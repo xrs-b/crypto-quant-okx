@@ -274,7 +274,7 @@ def format_price(p):
 def main():
     # 从config.yaml加载所有参数
     global TRADING_PAIRS, RSI_PERIOD, RSI_OVERSOLD, RSI_OVERBOUGHT
-    global POSITION_SIZE, MAX_EXPOSURE, LEVERAGE, STOP_LOSS_PCT, TAKE_PROFIT_PCT
+    global POSITION_SIZE, MAX_EXPOSURE, LEVERAGE, STOP_LOSS_PCT, TAKE_PROFIT_PCT, TRAILING_STOP_PCT
     
     try:
         cfg = load_config()
@@ -290,7 +290,12 @@ def main():
         LEVERAGE = t.get('leverage', LEVERAGE)
         STOP_LOSS_PCT = t.get('stop_loss', STOP_LOSS_PCT)
         TAKE_PROFIT_PCT = t.get('take_profit', TAKE_PROFIT_PCT)
-        print(f"✅ 配置已加载: {TRADING_PAIRS}")
+        TRAILING_STOP_PCT = t.get('trailing_stop', TRAILING_STOP_PCT)
+        print(f"✅ 配置已加载:")
+        print(f"   交易对: {TRADING_PAIRS}")
+        print(f"   止损: {STOP_LOSS_PCT*100}%")
+        print(f"   止盈: {TAKE_PROFIT_PCT*100}%")
+        print(f"   追踪止损: {TRAILING_STOP_PCT*100}%")
     except Exception as e:
         print(f"⚠️ 配置加载失败，使用默认值: {e}")
         TRADING_PAIRS = ['SOL-USDT-SWAP', 'HYPE/USDT']

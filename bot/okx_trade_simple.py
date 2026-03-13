@@ -7,11 +7,11 @@ import pandas as pd
 import joblib
 import json
 
-PROJECT_ROOT = "/Volumes/MacHD/Projects/crypto-quant-okx"
+# 动态获取项目根目录
+import os
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # 从config.yaml加载配置
-import yaml
-PROJECT_ROOT = "/Volumes/MacHD/Projects/crypto-quant-okx"
 with open(f"{PROJECT_ROOT}/config/config.yaml") as f:
     config = yaml.safe_load(f)
 
@@ -27,19 +27,21 @@ MAX_EXPOSURE = t.get('max_exposure', 0.3)
 LEVERAGE = t.get('leverage', 3)
 STOP_LOSS_PCT = t.get('stop_loss', 0.02)
 TAKE_PROFIT_PCT = t.get('take_profit', 0.04)
-TRAILING_STOP_PCT = 0.02
-MACD_FAST, MACD_SLOW, MACD_SIGNAL = 12, 26, 9
+TRAILING_STOP_PCT = t.get('trailing_stop', 0.02)
+MACD_FAST = s.get('macd_fast', 12)
+MACD_SLOW = s.get('macd_slow', 26)
+MACD_SIGNAL = s.get('macd_signal', 9)
 
 POSITION_FILE = '/tmp/okx_trailing.json'
 
 def load_config():
     with open(os.path.join(PROJECT_ROOT, 'config/config.yaml')) as f:
-        return yaml.safe_load(f))
+        return yaml.safe_load(f)
 
 def send_discord(msg):
     try:
         cfg = load_config()
-        ch = cfg.get('discord', {}).get('channel_id', ''))
+        ch = cfg.get('discord', {}).get('channel_id', '')
         subprocess.run(f'/opt/homebrew/bin/openclaw message send --channel discord --target "{ch}" --message "{msg}"', shell=True, capture_output=True, timeout=30)
     except:
         pass

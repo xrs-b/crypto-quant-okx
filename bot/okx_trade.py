@@ -26,6 +26,19 @@ def save_positions_tracking(data):
 
 PROJECT_ROOT = "/Volumes/MacHD/Projects/crypto-quant-okx"
 
+# 默认交易参数
+TRADING_PAIRS = ['SOL-USDT-SWAP', 'HYPE/USDT']
+RSI_PERIOD = 14
+RSI_OVERSOLD = 35
+RSI_OVERBOUGHT = 65
+MACD_FAST, MACD_SLOW, MACD_SIGNAL = 12, 26, 9
+POSITION_SIZE = 0.1
+MAX_EXPOSURE = 0.3
+LEVERAGE = 3
+STOP_LOSS_PCT = 0.02
+TAKE_PROFIT_PCT = 0.04
+TRAILING_STOP_PCT = 0.02
+
 # 交易日志
 TRADE_LOG_FILE = '/tmp/okx_trades.json'
 
@@ -57,17 +70,7 @@ def log_trade(action, symbol, price, amount, pnl=0, note=''):
 
 
 
-TRADING_PAIRS = ['SOL-USDT-SWAP', 'HYPE/USDT']
-RSI_PERIOD = 14
-RSI_OVERSOLD = 35
-RSI_OVERBOUGHT = 65
-MACD_FAST, MACD_SLOW, MACD_SIGNAL = 12, 26, 9
-POSITION_SIZE = 0.1
-MAX_EXPOSURE = 0.3
-LEVERAGE = 3
-STOP_LOSS_PCT = 0.02
-TRAILING_STOP_PCT = 0.02  # 2%追踪止损
-TAKE_PROFIT_PCT = 0.04
+
 
 
 def load_config():

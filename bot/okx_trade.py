@@ -235,10 +235,14 @@ def close_position(ex, symbol, side, amount, posSide=None):
         if ':' not in symbol:
             symbol = symbol + ':USDT'
         
+        params = {}
+        if posSide:
+            params = {'posSide': posSide}
+        
         if side == 'long':
-            ex.create_market_sell_order(symbol, amount)
+            ex.create_market_sell_order(symbol, amount, params)
         else:
-            ex.create_market_buy_order(symbol, amount)
+            ex.create_market_buy_order(symbol, amount, params)
         return True
     except:
         return False
@@ -403,8 +407,10 @@ def main():
                 final_signal = trad_signal
                 print(f"信号: 传统信号 = {'买入' if final_signal == 1 else '卖出' if final_signal == -1 else '观望'}")
             
-            # 检查持仓
-            p = pos.get(pair)
+            # 检查持仓 (兼容SOL/USDT和SOL/USDT:USDT格式)
+            pair_swap = pair if ':' in pair else pair + ':USDT'
+            p = pos.get(pair) or pos.get(pair_swap)
+            
             if p:
                 entry, side, cnt = p['entry'], p['side'], p['contracts']
                 pnl_pct = ((price-entry)/entry*100) if side=='long' else ((entry-price)/entry*100)
@@ -441,13 +447,18 @@ def main():
                 triggered, stop_price = check_trailing_stop(entry, price, highest, lowest, side, TRAILING_STOP_PCT)
                 
                 if triggered:
-                    print(f"追踪止损触发! 止盈: {stop_price:.2f}")
-                    close_position(ex, pair, side, cnt, posSide=side)
-                    send_discord(f"🔴 追踪止损 {pair} 止盈: {format_price(price)}")
+                    print(f"追踪止损触发! 价格: {price:.2f}, 止损价: {stop_price:.2f}")
+                    result = close_position(ex, pair, side, cnt, posSide=side)
+                    print(f"平仓结果: {result}")
+                    if result:
+                        send_discord(f"🔴 追踪止损 {pair}")
                     has_activity = True
                 elif pnl_pct_leveraged <= -STOP_LOSS_PCT*100:
-                    close_position(ex, pair, side, cnt, posSide=side)
-                    send_discord(f"🔴 止损 {pair} {pnl_pct:.1f}%")
+                    print(f"止损触发! pnl={pnl_pct_leveraged:.2f}%, 止损线={-STOP_LOSS_PCT*100:.2f}%")
+                    result = close_position(ex, pair, side, cnt, posSide=side)
+                    print(f"平仓结果: {result}")
+                    if result:
+                        send_discord(f"🔴 止损 {pair} {pnl_pct:.1f}%")
                     has_activity = True
                 elif pnl_pct_leveraged >= TAKE_PROFIT_PCT*100:
                     close_position(ex, pair, side, cnt, posSide=side)
@@ -456,6 +467,8 @@ def main():
                 continue
             
             # 检查仓位限制 (按实际占用保证金计算)
+            # 兼容两种格式
+            position_keys = list(pos.keys()) + [k.replace(':USDT', '') for k in pos.keys()]
             current_value = 0
             for p in pos.keys():
                 try:

@@ -5,3 +5,4 @@ __pycache__/
 /tmp/
 *.json
 .DS_Store
+config/config.yaml

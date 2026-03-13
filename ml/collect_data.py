@@ -6,8 +6,8 @@ import pandas as pd
 import time
 
 # OKX配置
-API_KEY = '2588d12c-9301-40af-8f9a-c70778ce8c41'
-SECRET = 'CD65DC2B0F211F6EF7A269D9FAE9C1AB'
+API_KEY = '你的API Key'
+SECRET = '你的Secret'
 PASSPHRASE = 'Xyj1994@@@'
 
 ex = ccxt.okx({

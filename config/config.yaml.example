@@ -1,0 +1,9 @@
+# OKX API 配置
+api:
+  key: "你的API Key"
+  secret: "你的Secret"
+  passphrase: "你的Passphrase"
+
+# Discord 配置
+discord:
+  channel_id: "你的Discord Channel ID"

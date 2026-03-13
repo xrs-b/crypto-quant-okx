@@ -1,0 +1,111 @@
+#!/usr/bin/env python3
+"""OKX合约量化交易机器人 - 简化版"""
+import os, yaml, subprocess
+from datetime import datetime
+import ccxt
+import pandas as pd
+import joblib
+import json
+
+PROJECT_ROOT = "/Volumes/MacHD/Projects/crypto-quant-okx"
+
+TRADING_PAIRS = ['SOL-USDT-SWAP', 'HYPE/USDT']
+RSI_PERIOD = 14
+RSI_OVERSOLD = 35
+RSI_OVERBOUGHT = 65
+MACD_FAST, MACD_SLOW, MACD_SIGNAL = 12, 26, 9
+POSITION_SIZE = 0.1
+MAX_EXPOSURE = 0.3
+LEVERAGE = 3
+STOP_LOSS_PCT = 0.02
+TAKE_PROFIT_PCT = 0.04
+TRAILING_STOP_PCT = 0.02
+
+POSITION_FILE = '/tmp/okx_trailing.json'
+
+def load_config():
+    with open(os.path.join(PROJECT_ROOT, 'config/config.yaml')) as f:
+        return yaml.safe_load(f))
+
+def send_discord(msg):
+    try:
+        cfg = load_config()
+        ch = cfg.get('discord', {}).get('channel_id', '1468585288770125876')
+        subprocess.run(f'/opt/homebrew/bin/openclaw message send --channel discord --target "{ch}" --message "{msg}"', shell=True, capture_output=True, timeout=30)
+    except:
+        pass
+
+def get_exchange():
+    c = load_config()
+    a = c.get('api', {})
+    return ccxt.okx({
+        'apiKey': a.get('key', ''),
+        'secret': a.get('secret', ''),
+        'password': a.get('passphrase', ''),
+        'enableRateLimit': True,
+        'timeout': 30000,
+        'testnet': True,
+    })
+
+def add_features(df):
+    close = df[4]
+    delta = close.diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.rolling(RSI_PERIOD).mean()
+    avg_loss = loss.rolling(RSI_PERIOD).mean()
+    rs = avg_gain / avg_loss
+    df['RSI'] = 100 - (100 / (1 + rs))
+    ema12 = close.ewm(span=MACD_FAST).mean()
+    ema26 = close.ewm(span=MACD_SLOW).mean()
+    df['MACD'] = ema12 - ema26
+    df['MACD_signal'] = df['MACD'].ewm(span=MACD_SIGNAL).mean()
+    return df
+
+def get_traditional_signal(df):
+    rsi = df['RSI'].iloc[-1]
+    macd = df['MACD'].iloc[-1]
+    macd_s = df['MACD_signal'].iloc[-1]
+    if rsi < RSI_OVERSOLD or (macd > macd_s and rsi < 50):
+        return 1
+    elif rsi > RSI_OVERBOUGHT or (macd < macd_s and rsi > 50):
+        return -1
+    return 0
+
+def get_positions(ex):
+    pos = ex.fetch_positions()
+    open_pos = {}
+    for p in pos:
+        c = float(p.get('contracts', 0) or 0)
+        if c > 0:
+            open_pos[p['symbol']] = {'contracts': c, 'side': p.get('side', 'long'), 'entry': float(p.get('entryPrice', 0) or 0)}
+    return open_pos
+
+def format_price(p):
+    return str(round(p, 2)) + " USDT"
+
+def main():
+    print(f"OKX {datetime.now()}")
+    ex = get_exchange()
+    bal = ex.fetch_balance({'type': 'future'})
+    usdt = bal['free'].get('USDT', 0)
+    print(f"余额: {format_price(usdt)}")
+    pos = get_positions(ex)
+    print(f"持仓: {list(pos.keys()) if pos else '无'}")
+    
+    for pair in TRADING_PAIRS:
+        print(f"\n=== {pair} ===")
+        try:
+            ohlcv = ex.fetch_ohlcv(pair, '1h', limit=50)
+            df = pd.DataFrame(ohlcv)
+            df = add_features(df)
+            tk = ex.fetch_ticker(pair)
+            price = float(tk['last'])
+            sig = get_traditional_signal(df)
+            rsi = df['RSI'].iloc[-1]
+            print(f"价格: {format_price(price)} RSI:{rsi:.1f} 信号:{'买' if sig==1 else '卖' if sig==-1 else '观'}")
+        except Exception as e:
+            print(f"错误: {e}")
+
+if __name__ == '__main__':
+    main()

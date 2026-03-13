@@ -345,9 +345,10 @@ def main():
                 pnl_pct = ((price-entry)/entry*100) if side=='long' else ((entry-price)/entry*100)
                 pnl_pct_leveraged = pnl_pct * LEVERAGE  # 杠杆后盈亏
                 
-                # 追踪止损检查
-                highest = pos.get('highest_price', entry)
-                lowest = pos.get('lowest_price', entry)
+                # 追踪止损检查 - 从持久化文件加载
+                tracked = tracking.get(pair, {})
+                highest = tracked.get('highest', entry)
+                lowest = tracked.get('lowest', entry)
                 
                 # 更新最高/最低价并保存
                 if side == 'long':
@@ -363,7 +364,8 @@ def main():
                     'lowest': lowest,
                     'entry': entry,
                     'side': side,
-                    'contracts': cnt
+                    'contracts': cnt,
+                    'partial_tp_done': tracked.get('partial_tp_done', False)
                 }
                 save_positions_tracking(tracking)
                 

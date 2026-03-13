@@ -26,8 +26,9 @@ def save_positions_tracking(data):
 
 PROJECT_ROOT = "/Volumes/MacHD/Projects/crypto-quant-okx"
 
-# 默认交易参数
-TRADING_PAIRS = ['SOL-USDT-SWAP', 'HYPE/USDT']
+# 交易参数 (在main()中从config.yaml加载)
+# 全局变量声明
+TRADING_PAIRS = None
 RSI_PERIOD = 14
 RSI_OVERSOLD = 35
 RSI_OVERBOUGHT = 65
@@ -271,6 +272,29 @@ def format_price(p):
 
 
 def main():
+    # 从config.yaml加载所有参数
+    global TRADING_PAIRS, RSI_PERIOD, RSI_OVERSOLD, RSI_OVERBOUGHT
+    global POSITION_SIZE, MAX_EXPOSURE, LEVERAGE, STOP_LOSS_PCT, TAKE_PROFIT_PCT
+    
+    try:
+        cfg = load_config()
+        t = cfg.get('trading', {})
+        s = cfg.get('strategy', {})
+        
+        TRADING_PAIRS = t.get('symbols', ['SOL-USDT-SWAP', 'HYPE/USDT'])
+        RSI_PERIOD = s.get('rsi_period', RSI_PERIOD)
+        RSI_OVERSOLD = s.get('rsi_oversold', RSI_OVERSOLD)
+        RSI_OVERBOUGHT = s.get('rsi_overbought', RSI_OVERBOUGHT)
+        POSITION_SIZE = t.get('position_size', POSITION_SIZE)
+        MAX_EXPOSURE = t.get('max_exposure', MAX_EXPOSURE)
+        LEVERAGE = t.get('leverage', LEVERAGE)
+        STOP_LOSS_PCT = t.get('stop_loss', STOP_LOSS_PCT)
+        TAKE_PROFIT_PCT = t.get('take_profit', TAKE_PROFIT_PCT)
+        print(f"✅ 配置已加载: {TRADING_PAIRS}")
+    except Exception as e:
+        print(f"⚠️ 配置加载失败，使用默认值: {e}")
+        TRADING_PAIRS = ['SOL-USDT-SWAP', 'HYPE/USDT']
+    
     print(f"🤖 OKX合约+ML {datetime.now()}")
     ex = get_exchange()
     

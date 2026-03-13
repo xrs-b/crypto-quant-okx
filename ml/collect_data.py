@@ -5,17 +5,24 @@ import ccxt
 import pandas as pd
 import time
 
-# OKX配置
-API_KEY = '你的API Key'
-SECRET = '你的Secret'
-PASSPHRASE = 'Xyj1994@@@'
+import os
+import yaml
+
+# 加载配置
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+with open(os.path.join(PROJECT_ROOT, 'config/config.yaml')) as f:
+    config = yaml.safe_load(f)
+
+api_config = config.get('api', {})
+exchange_config = config.get('exchange', 'okx')
+mode = config.get('mode', 'testnet')
 
 ex = ccxt.okx({
-    'apiKey': API_KEY,
-    'secret': SECRET,
-    'password': PASSPHRASE,
+    'apiKey': api_config.get('key', ''),
+    'secret': api_config.get('secret', ''),
+    'password': api_config.get('passphrase', ''),
     'enableRateLimit': True,
-    'testnet': True,
+    'testnet': (mode == 'testnet'),
     'options': {'defaultType': 'swap'}
 })
 

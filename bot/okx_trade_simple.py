@@ -9,7 +9,12 @@ import json
 
 PROJECT_ROOT = "/Volumes/MacHD/Projects/crypto-quant-okx"
 
-TRADING_PAIRS = ['SOL-USDT-SWAP', 'HYPE/USDT']
+# 从config.yaml加载配置
+import yaml
+PROJECT_ROOT = "/Volumes/MacHD/Projects/crypto-quant-okx"
+with open(f"{PROJECT_ROOT}/config/config.yaml") as f:
+    config = yaml.safe_load(f)
+TRADING_PAIRS = config.get('trading', {}).get('symbols', ['SOL-USDT-SWAP'])
 RSI_PERIOD = 14
 RSI_OVERSOLD = 35
 RSI_OVERBOUGHT = 65

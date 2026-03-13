@@ -1,9 +1,28 @@
-# OKX API 配置
-api:
-  key: "你的API Key"
-  secret: "你的Secret"
-  passphrase: "你的Passphrase"
+# OKX 量化交易配置
 
-# Discord 配置
+exchange: okx
+mode: testnet
+
+api:
+  key: "你的OKX API Key"
+  secret: "你的OKX Secret"
+  passphrase: "你的OKX Passphrase"
+
+trading:
+  symbols:
+    - SOL/USDT
+    - HYPE/USDT
+  position_size: 0.1
+  max_exposure: 0.3
+  leverage: 3
+  stop_loss: 0.02
+  take_profit: 0.04
+
+strategy:
+  rsi_period: 14
+  rsi_oversold: 35
+  rsi_overbought: 65
+
 discord:
+  enabled: true
   channel_id: "你的Discord Channel ID"

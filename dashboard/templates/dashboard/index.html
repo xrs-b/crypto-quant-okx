@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OKX量化交易仪表盘</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css">
+    <style>
+        :root {
+            --primary-color: #0ea5e9;
+            --success-color: #22c55e;
+            --danger-color: #ef4444;
+            --warning-color: #f59e0b;
+            --bg-color: #0f172a;
+            --card-bg: #1e293b;
+        }
+        
+        body {
+            background: var(--bg-color);
+            color: #e2e8f0;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        }
+        
+        .navbar {
+            background: var(--card-bg) !important;
+            border-bottom: 1px solid #334155;
+        }
+        
+        .card {
+            background: var(--card-bg);
+            border: 1px solid #334155;
+            border-radius: 12px;
+        }
+        
+        .card-header {
+            background: transparent;
+            border-bottom: 1px solid #334155;
+            font-weight: 600;
+        }
+        
+        .stat-card {
+            background: linear-gradient(135deg, var(--card-bg) 0%, #273549 100%);
+            border: 1px solid #334155;
+            border-radius: 12px;
+            padding: 20px;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        
+        .stat-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 25px rgba(0,0,0,0.3);
+        }
+        
+        .stat-value {
+            font-size: 2rem;
+            font-weight: 700;
+            color: var(--primary-color);
+        }
+        
+        .stat-label {
+            color: #94a3b8;
+            font-size: 0.875rem;
+        }
+        
+        .table {
+            color: #e2e8f0;
+        }
+        
+        .table thead th {
+            background: #0f172a;
+            border-color: #334155 !important;
+            color: #94a3b8;
+            font-weight: 600;
+        }
+        
+        .table td {
+            border-color: #334155 !important;
+            vertical-align: middle;
+        }
+        
+        .badge-long {
+            background: var(--success-color);
+        }
+        
+        .badge-short {
+            background: var(--danger-color);
+        }
+        
+        .profit-positive {
+            color: var(--success-color);
+        }
+        
+        .profit-negative {
+            color: var(--danger-color);
+        }
+        
+        .sidebar {
+            background: var(--card-bg);
+            min-height: 100vh;
+            border-right: 1px solid #334155;
+        }
+        
+        .nav-link {
+            color: #94a3b8;
+            padding: 12px 20px;
+            border-radius: 8px;
+            margin: 4px 8px;
+            transition: all 0.2s;
+        }
+        
+        .nav-link:hover, .nav-link.active {
+            background: rgba(14, 165, 233, 0.2);
+            color: var(--primary-color);
+        }
+        
+        .nav-link i {
+            margin-right: 10px;
+        }
+        
+        .refresh-btn {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            width: 50px;
+            height: 50px;
+            border-radius: 50%;
+            background: var(--primary-color);
+            color: white;
+            border: none;
+            box-shadow: 0 4px 15px rgba(14, 165, 233, 0.4);
+            cursor: pointer;
+            z-index: 1000;
+        }
+        
+        .refresh-btn:hover {
+            transform: rotate(180deg);
+            transition: transform 0.5s;
+        }
+        
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            display: inline-block;
+            margin-right: 5px;
+        }
+        
+        .status-running {
+            background: var(--success-color);
+            box-shadow: 0 0 10px var(--success-color);
+        }
+        
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        
+        .status-dot.pulse {
+            animation: pulse 2s infinite;
+        }
+    </style>
+</head>
+<body>
+    <div class="container-fluid">
+        <div class="row">
+            <!-- Sidebar -->
+            <nav class="col-md-2 d-none d-md-block sidebar p-0">
+                <div class="position-sticky pt-4">
+                    <div class="px-3 mb-4">
+                        <h5 class="text-primary">
+                            <i class="bi bi-graph-up-arrow"></i>
+                            OKX Trading
+                        </h5>
+                    </div>
+                    <ul class="nav flex-column">
+                        <li class="nav-item">
+                            <a class="nav-link active" href="/">
+                                <i class="bi bi-speedometer2"></i>
+                                仪表盘
+                            </a>
+                        </li>
+                        <li class="nav-item">
+                            <a class="nav-link" href="/trades">
+                                <i class="bi bi-list-task"></i>
+                                交易记录
+                            </a>
+                        </li>
+                        <li class="nav-item">
+                            <a class="nav-link" href="/signals">
+                                <i class="bi bi-lightning-charge"></i>
+                                信号分析
+                            </a>
+                        </li>
+                        <li class="nav-item">
+                            <a class="nav-link" href="#">
+                                <i class="bi bi-gear"></i>
+                                设置
+                            </a>
+                        </li>
+                    </ul>
+                </div>
+            </nav>
+            
+            <!-- Main Content -->
+            <main class="col-md-10 ms-sm-auto px-4">
+                <!-- Header -->
+                <div class="d-flex justify-content-between align-items-center pt-4 pb-3">
+                    <h4 class="mb-0">
+                        <span class="status-dot status-running pulse"></span>
+                        交易机器人运行中
+                    </h4>
+                    <span class="text-muted">{{ stats.get('today_signals', 0) }} 个信号今日</span>
+                </div>
+                
+                <!-- Stats Cards -->
+                <div class="row g-4 mb-4">
+                    <div class="col-md-3">
+                        <div class="stat-card">
+                            <div class="stat-label">总资产 (USDT)</div>
+                            <div class="stat-value">--</div>
+                        </div>
+                    </div>
+                    <div class="col-md-3">
+                        <div class="stat-card">
+                            <div class="stat-label">持仓数</div>
+                            <div class="stat-value">{{ positions|length }}</div>
+                        </div>
+                    </div>
+                    <div class="col-md-3">
+                        <div class="stat-card">
+                            <div class="stat-label">信号通过率</div>
+                            <div class="stat-value">{{ stats.get('pass_rate', 0) }}%</div>
+                        </div>
+                    </div>
+                    <div class="col-md-3">
+                        <div class="stat-card">
+                            <div class="stat-label">总交易次数</div>
+                            <div class="stat-value">{{ stats.get('total_trades', 0) }}</div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Positions -->
+                <div class="card mb-4">
+                    <div class="card-header">
+                        <i class="bi bi-collection"></i>
+                        当前持仓
+                    </div>
+                    <div class="card-body p-0">
+                        {% if positions %}
+                        <table class="table table-hover mb-0">
+                            <thead>
+                                <tr>
+                                    <th>交易对</th>
+                                    <th>方向</th>
+                                    <th>数量</th>
+                                    <th>开仓价</th>
+                                    <th>当前价</th>
+                                    <th>未实现盈亏</th>
+                                    <th>更新时间</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for p in positions %}
+                                <tr>
+                                    <td><strong>{{ p.symbol }}</strong></td>
+                                    <td>
+                                        <span class="badge bg-{{ 'success' if p.side == 'long' else 'danger' }}">
+                                            {{ '做多' if p.side == 'long' else '做空' }}
+                                        </span>
+                                    </td>
+                                    <td>{{ p.quantity }}</td>
+                                    <td>{{ p.entry_price }}</td>
+                                    <td>{{ p.current_price or '--' }}</td>
+                                    <td class="{{ 'profit-positive' if p.unrealized_pnl and p.unrealized_pnl > 0 else 'profit-negative' if p.unrealized_pnl and p.unrealized_pnl < 0 else '' }}">
+                                        {{ '%.2f'|format(p.unrealized_pnl or 0) }}
+                                    </td>
+                                    <td class="text-muted">{{ p.updated_at[:19] if p.updated_at else '--' }}</td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                        {% else %}
+                        <div class="text-center py-5 text-muted">
+                            <i class="bi bi-inbox" style="font-size: 3rem;"></i>
+                            <p class="mt-2">暂无持仓</p>
+                        </div>
+                        {% endif %}
+                    </div>
+                </div>
+                
+                <!-- Recent Trades -->
+                <div class="card">
+                    <div class="card-header">
+                        <i class="bi bi-clock-history"></i>
+                        最近交易
+                    </div>
+                    <div class="card-body p-0">
+                        <table class="table table-hover mb-0">
+                            <thead>
+                                <tr>
+                                    <th>时间</th>
+                                    <th>交易对</th>
+                                    <th>方向</th>
+                                    <th>开仓价</th>
+                                    <th>平仓价</th>
+                                    <th>盈亏</th>
+                                    <th>状态</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for trade in trades %}
+                                <tr>
+                                    <td class="text-muted">{{ trade.open_time[:19] if trade.open_time else '--' }}</td>
+                                    <td><strong>{{ trade.symbol }}</strong></td>
+                                    <td>
+                                        <span class="badge bg-{{ 'success' if trade.side == 'long' else 'danger' }}">
+                                            {{ '做多' if trade.side == 'long' else '做空' }}
+                                        </span>
+                                    </td>
+                                    <td>{{ trade.entry_price }}</td>
+                                    <td>{{ trade.exit_price or '--' }}</td>
+                                    <td class="{{ 'profit-positive' if trade.pnl and trade.pnl > 0 else 'profit-negative' if trade.pnl and trade.pnl < 0 else '' }}">
+                                        {{ '%.2f'|format(trade.pnl or 0) }}
+                                    </td>
+                                    <td>
+                                        <span class="badge bg-{{ 'warning' if trade.status == 'open' else 'secondary' }}">
+                                            {{ '持仓中' if trade.status == 'open' else '已平仓' }}
+                                        </span>
+                                    </td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </main>
+        </div>
+    </div>
+    
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        // Auto refresh every 30 seconds
+        setTimeout(() => location.reload(), 30000);
+    </script>
+</body>
+</html>

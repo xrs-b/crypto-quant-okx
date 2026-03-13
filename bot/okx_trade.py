@@ -82,7 +82,7 @@ def load_config():
 def send_discord(msg):
     try:
         cfg = load_config()
-        ch = cfg.get('discord', {}).get('channel_id', '1468585288770125876')
+        ch = cfg.get('discord', {}).get('channel_id', '')
         subprocess.run(f'/opt/homebrew/bin/openclaw message send --channel discord --target "{ch}" --message "{msg}"', shell=True, capture_output=True, timeout=30)
     except:
         pass
@@ -97,7 +97,7 @@ def get_exchange():
         'password': a.get('passphrase', ''),
         'enableRateLimit': True,
         'timeout': 30000,
-        'testnet': True,
+        'testnet': (load_config().get('mode', 'testnet') == 'testnet'),
     })
 
 

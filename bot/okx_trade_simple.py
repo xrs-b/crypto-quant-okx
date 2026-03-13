@@ -14,17 +14,21 @@ import yaml
 PROJECT_ROOT = "/Volumes/MacHD/Projects/crypto-quant-okx"
 with open(f"{PROJECT_ROOT}/config/config.yaml") as f:
     config = yaml.safe_load(f)
-TRADING_PAIRS = config.get('trading', {}).get('symbols', ['SOL-USDT-SWAP'])
-RSI_PERIOD = 14
-RSI_OVERSOLD = 35
-RSI_OVERBOUGHT = 65
-MACD_FAST, MACD_SLOW, MACD_SIGNAL = 12, 26, 9
-POSITION_SIZE = 0.1
-MAX_EXPOSURE = 0.3
-LEVERAGE = 3
-STOP_LOSS_PCT = 0.02
-TAKE_PROFIT_PCT = 0.04
+
+# 加载所有参数
+t = config.get('trading', {})
+s = config.get('strategy', {})
+TRADING_PAIRS = t.get('symbols', ['SOL-USDT-SWAP'])
+RSI_PERIOD = s.get('rsi_period', 14)
+RSI_OVERSOLD = s.get('rsi_oversold', 35)
+RSI_OVERBOUGHT = s.get('rsi_overbought', 65)
+POSITION_SIZE = t.get('position_size', 0.1)
+MAX_EXPOSURE = t.get('max_exposure', 0.3)
+LEVERAGE = t.get('leverage', 3)
+STOP_LOSS_PCT = t.get('stop_loss', 0.02)
+TAKE_PROFIT_PCT = t.get('take_profit', 0.04)
 TRAILING_STOP_PCT = 0.02
+MACD_FAST, MACD_SLOW, MACD_SIGNAL = 12, 26, 9
 
 POSITION_FILE = '/tmp/okx_trailing.json'
 
@@ -35,7 +39,7 @@ def load_config():
 def send_discord(msg):
     try:
         cfg = load_config()
-        ch = cfg.get('discord', {}).get('channel_id', '1468585288770125876')
+        ch = cfg.get('discord', {}).get('channel_id', ''))
         subprocess.run(f'/opt/homebrew/bin/openclaw message send --channel discord --target "{ch}" --message "{msg}"', shell=True, capture_output=True, timeout=30)
     except:
         pass
@@ -49,7 +53,7 @@ def get_exchange():
         'password': a.get('passphrase', ''),
         'enableRateLimit': True,
         'timeout': 30000,
-        'testnet': True,
+        'testnet': (config.get('mode', 'testnet') == 'testnet'),
     })
 
 def add_features(df):

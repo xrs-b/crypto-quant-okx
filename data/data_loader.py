@@ -56,14 +56,10 @@ class DataLoader:
             if api_config.get('passphrase'):
                 exchange_params['password'] = api_config['passphrase']
         
-        # 测试网模式
-        if config.get('testnet', False):
-            exchange_params['urls'] = {
-                'api': {
-                    'public': 'https://testnet.binance.vision/api',
-                    'private': 'https://testnet.binance.vision/api',
-                }
-            }
+        # 测试网模式 (从config.yaml读取)
+        mode = self.config.get('mode', 'testnet')
+        if mode == 'testnet':
+            exchange_params['testnet'] = True
         
         return exchange_class(exchange_params)
     

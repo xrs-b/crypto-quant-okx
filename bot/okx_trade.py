@@ -204,9 +204,13 @@ def get_positions(ex):
 
 def open_position(ex, symbol, side, amount, posSide=None):
     try:
-        params = {'posSide': posSide} if posSide else {}
-        if side == 'short':
-            params = {'posSide': posSide} if posSide else {}
+        # Convert to OKX swap format if needed
+        if ':' not in symbol:
+            symbol = symbol + ':USDT'
+        
+        params = {}
+        if posSide:
+            params = {'posSide': posSide}
         
         if side == 'long':
             ex.create_market_buy_order(symbol, amount, params)
@@ -219,6 +223,10 @@ def open_position(ex, symbol, side, amount, posSide=None):
 
 def close_position(ex, symbol, side, amount, posSide=None):
     try:
+        # Convert to OKX swap format if needed
+        if ':' not in symbol:
+            symbol = symbol + ':USDT'
+        
         if side == 'long':
             ex.create_market_sell_order(symbol, amount)
         else:
@@ -274,7 +282,7 @@ def format_price(p):
 def main():
     # 从config.yaml加载所有参数
     global TRADING_PAIRS, RSI_PERIOD, RSI_OVERSOLD, RSI_OVERBOUGHT
-    global POSITION_SIZE, MAX_EXPOSURE, LEVERAGE, STOP_LOSS_PCT, TAKE_PROFIT_PCT, TRAILING_STOP_PCT
+    global POSITION_SIZE, MAX_EXPOSURE, LEVERAGE, STOP_LOSS_PCT, TAKE_PROFIT_PCT, TRAILING_STOP_PCT, TRAILING_STOP_PCT
     
     try:
         cfg = load_config()
@@ -419,11 +427,15 @@ def main():
                     has_activity = True
                 continue
             
-            # 检查仓位限制
-            current_value = sum(
-                pos[p]['contracts'] * price 
-                for p in pos.keys()
-            )
+            # 检查仓位限制 (按实际占用保证金计算)
+            current_value = 0
+            for p in pos.keys():
+                try:
+                    tk = ex.fetch_ticker(p)
+                    pos_price = tk['last']
+                    current_value += pos[p]['contracts'] * pos_price / LEVERAGE
+                except:
+                    current_value += pos[p]['contracts'] * pos[p]['entry'] / LEVERAGE
             
             # 如果超过仓位限制，不开新仓
             if current_value >= usdt * MAX_EXPOSURE:

@@ -39,6 +39,8 @@ LEVERAGE = 3
 STOP_LOSS_PCT = 0.02
 TAKE_PROFIT_PCT = 0.04
 TRAILING_STOP_PCT = 0.02
+MIN_PRICE_CHANGE = 0.02
+TREND_CONFIRMATION = True
 
 # 交易日志
 TRADE_LOG_FILE = '/tmp/okx_trades.json'
@@ -282,7 +284,8 @@ def format_price(p):
 def main():
     # 从config.yaml加载所有参数
     global TRADING_PAIRS, RSI_PERIOD, RSI_OVERSOLD, RSI_OVERBOUGHT
-    global POSITION_SIZE, MAX_EXPOSURE, LEVERAGE, STOP_LOSS_PCT, TAKE_PROFIT_PCT, TRAILING_STOP_PCT, TRAILING_STOP_PCT
+    global POSITION_SIZE, MAX_EXPOSURE, LEVERAGE, STOP_LOSS_PCT, TAKE_PROFIT_PCT, TRAILING_STOP_PCT
+    global MIN_PRICE_CHANGE, TREND_CONFIRMATION, TRAILING_STOP_PCT
     
     try:
         cfg = load_config()
@@ -299,11 +302,15 @@ def main():
         STOP_LOSS_PCT = t.get('stop_loss', STOP_LOSS_PCT)
         TAKE_PROFIT_PCT = t.get('take_profit', TAKE_PROFIT_PCT)
         TRAILING_STOP_PCT = t.get('trailing_stop', TRAILING_STOP_PCT)
+        MIN_PRICE_CHANGE = t.get('min_price_change', MIN_PRICE_CHANGE)
+        TREND_CONFIRMATION = t.get('trend_confirmation', TREND_CONFIRMATION)
         print(f"✅ 配置已加载:")
         print(f"   交易对: {TRADING_PAIRS}")
         print(f"   止损: {STOP_LOSS_PCT*100}%")
         print(f"   止盈: {TAKE_PROFIT_PCT*100}%")
         print(f"   追踪止损: {TRAILING_STOP_PCT*100}%")
+        print(f"   最小价格变动: {MIN_PRICE_CHANGE*100}%")
+        print(f"   趋势确认: {TREND_CONFIRMATION}")
     except Exception as e:
         print(f"⚠️ 配置加载失败，使用默认值: {e}")
         TRADING_PAIRS = ['SOL-USDT-SWAP', 'HYPE/USDT']
@@ -390,13 +397,16 @@ def main():
                 highest = tracked.get('highest', entry)
                 lowest = tracked.get('lowest', entry)
                 
-                # 更新最高/最低价并保存
+                # 更新最高/最低价/最后价格并保存
                 if side == 'long':
                     if highest is None or price > highest:
                         highest = price
                 else:
                     if lowest is None or price < lowest:
                         lowest = price
+                
+                # 更新最后交易价格
+                tracked['last_price'] = price
                 
                 # 保存追踪数据
                 tracking[pair] = {
@@ -442,6 +452,28 @@ def main():
                 print(f"已达最大仓位 {MAX_EXPOSURE*100}% (当前: {current_value/usdt*100:.1f}%)")
                 continue
             
+            # 检查价格变动幅度
+            tracked = tracking.get(pair, {})
+            last_price = tracked.get('last_price')
+            if last_price and MIN_PRICE_CHANGE > 0:
+                price_change = abs(price - last_price) / last_price
+                if price_change < MIN_PRICE_CHANGE:
+                    print(f"价格变动{price_change*100:.2f}% < {MIN_PRICE_CHANGE*100}%，跳过")
+                    continue
+                print(f"价格变动: {price_change*100:.2f}%")
+            
+            # 趋势确认
+            if TREND_CONFIRMATION:
+                macd = df['MACD'].iloc[-1]
+                macd_s = df['MACD_signal'].iloc[-1]
+                if final_signal == 1 and macd < macd_s:
+                    print("趋势向下，跳过多单")
+                    continue
+                if final_signal == -1 and macd > macd_s:
+                    print("趋势向上，跳过空单")
+                    continue
+                print("趋势确认通过")
+            
             # 开仓
             if final_signal == 1:
                 contracts = usdt * POSITION_SIZE * LEVERAGE / price
@@ -449,7 +481,7 @@ def main():
                 
                 if open_position(ex, pair, 'long', contracts, posSide='long'):
                     log_trade('OPEN_LONG', pair, price, contracts, note='开多')
-                    tracking[pair] = {'highest': price, 'lowest': price, 'entry': price, 'side': 'long', 'contracts': contracts, 'partial_tp_done': False}
+                    tracking[pair] = {'highest': price, 'lowest': price, 'entry': price, 'side': 'long', 'contracts': contracts, 'partial_tp_done': False, 'last_price': price}
                     save_positions_tracking(tracking)
                     send_discord(f"""🟢 开多 {pair}
 
@@ -465,7 +497,7 @@ def main():
                 
                 if open_position(ex, pair, 'short', contracts, posSide='short'):
                     log_trade('OPEN_SHORT', pair, price, contracts, note='开空')
-                    tracking[pair] = {'highest': price, 'lowest': price, 'entry': price, 'side': 'short', 'contracts': contracts, 'partial_tp_done': False}
+                    tracking[pair] = {'highest': price, 'lowest': price, 'entry': price, 'side': 'short', 'contracts': contracts, 'partial_tp_done': False, 'last_price': price}
                     save_positions_tracking(tracking)
                     send_discord(f"""🔴 开空 {pair}
 

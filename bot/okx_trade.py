@@ -41,6 +41,12 @@ TAKE_PROFIT_PCT = 0.04
 TRAILING_STOP_PCT = 0.02
 MIN_PRICE_CHANGE = 0.02
 TREND_CONFIRMATION = True
+MULTI_TIMEFRAME = False
+VOLATILITY_ADJUST = False
+RSI_DIVERGENCE = False
+MA_CROSSOVER = False
+VOLUME_CONFIRM = False
+PARTIAL_TP_LEVELS = [[0.5, 0.04], [0.3, 0.06]]
 
 # 交易日志
 TRADE_LOG_FILE = '/tmp/okx_trades.json'
@@ -285,7 +291,8 @@ def main():
     # 从config.yaml加载所有参数
     global TRADING_PAIRS, RSI_PERIOD, RSI_OVERSOLD, RSI_OVERBOUGHT
     global POSITION_SIZE, MAX_EXPOSURE, LEVERAGE, STOP_LOSS_PCT, TAKE_PROFIT_PCT, TRAILING_STOP_PCT
-    global MIN_PRICE_CHANGE, TREND_CONFIRMATION, TRAILING_STOP_PCT
+    global MIN_PRICE_CHANGE, TREND_CONFIRMATION, MULTI_TIMEFRAME, VOLATILITY_ADJUST
+    global RSI_DIVERGENCE, MA_CROSSOVER, VOLUME_CONFIRM, PARTIAL_TP_LEVELS, TRAILING_STOP_PCT
     
     try:
         cfg = load_config()
@@ -304,6 +311,12 @@ def main():
         TRAILING_STOP_PCT = t.get('trailing_stop', TRAILING_STOP_PCT)
         MIN_PRICE_CHANGE = t.get('min_price_change', MIN_PRICE_CHANGE)
         TREND_CONFIRMATION = t.get('trend_confirmation', TREND_CONFIRMATION)
+        MULTI_TIMEFRAME = t.get('multi_timeframe', MULTI_TIMEFRAME)
+        VOLATILITY_ADJUST = t.get('volatility_adjust', VOLATILITY_ADJUST)
+        RSI_DIVERGENCE = t.get('rsi_divergence', RSI_DIVERGENCE)
+        MA_CROSSOVER = t.get('ma_crossover', MA_CROSSOVER)
+        VOLUME_CONFIRM = t.get('volume_confirm', VOLUME_CONFIRM)
+        PARTIAL_TP_LEVELS = t.get('partial_tp_levels', PARTIAL_TP_LEVELS)
         print(f"✅ 配置已加载:")
         print(f"   交易对: {TRADING_PAIRS}")
         print(f"   止损: {STOP_LOSS_PCT*100}%")
@@ -311,6 +324,11 @@ def main():
         print(f"   追踪止损: {TRAILING_STOP_PCT*100}%")
         print(f"   最小价格变动: {MIN_PRICE_CHANGE*100}%")
         print(f"   趋势确认: {TREND_CONFIRMATION}")
+        print(f"   多周期确认: {MULTI_TIMEFRAME}")
+        print(f"   波动率调整: {VOLATILITY_ADJUST}")
+        print(f"   RSI背离: {RSI_DIVERGENCE}")
+        print(f"   均线交叉: {MA_CROSSOVER}")
+        print(f"   成交量确认: {VOLUME_CONFIRM}")
     except Exception as e:
         print(f"⚠️ 配置加载失败，使用默认值: {e}")
         TRADING_PAIRS = ['SOL-USDT-SWAP', 'HYPE/USDT']
@@ -476,7 +494,13 @@ def main():
             
             # 开仓
             if final_signal == 1:
-                contracts = usdt * POSITION_SIZE * LEVERAGE / price
+                # 波动率调整仓位
+                adjusted_position_size = POSITION_SIZE
+                if VOLATILITY_ADJUST:
+                    adjusted_position_size = calculate_volatility_position(price)
+                    print(f"调整后仓位: {adjusted_position_size*100:.0f}%")
+                
+                contracts = usdt * adjusted_position_size * LEVERAGE / price
                 contracts = max(0.01, round(contracts, 2))
                 
                 if open_position(ex, pair, 'long', contracts, posSide='long'):
@@ -492,7 +516,13 @@ def main():
                     has_activity = True
                     
             elif final_signal == -1:
-                contracts = usdt * POSITION_SIZE * LEVERAGE / price
+                # 波动率调整仓位
+                adjusted_position_size = POSITION_SIZE
+                if VOLATILITY_ADJUST:
+                    adjusted_position_size = calculate_volatility_position(price)
+                    print(f"调整后仓位: {adjusted_position_size*100:.0f}%")
+                
+                contracts = usdt * adjusted_position_size * LEVERAGE / price
                 contracts = max(0.01, round(contracts, 2))
                 
                 if open_position(ex, pair, 'short', contracts, posSide='short'):

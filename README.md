@@ -288,10 +288,6 @@ python3 ml/train_model.py
    - `config/config.yaml` 已加入 `.gitignore`
    - 提交代码前确保不包含真实密钥
 
-3. **安全扫描**
-   - 项目已配置 gitleaks 扫描
-   - 提交前自动检查敏感信息
-
 ## 🤝 贡献
 
 欢迎提交 Issue 和 Pull Request！

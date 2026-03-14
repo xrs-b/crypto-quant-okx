@@ -65,7 +65,7 @@ notification:
     to_address: your_email@gmail.com
     username: your_email@gmail.com
   telegram:
-    bot_token: '
+    bot_token: your_bot_token
     chat_id: your_chat_id
     enabled: false
 runtime:
@@ -87,7 +87,7 @@ strategies:
   composite:
     enabled: true
     min_strategy_count: 2
-    min_strength: 30
+    min_strength: 26
   divergence:
     enabled: true
     lookback: 20
@@ -123,9 +123,9 @@ symbols:
   quote_currency: USDT
   watch_list:
   - BTC/USDT
-  candidate_watch_list: []
-  paused_watch_list:
+  candidate_watch_list:
   - XRP/USDT
+  paused_watch_list:
   - ETH/USDT
   - SOL/USDT
   - HYPE/USDT
@@ -137,10 +137,10 @@ trading:
   max_position_per_symbol: 0.15
   max_trades_per_day: 10
   min_trade_interval: 300
-  position_size: 0.08
+  position_size: 0.1
   stop_loss: 0.02
   take_profit: 0.04
-  trailing_stop: 0.015
+  trailing_stop: 0.01
   max_consecutive_losses: 3
   max_daily_drawdown: 0.03
 market_filters:

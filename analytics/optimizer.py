@@ -278,6 +278,22 @@ class ParameterOptimizer:
         # BTC focused 保持当前最佳主运行配置，不叠加更差专项 patch
         if symbol_specific.get('XRP/USDT'):
             presets['xrp-candidate.yaml'] = self._deep_merge(presets['xrp-candidate.yaml'], symbol_specific['XRP/USDT'][0]['patch'])
+        btc_grid = self._run_btc_grid_search(best_experiment)
+        if btc_grid:
+            best_grid = btc_grid[0]
+            presets['btc-grid-candidate.yaml'] = self._build_preset_config(
+                best_experiment,
+                ['BTC/USDT'],
+                ['XRP/USDT'],
+                ['ETH/USDT', 'SOL/USDT', 'HYPE/USDT'],
+                extra_patch={
+                    'strategies': {
+                        'composite': {'min_strength': best_grid['params']['min_strength']},
+                        'rsi': {'strength_weight': best_grid['params']['rsi_strength_weight']},
+                    },
+                    'trading': {'trailing_stop': best_grid['params']['trailing_stop']}
+                }
+            )
 
         for filename, data in presets.items():
             path = presets_dir / filename

@@ -197,7 +197,11 @@
                     <div class="section-title">专项实验与预设</div>
                     <div class="list" id="optimizerSymbolSpecific"></div>
                     <div style="height:12px"></div>
-                    <table><thead><tr><th>预设</th><th>路径</th></tr></thead><tbody id="optimizerPresets"></tbody></table>
+                    <div style="height:12px"></div>
+                    <div class="section-title">候选晋升建议</div>
+                    <table><thead><tr><th>币种</th><th>决定</th><th>原因</th></tr></thead><tbody id="optimizerPromotions"></tbody></table>
+                    <div style="height:12px"></div>
+                    <table><thead><tr><th>预设</th><th>路径</th><th>操作</th></tr></thead><tbody id="optimizerPresets"></tbody></table>
                 </div>
             </div>
         </div>
@@ -268,8 +272,10 @@
             document.getElementById('dailyDd').textContent = pct(status.risk.daily_drawdown);
             const positions = await api('/api/positions');
             document.getElementById('overviewPositions').innerHTML = positions.length ? positions.map(p => `<tr><td>${p.symbol}</td><td>${badge(p.side, p.side === 'long' ? 'long' : 'short')}</td><td>${p.quantity}</td><td>${money(p.entry_price)}</td><td>${money(p.current_price)}</td><td class="${Number(p.unrealized_pnl || 0) >= 0 ? 'pos' : 'neg'}">${money(p.unrealized_pnl)}</td></tr>`).join('') : '<tr><td colspan="6" class="muted">暂无持仓</td></tr>';
+            const mode = await api('/api/mode/status');
             document.getElementById('overviewList').innerHTML = `
                 <div class="item"><strong>模拟盘模式</strong><div class="muted">当前只做测试策略可靠性，不推进实盘执行。</div></div>
+                <div class="item"><strong>当前预设 / 模式</strong><div class="muted">preset: ${safe(mode.current_preset)} ｜ mode: ${safe(mode.selection_mode)} ｜ 主池: ${(mode.watch_list || []).join(', ') || '--'}</div></div>
                 <div class="item"><strong>风控状态</strong><div class="muted">当前风险状态：${status.risk.status} ｜ 风险占用 ${pct(status.risk.current_exposure)}</div></div>
                 <div class="item"><strong>信号执行</strong><div class="muted">今日信号 ${status.signals.today_signals} 个，已执行 ${status.signals.executed_today} 个。</div></div>
                 <div class="item"><strong>最近更新时间</strong><div class="muted">${status.system.last_update}</div></div>`;
@@ -317,6 +323,20 @@
             const recent = data.recent || [];
             document.getElementById('qualityRecentTable').innerHTML = recent.length ? recent.map(r => `<tr><td>${r.created_at}</td><td>${r.symbol}</td><td>${badge(r.signal_type, r.signal_type === 'buy' ? 'buy' : 'sell')}</td><td>${safe(r.return_1h_pct)}%</td><td>${safe(r.return_3h_pct)}%</td><td>${safe(r.return_6h_pct)}%</td><td class="${Number(r.avg_quality_pct || 0) >= 0 ? 'pos' : 'neg'}">${safe(r.avg_quality_pct)}%</td></tr>`).join('') : '<tr><td colspan="7" class="muted">暂无最近质量样本</td></tr>';
         }
+        async function applyPreset(name) {
+            const r = await fetch('/api/presets/apply', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({name})
+            });
+            const j = await r.json();
+            if (!j.success) {
+                alert('应用 preset 失败: ' + (j.error || 'unknown'));
+                return;
+            }
+            alert(`已应用 preset: ${name}\n建议你稍后留意 bot 下一轮运行日志。`);
+            await refreshAll();
+        }
         async function loadOptimizer() {
             const data = await api('/api/optimizer/results');
             const best = data.best_experiment || {};
@@ -335,8 +355,10 @@
             const specs = data.symbol_specific || {};
             const specHtml = Object.keys(specs).length ? Object.entries(specs).map(([symbol, rows]) => `<div class="item"><strong>${symbol}</strong><div class="muted">${rows.map(r => `${r.description}: ${r.summary?.total_return_pct}% / win ${r.summary?.win_rate}% / dd ${r.summary?.max_drawdown_pct}%`).join('<br>')}</div></div>`).join('') : '<div class="item muted">暂无专项实验</div>';
             document.getElementById('optimizerSymbolSpecific').innerHTML = specHtml;
+            const promotions = data.candidate_promotions || [];
+            document.getElementById('optimizerPromotions').innerHTML = promotions.length ? promotions.map(p => `<tr><td>${p.symbol}</td><td>${badge(p.decision, p.decision === 'promote' ? 'ok' : p.decision === 'keep_candidate' ? 'warn' : 'bad')}</td><td>${p.reason}</td></tr>`).join('') : '<tr><td colspan="3" class="muted">暂无候选晋升建议</td></tr>';
             const presets = data.presets || [];
-            document.getElementById('optimizerPresets').innerHTML = presets.length ? presets.map(p => `<tr><td>${p.name}</td><td>${p.path}</td></tr>`).join('') : '<tr><td colspan="2" class="muted">暂无预设</td></tr>';
+            document.getElementById('optimizerPresets').innerHTML = presets.length ? presets.map(p => `<tr><td>${p.name}</td><td>${p.path}</td><td><button onclick="applyPreset('${p.name}')">应用</button></td></tr>`).join('') : '<tr><td colspan="3" class="muted">暂无预设</td></tr>';
         }
         async function loadRisk() {
             const [risk, events] = await Promise.all([api('/api/risk/status'), api('/api/risk/events')]);

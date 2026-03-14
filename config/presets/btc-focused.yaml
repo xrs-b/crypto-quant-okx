@@ -1,0 +1,151 @@
+api:
+  key: your_api_key
+  passphrase: your_passphrase
+  secret: your_api_secret
+dashboard:
+  auto_refresh_seconds: 30
+  enabled: true
+  host: 0.0.0.0
+  port: 8050
+  theme: dark
+  title: OKX量化交易仪表盘
+database:
+  path: data/trading.db
+  retention:
+    logs_days: 30
+    signals_days: 90
+    trades_days: 365
+  type: sqlite
+exchange:
+  default_leverage: 10
+  mode: testnet
+  name: okx
+logging:
+  backup_count: 5
+  file: logs/trading.log
+  format: '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+  level: INFO
+  max_size_mb: 10
+ml:
+  enabled: true
+  features:
+  - RSI
+  - MACD
+  - MACD_signal
+  - MACD_hist
+  - BB_upper
+  - BB_lower
+  - BB_position
+  - MA5_ratio
+  - trend_gap
+  - volume_ratio
+  - returns
+  - returns_3d
+  - returns_5d
+  - volatility
+  - momentum
+  - atr_ratio
+  min_confidence: 0.6
+  model_path: ml/models
+  training:
+    label_horizon: 3
+    min_return_threshold: 0.002
+notification:
+  discord:
+    channel_id: '1468585288770125876'
+    enabled: true
+    notify_errors: true
+    notify_signals: true
+    notify_trades: true
+  email:
+    enabled: false
+    password: your_app_password
+    smtp_host: smtp.gmail.com
+    smtp_port: 587
+    to_address: your_email@gmail.com
+    username: your_email@gmail.com
+  telegram:
+    bot_token: '
+    chat_id: your_chat_id
+    enabled: false
+runtime:
+  interval_seconds: 300
+  max_runtime_minutes: 30
+  mode: interval
+  schedule: 0 * * * *
+strategies:
+  adx:
+    enabled: true
+    period: 14
+    strength_weight: 20
+    threshold: 25
+  bollinger:
+    enabled: true
+    period: 20
+    std_multiplier: 2
+    strength_weight: 15
+  composite:
+    enabled: true
+    min_strategy_count: 2
+    min_strength: 30
+  divergence:
+    enabled: true
+    lookback: 20
+    strength_weight: 30
+  ma_cross:
+    enabled: true
+    fast_period: 5
+    slow_period: 20
+    strength_weight: 25
+  macd:
+    enabled: true
+    fast_period: 12
+    signal_period: 9
+    slow_period: 26
+    strength_weight: 20
+  pattern:
+    enabled: true
+    strength_weight: 20
+  rsi:
+    enabled: true
+    overbought: 65
+    oversold: 35
+    period: 14
+    strength_weight: 40
+  volume:
+    enabled: true
+    strength_weight: 25
+    volume_ma_period: 20
+    volume_multiplier: 1.5
+symbols:
+  contract_type: usdt
+  margin_type: isolated
+  quote_currency: USDT
+  watch_list:
+  - BTC/USDT
+  candidate_watch_list:
+  - XRP/USDT
+  paused_watch_list:
+  - ETH/USDT
+  - SOL/USDT
+  - HYPE/USDT
+  selection_mode: focused
+trading:
+  cooldown_minutes: 15
+  leverage: 10
+  max_exposure: 0.3
+  max_position_per_symbol: 0.15
+  max_trades_per_day: 10
+  min_trade_interval: 300
+  position_size: 0.1
+  stop_loss: 0.02
+  take_profit: 0.03
+  trailing_stop: 0.012
+  max_consecutive_losses: 3
+  max_daily_drawdown: 0.03
+market_filters:
+  block_counter_trend: true
+  block_low_volatility: true
+  block_high_volatility: true
+  min_volatility: 0.0045
+  max_volatility: 0.05

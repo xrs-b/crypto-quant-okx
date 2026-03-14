@@ -193,6 +193,11 @@
                     <div style="height:12px"></div>
                     <div class="section-title">聚焦币池实验</div>
                     <table><thead><tr><th>组合</th><th>评分</th><th>收益</th><th>胜率</th><th>回撤</th></tr></thead><tbody id="optimizerFocusedSets"></tbody></table>
+                    <div style="height:12px"></div>
+                    <div class="section-title">专项实验与预设</div>
+                    <div class="list" id="optimizerSymbolSpecific"></div>
+                    <div style="height:12px"></div>
+                    <table><thead><tr><th>预设</th><th>路径</th></tr></thead><tbody id="optimizerPresets"></tbody></table>
                 </div>
             </div>
         </div>
@@ -327,6 +332,11 @@
             document.getElementById('optimizerStrategyAdvice').innerHTML = adv.length ? adv.map(a => `<div class="item"><strong>${a.topic}</strong><div class="muted">${a.advice}</div></div>`).join('') : '<div class="item muted">暂无策略建议</div>';
             const sets = data.focused_sets || [];
             document.getElementById('optimizerFocusedSets').innerHTML = sets.length ? sets.map(s => `<tr><td>${s.description}</td><td>${s.score}</td><td class="${Number(s.summary?.total_return_pct || 0) >= 0 ? 'pos' : 'neg'}">${safe(s.summary?.total_return_pct)}%</td><td>${safe(s.summary?.win_rate)}%</td><td class="${Number(s.summary?.max_drawdown_pct || 0) >= 0 ? 'pos' : 'neg'}">${safe(s.summary?.max_drawdown_pct)}%</td></tr>`).join('') : '<tr><td colspan="5" class="muted">暂无聚焦实验</td></tr>';
+            const specs = data.symbol_specific || {};
+            const specHtml = Object.keys(specs).length ? Object.entries(specs).map(([symbol, rows]) => `<div class="item"><strong>${symbol}</strong><div class="muted">${rows.map(r => `${r.description}: ${r.summary?.total_return_pct}% / win ${r.summary?.win_rate}% / dd ${r.summary?.max_drawdown_pct}%`).join('<br>')}</div></div>`).join('') : '<div class="item muted">暂无专项实验</div>';
+            document.getElementById('optimizerSymbolSpecific').innerHTML = specHtml;
+            const presets = data.presets || [];
+            document.getElementById('optimizerPresets').innerHTML = presets.length ? presets.map(p => `<tr><td>${p.name}</td><td>${p.path}</td></tr>`).join('') : '<tr><td colspan="2" class="muted">暂无预设</td></tr>';
         }
         async function loadRisk() {
             const [risk, events] = await Promise.all([api('/api/risk/status'), api('/api/risk/events')]);

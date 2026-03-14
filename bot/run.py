@@ -302,6 +302,14 @@ def main():
         print("\n币种分层建议:")
         for row in result['symbol_advice']:
             print(f"  {row['symbol']}: {row['tier']} | backtest={row['backtest_return_pct']}% | quality={row['avg_quality_pct']}% | {row['action']}")
+        print("\n单币种专项实验:")
+        for symbol, rows in result.get('symbol_specific', {}).items():
+            print(f"  [{symbol}]")
+            for row in rows:
+                print(f"    {row['name']}: score={row['score']} return={row['summary']['total_return_pct']}% win={row['summary']['win_rate']}% dd={row['summary']['max_drawdown_pct']}%")
+        print("\n预设配置:")
+        for preset in result.get('presets', []):
+            print(f"  {preset['name']}: {preset['path']}")
 
     else:
         # 运行交易

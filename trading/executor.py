@@ -360,60 +360,114 @@ class TradingExecutor:
 
 class RiskManager:
     """风险管理器"""
-    
+
     def __init__(self, config: Config, db: Database):
         self.config = config
         self.db = db
         self.trading_config = config.get('trading', {})
         self._exchange = None
-    
+
     def can_open_position(self, symbol: str) -> tuple:
-        """
-        检查是否可以开仓
-        
-        Returns:
-            (can_open: bool, reason: str, details: dict)
-        """
+        """检查是否可以开仓"""
         details = {}
-        
-        # 1. 检查每日交易次数
-        max_trades = self.trading_config.get('max_trades_per_day', 10)
+
+        max_trades = int(self.trading_config.get('max_trades_per_day', 10))
         today_trades = self._get_today_trade_count()
-        
         if today_trades >= max_trades:
             details['daily_limit'] = {'passed': False, 'reason': f'已达每日交易上限({today_trades})'}
             return False, f"已达每日交易上限({today_trades}/{max_trades})", details
-        
         details['daily_limit'] = {'passed': True, 'count': today_trades, 'max': max_trades}
-        
-        # 2. 检查全局冷却
-        min_interval = self.trading_config.get('min_trade_interval', 300)
+
+        min_interval = int(self.trading_config.get('min_trade_interval', 300))
         last_trade = self._get_last_trade_time()
         if last_trade:
             diff_seconds = (datetime.now() - last_trade).total_seconds()
             if diff_seconds < min_interval:
-                details['global_cooldown'] = {
-                    'passed': False, 
-                    'remaining': min_interval - diff_seconds
-                }
+                details['global_cooldown'] = {'passed': False, 'remaining': int(min_interval - diff_seconds)}
                 return False, f"全局冷却中({int(diff_seconds)}s)", details
-        
         details['global_cooldown'] = {'passed': True}
-        
-        # 3. 检查总持仓比例
-        max_exposure = self.trading_config.get('max_exposure', 0.3)
+
+        max_consecutive_losses = int(self.trading_config.get('max_consecutive_losses', 3))
+        consecutive_losses = self._get_consecutive_losses()
+        if consecutive_losses >= max_consecutive_losses:
+            details['loss_streak_limit'] = {
+                'passed': False,
+                'current': consecutive_losses,
+                'max': max_consecutive_losses
+            }
+            return False, f"连续亏损熔断({consecutive_losses}/{max_consecutive_losses})", details
+        details['loss_streak_limit'] = {'passed': True, 'current': consecutive_losses, 'max': max_consecutive_losses}
+
+        max_daily_drawdown = float(self.trading_config.get('max_daily_drawdown', 0.03))
+        daily_drawdown_ratio = self._get_daily_drawdown_ratio()
+        if daily_drawdown_ratio >= max_daily_drawdown:
+            details['daily_drawdown_limit'] = {
+                'passed': False,
+                'current': round(daily_drawdown_ratio, 4),
+                'max': max_daily_drawdown
+            }
+            return False, f"日内回撤熔断({daily_drawdown_ratio*100:.2f}%/{max_daily_drawdown*100:.2f}%)", details
+        details['daily_drawdown_limit'] = {
+            'passed': True,
+            'current': round(daily_drawdown_ratio, 4),
+            'max': max_daily_drawdown
+        }
+
+        max_exposure = float(self.trading_config.get('max_exposure', 0.3))
+        position_ratio = float(self.trading_config.get('position_size', 0.1))
         current_exposure = self._get_current_exposure()
-        
-        if current_exposure >= max_exposure:
-            details['exposure_limit'] = {'passed': False, 'current': current_exposure}
-            return False, f"已达最大持仓比例({current_exposure*100:.0f}%)", details
-        
-        details['exposure_limit'] = {'passed': True, 'current': current_exposure}
-        
+        projected_exposure = current_exposure + position_ratio
+        if projected_exposure > max_exposure:
+            details['exposure_limit'] = {
+                'passed': False,
+                'current': round(current_exposure, 4),
+                'projected': round(projected_exposure, 4),
+                'max': max_exposure
+            }
+            return False, f"开仓后将超过最大持仓比例({projected_exposure*100:.0f}%)", details
+        details['exposure_limit'] = {
+            'passed': True,
+            'current': round(current_exposure, 4),
+            'projected': round(projected_exposure, 4),
+            'max': max_exposure
+        }
+
         return True, None, details
-    
+
+    def get_risk_status(self) -> Dict[str, Any]:
+        """供仪表盘显示的风险状态"""
+        balance = self._get_balance_summary()
+        current_exposure = self._get_current_exposure()
+        daily_drawdown = self._get_daily_drawdown_ratio()
+        consecutive_losses = self._get_consecutive_losses()
+        return {
+            'today_trades': self._get_today_trade_count(),
+            'last_trade_time': self._get_last_trade_time().isoformat() if self._get_last_trade_time() else None,
+            'current_exposure': round(current_exposure, 4),
+            'max_exposure': float(self.trading_config.get('max_exposure', 0.3)),
+            'position_size': float(self.trading_config.get('position_size', 0.1)),
+            'daily_drawdown': round(daily_drawdown, 4),
+            'max_daily_drawdown': float(self.trading_config.get('max_daily_drawdown', 0.03)),
+            'consecutive_losses': consecutive_losses,
+            'max_consecutive_losses': int(self.trading_config.get('max_consecutive_losses', 3)),
+            'balance': balance,
+            'status': 'guarded' if (daily_drawdown > 0 or consecutive_losses > 0) else 'normal'
+        }
+
+    def _get_balance_summary(self) -> Dict[str, float]:
+        try:
+            from core.exchange import Exchange
+            if self._exchange is None:
+                self._exchange = Exchange(self.config.all)
+            balance = self._exchange.fetch_balance()
+            total = float(balance.get('total', {}).get('USDT', 0) or 0)
+            free = float(balance.get('free', {}).get('USDT', 0) or 0)
+            used = max(0.0, total - free)
+            return {'total': round(total, 2), 'free': round(free, 2), 'used': round(used, 2)}
+        except Exception:
+            return {'total': 0.0, 'free': 0.0, 'used': 0.0}
+
     def _get_today_trade_count(self) -> int:
-        """获取今日交易次数（不只看 open，避免低估）"""
         trades = self.db.get_trades(limit=1000)
         today = datetime.now().date()
         count = 0
@@ -422,35 +476,46 @@ class RiskManager:
             if open_time and datetime.fromisoformat(open_time).date() == today:
                 count += 1
         return count
-    
+
     def _get_last_trade_time(self) -> Optional[datetime]:
-        """获取上次交易时间"""
         trades = self.db.get_trades(limit=1)
-        
         if trades:
             open_time = trades[0].get('open_time', '')
             if open_time:
                 return datetime.fromisoformat(open_time)
-        
         return None
-    
-    def _get_current_exposure(self) -> float:
-        """获取当前持仓风险占比（按保证金占用，而不是按全仓名义价值）"""
-        positions = self.db.get_positions()
-        try:
-            from core.exchange import Exchange
-            if self._exchange is None:
-                self._exchange = Exchange(self.config.all)
-            balance = self._exchange.fetch_balance()
-            total_balance = float(balance.get('total', {}).get('USDT', 0) or balance.get('free', {}).get('USDT', 1) or 1)
-        except Exception:
-            total_balance = 1.0
 
+    def _get_consecutive_losses(self) -> int:
+        trades = self.db.get_trades(status='closed', limit=20)
+        count = 0
+        for trade in trades:
+            pnl = float(trade.get('pnl', 0) or 0)
+            if pnl < 0:
+                count += 1
+            else:
+                break
+        return count
+
+    def _get_daily_drawdown_ratio(self) -> float:
+        trades = self.db.get_trades(status='closed', limit=1000)
+        today = datetime.now().date()
+        today_pnl = 0.0
+        for trade in trades:
+            close_time = trade.get('close_time') or trade.get('open_time')
+            if close_time and datetime.fromisoformat(close_time).date() == today:
+                today_pnl += float(trade.get('pnl', 0) or 0)
+        if today_pnl >= 0:
+            return 0.0
+        balance_total = self._get_balance_summary().get('total', 0.0) or 1.0
+        return abs(today_pnl) / balance_total
+
+    def _get_current_exposure(self) -> float:
+        positions = self.db.get_positions()
+        total_balance = self._get_balance_summary().get('total', 0.0) or 1.0
         total_margin_used = 0.0
         for p in positions:
             qty = float(p.get('quantity', 0) or 0)
             px = float(p.get('current_price', 0) or p.get('entry_price', 0) or 0)
             lev = max(1, int(p.get('leverage', 1) or 1))
             total_margin_used += (qty * px) / lev if qty and px else 0.0
-
         return total_margin_used / total_balance if total_balance > 0 else 0.0

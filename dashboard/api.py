@@ -14,10 +14,12 @@ CORS(app)
 
 from core.config import Config
 from core.database import Database
+from trading.executor import RiskManager
 
 # 初始化
 config = Config()
 db = Database(config.db_path)
+risk_manager = RiskManager(config, db)
 
 
 # ============================================================================
@@ -192,26 +194,21 @@ def get_daily_summary():
 @app.route('/api/system/status')
 def get_system_status():
     """获取系统状态"""
-    # 获取持仓
     positions = db.get_positions()
-    
-    # 获取交易统计
     trade_stats = db.get_trade_stats(days=30)
-    
-    # 获取信号统计
-    signals = db.get_signals(limit=100)
+    signals = db.get_signals(limit=200)
     today_signals = sum(1 for s in signals if s.get('created_at', '').startswith(datetime.now().strftime('%Y-%m-%d')))
-    
-    # 计算总资产
+    executed_today = sum(1 for s in signals if s.get('created_at', '').startswith(datetime.now().strftime('%Y-%m-%d')) and s.get('executed'))
     total_value = sum(p.get('quantity', 0) * p.get('current_price', 0) for p in positions)
     unrealized_pnl = sum(p.get('unrealized_pnl', 0) for p in positions)
-    
+    risk = risk_manager.get_risk_status()
+
     return jsonify({
         'success': True,
         'data': {
             'system': {
                 'status': 'running',
-                'uptime': 'N/A',  # 可以添加启动时间追踪
+                'uptime': 'N/A',
                 'last_update': datetime.now().isoformat()
             },
             'portfolio': {
@@ -226,8 +223,10 @@ def get_system_status():
             },
             'signals': {
                 'today_signals': today_signals,
-                'execution_rate': round(trade_stats.get('total_trades', 0) / max(today_signals, 1) * 100, 2)
-            }
+                'executed_today': executed_today,
+                'execution_rate': round(executed_today / max(today_signals, 1) * 100, 2)
+            },
+            'risk': risk
         }
     })
 
@@ -235,6 +234,15 @@ def get_system_status():
 # ============================================================================
 # 配置API
 # ============================================================================
+
+@app.route('/api/risk/status')
+def get_risk_status():
+    """获取风险状态"""
+    return jsonify({
+        'success': True,
+        'data': risk_manager.get_risk_status()
+    })
+
 
 @app.route('/api/config')
 def get_config():

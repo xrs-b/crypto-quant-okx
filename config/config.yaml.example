@@ -120,6 +120,8 @@ trading:
   max_position_per_symbol: 0.15
   max_trades_per_day: 10
   min_trade_interval: 300
+  max_consecutive_losses: 3   # 连续亏损熔断阈值
+  max_daily_drawdown: 0.03    # 日内最大回撤(按账户比例)
   position_size: 0.1
   stop_loss: 0.02
   take_profit: 0.04

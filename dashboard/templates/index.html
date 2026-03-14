@@ -1,570 +1,334 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>OKX量化交易仪表盘</title>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
         :root {
-            --primary: #00d4aa;
-            --secondary: #6366f1;
-            --danger: #ef4444;
-            --success: #22c55e;
-            --warning: #f59e0b;
-            --dark: #0f172a;
-            --dark2: #1e293b;
-            --dark3: #334155;
-            --text: #f8fafc;
-            --text2: #94a3b8;
+            --bg: #08111f;
+            --panel: #0f1b2d;
+            --panel-2: #13233a;
+            --border: #243750;
+            --text: #e6edf7;
+            --muted: #8ca0be;
+            --primary: #35d0a1;
+            --danger: #ff6b6b;
+            --warn: #ffb84d;
+            --info: #7aa2ff;
         }
-        
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-        
+        * { box-sizing: border-box; }
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: var(--dark);
+            margin: 0;
+            font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+            background: linear-gradient(180deg, #08111f 0%, #0b1324 100%);
             color: var(--text);
-            min-height: 100vh;
         }
-        
-        /* Header */
-        .header {
-            background: var(--dark2);
-            padding: 1rem 2rem;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            border-bottom: 1px solid var(--dark3);
+        .wrap { max-width: 1500px; margin: 0 auto; padding: 24px; }
+        .topbar {
+            display:flex; justify-content:space-between; align-items:center; gap:16px;
+            margin-bottom:20px; padding:18px 22px; border:1px solid var(--border);
+            background: rgba(15,27,45,.9); border-radius: 18px; backdrop-filter: blur(12px);
         }
-        
-        .logo {
-            font-size: 1.5rem;
-            font-weight: bold;
-            color: var(--primary);
-            display: flex;
-            align-items: center;
-            gap: 0.5rem;
+        .title h1 { margin:0; font-size: 24px; }
+        .title p { margin:6px 0 0; color: var(--muted); font-size: 13px; }
+        .actions { display:flex; align-items:center; gap:12px; }
+        .pill { padding:6px 12px; border-radius:999px; font-size:12px; background:rgba(53,208,161,.12); color:var(--primary); border:1px solid rgba(53,208,161,.25); }
+        button {
+            border: 0; border-radius: 12px; padding: 10px 14px; cursor: pointer;
+            background: var(--primary); color: #04231a; font-weight: 700;
         }
-        
-        .status-badge {
-            padding: 0.25rem 0.75rem;
-            border-radius: 9999px;
-            font-size: 0.875rem;
-            background: rgba(34, 197, 94, 0.2);
-            color: var(--success);
-        }
-        
-        /* Main Layout */
-        .container {
-            max-width: 1400px;
-            margin: 0 auto;
-            padding: 1.5rem;
-        }
-        
-        /* Stats Grid */
-        .stats-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-            gap: 1rem;
-            margin-bottom: 1.5rem;
-        }
-        
-        .stat-card {
-            background: var(--dark2);
-            border-radius: 0.75rem;
-            padding: 1.25rem;
-            border: 1px solid var(--dark3);
-        }
-        
-        .stat-label {
-            color: var(--text2);
-            font-size: 0.875rem;
-            margin-bottom: 0.5rem;
-        }
-        
-        .stat-value {
-            font-size: 1.75rem;
-            font-weight: bold;
-        }
-        
-        .stat-value.positive { color: var(--success); }
-        .stat-value.negative { color: var(--danger); }
-        
-        .stat-sub {
-            font-size: 0.75rem;
-            color: var(--text2);
-            margin-top: 0.25rem;
-        }
-        
-        /* Content Grid */
-        .content-grid {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 1.5rem;
-        }
-        
-        @media (max-width: 1024px) {
-            .content-grid {
-                grid-template-columns: 1fr;
-            }
-        }
-        
+        .stats { display:grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom:18px; }
         .card {
-            background: var(--dark2);
-            border-radius: 0.75rem;
-            border: 1px solid var(--dark3);
-            overflow: hidden;
+            background: rgba(15,27,45,.95); border:1px solid var(--border); border-radius: 18px;
+            box-shadow: 0 10px 30px rgba(0,0,0,.18);
         }
-        
-        .card-header {
-            padding: 1rem 1.25rem;
-            border-bottom: 1px solid var(--dark3);
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
+        .stat { padding:18px; }
+        .label { color: var(--muted); font-size: 13px; margin-bottom: 8px; }
+        .value { font-size: 28px; font-weight: 800; }
+        .sub { color: var(--muted); font-size: 12px; margin-top: 8px; }
+        .pos { color: var(--primary); }
+        .neg { color: var(--danger); }
+        .tabs { display:flex; gap:10px; flex-wrap:wrap; margin-bottom:18px; }
+        .tab-btn {
+            background: var(--panel); color: var(--text); border:1px solid var(--border); font-weight:600;
         }
-        
-        .card-title {
-            font-weight: 600;
-            font-size: 1rem;
+        .tab-btn.active { background: linear-gradient(135deg, #35d0a1 0%, #6dd5ff 100%); color:#04131e; }
+        .panel { display:none; padding:18px; }
+        .panel.active { display:block; }
+        .panel-grid { display:grid; grid-template-columns: 1.2fr .8fr; gap: 16px; }
+        .section-title { font-size: 16px; font-weight: 700; margin: 0 0 14px; }
+        table { width:100%; border-collapse: collapse; }
+        th, td { padding: 12px 10px; border-bottom:1px solid rgba(140,160,190,.12); font-size:13px; text-align:left; }
+        th { color: var(--muted); font-weight:600; }
+        tr:hover td { background: rgba(255,255,255,.02); }
+        .badge { display:inline-block; padding:4px 8px; border-radius:999px; font-size:12px; font-weight:700; }
+        .long, .buy, .ok { background: rgba(53,208,161,.12); color: var(--primary); }
+        .short, .sell, .bad { background: rgba(255,107,107,.12); color: var(--danger); }
+        .hold, .warn { background: rgba(255,184,77,.14); color: var(--warn); }
+        .kpis { display:grid; grid-template-columns: repeat(2,1fr); gap:12px; }
+        .mini { padding:16px; }
+        .mini .value { font-size:22px; }
+        .list { display:grid; gap:10px; }
+        .item { padding:14px; border-radius:14px; background: var(--panel-2); border:1px solid rgba(140,160,190,.08); }
+        .muted { color: var(--muted); }
+        pre {
+            white-space: pre-wrap; word-break: break-word; margin:0; font-size:12px; line-height:1.55;
+            color:#d8e3f3;
         }
-        
-        .card-body {
-            padding: 1.25rem;
-        }
-        
-        /* Table */
-        .table {
-            width: 100%;
-            border-collapse: collapse;
-        }
-        
-        .table th,
-        .table td {
-            padding: 0.75rem 1rem;
-            text-align: left;
-            border-bottom: 1px solid var(--dark3);
-        }
-        
-        .table th {
-            color: var(--text2);
-            font-weight: 500;
-            font-size: 0.875rem;
-        }
-        
-        .table td {
-            font-size: 0.875rem;
-        }
-        
-        .table tr:hover {
-            background: var(--dark3);
-        }
-        
-        /* Position Badge */
-        .badge {
-            padding: 0.25rem 0.5rem;
-            border-radius: 0.25rem;
-            font-size: 0.75rem;
-            font-weight: 500;
-        }
-        
-        .badge-long {
-            background: rgba(34, 197, 94, 0.2);
-            color: var(--success);
-        }
-        
-        .badge-short {
-            background: rgba(239, 68, 68, 0.2);
-            color: var(--danger);
-        }
-        
-        /* Buttons */
-        .btn {
-            padding: 0.5rem 1rem;
-            border-radius: 0.5rem;
-            border: none;
-            cursor: pointer;
-            font-size: 0.875rem;
-            font-weight: 500;
-            transition: all 0.2s;
-        }
-        
-        .btn-primary {
-            background: var(--primary);
-            color: var(--dark);
-        }
-        
-        .btn-primary:hover {
-            opacity: 0.9;
-        }
-        
-        /* Refresh */
-        .refresh-btn {
-            background: var(--dark3);
-            color: var(--text);
-            border: none;
-            padding: 0.5rem 1rem;
-            border-radius: 0.5rem;
-            cursor: pointer;
-            font-size: 0.875rem;
-        }
-        
-        .refresh-btn:hover {
-            background: var(--dark3);
-            opacity: 0.8;
-        }
-        
-        /* Loading */
-        .loading {
-            text-align: center;
-            padding: 2rem;
-            color: var(--text2);
-        }
-        
-        /* Symbol Pills */
-        .symbols {
-            display: flex;
-            gap: 0.5rem;
-            flex-wrap: wrap;
-        }
-        
-        .symbol-pill {
-            padding: 0.25rem 0.75rem;
-            background: var(--dark3);
-            border-radius: 9999px;
-            font-size: 0.75rem;
-        }
-        
-        /* Strategy Tags */
-        .strategy-tag {
-            display: inline-block;
-            padding: 0.125rem 0.375rem;
-            background: rgba(99, 102, 241, 0.2);
-            color: var(--secondary);
-            border-radius: 0.25rem;
-            font-size: 0.625rem;
-            margin: 0.125rem;
-        }
-        
-        /* Chart */
-        .chart-container {
-            height: 250px;
-            position: relative;
+        @media (max-width: 1100px) {
+            .stats, .panel-grid, .kpis { grid-template-columns:1fr; }
         }
     </style>
 </head>
 <body>
-    <header class="header">
-        <div class="logo">
-            <span>📊</span>
-            <span>OKX量化交易仪表盘</span>
-        </div>
-        <div style="display: flex; align-items: center; gap: 1rem;">
-            <span class="status-badge">● 运行中</span>
-            <button class="refresh-btn" onclick="refreshAll()">🔄 刷新</button>
-        </div>
-    </header>
-    
-    <div class="container">
-        <!-- Stats Overview -->
-        <div class="stats-grid">
-            <div class="stat-card">
-                <div class="stat-label">总持仓价值</div>
-                <div class="stat-value" id="totalValue">--</div>
-                <div class="stat-sub">未实现盈亏: <span id="unrealizedPnl">--</span></div>
+    <div class="wrap">
+        <div class="topbar card">
+            <div class="title">
+                <h1>📊 OKX 量化交易仪表盘</h1>
+                <p>模拟盘专用 · 合约策略观察台 · 多标签查看信号 / 交易 / 风控 / 配置</p>
             </div>
-            <div class="stat-card">
-                <div class="stat-label">30天交易统计</div>
-                <div class="stat-value" id="totalTrades">--</div>
-                <div class="stat-sub">胜率: <span id="winRate">--</span> | 盈亏: <span id="totalPnl">--</span></div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-label">今日信号</div>
-                <div class="stat-value" id="todaySignals">--</div>
-                <div class="stat-sub">执行率: <span id="execRate">--</span></div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-label">当前持仓数</div>
-                <div class="stat-value" id="positionCount">--</div>
-                <div class="stat-sub" id="symbolList">--</div>
+            <div class="actions">
+                <span class="pill" id="systemStatus">● running</span>
+                <button onclick="refreshAll()">刷新数据</button>
             </div>
         </div>
-        
-        <!-- Content -->
-        <div class="content-grid">
-            <!-- Positions -->
-            <div class="card">
-                <div class="card-header">
-                    <span class="card-title">当前持仓</span>
-                    <span style="color: var(--text2); font-size: 0.875rem;">实时更新</span>
+
+        <div class="stats">
+            <div class="card stat"><div class="label">持仓总价值</div><div class="value" id="totalValue">--</div><div class="sub">未实现盈亏 <span id="unrealizedPnl">--</span></div></div>
+            <div class="card stat"><div class="label">30天交易</div><div class="value" id="totalTrades">--</div><div class="sub">胜率 <span id="winRate">--</span> · 总盈亏 <span id="totalPnl">--</span></div></div>
+            <div class="card stat"><div class="label">今日信号</div><div class="value" id="todaySignals">--</div><div class="sub">执行率 <span id="execRate">--</span></div></div>
+            <div class="card stat"><div class="label">风险占用</div><div class="value" id="riskExposure">--</div><div class="sub">连续亏损 <span id="lossStreak">--</span> · 日内回撤 <span id="dailyDd">--</span></div></div>
+        </div>
+
+        <div class="tabs">
+            <button class="tab-btn active" data-tab="overview">总览</button>
+            <button class="tab-btn" data-tab="positions">持仓</button>
+            <button class="tab-btn" data-tab="trades">交易记录</button>
+            <button class="tab-btn" data-tab="signals">信号记录</button>
+            <button class="tab-btn" data-tab="strategy">策略分析</button>
+            <button class="tab-btn" data-tab="risk">风控状态</button>
+            <button class="tab-btn" data-tab="config">系统配置</button>
+        </div>
+
+        <div class="card panel active" id="tab-overview">
+            <div class="panel-grid">
+                <div class="card mini">
+                    <div class="section-title">当前持仓概览</div>
+                    <table><thead><tr><th>币种</th><th>方向</th><th>数量</th><th>开仓价</th><th>现价</th><th>未实现盈亏</th></tr></thead><tbody id="overviewPositions"></tbody></table>
                 </div>
-                <div class="card-body">
-                    <table class="table">
-                        <thead>
-                            <tr>
-                                <th>币种</th>
-                                <th>方向</th>
-                                <th>数量</th>
-                                <th>开仓价</th>
-                                <th>当前价</th>
-                                <th>盈亏</th>
-                            </tr>
-                        </thead>
-                        <tbody id="positionsTable">
-                            <tr><td colspan="6" class="loading">加载中...</td></tr>
-                        </tbody>
-                    </table>
+                <div class="list" id="overviewList"></div>
+            </div>
+        </div>
+
+        <div class="card panel" id="tab-positions">
+            <div class="section-title">持仓详情</div>
+            <table><thead><tr><th>币种</th><th>方向</th><th>数量</th><th>杠杆</th><th>开仓价</th><th>现价</th><th>未实现盈亏</th><th>更新时间</th></tr></thead><tbody id="positionsTable"></tbody></table>
+        </div>
+
+        <div class="card panel" id="tab-trades">
+            <div class="section-title">交易记录</div>
+            <table><thead><tr><th>ID</th><th>币种</th><th>方向</th><th>状态</th><th>开仓价</th><th>平仓价</th><th>数量</th><th>盈亏</th><th>开仓时间</th></tr></thead><tbody id="tradesTable"></tbody></table>
+        </div>
+
+        <div class="card panel" id="tab-signals">
+            <div class="section-title">信号记录</div>
+            <table><thead><tr><th>时间</th><th>币种</th><th>信号</th><th>强度</th><th>策略</th><th>是否过滤</th><th>过滤原因</th></tr></thead><tbody id="signalsTable"></tbody></table>
+        </div>
+
+        <div class="card panel" id="tab-strategy">
+            <div class="panel-grid">
+                <div class="card mini">
+                    <div class="section-title">策略统计</div>
+                    <table><thead><tr><th>策略</th><th>信号数</th><th>触发数</th><th>平均置信度</th></tr></thead><tbody id="strategyTable"></tbody></table>
+                </div>
+                <div class="card mini">
+                    <div class="section-title">日汇总</div>
+                    <table><thead><tr><th>日期</th><th>交易数</th><th>胜</th><th>负</th><th>盈亏</th></tr></thead><tbody id="dailyTable"></tbody></table>
                 </div>
             </div>
-            
-            <!-- PnL Chart -->
-            <div class="card">
-                <div class="card-header">
-                    <span class="card-title">盈亏趋势 (30天)</span>
+        </div>
+
+        <div class="card panel" id="tab-risk">
+            <div class="panel-grid">
+                <div class="kpis">
+                    <div class="card mini"><div class="label">当前风险占用</div><div class="value" id="riskCurrentExposure">--</div></div>
+                    <div class="card mini"><div class="label">日内回撤</div><div class="value" id="riskDailyDrawdown">--</div></div>
+                    <div class="card mini"><div class="label">连续亏损</div><div class="value" id="riskConsecutiveLosses">--</div></div>
+                    <div class="card mini"><div class="label">今日交易次数</div><div class="value" id="riskTodayTrades">--</div></div>
                 </div>
-                <div class="card-body">
-                    <div class="chart-container">
-                        <canvas id="pnlChart"></canvas>
-                    </div>
-                </div>
-            </div>
-            
-            <!-- Recent Trades -->
-            <div class="card">
-                <div class="card-header">
-                    <span class="card-title">最近交易</span>
-                </div>
-                <div class="card-body">
-                    <table class="table">
-                        <thead>
-                            <tr>
-                                <th>时间</th>
-                                <th>币种</th>
-                                <th>方向</th>
-                                <th>数量</th>
-                                <th>盈亏</th>
-                            </tr>
-                        </thead>
-                        <tbody id="tradesTable">
-                            <tr><td colspan="5" class="loading">加载中...</td></tr>
-                        </tbody>
-                    </table>
+                <div class="card mini">
+                    <div class="section-title">风险哨兵</div>
+                    <div class="list" id="riskCards"></div>
                 </div>
             </div>
-            
-            <!-- Strategy Stats -->
-            <div class="card">
-                <div class="card-header">
-                    <span class="card-title">策略触发统计</span>
-                </div>
-                <div class="card-body" id="strategyStats">
-                    <div class="loading">加载中...</div>
-                </div>
-            </div>
+        </div>
+
+        <div class="card panel" id="tab-config">
+            <div class="section-title">系统配置（脱敏）</div>
+            <pre id="configBlock">加载中...</pre>
         </div>
     </div>
-    
+
     <script>
-        const API_BASE = '';
-        
-        // Chart instance
-        let pnlChart = null;
-        
-        // Load all data
+        const money = v => `${Number(v || 0).toFixed(2)}`;
+        const pct = v => `${(Number(v || 0) * 100).toFixed(2)}%`;
+        const badge = (text, cls) => `<span class="badge ${cls}">${text}</span>`;
+        const yesNo = val => val ? badge('已执行', 'ok') : badge('未执行', 'warn');
+        const filteredTag = row => row.filtered ? badge('已过滤', 'bad') : badge('通过', 'ok');
+
+        async function api(url) {
+            const r = await fetch(url);
+            const j = await r.json();
+            return j.data;
+        }
+
+        function mountTabs() {
+            document.querySelectorAll('.tab-btn').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    document.querySelectorAll('.tab-btn').forEach(x => x.classList.remove('active'));
+                    document.querySelectorAll('.panel').forEach(x => x.classList.remove('active'));
+                    btn.classList.add('active');
+                    document.getElementById(`tab-${btn.dataset.tab}`).classList.add('active');
+                });
+            });
+        }
+
+        async function loadOverview() {
+            const status = await api('/api/system/status');
+            document.getElementById('systemStatus').textContent = `● ${status.system.status}`;
+            document.getElementById('totalValue').textContent = money(status.portfolio.total_value);
+            document.getElementById('unrealizedPnl').textContent = money(status.portfolio.unrealized_pnl);
+            document.getElementById('unrealizedPnl').className = status.portfolio.unrealized_pnl >= 0 ? 'pos' : 'neg';
+            document.getElementById('totalTrades').textContent = status.trading.total_trades_30d;
+            document.getElementById('winRate').textContent = `${status.trading.win_rate}%`;
+            document.getElementById('totalPnl').textContent = money(status.trading.total_pnl);
+            document.getElementById('todaySignals').textContent = status.signals.today_signals;
+            document.getElementById('execRate').textContent = `${status.signals.execution_rate}%`;
+            document.getElementById('riskExposure').textContent = pct(status.risk.current_exposure);
+            document.getElementById('lossStreak').textContent = `${status.risk.consecutive_losses}/${status.risk.max_consecutive_losses}`;
+            document.getElementById('dailyDd').textContent = pct(status.risk.daily_drawdown);
+
+            const positions = await api('/api/positions');
+            document.getElementById('overviewPositions').innerHTML = positions.length ? positions.map(p => `
+                <tr>
+                    <td>${p.symbol}</td>
+                    <td>${badge(p.side, p.side === 'long' ? 'long' : 'short')}</td>
+                    <td>${p.quantity}</td>
+                    <td>${money(p.entry_price)}</td>
+                    <td>${money(p.current_price)}</td>
+                    <td class="${Number(p.unrealized_pnl || 0) >= 0 ? 'pos' : 'neg'}">${money(p.unrealized_pnl)}</td>
+                </tr>
+            `).join('') : '<tr><td colspan="6" class="muted">暂无持仓</td></tr>';
+
+            document.getElementById('overviewList').innerHTML = `
+                <div class="item"><strong>模拟盘模式</strong><div class="muted">当前只做测试策略可靠性，不推进实盘执行。</div></div>
+                <div class="item"><strong>风控状态</strong><div class="muted">当前风险状态：${status.risk.status} ｜ 风险占用 ${pct(status.risk.current_exposure)}</div></div>
+                <div class="item"><strong>信号执行</strong><div class="muted">今日信号 ${status.signals.today_signals} 个，已执行 ${status.signals.executed_today} 个。</div></div>
+                <div class="item"><strong>最近更新时间</strong><div class="muted">${status.system.last_update}</div></div>
+            `;
+        }
+
+        async function loadPositions() {
+            const rows = await api('/api/positions');
+            document.getElementById('positionsTable').innerHTML = rows.length ? rows.map(p => `
+                <tr>
+                    <td>${p.symbol}</td>
+                    <td>${badge(p.side, p.side === 'long' ? 'long' : 'short')}</td>
+                    <td>${p.quantity}</td>
+                    <td>${p.leverage}x</td>
+                    <td>${money(p.entry_price)}</td>
+                    <td>${money(p.current_price)}</td>
+                    <td class="${Number(p.unrealized_pnl || 0) >= 0 ? 'pos' : 'neg'}">${money(p.unrealized_pnl)}</td>
+                    <td>${p.updated_at || '--'}</td>
+                </tr>
+            `).join('') : '<tr><td colspan="8" class="muted">暂无持仓</td></tr>';
+        }
+
+        async function loadTrades() {
+            const rows = await api('/api/trades?limit=50');
+            document.getElementById('tradesTable').innerHTML = rows.length ? rows.map(t => `
+                <tr>
+                    <td>${t.id}</td>
+                    <td>${t.symbol}</td>
+                    <td>${badge(t.side, t.side === 'long' ? 'long' : 'short')}</td>
+                    <td>${badge(t.status, t.status === 'open' ? 'warn' : 'ok')}</td>
+                    <td>${money(t.entry_price)}</td>
+                    <td>${t.exit_price ? money(t.exit_price) : '--'}</td>
+                    <td>${t.quantity}</td>
+                    <td class="${Number(t.pnl || 0) >= 0 ? 'pos' : 'neg'}">${t.pnl == null ? '--' : money(t.pnl)}</td>
+                    <td>${t.open_time || '--'}</td>
+                </tr>
+            `).join('') : '<tr><td colspan="9" class="muted">暂无交易记录</td></tr>';
+        }
+
+        async function loadSignals() {
+            const rows = await api('/api/signals?limit=50');
+            document.getElementById('signalsTable').innerHTML = rows.length ? rows.map(s => `
+                <tr>
+                    <td>${s.created_at}</td>
+                    <td>${s.symbol}</td>
+                    <td>${badge(s.signal_type, s.signal_type === 'buy' ? 'buy' : s.signal_type === 'sell' ? 'sell' : 'hold')}</td>
+                    <td>${s.strength}%</td>
+                    <td>${(s.strategies_triggered || []).join(', ') || '--'}</td>
+                    <td>${filteredTag(s)}</td>
+                    <td>${s.filter_reason || '--'}</td>
+                </tr>
+            `).join('') : '<tr><td colspan="7" class="muted">暂无信号记录</td></tr>';
+        }
+
+        async function loadStrategy() {
+            const stats = await api('/api/strategy/stats');
+            document.getElementById('strategyTable').innerHTML = stats.length ? stats.map(s => `
+                <tr>
+                    <td>${s.strategy_name}</td>
+                    <td>${s.total_signals}</td>
+                    <td>${s.triggered_count}</td>
+                    <td>${Number(s.avg_confidence || 0).toFixed(3)}</td>
+                </tr>
+            `).join('') : '<tr><td colspan="4" class="muted">暂无策略分析</td></tr>';
+
+            const daily = await api('/api/daily/summary');
+            document.getElementById('dailyTable').innerHTML = daily.length ? daily.map(d => `
+                <tr>
+                    <td>${d.date}</td>
+                    <td>${d.trades}</td>
+                    <td>${d.wins}</td>
+                    <td>${d.losses}</td>
+                    <td class="${Number(d.pnl || 0) >= 0 ? 'pos' : 'neg'}">${money(d.pnl)}</td>
+                </tr>
+            `).join('') : '<tr><td colspan="5" class="muted">暂无日汇总</td></tr>';
+        }
+
+        async function loadRisk() {
+            const risk = await api('/api/risk/status');
+            document.getElementById('riskCurrentExposure').textContent = pct(risk.current_exposure);
+            document.getElementById('riskDailyDrawdown').textContent = pct(risk.daily_drawdown);
+            document.getElementById('riskConsecutiveLosses').textContent = `${risk.consecutive_losses}/${risk.max_consecutive_losses}`;
+            document.getElementById('riskTodayTrades').textContent = risk.today_trades;
+            document.getElementById('riskCards').innerHTML = `
+                <div class="item"><strong>余额</strong><div class="muted">总额 ${money(risk.balance.total)} USDT ｜ 可用 ${money(risk.balance.free)} USDT ｜ 已用 ${money(risk.balance.used)} USDT</div></div>
+                <div class="item"><strong>仓位上限</strong><div class="muted">当前 ${pct(risk.current_exposure)} / 最大 ${pct(risk.max_exposure)} ｜ 单次计划开仓 ${pct(risk.position_size)}</div></div>
+                <div class="item"><strong>回撤熔断</strong><div class="muted">当前 ${pct(risk.daily_drawdown)} / 上限 ${pct(risk.max_daily_drawdown)}</div></div>
+                <div class="item"><strong>亏损熔断</strong><div class="muted">当前连续亏损 ${risk.consecutive_losses} 次 / 上限 ${risk.max_consecutive_losses} 次</div></div>
+                <div class="item"><strong>最后交易时间</strong><div class="muted">${risk.last_trade_time || '暂无'}</div></div>
+            `;
+        }
+
+        async function loadConfig() {
+            const cfg = await api('/api/config');
+            document.getElementById('configBlock').textContent = JSON.stringify(cfg, null, 2);
+        }
+
         async function refreshAll() {
             await Promise.all([
-                loadSystemStatus(),
-                loadPositions(),
-                loadTrades(),
-                loadDailySummary(),
-                loadSignalStats()
+                loadOverview(), loadPositions(), loadTrades(), loadSignals(), loadStrategy(), loadRisk(), loadConfig()
             ]);
         }
-        
-        // System Status
-        async function loadSystemStatus() {
-            try {
-                const res = await fetch(`${API_BASE}/api/system/status`);
-                const data = await res.json();
-                
-                if (data.success) {
-                    const d = data.data;
-                    document.getElementById('totalValue').textContent = `$${d.portfolio.total_value.toFixed(2)}`;
-                    
-                    const pnlEl = document.getElementById('unrealizedPnl');
-                    pnlEl.textContent = `$${d.portfolio.unrealized_pnl.toFixed(2)}`;
-                    pnlEl.className = d.portfolio.unrealized_pnl >= 0 ? 'stat-value positive' : 'stat-value negative';
-                    
-                    document.getElementById('totalTrades').textContent = d.trading.total_trades_30d;
-                    document.getElementById('winRate').textContent = `${d.trading.win_rate}%`;
-                    
-                    const pnlEl2 = document.getElementById('totalPnl');
-                    pnlEl2.textContent = `$${d.trading.total_pnl.toFixed(2)}`;
-                    pnlEl2.className = d.trading.total_pnl >= 0 ? 'positive' : 'negative';
-                    
-                    document.getElementById('todaySignals').textContent = d.signals.today_signals;
-                    document.getElementById('execRate').textContent = `${d.signals.execution_rate}%`;
-                    
-                    document.getElementById('positionCount').textContent = d.portfolio.total_positions;
-                }
-            } catch (e) {
-                console.error('Status error:', e);
-            }
-        }
-        
-        // Positions
-        async function loadPositions() {
-            try {
-                const res = await fetch(`${API_BASE}/api/positions`);
-                const data = await res.json();
-                
-                if (data.success && data.data.length > 0) {
-                    const tbody = document.getElementById('positionsTable');
-                    tbody.innerHTML = data.data.map(p => `
-                        <tr>
-                            <td>${p.symbol}</td>
-                            <td><span class="badge badge-${p.side}">${p.side.toUpperCase()}</span></td>
-                            <td>${p.quantity}</td>
-                            <td>$${p.entry_price.toFixed(2)}</td>
-                            <td>$${p.current_price?.toFixed(2) || '--'}</td>
-                            <td class="${p.unrealized_pnl >= 0 ? 'positive' : 'negative'}">
-                                $${p.unrealized_pnl?.toFixed(2) || '0.00'}
-                            </td>
-                        </tr>
-                    `).join('');
-                    
-                    // Symbol list
-                    const symbols = [...new Set(data.data.map(p => p.symbol))];
-                    document.getElementById('symbolList').innerHTML = 
-                        `<div class="symbols">${symbols.map(s => `<span class="symbol-pill">${s}</span>`).join('')}</div>`;
-                } else {
-                    document.getElementById('positionsTable').innerHTML = 
-                        '<tr><td colspan="6" style="text-align: center; color: var(--text2);">暂无持仓</td></tr>';
-                }
-            } catch (e) {
-                console.error('Positions error:', e);
-            }
-        }
-        
-        // Trades
-        async function loadTrades() {
-            try {
-                const res = await fetch(`${API_BASE}/api/trades?limit=10`);
-                const data = await res.json();
-                
-                if (data.success) {
-                    const tbody = document.getElementById('tradesTable');
-                    if (data.data.length > 0) {
-                        tbody.innerHTML = data.data.map(t => `
-                            <tr>
-                                <td>${t.open_time?.slice(0, 16) || '--'}</td>
-                                <td>${t.symbol}</td>
-                                <td><span class="badge badge-${t.side}">${t.side.toUpperCase()}</span></td>
-                                <td>${t.quantity}</td>
-                                <td class="${t.pnl >= 0 ? 'positive' : 'negative'}">
-                                    $${t.pnl?.toFixed(2) || '0.00'}
-                                </td>
-                            </tr>
-                        `).join('');
-                    } else {
-                        tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: var(--text2);">暂无交易记录</td></tr>';
-                    }
-                }
-            } catch (e) {
-                console.error('Trades error:', e);
-            }
-        }
-        
-        // Daily Summary
-        async function loadDailySummary() {
-            try {
-                const res = await fetch(`${API_BASE}/api/daily/summary?days=30`);
-                const data = await res.json();
-                
-                if (data.success && data.data.length > 0) {
-                    const labels = data.data.map(d => d.date.slice(5)).reverse();
-                    const values = data.data.map(d => d.pnl).reverse();
-                    
-                    if (pnlChart) {
-                        pnlChart.destroy();
-                    }
-                    
-                    const ctx = document.getElementById('pnlChart').getContext('2d');
-                    pnlChart = new Chart(ctx, {
-                        type: 'bar',
-                        data: {
-                            labels: labels,
-                            datasets: [{
-                                label: '每日盈亏',
-                                data: values,
-                                backgroundColor: values.map(v => v >= 0 ? '#22c55e' : '#ef4444'),
-                                borderRadius: 4
-                            }]
-                        },
-                        options: {
-                            responsive: true,
-                            maintainAspectRatio: false,
-                            plugins: {
-                                legend: { display: false }
-                            },
-                            scales: {
-                                x: {
-                                    grid: { color: '#334155' },
-                                    ticks: { color: '#94a3b8' }
-                                },
-                                y: {
-                                    grid: { color: '#334155' },
-                                    ticks: { color: '#94a3b8' }
-                                }
-                            }
-                        }
-                    });
-                }
-            } catch (e) {
-                console.error('Summary error:', e);
-            }
-        }
-        
-        // Signal Stats
-        async function loadSignalStats() {
-            try {
-                const res = await fetch(`${API_BASE}/api/signals/stats?days=30`);
-                const data = await res.json();
-                
-                if (data.success) {
-                    const d = data.data;
-                    const stats = document.getElementById('strategyStats');
-                    
-                    let html = `<div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 1rem;">`;
-                    html += `<div><div style="color: var(--text2); font-size: 0.75rem;">总信号</div><div style="font-size: 1.5rem; font-weight: bold;">${d.total_signals}</div></div>`;
-                    html += `<div><div style="color: var(--text2); font-size: 0.75rem;">已执行</div><div style="font-size: 1.5rem; font-weight: bold; color: var(--success);">${d.executed_signals}</div></div>`;
-                    html += `<div><div style="color: var(--text2); font-size: 0.75rem;">已过滤</div><div style="font-size: 1.5rem; font-weight: bold; color: var(--warning);">${d.filtered_signals}</div></div>`;
-                    html += `<div><div style="color: var(--text2); font-size: 0.75rem;">执行率</div><div style="font-size: 1.5rem; font-weight: bold;">${d.execution_rate}%</div></div>`;
-                    html += `</div>`;
-                    
-                    if (d.strategy_counts) {
-                        html += `<div style="margin-top: 1rem;"><div style="color: var(--text2); font-size: 0.75rem; margin-bottom: 0.5rem;">策略触发</div>`;
-                        for (const [name, count] of Object.entries(d.strategy_counts)) {
-                            html += `<span class="strategy-tag">${name}: ${count}</span>`;
-                        }
-                        html += `</div>`;
-                    }
-                    
-                    stats.innerHTML = html;
-                }
-            } catch (e) {
-                console.error('Signal stats error:', e);
-            }
-        }
-        
-        // Auto refresh
+
+        mountTabs();
         refreshAll();
-        setInterval(refreshAll, 30000); // 30秒刷新
+        setInterval(refreshAll, 30000);
     </script>
 </body>
 </html>

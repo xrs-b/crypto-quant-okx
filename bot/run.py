@@ -218,20 +218,49 @@ def main():
     elif args.train:
         # 训练模型
         print("\n🎯 开始训练模型...\n")
-        trainer = ModelTrainer(Config().all)
-        results = trainer.auto_train_all()
-        
+        cfg = Config()
+        exchange = Exchange(cfg.all)
+        collector = DataCollector(exchange, cfg.all)
+        trainer = ModelTrainer(cfg.all)
+        results = {}
+
+        for symbol in cfg.symbols:
+            if not exchange.is_futures_symbol(symbol):
+                print(f"跳过 {symbol}: 暂无U本位永续合约")
+                results[symbol] = False
+                continue
+            print(f"收集并训练 {symbol}...")
+            if collector.collect_data(symbol, '1h', 1000):
+                import pandas as pd
+                csv_name = symbol.replace('/', '_').replace(':', '_')
+                symbol_map = {
+                    'BTC/USDT': 'BTC_USDT',
+                    'ETH/USDT': 'ETH_USDT',
+                    'SOL/USDT': 'SOL_USDT',
+                    'XRP/USDT': 'XRP_USDT',
+                    'HYPE/USDT': 'HYPE_USDT'
+                }
+                filename = symbol_map.get(symbol, csv_name)
+                df = pd.read_csv(f"ml/data/{filename}_1h.csv")
+                results[symbol] = trainer.train(symbol, df)
+            else:
+                results[symbol] = False
+
         print("\n训练结果:")
         for symbol, success in results.items():
             print(f"   {symbol}: {'✅ 成功' if success else '❌ 失败'}")
-    
+
     elif args.collect:
         # 收集数据
         print("\n📊 开始收集数据...\n")
         config = Config()
-        collector = DataCollector(Exchange(config.all), config.all)
-        
+        exchange = Exchange(config.all)
+        collector = DataCollector(exchange, config.all)
+
         for symbol in config.symbols:
+            if not exchange.is_futures_symbol(symbol):
+                print(f"跳过 {symbol}: 暂无U本位永续合约")
+                continue
             print(f"收集 {symbol}...")
             collector.collect_data(symbol, '1h', 1000)
     

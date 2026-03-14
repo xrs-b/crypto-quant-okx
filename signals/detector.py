@@ -33,6 +33,7 @@ class Signal:
     timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
     indicators: Dict = field(default_factory=dict)  # 实时指标值
     direction_score: Dict = field(default_factory=dict)
+    market_context: Dict = field(default_factory=dict)
 
     def to_dict(self) -> Dict:
         return asdict(self)
@@ -56,6 +57,7 @@ class SignalDetector:
             strength=0,
             indicators=indicators
         )
+        signal.market_context = self._analyze_market_context(df, current_price)
 
         triggered_strategies = []
 
@@ -118,6 +120,9 @@ class SignalDetector:
         net_strength = max(0.0, dominant_score - opposing_score * 0.5)
         signal.strength = min(100, int(round(net_strength)))
 
+        # 市场环境修正：逆趋势 / 波动异常会降置信，减少假信号
+        signal.strength = self._adjust_strength_by_market_context(signal, dominant_action, signal.strength)
+
         # 只有有明确方向 + 达门槛，先判为 buy/sell
         if dominant_action != 'hold' and len(triggered_strategies) >= min_strategy_count and signal.strength >= min_strength:
             signal.signal_type = dominant_action
@@ -126,6 +131,7 @@ class SignalDetector:
 
     def _get_current_indicators(self, df: pd.DataFrame) -> Dict:
         indicators = {}
+        close = df[4]
         if 'RSI' in df.columns:
             indicators['RSI'] = round(df['RSI'].iloc[-1], 2)
         if 'MACD' in df.columns:
@@ -137,14 +143,85 @@ class SignalDetector:
             indicators['BB_mid'] = round(df['BB_mid'].iloc[-1], 2)
             indicators['BB_lower'] = round(df['BB_lower'].iloc[-1], 2)
         if len(df) >= 5:
-            indicators['MA5'] = round(df[4].rolling(5).mean().iloc[-1], 2)
+            indicators['MA5'] = round(close.rolling(5).mean().iloc[-1], 2)
         if len(df) >= 20:
-            indicators['MA20'] = round(df[4].rolling(20).mean().iloc[-1], 2)
+            indicators['MA20'] = round(close.rolling(20).mean().iloc[-1], 2)
             indicators['volume'] = int(df[5].iloc[-1])
             indicators['volume_ma20'] = round(df[5].rolling(20).mean().iloc[-1], 0)
+            returns = close.pct_change()
+            indicators['volatility_20'] = round(float(returns.rolling(20).std().iloc[-1] or 0), 5)
+            indicators['atr_ratio'] = round(float(self._calc_atr_ratio(df, 14)), 5)
         if len(df) >= 60:
-            indicators['MA60'] = round(df[4].rolling(60).mean().iloc[-1], 2)
+            indicators['MA60'] = round(close.rolling(60).mean().iloc[-1], 2)
         return indicators
+
+    def _calc_atr_ratio(self, df: pd.DataFrame, period: int = 14) -> float:
+        if len(df) < period + 1:
+            return 0.0
+        high = df[2]
+        low = df[3]
+        close = df[4]
+        prev_close = close.shift(1)
+        tr = pd.concat([
+            (high - low),
+            (high - prev_close).abs(),
+            (low - prev_close).abs(),
+        ], axis=1).max(axis=1)
+        atr = tr.rolling(period).mean().iloc[-1]
+        last_close = float(close.iloc[-1] or 1)
+        return float(atr / last_close) if last_close else 0.0
+
+    def _analyze_market_context(self, df: pd.DataFrame, current_price: float) -> Dict:
+        close = df[4]
+        ma20 = float(close.rolling(20).mean().iloc[-1]) if len(df) >= 20 else current_price
+        ma60 = float(close.rolling(60).mean().iloc[-1]) if len(df) >= 60 else ma20
+        trend_gap = ((ma20 - ma60) / ma60) if ma60 else 0.0
+        volatility = float(close.pct_change().rolling(20).std().iloc[-1] or 0.0) if len(df) >= 20 else 0.0
+        atr_ratio = self._calc_atr_ratio(df, 14)
+
+        if trend_gap > 0.01:
+            trend = 'bullish'
+        elif trend_gap < -0.01:
+            trend = 'bearish'
+        else:
+            trend = 'sideways'
+
+        vol_cfg = self.config.get('market_filters', {})
+        min_volatility = float(vol_cfg.get('min_volatility', 0.003))
+        max_volatility = float(vol_cfg.get('max_volatility', 0.05))
+        too_low = volatility < min_volatility
+        too_high = volatility > max_volatility or atr_ratio > max_volatility
+
+        return {
+            'trend': trend,
+            'trend_gap': round(trend_gap, 5),
+            'volatility': round(volatility, 5),
+            'atr_ratio': round(atr_ratio, 5),
+            'volatility_too_low': too_low,
+            'volatility_too_high': too_high,
+            'market_ok': not too_low and not too_high,
+        }
+
+    def _adjust_strength_by_market_context(self, signal: Signal, dominant_action: str, base_strength: int) -> int:
+        context = signal.market_context or {}
+        adjusted = float(base_strength)
+        trend = context.get('trend', 'sideways')
+        too_low = context.get('volatility_too_low', False)
+        too_high = context.get('volatility_too_high', False)
+
+        if dominant_action == 'buy' and trend == 'bearish':
+            adjusted *= 0.65
+        elif dominant_action == 'sell' and trend == 'bullish':
+            adjusted *= 0.65
+        elif dominant_action in ['buy', 'sell'] and trend != 'sideways':
+            adjusted *= 1.08
+
+        if too_low:
+            adjusted *= 0.7
+        if too_high:
+            adjusted *= 0.78
+
+        return min(100, max(0, int(round(adjusted))))
 
     def _analyze_rsi(self, df: pd.DataFrame, price: float) -> Optional[Dict]:
         config = self.strategies_config.get('rsi', {})

@@ -38,6 +38,12 @@ ml:
   - returns
   min_confidence: 0.6
   model_path: ml/models
+market_filters:
+  block_counter_trend: true
+  block_low_volatility: true
+  block_high_volatility: true
+  min_volatility: 0.003
+  max_volatility: 0.05
 notification:
   discord:
     channel_id: '1468585288770125876'

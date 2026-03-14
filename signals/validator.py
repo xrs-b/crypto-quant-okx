@@ -129,7 +129,51 @@ class SignalValidator:
             'after_open': round(new_symbol_exposure, 4)
         }
 
-        # 4. 最低强度与策略数（详细化）
+        # 4. 市场环境过滤（趋势 / 波动率）
+        market_filters = self.config.get('market_filters', {})
+        context = getattr(signal, 'market_context', {}) or {}
+        trend = context.get('trend', 'sideways')
+
+        if market_filters.get('block_low_volatility', True) and context.get('volatility_too_low'):
+            details['market_volatility_check'] = {
+                'passed': False,
+                'reason': f"波动率过低({context.get('volatility')})",
+                'context': context
+            }
+            return False, '波动率过低', details
+
+        if market_filters.get('block_high_volatility', True) and context.get('volatility_too_high'):
+            details['market_volatility_check'] = {
+                'passed': False,
+                'reason': f"波动率过高({context.get('volatility')})",
+                'context': context
+            }
+            return False, '波动率过高', details
+
+        if market_filters.get('block_counter_trend', True):
+            if signal.signal_type == 'buy' and trend == 'bearish':
+                details['trend_alignment_check'] = {
+                    'passed': False,
+                    'reason': '信号逆大趋势(当前偏空)',
+                    'context': context
+                }
+                return False, '信号逆大趋势', details
+            if signal.signal_type == 'sell' and trend == 'bullish':
+                details['trend_alignment_check'] = {
+                    'passed': False,
+                    'reason': '信号逆大趋势(当前偏多)',
+                    'context': context
+                }
+                return False, '信号逆大趋势', details
+
+        details['market_context_check'] = {
+            'passed': True,
+            'trend': trend,
+            'volatility': context.get('volatility'),
+            'atr_ratio': context.get('atr_ratio')
+        }
+
+        # 5. 最低强度与策略数（详细化）
         min_strategy_count = self.strategies_config.get('composite', {}).get('min_strategy_count', 1)
         min_strength = self.strategies_config.get('composite', {}).get('min_strength', 20)
         if len(signal.strategies_triggered) < min_strategy_count:

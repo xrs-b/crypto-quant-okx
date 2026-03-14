@@ -9,3 +9,5 @@ config/config.yaml
 config/config.local.yaml
 bot.pid
 data/trading.db
+ml/data/
+ml/models/

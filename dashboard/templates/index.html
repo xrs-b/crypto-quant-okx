@@ -201,6 +201,9 @@
                     <div class="section-title">候选晋升建议</div>
                     <table><thead><tr><th>币种</th><th>决定</th><th>原因</th></tr></thead><tbody id="optimizerPromotions"></tbody></table>
                     <div style="height:12px"></div>
+                    <div class="section-title">候选历史 / Preset 历史</div>
+                    <table><thead><tr><th>时间</th><th>对象</th><th>动作</th><th>说明</th></tr></thead><tbody id="optimizerHistory"></tbody></table>
+                    <div style="height:12px"></div>
                     <table><thead><tr><th>预设</th><th>路径</th><th>操作</th></tr></thead><tbody id="optimizerPresets"></tbody></table>
                 </div>
             </div>
@@ -338,7 +341,11 @@
             await refreshAll();
         }
         async function loadOptimizer() {
-            const data = await api('/api/optimizer/results');
+            const [data, candidateHistory, presetHistory] = await Promise.all([
+                api('/api/optimizer/results'),
+                api('/api/candidates/history?limit=10'),
+                api('/api/presets/history?limit=10')
+            ]);
             const best = data.best_experiment || {};
             document.getElementById('optimizerBest').innerHTML = `
                 <div class="item"><strong>${safe(best.name)}</strong><div class="muted">${safe(best.description)}</div></div>
@@ -357,6 +364,11 @@
             document.getElementById('optimizerSymbolSpecific').innerHTML = specHtml;
             const promotions = data.candidate_promotions || [];
             document.getElementById('optimizerPromotions').innerHTML = promotions.length ? promotions.map(p => `<tr><td>${p.symbol}</td><td>${badge(p.decision, p.decision === 'promote' ? 'ok' : p.decision === 'keep_candidate' ? 'warn' : 'bad')}</td><td>${p.reason}</td></tr>`).join('') : '<tr><td colspan="3" class="muted">暂无候选晋升建议</td></tr>';
+            const historyRows = [];
+            (candidateHistory || []).forEach(h => historyRows.push({time: h.created_at, object: h.symbol, action: h.decision, note: h.reason || h.best_variant || '--'}));
+            (presetHistory || []).forEach(h => historyRows.push({time: h.created_at, object: h.preset_name, action: 'preset_apply', note: (h.watch_list || []).join(', ') || '--'}));
+            historyRows.sort((a,b) => String(b.time).localeCompare(String(a.time)));
+            document.getElementById('optimizerHistory').innerHTML = historyRows.length ? historyRows.slice(0,12).map(h => `<tr><td>${h.time}</td><td>${h.object}</td><td>${h.action}</td><td>${h.note}</td></tr>`).join('') : '<tr><td colspan="4" class="muted">暂无历史记录</td></tr>';
             const presets = data.presets || [];
             document.getElementById('optimizerPresets').innerHTML = presets.length ? presets.map(p => `<tr><td>${p.name}</td><td>${p.path}</td><td><button onclick="applyPreset('${p.name}')">应用</button></td></tr>`).join('') : '<tr><td colspan="3" class="muted">暂无预设</td></tr>';
         }

@@ -16,12 +16,15 @@ from core.config import Config
 from core.database import Database
 from trading.executor import RiskManager
 from ml.engine import MLEngine
+from analytics import StrategyBacktester, SignalQualityAnalyzer
 
 # 初始化
 config = Config()
 db = Database(config.db_path)
 risk_manager = RiskManager(config, db)
 ml_engine = MLEngine(config.all)
+backtester = StrategyBacktester(config)
+signal_quality_analyzer = SignalQualityAnalyzer(config, db)
 
 
 # ============================================================================
@@ -308,6 +311,18 @@ def get_risk_events():
 def get_ml_metrics():
     """获取模型评估结果"""
     return jsonify({'success': True, 'data': ml_engine.get_all_model_metrics(config.symbols)})
+
+
+@app.route('/api/backtest/summary')
+def get_backtest_summary():
+    """获取回测结果"""
+    return jsonify({'success': True, 'data': backtester.run_all(config.symbols)})
+
+
+@app.route('/api/signal-quality')
+def get_signal_quality():
+    """获取信号质量分析"""
+    return jsonify({'success': True, 'data': signal_quality_analyzer.analyze()})
 
 
 @app.route('/api/config')

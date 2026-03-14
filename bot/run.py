@@ -21,6 +21,7 @@ from core.logger import logger
 from signals import SignalDetector, SignalValidator, SignalRecorder
 from trading import TradingExecutor, RiskManager
 from ml.engine import MLEngine, ModelTrainer, DataCollector
+from analytics import StrategyBacktester, SignalQualityAnalyzer
 
 
 class TradingBot:
@@ -206,6 +207,8 @@ def main():
     parser.add_argument('--dashboard', action='store_true', help='启动仪表盘')
     parser.add_argument('--train', action='store_true', help='训练模型')
     parser.add_argument('--collect', action='store_true', help='收集数据')
+    parser.add_argument('--backtest', action='store_true', help='运行回测')
+    parser.add_argument('--signal-quality', action='store_true', help='分析信号质量')
     parser.add_argument('--port', type=int, default=8050, help='仪表盘端口')
     
     args = parser.parse_args()
@@ -263,7 +266,30 @@ def main():
                 continue
             print(f"收集 {symbol}...")
             collector.collect_data(symbol, '1h', 1000)
-    
+
+    elif args.backtest:
+        print("\n🧪 开始回测...\n")
+        cfg = Config()
+        backtester = StrategyBacktester(cfg)
+        result = backtester.run_all()
+        print("回测总览:")
+        print(result['summary'])
+        print("\n分币种结果:")
+        for row in result['symbols']:
+            print(f"  {row['symbol']}: trades={row['trades']} win_rate={row['win_rate']}% return={row['total_return_pct']}% dd={row['max_drawdown_pct']}%")
+
+    elif args.signal_quality:
+        print("\n🔎 开始分析信号质量...\n")
+        cfg = Config()
+        db = Database(cfg.db_path)
+        analyzer = SignalQualityAnalyzer(cfg, db)
+        result = analyzer.analyze()
+        print("信号质量总览:")
+        print(result['summary'])
+        print("\n分币种质量:")
+        for row in result['by_symbol']:
+            print(f"  {row['symbol']}: signals={row['signals']} positive_rate={row['positive_rate']}% avg_quality={row['avg_quality_pct']}%")
+
     else:
         # 运行交易
         bot = TradingBot()

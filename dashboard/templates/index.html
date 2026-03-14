@@ -86,6 +86,8 @@
             <button class="tab-btn" data-tab="trades">交易记录</button>
             <button class="tab-btn" data-tab="signals">信号记录</button>
             <button class="tab-btn" data-tab="strategy">策略分析</button>
+            <button class="tab-btn" data-tab="backtest">回测分析</button>
+            <button class="tab-btn" data-tab="quality">信号质量</button>
             <button class="tab-btn" data-tab="risk">风控状态</button>
             <button class="tab-btn" data-tab="config">系统配置</button>
         </div>
@@ -142,6 +144,34 @@
             <div class="card mini">
                 <div class="section-title">ML 模型评估</div>
                 <table><thead><tr><th>币种</th><th>训练准确率</th><th>测试准确率</th><th>F1</th><th>Top Features</th></tr></thead><tbody id="mlMetricsTable"></tbody></table>
+            </div>
+        </div>
+
+        <div class="card panel" id="tab-backtest">
+            <div class="panel-grid">
+                <div class="card mini">
+                    <div class="section-title">回测总览</div>
+                    <div class="list" id="backtestSummaryCards"></div>
+                </div>
+                <div class="card mini">
+                    <div class="section-title">分币种回测</div>
+                    <table><thead><tr><th>币种</th><th>交易数</th><th>胜率</th><th>总收益</th><th>最大回撤</th></tr></thead><tbody id="backtestTable"></tbody></table>
+                </div>
+            </div>
+        </div>
+
+        <div class="card panel" id="tab-quality">
+            <div class="panel-grid">
+                <div class="card mini">
+                    <div class="section-title">信号质量总览</div>
+                    <div class="list" id="qualitySummaryCards"></div>
+                    <div style="height:12px"></div>
+                    <table><thead><tr><th>币种</th><th>信号数</th><th>正向率</th><th>平均质量</th></tr></thead><tbody id="qualityBySymbolTable"></tbody></table>
+                </div>
+                <div class="card mini">
+                    <div class="section-title">最近信号质量</div>
+                    <table><thead><tr><th>时间</th><th>币种</th><th>方向</th><th>1h</th><th>3h</th><th>6h</th><th>平均</th></tr></thead><tbody id="qualityRecentTable"></tbody></table>
+                </div>
             </div>
         </div>
 
@@ -237,6 +267,29 @@
             document.getElementById('symbolPerfTable').innerHTML = perf.length ? perf.map(p => `<tr><td>${p.symbol}</td><td>${p.trades}</td><td>${p.win_rate}%</td><td class="${Number(p.total_pnl || 0) >= 0 ? 'pos' : 'neg'}">${money(p.total_pnl)}</td></tr>`).join('') : '<tr><td colspan="4" class="muted">暂无币种表现</td></tr>';
             document.getElementById('mlMetricsTable').innerHTML = ml.length ? ml.map(m => `<tr><td>${m.symbol}</td><td>${(m.train_accuracy*100).toFixed(2)}%</td><td>${(m.test_accuracy*100).toFixed(2)}%</td><td>${(m.f1*100).toFixed(2)}%</td><td>${(m.top_features || []).slice(0,3).map(x => `${x.feature}:${x.importance}`).join(' | ')}</td></tr>`).join('') : '<tr><td colspan="5" class="muted">暂无模型评估</td></tr>';
         }
+        async function loadBacktest() {
+            const data = await api('/api/backtest/summary');
+            const s = data.summary || {};
+            document.getElementById('backtestSummaryCards').innerHTML = `
+                <div class="item"><strong>覆盖币种</strong><div class="muted">${safe(s.symbols)} 个</div></div>
+                <div class="item"><strong>总交易数</strong><div class="muted">${safe(s.total_trades)}</div></div>
+                <div class="item"><strong>总胜率</strong><div class="muted">${safe(s.win_rate)}%</div></div>
+                <div class="item"><strong>总收益 / 最大回撤</strong><div class="muted">${safe(s.total_return_pct)}% / ${safe(s.max_drawdown_pct)}%</div></div>`;
+            const rows = data.symbols || [];
+            document.getElementById('backtestTable').innerHTML = rows.length ? rows.map(r => `<tr><td>${r.symbol}</td><td>${r.trades}</td><td>${r.win_rate}%</td><td class="${Number(r.total_return_pct || 0) >= 0 ? 'pos' : 'neg'}">${r.total_return_pct}%</td><td class="${Number(r.max_drawdown_pct || 0) >= 0 ? 'pos' : 'neg'}">${r.max_drawdown_pct}%</td></tr>`).join('') : '<tr><td colspan="5" class="muted">暂无回测结果</td></tr>';
+        }
+        async function loadQuality() {
+            const data = await api('/api/signal-quality');
+            const s = data.summary || {};
+            document.getElementById('qualitySummaryCards').innerHTML = `
+                <div class="item"><strong>已评分信号</strong><div class="muted">${safe(s.signals_scored)} 条</div></div>
+                <div class="item"><strong>正向率</strong><div class="muted">${safe(s.positive_rate)}%</div></div>
+                <div class="item"><strong>平均质量</strong><div class="muted">${safe(s.avg_quality_pct)}%</div></div>`;
+            const bySymbol = data.by_symbol || [];
+            document.getElementById('qualityBySymbolTable').innerHTML = bySymbol.length ? bySymbol.map(r => `<tr><td>${r.symbol}</td><td>${r.signals}</td><td>${r.positive_rate}%</td><td class="${Number(r.avg_quality_pct || 0) >= 0 ? 'pos' : 'neg'}">${r.avg_quality_pct}%</td></tr>`).join('') : '<tr><td colspan="4" class="muted">暂无质量统计</td></tr>';
+            const recent = data.recent || [];
+            document.getElementById('qualityRecentTable').innerHTML = recent.length ? recent.map(r => `<tr><td>${r.created_at}</td><td>${r.symbol}</td><td>${badge(r.signal_type, r.signal_type === 'buy' ? 'buy' : 'sell')}</td><td>${safe(r.return_1h_pct)}%</td><td>${safe(r.return_3h_pct)}%</td><td>${safe(r.return_6h_pct)}%</td><td class="${Number(r.avg_quality_pct || 0) >= 0 ? 'pos' : 'neg'}">${safe(r.avg_quality_pct)}%</td></tr>`).join('') : '<tr><td colspan="7" class="muted">暂无最近质量样本</td></tr>';
+        }
         async function loadRisk() {
             const [risk, events] = await Promise.all([api('/api/risk/status'), api('/api/risk/events')]);
             document.getElementById('riskCurrentExposure').textContent = pct(risk.current_exposure);
@@ -256,7 +309,7 @@
             document.getElementById('configBlock').textContent = JSON.stringify(cfg, null, 2);
         }
         async function refreshAll() {
-            await Promise.all([loadOverview(), loadPositions(), loadTrades(), loadSignals(), loadStrategy(), loadRisk(), loadConfig()]);
+            await Promise.all([loadOverview(), loadPositions(), loadTrades(), loadSignals(), loadStrategy(), loadBacktest(), loadQuality(), loadRisk(), loadConfig()]);
         }
         mountTabs(); refreshAll(); setInterval(refreshAll, 30000);
     </script>

@@ -32,12 +32,24 @@ ml:
   - RSI
   - MACD
   - MACD_signal
+  - MACD_hist
   - BB_upper
   - BB_lower
-  - volume
+  - BB_position
+  - MA5_ratio
+  - trend_gap
+  - volume_ratio
   - returns
+  - returns_3d
+  - returns_5d
+  - volatility
+  - momentum
+  - atr_ratio
   min_confidence: 0.6
   model_path: ml/models
+  training:
+    label_horizon: 3           # 预测未来3根K线方向
+    min_return_threshold: 0.002 # 小于此涨跌幅视为噪音样本
 market_filters:
   block_counter_trend: true
   block_low_volatility: true

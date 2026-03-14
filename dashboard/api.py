@@ -15,11 +15,13 @@ CORS(app)
 from core.config import Config
 from core.database import Database
 from trading.executor import RiskManager
+from ml.engine import MLEngine
 
 # 初始化
 config = Config()
 db = Database(config.db_path)
 risk_manager = RiskManager(config, db)
+ml_engine = MLEngine(config.all)
 
 
 # ============================================================================
@@ -75,6 +77,29 @@ def get_trade_stats():
     })
 
 
+@app.route('/api/trades/symbol-performance')
+def get_symbol_performance():
+    """获取按币种聚合的表现"""
+    trades = db.get_trades(limit=1000)
+    perf = {}
+    for t in trades:
+        symbol = t.get('symbol')
+        if symbol not in perf:
+            perf[symbol] = {'symbol': symbol, 'trades': 0, 'wins': 0, 'total_pnl': 0.0}
+        perf[symbol]['trades'] += 1
+        pnl = float(t.get('pnl', 0) or 0)
+        perf[symbol]['total_pnl'] += pnl
+        if pnl > 0:
+            perf[symbol]['wins'] += 1
+    data = []
+    for row in perf.values():
+        row['win_rate'] = round(row['wins'] / row['trades'] * 100, 2) if row['trades'] > 0 else 0
+        row['total_pnl'] = round(row['total_pnl'], 2)
+        data.append(row)
+    data.sort(key=lambda x: x['total_pnl'], reverse=True)
+    return jsonify({'success': True, 'data': data})
+
+
 # ============================================================================
 # 信号数据API
 # ============================================================================
@@ -92,6 +117,22 @@ def get_signals():
         'data': signals,
         'count': len(signals)
     })
+
+
+@app.route('/api/signals/filter-reasons')
+def get_signal_filter_reasons():
+    """获取过滤原因排行"""
+    limit = int(request.args.get('limit', 10))
+    signals = db.get_signals(limit=1000)
+    counts = {}
+    for s in signals:
+        if s.get('filtered') and s.get('filter_reason'):
+            reason = s.get('filter_reason')
+            counts[reason] = counts.get(reason, 0) + 1
+    data = sorted([
+        {'reason': k, 'count': v} for k, v in counts.items()
+    ], key=lambda x: x['count'], reverse=True)[:limit]
+    return jsonify({'success': True, 'data': data})
 
 
 @app.route('/api/signals/stats')
@@ -242,6 +283,31 @@ def get_risk_status():
         'success': True,
         'data': risk_manager.get_risk_status()
     })
+
+
+@app.route('/api/risk/events')
+def get_risk_events():
+    """获取最近风控/过滤事件"""
+    signals = db.get_signals(limit=100)
+    events = []
+    keywords = ['风险', '回撤', '亏损', '冷却', '波动率', '逆大趋势', '持仓', '余额']
+    for s in signals:
+        reason = s.get('filter_reason') or ''
+        if s.get('filtered') and any(k in reason for k in keywords):
+            events.append({
+                'time': s.get('created_at'),
+                'symbol': s.get('symbol'),
+                'reason': reason,
+                'signal_type': s.get('signal_type'),
+                'strength': s.get('strength')
+            })
+    return jsonify({'success': True, 'data': events[:20]})
+
+
+@app.route('/api/ml/metrics')
+def get_ml_metrics():
+    """获取模型评估结果"""
+    return jsonify({'success': True, 'data': ml_engine.get_all_model_metrics(config.symbols)})
 
 
 @app.route('/api/config')

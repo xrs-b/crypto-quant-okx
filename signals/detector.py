@@ -78,6 +78,7 @@ class SignalDetector:
                 continue
             result = fn()
             if result:
+                result = self._apply_regime_weighting(result, signal.market_context)
                 signal.reasons.append(result)
                 triggered_strategies.append(strategy_name)
 
@@ -201,6 +202,31 @@ class SignalDetector:
             'volatility_too_high': too_high,
             'market_ok': not too_low and not too_high,
         }
+
+    def _apply_regime_weighting(self, reason: Dict, context: Dict) -> Dict:
+        reason = dict(reason)
+        trend = context.get('trend', 'sideways')
+        strategy = reason.get('strategy')
+
+        trend_following = {'MACD', 'MA_Cross', 'Volume', 'ML'}
+        mean_reversion = {'RSI', 'Bollinger', 'Pattern'}
+
+        multiplier = 1.0
+        if trend in ['bullish', 'bearish']:
+            if strategy in trend_following:
+                multiplier *= 1.15
+            if strategy in mean_reversion:
+                multiplier *= 0.88
+        elif trend == 'sideways':
+            if strategy in mean_reversion:
+                multiplier *= 1.12
+            if strategy in trend_following:
+                multiplier *= 0.9
+
+        reason['strength'] = float(reason.get('strength', 0)) * multiplier
+        reason.setdefault('metadata', {})['regime_multiplier'] = round(multiplier, 3)
+        reason['metadata']['market_trend'] = trend
+        return reason
 
     def _adjust_strength_by_market_context(self, signal: Signal, dominant_action: str, base_strength: int) -> int:
         context = signal.market_context or {}

@@ -197,6 +197,8 @@
                     <div class="section-title">专项实验与预设</div>
                     <div class="list" id="optimizerSymbolSpecific"></div>
                     <div style="height:12px"></div>
+                    <div class="section-title">BTC 微调网格 Top</div>
+                    <table><thead><tr><th>参数</th><th>评分</th><th>收益</th><th>回撤</th></tr></thead><tbody id="optimizerBtcGrid"></tbody></table>
                     <div style="height:12px"></div>
                     <div class="section-title">候选晋升建议</div>
                     <table><thead><tr><th>币种</th><th>决定</th><th>原因</th></tr></thead><tbody id="optimizerPromotions"></tbody></table>
@@ -330,14 +332,15 @@
             const r = await fetch('/api/presets/apply', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({name})
+                body: JSON.stringify({name, auto_restart: true})
             });
             const j = await r.json();
             if (!j.success) {
                 alert('应用 preset 失败: ' + (j.error || 'unknown'));
                 return;
             }
-            alert(`已应用 preset: ${name}\n建议你稍后留意 bot 下一轮运行日志。`);
+            const msg = j.data?.message || `已应用 preset: ${name}`;
+            alert(msg + `\n主池: ${(j.data?.watch_list || []).join(', ') || '--'}`);
             await refreshAll();
         }
         async function loadOptimizer() {
@@ -362,6 +365,8 @@
             const specs = data.symbol_specific || {};
             const specHtml = Object.keys(specs).length ? Object.entries(specs).map(([symbol, rows]) => `<div class="item"><strong>${symbol}</strong><div class="muted">${rows.map(r => `${r.description}: ${r.summary?.total_return_pct}% / win ${r.summary?.win_rate}% / dd ${r.summary?.max_drawdown_pct}%`).join('<br>')}</div></div>`).join('') : '<div class="item muted">暂无专项实验</div>';
             document.getElementById('optimizerSymbolSpecific').innerHTML = specHtml;
+            const btcGrid = data.btc_grid || [];
+            document.getElementById('optimizerBtcGrid').innerHTML = btcGrid.length ? btcGrid.map(r => `<tr><td>ms=${r.params?.min_strength}, rsi=${r.params?.rsi_strength_weight}, ts=${r.params?.trailing_stop}</td><td>${r.score}</td><td class="${Number(r.summary?.total_return_pct || 0) >= 0 ? 'pos' : 'neg'}">${safe(r.summary?.total_return_pct)}%</td><td class="${Number(r.summary?.max_drawdown_pct || 0) >= 0 ? 'pos' : 'neg'}">${safe(r.summary?.max_drawdown_pct)}%</td></tr>`).join('') : '<tr><td colspan="4" class="muted">暂无 BTC 网格</td></tr>';
             const promotions = data.candidate_promotions || [];
             document.getElementById('optimizerPromotions').innerHTML = promotions.length ? promotions.map(p => `<tr><td>${p.symbol}</td><td>${badge(p.decision, p.decision === 'promote' ? 'ok' : p.decision === 'keep_candidate' ? 'warn' : 'bad')}</td><td>${p.reason}</td></tr>`).join('') : '<tr><td colspan="3" class="muted">暂无候选晋升建议</td></tr>';
             const historyRows = [];

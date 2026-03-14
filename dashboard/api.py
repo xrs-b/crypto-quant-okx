@@ -372,9 +372,10 @@ def apply_preset():
     """应用预设"""
     payload = request.get_json(silent=True) or {}
     name = payload.get('name') or request.args.get('name')
+    auto_restart = bool(payload.get('auto_restart', True))
     if not name:
         return jsonify({'success': False, 'error': 'missing preset name'}), 400
-    result = preset_manager.apply_preset(name)
+    result = preset_manager.apply_preset(name, auto_restart=auto_restart)
     # refresh globals using updated config
     config.reload()
     global risk_manager, ml_engine, backtester, signal_quality_analyzer, optimizer

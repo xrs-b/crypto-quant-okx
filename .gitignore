@@ -11,3 +11,4 @@ bot.pid
 data/trading.db
 ml/data/
 ml/models/
+config/backups/

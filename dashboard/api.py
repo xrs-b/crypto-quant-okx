@@ -14,6 +14,7 @@ CORS(app)
 
 from core.config import Config
 from core.database import Database
+from core.presets import PresetManager
 from trading.executor import RiskManager
 from ml.engine import MLEngine
 from analytics import StrategyBacktester, SignalQualityAnalyzer, ParameterOptimizer
@@ -26,6 +27,7 @@ ml_engine = MLEngine(config.all)
 backtester = StrategyBacktester(config)
 signal_quality_analyzer = SignalQualityAnalyzer(config, db)
 optimizer = ParameterOptimizer(config, db)
+preset_manager = PresetManager(config)
 
 
 # ============================================================================
@@ -330,6 +332,43 @@ def get_signal_quality():
 def get_optimizer_results():
     """获取参数优化与币种分层结果"""
     return jsonify({'success': True, 'data': optimizer.run()})
+
+
+@app.route('/api/mode/status')
+def get_mode_status():
+    """获取当前 preset / 模式状态"""
+    return jsonify({'success': True, 'data': preset_manager.status()})
+
+
+@app.route('/api/candidates/promotion')
+def get_candidate_promotion():
+    """获取候选晋升建议"""
+    return jsonify({'success': True, 'data': optimizer.run().get('candidate_promotions', [])})
+
+
+@app.route('/api/presets')
+def get_presets():
+    """列出可用预设"""
+    return jsonify({'success': True, 'data': preset_manager.list_presets()})
+
+
+@app.route('/api/presets/apply', methods=['POST'])
+def apply_preset():
+    """应用预设"""
+    payload = request.get_json(silent=True) or {}
+    name = payload.get('name') or request.args.get('name')
+    if not name:
+        return jsonify({'success': False, 'error': 'missing preset name'}), 400
+    result = preset_manager.apply_preset(name)
+    # refresh globals using updated config
+    config.reload()
+    global risk_manager, ml_engine, backtester, signal_quality_analyzer, optimizer
+    risk_manager = RiskManager(config, db)
+    ml_engine = MLEngine(config.all)
+    backtester = StrategyBacktester(config)
+    signal_quality_analyzer = SignalQualityAnalyzer(config, db)
+    optimizer = ParameterOptimizer(config, db)
+    return jsonify({'success': True, 'data': result})
 
 
 @app.route('/api/config')

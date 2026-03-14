@@ -48,6 +48,7 @@ class ParameterOptimizer:
         strategy_advice = self._build_strategy_advice(best)
         focused_sets = self._run_focused_symbol_sets(best)
         symbol_specific = self._run_symbol_specific_experiments(best)
+        promotions = self._evaluate_candidate_promotions(symbol_specific, symbol_advice, focused_sets)
         presets = self._write_presets(best, symbol_specific)
 
         result = {
@@ -57,6 +58,7 @@ class ParameterOptimizer:
             'strategy_advice': strategy_advice,
             'focused_sets': focused_sets,
             'symbol_specific': symbol_specific,
+            'candidate_promotions': promotions,
             'presets': presets,
         }
         self._cache = result
@@ -246,9 +248,7 @@ class ParameterOptimizer:
             'safe-mode.yaml': self._build_preset_config(best_experiment, ['BTC/USDT'], [], ['XRP/USDT', 'ETH/USDT', 'SOL/USDT', 'HYPE/USDT'], extra_patch={'trading': {'position_size': 0.08}, 'strategies': {'composite': {'min_strength': 30, 'min_strategy_count': 2}}}),
         }
 
-        # 如果有专项实验最优 patch，则叠加进对应 preset
-        if symbol_specific.get('BTC/USDT'):
-            presets['btc-focused.yaml'] = self._deep_merge(presets['btc-focused.yaml'], symbol_specific['BTC/USDT'][0]['patch'])
+        # BTC focused 保持当前最佳主运行配置，不叠加更差专项 patch
         if symbol_specific.get('XRP/USDT'):
             presets['xrp-candidate.yaml'] = self._deep_merge(presets['xrp-candidate.yaml'], symbol_specific['XRP/USDT'][0]['patch'])
 
@@ -274,6 +274,43 @@ class ParameterOptimizer:
             base['api']['secret'] = 'your_api_secret'
             base['api']['passphrase'] = 'your_passphrase'
         return base
+
+    def _evaluate_candidate_promotions(self, symbol_specific: Dict, symbol_advice: List[Dict], focused_sets: List[Dict]) -> List[Dict]:
+        current_watch = set(self.config.symbols)
+        advice_map = {row['symbol']: row for row in symbol_advice}
+        focused_map = {row['name']: row for row in focused_sets}
+        results = []
+        for symbol, rows in symbol_specific.items():
+            if symbol in current_watch:
+                continue
+            best_row = rows[0] if rows else None
+            advice = advice_map.get(symbol, {})
+            focused_score = None
+            if symbol == 'XRP/USDT' and focused_map.get('xrp_only'):
+                focused_score = focused_map['xrp_only']['score']
+            decision = 'reject'
+            reason = '当前专项结果不足以升级'
+            if best_row:
+                ret = float(best_row['summary'].get('total_return_pct', -999) or -999)
+                dd = abs(float(best_row['summary'].get('max_drawdown_pct', 0) or 0))
+                win = float(best_row['summary'].get('win_rate', 0) or 0)
+                quality = float(advice.get('avg_quality_pct', -999) or -999)
+                if ret > -2.5 and win >= 45 and dd <= 6 and quality >= -0.03:
+                    decision = 'promote'
+                    reason = '回测与质量均接近可接受，可升入主池试跑'
+                elif ret > -5 and win >= 40 and quality >= -0.05:
+                    decision = 'keep_candidate'
+                    reason = '已有潜力，但仍需继续观察'
+            results.append({
+                'symbol': symbol,
+                'best_variant': best_row['name'] if best_row else None,
+                'decision': decision,
+                'reason': reason,
+                'score': best_row['score'] if best_row else None,
+                'focused_score': focused_score,
+                'summary': best_row['summary'] if best_row else None,
+            })
+        return results
 
     def _build_strategy_advice(self, best_experiment: Optional[Dict]) -> List[Dict]:
         name = best_experiment['name'] if best_experiment else 'baseline'

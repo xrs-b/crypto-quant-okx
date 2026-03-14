@@ -18,6 +18,7 @@ from core.config import Config
 from core.database import Database
 from core.exchange import Exchange
 from core.logger import logger
+from core.presets import PresetManager
 from signals import SignalDetector, SignalValidator, SignalRecorder
 from trading import TradingExecutor, RiskManager
 from ml.engine import MLEngine, ModelTrainer, DataCollector
@@ -210,6 +211,9 @@ def main():
     parser.add_argument('--backtest', action='store_true', help='运行回测')
     parser.add_argument('--signal-quality', action='store_true', help='分析信号质量')
     parser.add_argument('--optimize', action='store_true', help='运行参数优化与币种分层')
+    parser.add_argument('--list-presets', action='store_true', help='列出可用预设')
+    parser.add_argument('--apply-preset', type=str, help='应用预设配置')
+    parser.add_argument('--mode-status', action='store_true', help='显示当前模式状态')
     parser.add_argument('--port', type=int, default=8050, help='仪表盘端口')
     
     args = parser.parse_args()
@@ -307,9 +311,29 @@ def main():
             print(f"  [{symbol}]")
             for row in rows:
                 print(f"    {row['name']}: score={row['score']} return={row['summary']['total_return_pct']}% win={row['summary']['win_rate']}% dd={row['summary']['max_drawdown_pct']}%")
+        print("\n候选晋升判断:")
+        for row in result.get('candidate_promotions', []):
+            print(f"  {row['symbol']}: {row['decision']} | {row['reason']}")
         print("\n预设配置:")
         for preset in result.get('presets', []):
             print(f"  {preset['name']}: {preset['path']}")
+
+    elif args.list_presets:
+        pm = PresetManager(Config())
+        print("\n📦 可用预设:\n")
+        for row in pm.list_presets():
+            print(f"  {row['name']}: watch={row['watch_list']} candidate={row['candidate_watch_list']} paused={row['paused_watch_list']}")
+
+    elif args.apply_preset:
+        pm = PresetManager(Config())
+        result = pm.apply_preset(args.apply_preset)
+        print("\n✅ 已应用预设:\n")
+        print(result)
+
+    elif args.mode_status:
+        pm = PresetManager(Config())
+        print("\n🧭 当前模式:\n")
+        print(pm.status())
 
     else:
         # 运行交易

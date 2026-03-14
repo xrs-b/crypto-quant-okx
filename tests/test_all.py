@@ -32,9 +32,12 @@ class TestConfig(unittest.TestCase):
     def test_symbols_list(self):
         """测试币种列表"""
         symbols = self.config.symbols
+        all_symbols = set(symbols)
+        all_symbols.update(self.config.get('symbols.candidate_watch_list', []))
+        all_symbols.update(self.config.get('symbols.paused_watch_list', []))
         self.assertIn('BTC/USDT', symbols)
-        self.assertIn('ETH/USDT', symbols)
-        self.assertEqual(len(symbols), 5)
+        self.assertGreaterEqual(len(symbols), 1)
+        self.assertTrue({'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'HYPE/USDT'}.issubset(all_symbols))
     
     def test_trading_params(self):
         """测试交易参数"""

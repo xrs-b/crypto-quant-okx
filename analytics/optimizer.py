@@ -43,12 +43,14 @@ class ParameterOptimizer:
         best = rows[0] if rows else None
         symbol_advice = self._build_symbol_advice(best)
         strategy_advice = self._build_strategy_advice(best)
+        focused_sets = self._run_focused_symbol_sets(best)
 
         result = {
             'best_experiment': best,
             'experiments': rows,
             'symbol_advice': symbol_advice,
             'strategy_advice': strategy_advice,
+            'focused_sets': focused_sets,
         }
         self._cache = result
         self._cache_at = now
@@ -152,12 +154,37 @@ class ParameterOptimizer:
         advice.sort(key=lambda x: (tier_rank.get(x['tier'], 9), -(x.get('backtest_return_pct') or -999)))
         return advice
 
+    def _run_focused_symbol_sets(self, best_experiment: Optional[Dict]) -> List[Dict]:
+        patch = best_experiment['patch'] if best_experiment else {}
+        sets = [
+            {'name': 'btc_only', 'symbols': ['BTC/USDT'], 'description': '只跑 BTC'},
+            {'name': 'xrp_only', 'symbols': ['XRP/USDT'], 'description': '只跑 XRP'},
+            {'name': 'btc_xrp', 'symbols': ['BTC/USDT', 'XRP/USDT'], 'description': '跑 BTC + XRP'},
+        ]
+        rows = []
+        for item in sets:
+            cfg = Config(self.config.config_path)
+            merged = self._deep_merge(deepcopy(self.config.all), patch)
+            merged.setdefault('symbols', {})['watch_list'] = item['symbols']
+            cfg._config = merged
+            summary = StrategyBacktester(cfg).run_all(item['symbols'], use_cache=False)['summary']
+            rows.append({
+                'name': item['name'],
+                'description': item['description'],
+                'symbols': item['symbols'],
+                'summary': summary,
+                'score': round(self._score(summary), 4),
+            })
+        rows.sort(key=lambda x: x['score'], reverse=True)
+        return rows
+
     def _build_strategy_advice(self, best_experiment: Optional[Dict]) -> List[Dict]:
         name = best_experiment['name'] if best_experiment else 'baseline'
         if name == 'strict_quality':
             return [
                 {'topic': 'min_strength', 'advice': '建议提高到 28，减少噪音信号'},
                 {'topic': 'min_strategy_count', 'advice': '建议提高到 2，避免单一策略误触发'},
+                {'topic': 'symbol_focus', 'advice': '建议先收缩到 BTC 主池，XRP 保留候选观察'},
             ]
         if name == 'tighter_risk':
             return [

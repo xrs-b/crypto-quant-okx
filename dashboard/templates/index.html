@@ -190,6 +190,9 @@
                     <div style="height:12px"></div>
                     <div class="section-title">策略建议</div>
                     <div class="list" id="optimizerStrategyAdvice"></div>
+                    <div style="height:12px"></div>
+                    <div class="section-title">聚焦币池实验</div>
+                    <table><thead><tr><th>组合</th><th>评分</th><th>收益</th><th>胜率</th><th>回撤</th></tr></thead><tbody id="optimizerFocusedSets"></tbody></table>
                 </div>
             </div>
         </div>
@@ -322,6 +325,8 @@
             document.getElementById('optimizerSymbols').innerHTML = syms.length ? syms.map(r => `<tr><td>${r.symbol}</td><td>${badge(r.tier, r.tier === 'keep' ? 'ok' : r.tier === 'watch' ? 'warn' : 'bad')}</td><td class="${Number(r.backtest_return_pct || 0) >= 0 ? 'pos' : 'neg'}">${safe(r.backtest_return_pct)}%</td><td class="${Number(r.avg_quality_pct || 0) >= 0 ? 'pos' : 'neg'}">${safe(r.avg_quality_pct)}%</td><td>${r.action}</td></tr>`).join('') : '<tr><td colspan="5" class="muted">暂无建议</td></tr>';
             const adv = data.strategy_advice || [];
             document.getElementById('optimizerStrategyAdvice').innerHTML = adv.length ? adv.map(a => `<div class="item"><strong>${a.topic}</strong><div class="muted">${a.advice}</div></div>`).join('') : '<div class="item muted">暂无策略建议</div>';
+            const sets = data.focused_sets || [];
+            document.getElementById('optimizerFocusedSets').innerHTML = sets.length ? sets.map(s => `<tr><td>${s.description}</td><td>${s.score}</td><td class="${Number(s.summary?.total_return_pct || 0) >= 0 ? 'pos' : 'neg'}">${safe(s.summary?.total_return_pct)}%</td><td>${safe(s.summary?.win_rate)}%</td><td class="${Number(s.summary?.max_drawdown_pct || 0) >= 0 ? 'pos' : 'neg'}">${safe(s.summary?.max_drawdown_pct)}%</td></tr>`).join('') : '<tr><td colspan="5" class="muted">暂无聚焦实验</td></tr>';
         }
         async function loadRisk() {
             const [risk, events] = await Promise.all([api('/api/risk/status'), api('/api/risk/events')]);

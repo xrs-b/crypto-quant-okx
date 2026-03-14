@@ -125,11 +125,14 @@ strategies:
     volume_multiplier: 1.5
 symbols:
   quote_currency: USDT
+  selection_mode: focused       # focused=主跑精选币种 / broad=全量观察
   watch_list:
-  - BTC/USDT
+  - BTC/USDT                    # 当前主运行池（建议先专注 BTC）
+  candidate_watch_list:
+  - XRP/USDT                    # 候选观察池（后续可单独验证后再放入主池）
+  paused_watch_list:
   - ETH/USDT
   - SOL/USDT
-  - XRP/USDT
   - HYPE/USDT
 trading:
   cooldown_minutes: 15

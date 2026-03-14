@@ -48,6 +48,7 @@ class ParameterOptimizer:
         strategy_advice = self._build_strategy_advice(best)
         focused_sets = self._run_focused_symbol_sets(best)
         symbol_specific = self._run_symbol_specific_experiments(best)
+        btc_grid = self._run_btc_grid_search(best)
         promotions = self._evaluate_candidate_promotions(symbol_specific, symbol_advice, focused_sets)
         presets = self._write_presets(best, symbol_specific)
 
@@ -60,6 +61,7 @@ class ParameterOptimizer:
             'strategy_advice': strategy_advice,
             'focused_sets': focused_sets,
             'symbol_specific': symbol_specific,
+            'btc_grid': btc_grid,
             'candidate_promotions': promotions,
             'presets': presets,
         }
@@ -238,6 +240,29 @@ class ParameterOptimizer:
             rows.sort(key=lambda x: x['score'], reverse=True)
             result[symbol] = rows
         return result
+
+    def _run_btc_grid_search(self, best_experiment: Optional[Dict]) -> List[Dict]:
+        base_patch = best_experiment['patch'] if best_experiment else {}
+        results = []
+        for min_strength in [26, 28, 30]:
+            for rsi_weight in [34, 40]:
+                for trailing in [0.010, 0.012, 0.015]:
+                    cfg = Config(self.config.config_path)
+                    merged = self._deep_merge(deepcopy(self.config.all), base_patch)
+                    merged.setdefault('symbols', {})['watch_list'] = ['BTC/USDT']
+                    merged.setdefault('strategies', {}).setdefault('composite', {})['min_strength'] = min_strength
+                    merged.setdefault('strategies', {}).setdefault('rsi', {})['strength_weight'] = rsi_weight
+                    merged.setdefault('trading', {})['trailing_stop'] = trailing
+                    cfg._config = merged
+                    summary = StrategyBacktester(cfg).run_all(['BTC/USDT'], use_cache=False)['summary']
+                    results.append({
+                        'name': f'btc_grid_ms{min_strength}_rsi{rsi_weight}_ts{trailing}',
+                        'params': {'min_strength': min_strength, 'rsi_strength_weight': rsi_weight, 'trailing_stop': trailing},
+                        'summary': summary,
+                        'score': round(self._score(summary), 4),
+                    })
+        results.sort(key=lambda x: x['score'], reverse=True)
+        return results[:10]
 
     def _write_presets(self, best_experiment: Optional[Dict], symbol_specific: Dict) -> List[Dict]:
         presets_dir = Path(self.config.config_path).parent / 'presets'

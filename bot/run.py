@@ -326,7 +326,7 @@ def main():
 
     elif args.apply_preset:
         pm = PresetManager(Config())
-        result = pm.apply_preset(args.apply_preset)
+        result = pm.apply_preset(args.apply_preset, auto_restart=True)
         print("\n✅ 已应用预设:\n")
         print(result)
 

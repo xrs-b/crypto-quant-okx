@@ -10,12 +10,14 @@ import yaml
 
 from core.config import Config
 from core.database import Database
+from core.runtime_control import RuntimeController
 
 
 class PresetManager:
     def __init__(self, config: Optional[Config] = None):
         self.config = config or Config()
         self.db = Database(self.config.db_path)
+        self.runtime = RuntimeController(str(Path(self.config.config_path).parent.parent))
         self.config_path = Path(self.config.config_path)
         self.presets_dir = self.config_path.parent / 'presets'
         self.backups_dir = self.config_path.parent / 'backups'
@@ -40,7 +42,7 @@ class PresetManager:
                 rows.append({'name': path.stem, 'path': str(path), 'watch_list': [], 'candidate_watch_list': [], 'paused_watch_list': []})
         return rows
 
-    def apply_preset(self, name: str) -> Dict:
+    def apply_preset(self, name: str, auto_restart: bool = False) -> Dict:
         preset_path = self.presets_dir / f'{name}.yaml'
         if not preset_path.exists():
             raise FileNotFoundError(f'Preset 不存在: {name}')
@@ -71,14 +73,19 @@ class PresetManager:
                 'paused_watch_list': data.get('symbols', {}).get('paused_watch_list', []),
             }
         )
+        restart_info = None
+        if auto_restart:
+            restart_info = self.runtime.restart_bot()
         self.config.reload()
         return {
             'applied': name,
             'config_path': str(self.config_path),
             'backup_path': str(backup_path),
             'watch_list': watch_list,
-            'restart_required': True,
-            'message': '配置已切换。建议重启 bot 以确保运行进程加载新 preset。',
+            'restart_required': not auto_restart,
+            'auto_restarted': auto_restart,
+            'restart_info': restart_info,
+            'message': '配置已切换，并已自动重启 bot。' if auto_restart else '配置已切换。建议重启 bot 以确保运行进程加载新 preset。',
         }
 
     def status(self) -> Dict:

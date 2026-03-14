@@ -151,5 +151,5 @@ market_filters:
   max_volatility: 0.05
 runtime_meta:
   current_preset: btc-focused
-  last_applied_at: '2026-03-15T01:02:06.137773'
-  last_backup: /Volumes/MacHD/Projects/crypto-quant-okx/config/backups/config-20260315-010206.yaml
+  last_applied_at: '2026-03-15T01:16:32.858219'
+  last_backup: /Volumes/MacHD/Projects/crypto-quant-okx/config/backups/config-20260315-011632.yaml

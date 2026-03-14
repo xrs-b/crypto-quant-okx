@@ -51,6 +51,8 @@ class ParameterOptimizer:
         promotions = self._evaluate_candidate_promotions(symbol_specific, symbol_advice, focused_sets)
         presets = self._write_presets(best, symbol_specific)
 
+        self._record_candidate_reviews(promotions)
+
         result = {
             'best_experiment': best,
             'experiments': rows,
@@ -274,6 +276,17 @@ class ParameterOptimizer:
             base['api']['secret'] = 'your_api_secret'
             base['api']['passphrase'] = 'your_passphrase'
         return base
+
+    def _record_candidate_reviews(self, promotions: List[Dict]):
+        for row in promotions:
+            self.db.record_candidate_review(
+                symbol=row['symbol'],
+                decision=row['decision'],
+                best_variant=row.get('best_variant'),
+                score=row.get('score'),
+                reason=row.get('reason'),
+                details={'focused_score': row.get('focused_score'), 'summary': row.get('summary')}
+            )
 
     def _evaluate_candidate_promotions(self, symbol_specific: Dict, symbol_advice: List[Dict], focused_sets: List[Dict]) -> List[Dict]:
         current_watch = set(self.config.symbols)

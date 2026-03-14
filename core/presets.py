@@ -9,11 +9,13 @@ from typing import Dict, List, Optional
 import yaml
 
 from core.config import Config
+from core.database import Database
 
 
 class PresetManager:
     def __init__(self, config: Optional[Config] = None):
         self.config = config or Config()
+        self.db = Database(self.config.db_path)
         self.config_path = Path(self.config.config_path)
         self.presets_dir = self.config_path.parent / 'presets'
         self.backups_dir = self.config_path.parent / 'backups'
@@ -58,12 +60,25 @@ class PresetManager:
         with open(self.config_path, 'w', encoding='utf-8') as f:
             yaml.dump(data, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
 
+        watch_list = data.get('symbols', {}).get('watch_list', [])
+        self.db.record_preset_history(
+            preset_name=name,
+            watch_list=watch_list,
+            backup_path=str(backup_path),
+            details={
+                'selection_mode': data.get('symbols', {}).get('selection_mode', 'focused'),
+                'candidate_watch_list': data.get('symbols', {}).get('candidate_watch_list', []),
+                'paused_watch_list': data.get('symbols', {}).get('paused_watch_list', []),
+            }
+        )
         self.config.reload()
         return {
             'applied': name,
             'config_path': str(self.config_path),
             'backup_path': str(backup_path),
-            'watch_list': data.get('symbols', {}).get('watch_list', []),
+            'watch_list': watch_list,
+            'restart_required': True,
+            'message': '配置已切换。建议重启 bot 以确保运行进程加载新 preset。',
         }
 
     def status(self) -> Dict:

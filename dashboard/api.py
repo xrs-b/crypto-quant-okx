@@ -346,10 +346,25 @@ def get_candidate_promotion():
     return jsonify({'success': True, 'data': optimizer.run().get('candidate_promotions', [])})
 
 
+@app.route('/api/candidates/history')
+def get_candidate_history():
+    """获取候选审查历史"""
+    symbol = request.args.get('symbol')
+    limit = int(request.args.get('limit', 50))
+    return jsonify({'success': True, 'data': db.get_candidate_reviews(symbol=symbol, limit=limit)})
+
+
 @app.route('/api/presets')
 def get_presets():
     """列出可用预设"""
     return jsonify({'success': True, 'data': preset_manager.list_presets()})
+
+
+@app.route('/api/presets/history')
+def get_preset_history():
+    """获取 preset 应用历史"""
+    limit = int(request.args.get('limit', 30))
+    return jsonify({'success': True, 'data': db.get_preset_history(limit=limit)})
 
 
 @app.route('/api/presets/apply', methods=['POST'])

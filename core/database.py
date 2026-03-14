@@ -130,6 +130,32 @@ class Database:
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+
+        # 候选晋升/降级历史
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS candidate_reviews (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT NOT NULL,
+                decision TEXT NOT NULL,
+                best_variant TEXT,
+                score REAL,
+                reason TEXT,
+                details TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        # preset 应用历史
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS preset_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                preset_name TEXT NOT NULL,
+                watch_list TEXT,
+                backup_path TEXT,
+                details TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
         
         # 创建索引
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_signals_symbol ON signals(symbol)")
@@ -424,6 +450,55 @@ class Database:
         conn.close()
     
     # =========================================================================
+    # 候选审查 / preset 历史
+    # =========================================================================
+
+    def record_candidate_review(self, symbol: str, decision: str, best_variant: str = None,
+                                score: float = None, reason: str = None, details: Dict = None):
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO candidate_reviews (symbol, decision, best_variant, score, reason, details)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (symbol, decision, best_variant, score, reason, json.dumps(details) if details else None))
+        conn.commit()
+        conn.close()
+
+    def get_candidate_reviews(self, symbol: str = None, limit: int = 100) -> List[Dict]:
+        conn = self._get_connection()
+        query = "SELECT * FROM candidate_reviews"
+        params = []
+        if symbol:
+            query += " WHERE symbol = ?"
+            params.append(symbol)
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+        df = pd.read_sql_query(query, conn, params=params)
+        conn.close()
+        if not df.empty and 'details' in df.columns:
+            df['details'] = df['details'].apply(lambda x: json.loads(x) if x else {})
+        return df.to_dict('records')
+
+    def record_preset_history(self, preset_name: str, watch_list: List[str], backup_path: str = None, details: Dict = None):
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO preset_history (preset_name, watch_list, backup_path, details)
+            VALUES (?, ?, ?, ?)
+        """, (preset_name, json.dumps(watch_list or []), backup_path, json.dumps(details) if details else None))
+        conn.commit()
+        conn.close()
+
+    def get_preset_history(self, limit: int = 50) -> List[Dict]:
+        conn = self._get_connection()
+        df = pd.read_sql_query("SELECT * FROM preset_history ORDER BY created_at DESC LIMIT ?", conn, params=(limit,))
+        conn.close()
+        if not df.empty:
+            df['watch_list'] = df['watch_list'].apply(lambda x: json.loads(x) if x else [])
+            df['details'] = df['details'].apply(lambda x: json.loads(x) if x else {})
+        return df.to_dict('records')
+
+    # =========================================================================
     # 清理操作
     # =========================================================================
     
@@ -436,6 +511,8 @@ class Database:
         cursor.execute("DELETE FROM signals WHERE created_at < datetime('now', '-' || ? || ' days')", (signals_days,))
         cursor.execute("DELETE FROM trades WHERE open_time < datetime('now', '-' || ? || ' days')", (trades_days,))
         cursor.execute("DELETE FROM system_logs WHERE created_at < datetime('now', '-' || ? || ' days')", (logs_days,))
+        cursor.execute("DELETE FROM candidate_reviews WHERE created_at < datetime('now', '-90 days')")
+        cursor.execute("DELETE FROM preset_history WHERE created_at < datetime('now', '-180 days')")
         
         deleted = cursor.rowcount
         conn.commit()

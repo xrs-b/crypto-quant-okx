@@ -16,7 +16,7 @@ from core.config import Config
 from core.database import Database
 from trading.executor import RiskManager
 from ml.engine import MLEngine
-from analytics import StrategyBacktester, SignalQualityAnalyzer
+from analytics import StrategyBacktester, SignalQualityAnalyzer, ParameterOptimizer
 
 # 初始化
 config = Config()
@@ -25,6 +25,7 @@ risk_manager = RiskManager(config, db)
 ml_engine = MLEngine(config.all)
 backtester = StrategyBacktester(config)
 signal_quality_analyzer = SignalQualityAnalyzer(config, db)
+optimizer = ParameterOptimizer(config, db)
 
 
 # ============================================================================
@@ -323,6 +324,12 @@ def get_backtest_summary():
 def get_signal_quality():
     """获取信号质量分析"""
     return jsonify({'success': True, 'data': signal_quality_analyzer.analyze()})
+
+
+@app.route('/api/optimizer/results')
+def get_optimizer_results():
+    """获取参数优化与币种分层结果"""
+    return jsonify({'success': True, 'data': optimizer.run()})
 
 
 @app.route('/api/config')

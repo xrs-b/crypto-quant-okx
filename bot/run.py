@@ -21,7 +21,7 @@ from core.logger import logger
 from signals import SignalDetector, SignalValidator, SignalRecorder
 from trading import TradingExecutor, RiskManager
 from ml.engine import MLEngine, ModelTrainer, DataCollector
-from analytics import StrategyBacktester, SignalQualityAnalyzer
+from analytics import StrategyBacktester, SignalQualityAnalyzer, ParameterOptimizer
 
 
 class TradingBot:
@@ -209,6 +209,7 @@ def main():
     parser.add_argument('--collect', action='store_true', help='收集数据')
     parser.add_argument('--backtest', action='store_true', help='运行回测')
     parser.add_argument('--signal-quality', action='store_true', help='分析信号质量')
+    parser.add_argument('--optimize', action='store_true', help='运行参数优化与币种分层')
     parser.add_argument('--port', type=int, default=8050, help='仪表盘端口')
     
     args = parser.parse_args()
@@ -289,6 +290,18 @@ def main():
         print("\n分币种质量:")
         for row in result['by_symbol']:
             print(f"  {row['symbol']}: signals={row['signals']} positive_rate={row['positive_rate']}% avg_quality={row['avg_quality_pct']}%")
+
+    elif args.optimize:
+        print("\n⚙️ 开始参数优化与币种分层...\n")
+        cfg = Config()
+        db = Database(cfg.db_path)
+        optimizer = ParameterOptimizer(cfg, db)
+        result = optimizer.run(use_cache=False)
+        print("最佳实验:")
+        print(result['best_experiment'])
+        print("\n币种分层建议:")
+        for row in result['symbol_advice']:
+            print(f"  {row['symbol']}: {row['tier']} | backtest={row['backtest_return_pct']}% | quality={row['avg_quality_pct']}% | {row['action']}")
 
     else:
         # 运行交易

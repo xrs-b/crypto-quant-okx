@@ -88,6 +88,7 @@
             <button class="tab-btn" data-tab="strategy">策略分析</button>
             <button class="tab-btn" data-tab="backtest">回测分析</button>
             <button class="tab-btn" data-tab="quality">信号质量</button>
+            <button class="tab-btn" data-tab="optimizer">优化建议</button>
             <button class="tab-btn" data-tab="risk">风控状态</button>
             <button class="tab-btn" data-tab="config">系统配置</button>
         </div>
@@ -171,6 +172,24 @@
                 <div class="card mini">
                     <div class="section-title">最近信号质量</div>
                     <table><thead><tr><th>时间</th><th>币种</th><th>方向</th><th>1h</th><th>3h</th><th>6h</th><th>平均</th></tr></thead><tbody id="qualityRecentTable"></tbody></table>
+                </div>
+            </div>
+        </div>
+
+        <div class="card panel" id="tab-optimizer">
+            <div class="panel-grid">
+                <div class="card mini">
+                    <div class="section-title">最佳实验</div>
+                    <div class="list" id="optimizerBest"></div>
+                    <div style="height:12px"></div>
+                    <table><thead><tr><th>实验</th><th>评分</th><th>总收益</th><th>胜率</th><th>回撤</th></tr></thead><tbody id="optimizerExperiments"></tbody></table>
+                </div>
+                <div class="card mini">
+                    <div class="section-title">币种分层建议</div>
+                    <table><thead><tr><th>币种</th><th>层级</th><th>回测</th><th>质量</th><th>建议</th></tr></thead><tbody id="optimizerSymbols"></tbody></table>
+                    <div style="height:12px"></div>
+                    <div class="section-title">策略建议</div>
+                    <div class="list" id="optimizerStrategyAdvice"></div>
                 </div>
             </div>
         </div>
@@ -290,6 +309,20 @@
             const recent = data.recent || [];
             document.getElementById('qualityRecentTable').innerHTML = recent.length ? recent.map(r => `<tr><td>${r.created_at}</td><td>${r.symbol}</td><td>${badge(r.signal_type, r.signal_type === 'buy' ? 'buy' : 'sell')}</td><td>${safe(r.return_1h_pct)}%</td><td>${safe(r.return_3h_pct)}%</td><td>${safe(r.return_6h_pct)}%</td><td class="${Number(r.avg_quality_pct || 0) >= 0 ? 'pos' : 'neg'}">${safe(r.avg_quality_pct)}%</td></tr>`).join('') : '<tr><td colspan="7" class="muted">暂无最近质量样本</td></tr>';
         }
+        async function loadOptimizer() {
+            const data = await api('/api/optimizer/results');
+            const best = data.best_experiment || {};
+            document.getElementById('optimizerBest').innerHTML = `
+                <div class="item"><strong>${safe(best.name)}</strong><div class="muted">${safe(best.description)}</div></div>
+                <div class="item"><strong>综合评分</strong><div class="muted">${safe(best.score)}</div></div>
+                <div class="item"><strong>结果总览</strong><div class="muted">收益 ${safe(best.summary?.total_return_pct)}% ｜ 胜率 ${safe(best.summary?.win_rate)}% ｜ 回撤 ${safe(best.summary?.max_drawdown_pct)}%</div></div>`;
+            const exps = data.experiments || [];
+            document.getElementById('optimizerExperiments').innerHTML = exps.length ? exps.map(r => `<tr><td>${r.name}</td><td>${r.score}</td><td class="${Number(r.summary?.total_return_pct || 0) >= 0 ? 'pos' : 'neg'}">${safe(r.summary?.total_return_pct)}%</td><td>${safe(r.summary?.win_rate)}%</td><td class="${Number(r.summary?.max_drawdown_pct || 0) >= 0 ? 'pos' : 'neg'}">${safe(r.summary?.max_drawdown_pct)}%</td></tr>`).join('') : '<tr><td colspan="5" class="muted">暂无实验</td></tr>';
+            const syms = data.symbol_advice || [];
+            document.getElementById('optimizerSymbols').innerHTML = syms.length ? syms.map(r => `<tr><td>${r.symbol}</td><td>${badge(r.tier, r.tier === 'keep' ? 'ok' : r.tier === 'watch' ? 'warn' : 'bad')}</td><td class="${Number(r.backtest_return_pct || 0) >= 0 ? 'pos' : 'neg'}">${safe(r.backtest_return_pct)}%</td><td class="${Number(r.avg_quality_pct || 0) >= 0 ? 'pos' : 'neg'}">${safe(r.avg_quality_pct)}%</td><td>${r.action}</td></tr>`).join('') : '<tr><td colspan="5" class="muted">暂无建议</td></tr>';
+            const adv = data.strategy_advice || [];
+            document.getElementById('optimizerStrategyAdvice').innerHTML = adv.length ? adv.map(a => `<div class="item"><strong>${a.topic}</strong><div class="muted">${a.advice}</div></div>`).join('') : '<div class="item muted">暂无策略建议</div>';
+        }
         async function loadRisk() {
             const [risk, events] = await Promise.all([api('/api/risk/status'), api('/api/risk/events')]);
             document.getElementById('riskCurrentExposure').textContent = pct(risk.current_exposure);
@@ -309,7 +342,7 @@
             document.getElementById('configBlock').textContent = JSON.stringify(cfg, null, 2);
         }
         async function refreshAll() {
-            await Promise.all([loadOverview(), loadPositions(), loadTrades(), loadSignals(), loadStrategy(), loadBacktest(), loadQuality(), loadRisk(), loadConfig()]);
+            await Promise.all([loadOverview(), loadPositions(), loadTrades(), loadSignals(), loadStrategy(), loadBacktest(), loadQuality(), loadOptimizer(), loadRisk(), loadConfig()]);
         }
         mountTabs(); refreshAll(); setInterval(refreshAll, 30000);
     </script>

@@ -1,6 +1,10 @@
 """
 OKX量化交易机器人 - 主程序
 """
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import pandas as pd
 import joblib
 import os

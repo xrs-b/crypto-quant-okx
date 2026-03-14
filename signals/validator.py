@@ -1,109 +1,224 @@
 """
-信号验证模块
+信号验证与记录模块 - 增强版
 """
 from typing import Dict, List
+from datetime import datetime, timedelta
 from core.config import Config
 from core.exchange import Exchange
 
 
 class SignalValidator:
     """信号验证器 - 过滤不符合条件的信号"""
-    
+
     def __init__(self, config: Config, exchange: Exchange):
         self.config = config
         self.exchange = exchange
-        self.filters = config.get('filters', {})
-    
-    def validate(self, signal, current_positions: Dict, 
-                tracking_data: Dict = None) -> tuple:
-        """
-        验证信号
-        
-        Returns:
-            (passed: bool, reason: str, details: list)
-        """
-        details = []
-        
-        # 1. 检查是否已有持仓
+        self.trading_config = config.get('trading', {})
+        self.strategies_config = config.get('strategies', {})
+
+    def validate(self, signal, current_positions: Dict = None,
+                 tracking_data: Dict = None) -> tuple:
+        """验证信号，返回 (passed, reason, details)"""
+        current_positions = current_positions or {}
+        tracking_data = tracking_data or {}
+        details = {}
+
+        # 0. 先过滤非方向性信号
+        if signal.signal_type not in ['buy', 'sell']:
+            details['direction_check'] = {'passed': False, 'reason': '无可执行方向'}
+            return False, '无可执行方向', details
+
+        side = 'long' if signal.signal_type == 'buy' else 'short'
+
+        # 1. 已有同方向持仓
         existing = current_positions.get(signal.symbol)
-        if existing:
-            # 如果同方向，不开仓
-            side = 'long' if signal.signal_type == 'buy' else 'short'
-            if existing.get('side') == side:
-                return False, f"已有相同方向持仓", details
-        
-        # 2. 检查最小价格变动
-        if self.filters.get('min_price_change', 0) > 0:
-            min_change = self.filters['min_price_change']
-            if tracking_data and signal.symbol in tracking_data:
-                last_price = tracking_data[signal.symbol].get('last_price')
-                if last_price:
-                    price_change = abs(signal.price - last_price) / last_price
-                    if price_change < min_change:
-                        return False, f"价格变动{price_change*100:.2f}%<{min_change*100}%", details
-                    details.append({
-                        'name': '价格变动',
-                        'passed': True,
-                        'value': f"{price_change*100:.2f}%"
-                    })
-        
-        # 3. 趋势确认
-        if self.filters.get('trend_confirmation', False):
-            # 需要MACD趋势与信号一致
-            # 这个在detector中已经处理
-            details.append({
-                'name': '趋势确认',
+        if existing and existing.get('side') == side:
+            details['position_check'] = {
+                'passed': False,
+                'reason': f"已有相同方向持仓: {existing.get('side')}",
+                'existing_position': existing
+            }
+            return False, f"已有相同方向持仓: {existing.get('side')}", details
+        details['position_check'] = {'passed': True, 'reason': '无冲突持仓'}
+
+        # 2. 冷却时间
+        cooldown = self.trading_config.get('cooldown_minutes', 15)
+        if tracking_data.get(signal.symbol):
+            last_trade = tracking_data[signal.symbol].get('last_trade_time')
+            if last_trade:
+                last_time = datetime.fromisoformat(last_trade)
+                diff_minutes = (datetime.now() - last_time).total_seconds() / 60
+                if diff_minutes < cooldown:
+                    details['cooldown_check'] = {
+                        'passed': False,
+                        'reason': f"冷却期内({diff_minutes:.1f}分钟<{cooldown}分钟)",
+                        'remaining_minutes': round(cooldown - diff_minutes, 1)
+                    }
+                    return False, f"冷却期内({diff_minutes:.1f}分钟)", details
+        details['cooldown_check'] = {'passed': True, 'reason': '冷却时间已过'}
+
+        # 3. 资金与风险占比（用比例，不再错误地用绝对市值对 0.3 比较）
+        position_ratio = float(self.trading_config.get('position_size', 0.1))
+        max_exposure = float(self.trading_config.get('max_exposure', 0.3))
+        max_per_symbol = float(self.trading_config.get('max_position_per_symbol', 0.15))
+
+        available_usdt = None
+        current_exposure_ratio = 0.0
+        symbol_exposure_ratio = 0.0
+
+        if self.exchange:
+            balance_info = self.exchange.fetch_balance()
+            free = balance_info.get('free', {})
+            total = balance_info.get('total', {})
+            available_usdt = float(free.get('USDT', 0) or 0)
+            total_usdt = float(total.get('USDT', available_usdt) or available_usdt or 1)
+
+            for _, pos in current_positions.items():
+                entry = float(pos.get('entry_price', 0) or 0)
+                qty = float(pos.get('quantity', 0) or 0)
+                lev = max(1, int(pos.get('leverage', 1) or 1))
+                margin_used = (entry * qty) / lev if entry and qty else 0
+                ratio = margin_used / total_usdt if total_usdt > 0 else 0
+                current_exposure_ratio += ratio
+                if pos.get('symbol') == signal.symbol:
+                    symbol_exposure_ratio += ratio
+
+            if available_usdt < 100:
+                details['balance_check'] = {
+                    'passed': False,
+                    'reason': f"余额不足({available_usdt:.2f} USDT)",
+                    'available': available_usdt
+                }
+                return False, '余额不足', details
+
+            details['balance_check'] = {
                 'passed': True,
-                'value': '已通过'
-            })
-        
-        # 4. 仓位检查
-        position_config = self.config.get('position', {})
-        total_limit = position_config.get('total_limit', 0.3)
-        
-        # 计算当前总仓位
-        total_margin = sum(
-            pos.get('margin_used', 0) 
-            for pos in current_positions.values()
-        )
-        
-        # 估算新仓位需要的保证金
-        # 这里简化处理，假设每次开单笔仓位的保证金
-        if total_margin > 0:
-            margin_percent = total_margin / 100  # 简化
-        
-        # 这个在trading模块中检查
-        
+                'reason': '余额充足',
+                'available': round(available_usdt, 2)
+            }
+        else:
+            details['balance_check'] = {'passed': True, 'reason': '跳过(无exchange)'}
+
+        new_total_exposure = current_exposure_ratio + position_ratio
+        if new_total_exposure > max_exposure:
+            details['exposure_check'] = {
+                'passed': False,
+                'reason': f"超过最大持仓比例({new_total_exposure:.2f}>{max_exposure:.2f})",
+                'current_exposure': round(current_exposure_ratio, 4),
+                'new_position_ratio': position_ratio,
+                'max_exposure': max_exposure
+            }
+            return False, '超过最大持仓比例', details
+        details['exposure_check'] = {
+            'passed': True,
+            'reason': '总风险占用正常',
+            'current_exposure': round(current_exposure_ratio, 4),
+            'after_open': round(new_total_exposure, 4)
+        }
+
+        new_symbol_exposure = symbol_exposure_ratio + position_ratio
+        if new_symbol_exposure > max_per_symbol:
+            details['symbol_exposure_check'] = {
+                'passed': False,
+                'reason': f"单币种持仓超过限制({new_symbol_exposure:.2f}>{max_per_symbol:.2f})",
+            }
+            return False, '单币种持仓超过限制', details
+        details['symbol_exposure_check'] = {
+            'passed': True,
+            'reason': '单币种风险正常',
+            'after_open': round(new_symbol_exposure, 4)
+        }
+
+        # 4. 最低强度与策略数（详细化）
+        min_strategy_count = self.strategies_config.get('composite', {}).get('min_strategy_count', 1)
+        min_strength = self.strategies_config.get('composite', {}).get('min_strength', 20)
+        if len(signal.strategies_triggered) < min_strategy_count:
+            details['strategy_check'] = {
+                'passed': False,
+                'reason': f"触发策略数不足({len(signal.strategies_triggered)}<{min_strategy_count})"
+            }
+            return False, '触发策略数不足', details
+        if signal.strength < min_strength:
+            details['strength_check'] = {
+                'passed': False,
+                'reason': f"信号强度不足({signal.strength}<{min_strength})"
+            }
+            return False, '信号强度不足', details
+
+        details['strategy_check'] = {
+            'passed': True,
+            'reason': '策略确认通过',
+            'strategies': signal.strategies_triggered
+        }
+        details['strength_check'] = {
+            'passed': True,
+            'reason': '信号强度达标',
+            'strength': signal.strength
+        }
+
         return True, None, details
+
+    def get_filter_summary(self, details: dict) -> str:
+        for _, value in details.items():
+            if isinstance(value, dict) and not value.get('passed', True):
+                return value.get('reason', 'Unknown')
+        return None
 
 
 class SignalRecorder:
-    """信号记录器"""
-    
+    """信号记录器 - 增强版"""
+
     def __init__(self, database):
         self.db = database
-    
-    def record(self, signal, filter_result: tuple = None):
-        """记录信号"""
-        passed, reason, details = filter_result or (True, None, [])
-        
-        signal_data = {
-            'symbol': signal.symbol,
-            'signal_type': signal.signal_type,
-            'price': signal.price,
-            'strength': signal.strength,
-            'reasons': signal.reasons,
-            'strategies_triggered': signal.strategies_triggered,
-            'filtered': not passed,
-            'filter_reason': reason,
-            'executed': signal.executed,
-            'strategy_details': signal.reasons
-        }
-        
-        signal_id = self.db.add_signal(signal_data)
-        
+
+    def record(self, signal, filter_result: tuple = None) -> int:
+        passed, reason, details = filter_result or (True, None, {})
+        signal_id = self.db.record_signal(
+            symbol=signal.symbol,
+            signal_type=signal.signal_type,
+            price=signal.price,
+            strength=signal.strength,
+            reasons=signal.reasons,
+            strategies_triggered=signal.strategies_triggered
+        )
+        if not passed:
+            self.db.update_signal(signal_id, filtered=1, filter_reason=reason)
+        for reason_data in signal.reasons:
+            self.db.record_strategy_analysis(
+                signal_id=signal_id,
+                strategy_name=reason_data.get('strategy', 'Unknown'),
+                triggered=reason_data.get('triggered', True),
+                strength=int(reason_data.get('strength', 0) or 0),
+                confidence=float(reason_data.get('confidence', 0) or 0),
+                action=reason_data.get('action'),
+                details=reason_data.get('detail')
+            )
         return signal_id
-    
+
     def mark_executed(self, signal_id: int, trade_id: int = None):
-        """标记信号已执行"""
-        self.db.update_signal_executed(signal_id, trade_id)
+        self.db.update_signal(signal_id, executed=1, trade_id=trade_id)
+
+    def mark_filtered(self, signal_id: int, reason: str, details: dict = None):
+        self.db.update_signal(signal_id, filtered=1, filter_reason=reason)
+
+    def get_signal_history(self, symbol: str = None, limit: int = 100) -> List[Dict]:
+        return self.db.get_signals(symbol=symbol, limit=limit)
+
+    def get_signal_stats(self, days: int = 30) -> Dict:
+        signals = self.db.get_signals(limit=1000)
+        cutoff = datetime.now() - timedelta(days=days)
+        signals = [s for s in signals if datetime.fromisoformat(s['created_at']) > cutoff]
+        total = len(signals)
+        executed = sum(1 for s in signals if s.get('executed'))
+        filtered = sum(1 for s in signals if s.get('filtered'))
+        strategy_counts = {}
+        for s in signals:
+            for strat in s.get('strategies_triggered', []):
+                strategy_counts[strat] = strategy_counts.get(strat, 0) + 1
+        return {
+            'total_signals': total,
+            'executed_signals': executed,
+            'filtered_signals': filtered,
+            'execution_rate': round(executed / total * 100, 2) if total > 0 else 0,
+            'strategy_counts': strategy_counts
+        }

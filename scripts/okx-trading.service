@@ -1,0 +1,19 @@
+[Unit]
+Description=OKX Quantitative Trading Bot
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/var/www/crypto-quant-okx
+ExecStart=/usr/bin/python3 /var/www/crypto-quant-okx/bot/run.py
+Restart=always
+RestartSec=10
+StandardOutput=append:/var/www/crypto-quant-okx/logs/bot.log
+StandardError=append:/var/www/crypto-quant-okx/logs/error.log
+
+# 环境变量
+Environment=PYTHONPATH=/var/www/crypto-quant-okx
+
+[Install]
+WantedBy=multi-user.target

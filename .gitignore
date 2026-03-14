@@ -6,3 +6,6 @@ __pycache__/
 *.json
 .DS_Store
 config/config.yaml
+config/config.local.yaml
+bot.pid
+data/trading.db

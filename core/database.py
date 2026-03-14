@@ -1,29 +1,30 @@
 """
-数据库模块
+数据库模块 - SQLite实现
 """
 import sqlite3
 import json
-from datetime import datetime
+import os
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any
 from pathlib import Path
-import os
+import pandas as pd
 
 
 class Database:
-    """SQLite数据库管理类"""
+    """数据库管理类"""
     
-    def __init__(self, db_path: str = None):
-        if db_path is None:
-            project_root = Path(__file__).parent.parent
-            db_path = project_root / "data" / "trading.db"
-        
+    def __init__(self, db_path: str = "data/trading.db"):
         self.db_path = db_path
-        os.makedirs(os.path.dirname(db_path), exist_ok=True)
+        self._ensure_dir()
         self._init_db()
+    
+    def _ensure_dir(self):
+        """确保目录存在"""
+        Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
     
     def _get_connection(self):
         """获取数据库连接"""
-        conn = sqlite3.connect(str(self.db_path))
+        conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         return conn
     
@@ -32,382 +33,414 @@ class Database:
         conn = self._get_connection()
         cursor = conn.cursor()
         
-        # 交易记录表
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS trades (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                symbol TEXT NOT NULL,
-                side TEXT NOT NULL,
-                entry_price REAL NOT NULL,
-                exit_price REAL,
-                quantity REAL NOT NULL,
-                leverage INTEGER NOT NULL,
-                pnl REAL,
-                pnl_percent REAL,
-                status TEXT NOT NULL,
-                open_time DATETIME NOT NULL,
-                close_time DATETIME,
-                reason TEXT,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        
         # 信号记录表
-        cursor.execute('''
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS signals (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 symbol TEXT NOT NULL,
                 signal_type TEXT NOT NULL,
                 price REAL NOT NULL,
-                strength INTEGER NOT NULL,
-                reasons TEXT NOT NULL,
+                strength INTEGER DEFAULT 0,
+                reasons TEXT,
                 strategies_triggered TEXT,
-                filtered BOOLEAN DEFAULT FALSE,
+                filtered INTEGER DEFAULT 0,
                 filter_reason TEXT,
-                executed BOOLEAN DEFAULT FALSE,
-                executed_at DATETIME,
+                executed INTEGER DEFAULT 0,
                 trade_id INTEGER,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (trade_id) REFERENCES trades(id)
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
-        ''')
+        """)
         
-        # 策略分析记录表
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS strategy_analysis (
+        # 交易记录表
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS trades (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                signal_id INTEGER NOT NULL,
-                strategy_name TEXT NOT NULL,
-                strategy_type TEXT NOT NULL,
-                triggered BOOLEAN NOT NULL,
-                details TEXT,
-                confidence REAL,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                signal_id INTEGER,
+                symbol TEXT NOT NULL,
+                side TEXT NOT NULL,
+                entry_price REAL NOT NULL,
+                exit_price REAL,
+                quantity REAL NOT NULL,
+                leverage INTEGER DEFAULT 1,
+                pnl REAL,
+                pnl_percent REAL,
+                status TEXT DEFAULT 'open',
+                open_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                close_time TIMESTAMP,
+                notes TEXT,
                 FOREIGN KEY (signal_id) REFERENCES signals(id)
             )
-        ''')
+        """)
         
         # 持仓表
-        cursor.execute('''
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS positions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 symbol TEXT NOT NULL UNIQUE,
                 side TEXT NOT NULL,
                 entry_price REAL NOT NULL,
-                quantity REAL NOT NULL,
-                leverage INTEGER NOT NULL,
                 current_price REAL,
-                unrealized_pnl REAL,
-                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                quantity REAL NOT NULL,
+                leverage INTEGER DEFAULT 1,
+                unrealized_pnl REAL DEFAULT 0,
+                opened_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
-        ''')
+        """)
         
-        # 系统配置表
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS settings (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL,
-                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        # 每日总结表
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS daily_summary (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                date DATE UNIQUE NOT NULL,
+                total_trades INTEGER DEFAULT 0,
+                winning_trades INTEGER DEFAULT 0,
+                losing_trades INTEGER DEFAULT 0,
+                total_pnl REAL DEFAULT 0,
+                total_volume REAL DEFAULT 0,
+                signals_generated INTEGER DEFAULT 0,
+                signals_filtered INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
-        ''')
+        """)
+        
+        # 策略分析表
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS strategy_analysis (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                signal_id INTEGER,
+                strategy_name TEXT NOT NULL,
+                triggered INTEGER DEFAULT 0,
+                strength INTEGER DEFAULT 0,
+                confidence REAL,
+                action TEXT,
+                details TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (signal_id) REFERENCES signals(id)
+            )
+        """)
+        
+        # 系统日志表
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS system_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                level TEXT NOT NULL,
+                message TEXT NOT NULL,
+                details TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
         
         # 创建索引
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades(symbol)')
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status)')
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_trades_open_time ON trades(open_time)')
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_signals_symbol ON signals(symbol)')
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_signals_created ON signals(created_at)')
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_signals_executed ON signals(executed)')
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_signals_symbol ON signals(symbol)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_signals_created ON signals(created_at)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades(symbol)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_positions_symbol ON positions(symbol)")
         
         conn.commit()
         conn.close()
     
-    # ==================== 交易记录 ====================
+    # =========================================================================
+    # 信号操作
+    # =========================================================================
     
-    def add_trade(self, trade: Dict) -> int:
-        """添加交易记录"""
+    def record_signal(self, symbol: str, signal_type: str, price: float,
+                      strength: int, reasons: List[Dict], 
+                      strategies_triggered: List[str]) -> int:
+        """记录信号"""
         conn = self._get_connection()
         cursor = conn.cursor()
         
-        cursor.execute('''
-            INSERT INTO trades (symbol, side, entry_price, quantity, leverage, status, open_time)
-            VALUES (?, ?, ?, ?, ?, 'open', ?)
-        ''', (
-            trade['symbol'], trade['side'], trade['entry_price'],
-            trade['quantity'], trade['leverage'], datetime.now().isoformat()
-        ))
+        cursor.execute("""
+            INSERT INTO signals (symbol, signal_type, price, strength, reasons, strategies_triggered)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (symbol, signal_type, price, strength, 
+              json.dumps(reasons), json.dumps(strategies_triggered)))
+        
+        signal_id = cursor.lastrowid
+        conn.commit()
+        conn.close()
+        return signal_id
+    
+    def update_signal(self, signal_id: int, **kwargs):
+        """更新信号"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        fields = []
+        values = []
+        for k, v in kwargs.items():
+            fields.append(f"{k} = ?")
+            values.append(v)
+        
+        values.append(signal_id)
+        cursor.execute(f"UPDATE signals SET {', '.join(fields)} WHERE id = ?", values)
+        conn.commit()
+        conn.close()
+    
+    def get_signals(self, symbol: str = None, limit: int = 100, 
+                    executed_only: bool = False) -> List[Dict]:
+        """获取信号列表"""
+        conn = self._get_connection()
+        
+        query = "SELECT * FROM signals"
+        conditions = []
+        params = []
+        
+        if symbol:
+            conditions.append("symbol = ?")
+            params.append(symbol)
+        if executed_only:
+            conditions.append("executed = 1")
+        
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+        
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+        
+        df = pd.read_sql_query(query, conn, params=params)
+        conn.close()
+        
+        # 转换JSON字段
+        if not df.empty:
+            df['reasons'] = df['reasons'].apply(lambda x: json.loads(x) if x else [])
+            df['strategies_triggered'] = df['strategies_triggered'].apply(lambda x: json.loads(x) if x else [])
+            df['filtered'] = df['filtered'].astype(bool)
+            df['executed'] = df['executed'].astype(bool)
+        
+        return df.to_dict('records')
+    
+    # =========================================================================
+    # 交易操作
+    # =========================================================================
+    
+    def record_trade(self, symbol: str, side: str, entry_price: float,
+                     quantity: float, leverage: int = 1, 
+                     signal_id: int = None, notes: str = None) -> int:
+        """记录交易"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            INSERT INTO trades (symbol, side, entry_price, quantity, leverage, signal_id, notes)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (symbol, side, entry_price, quantity, leverage, signal_id, notes))
         
         trade_id = cursor.lastrowid
         conn.commit()
         conn.close()
         return trade_id
     
-    def close_trade(self, trade_id: int, exit_price: float, reason: str = None):
+    def update_trade(self, trade_id: int, **kwargs):
+        """更新交易"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        fields = []
+        values = []
+        for k, v in kwargs.items():
+            fields.append(f"{k} = ?")
+            values.append(v)
+        
+        values.append(trade_id)
+        cursor.execute(f"UPDATE trades SET {', '.join(fields)} WHERE id = ?", values)
+        conn.commit()
+        conn.close()
+    
+    def close_trade(self, trade_id: int, exit_price: float, pnl: float, 
+                    pnl_percent: float, notes: str = None):
         """平仓"""
         conn = self._get_connection()
         cursor = conn.cursor()
         
-        # 获取开仓信息
-        cursor.execute('SELECT * FROM trades WHERE id = ?', (trade_id,))
-        trade = cursor.fetchone()
-        
-        if trade:
-            # 计算盈亏
-            if trade['side'] == 'long':
-                pnl = (exit_price - trade['entry_price']) * trade['quantity']
-            else:
-                pnl = (trade['entry_price'] - exit_price) * trade['quantity']
-            
-            pnl_percent = (exit_price - trade['entry_price']) / trade['entry_price'] * 100
-            if trade['side'] == 'short':
-                pnl_percent = -pnl_percent
-            
-            cursor.execute('''
-                UPDATE trades 
-                SET exit_price = ?, pnl = ?, pnl_percent = ?, status = 'closed',
-                    close_time = ?, reason = ?
-                WHERE id = ?
-            ''', (exit_price, pnl, pnl_percent, datetime.now().isoformat(), reason, trade_id))
+        cursor.execute("""
+            UPDATE trades 
+            SET exit_price = ?, pnl = ?, pnl_percent = ?, 
+                status = 'closed', close_time = CURRENT_TIMESTAMP, notes = ?
+            WHERE id = ?
+        """, (exit_price, pnl, pnl_percent, notes, trade_id))
         
         conn.commit()
         conn.close()
     
-    def get_trades(self, limit: int = 100, offset: int = 0, 
-                   symbol: str = None, status: str = None) -> List[Dict]:
-        """获取交易记录"""
+    def get_trades(self, symbol: str = None, status: str = None,
+                   limit: int = 100) -> List[Dict]:
+        """获取交易列表"""
         conn = self._get_connection()
-        cursor = conn.cursor()
         
-        query = 'SELECT * FROM trades WHERE 1=1'
+        query = "SELECT * FROM trades"
+        conditions = []
         params = []
         
         if symbol:
-            query += ' AND symbol = ?'
+            conditions.append("symbol = ?")
             params.append(symbol)
         if status:
-            query += ' AND status = ?'
+            conditions.append("status = ?")
             params.append(status)
         
-        query += ' ORDER BY open_time DESC LIMIT ? OFFSET ?'
-        params.extend([limit, offset])
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
         
-        cursor.execute(query, params)
-        rows = cursor.fetchall()
+        query += " ORDER BY open_time DESC LIMIT ?"
+        params.append(limit)
+        
+        df = pd.read_sql_query(query, conn, params=params)
         conn.close()
-        
-        return [dict(row) for row in rows]
+        return df.to_dict('records')
     
-    # ==================== 信号记录 ====================
-    
-    def add_signal(self, signal: Dict) -> int:
-        """添加信号记录"""
+    def get_trade_stats(self, days: int = 30) -> Dict:
+        """获取交易统计"""
         conn = self._get_connection()
-        cursor = conn.cursor()
         
-        cursor.execute('''
-            INSERT INTO signals (symbol, signal_type, price, strength, reasons, 
-                              strategies_triggered, filtered, filter_reason, executed)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (
-            signal['symbol'], signal['signal_type'], signal['price'],
-            signal['strength'], json.dumps(signal['reasons']),
-            json.dumps(signal.get('strategies_triggered', [])),
-            signal.get('filtered', False),
-            signal.get('filter_reason'),
-            signal.get('executed', False)
-        ))
+        query = """
+            SELECT 
+                COUNT(*) as total,
+                SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
+                SUM(CASE WHEN pnl < 0 THEN 1 ELSE 0 END) as losses,
+                SUM(pnl) as total_pnl,
+                AVG(pnl_percent) as avg_pnl_percent
+            FROM trades 
+            WHERE status = 'closed' 
+            AND open_time >= datetime('now', '-' || ? || ' days')
+        """
         
-        signal_id = cursor.lastrowid
-        
-        # 添加策略分析记录
-        if 'strategy_details' in signal:
-            for detail in signal['strategy_details']:
-                cursor.execute('''
-                    INSERT INTO strategy_analysis 
-                    (signal_id, strategy_name, strategy_type, triggered, details, confidence)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                ''', (
-                    signal_id, detail['name'], detail['type'],
-                    detail['triggered'], json.dumps(detail), detail.get('confidence', 0)
-                ))
-        
-        conn.commit()
-        conn.close()
-        return signal_id
-    
-    def update_signal_executed(self, signal_id: int, trade_id: int = None):
-        """更新信号执行状态"""
-        conn = self._get_connection()
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            UPDATE signals 
-            SET executed = TRUE, executed_at = ?, trade_id = ?
-            WHERE id = ?
-        ''', (datetime.now().isoformat(), trade_id, signal_id))
-        
-        conn.commit()
-        conn.close()
-    
-    def get_signals(self, limit: int = 100, offset: int = 0,
-                   symbol: str = None, executed: bool = None) -> List[Dict]:
-        """获取信号记录"""
-        conn = self._get_connection()
-        cursor = conn.cursor()
-        
-        query = 'SELECT * FROM signals WHERE 1=1'
-        params = []
-        
-        if symbol:
-            query += ' AND symbol = ?'
-            params.append(symbol)
-        if executed is not None:
-            query += ' AND executed = ?'
-            params.append(executed)
-        
-        query += ' ORDER BY created_at DESC LIMIT ? OFFSET ?'
-        params.extend([limit, offset])
-        
-        cursor.execute(query, params)
-        rows = cursor.fetchall()
+        df = pd.read_sql_query(query, conn, params=(days,))
         conn.close()
         
-        results = []
-        for row in rows:
-            d = dict(row)
-            d['reasons'] = json.loads(d['reasons'])
-            d['strategies_triggered'] = json.loads(d['strategies_triggered']) if d['strategies_triggered'] else []
-            results.append(d)
-        
-        return results
+        if not df.empty:
+            row = df.iloc[0]
+            total = row['total'] or 0
+            wins = row['wins'] or 0
+            return {
+                'total_trades': int(total),
+                'winning_trades': int(wins),
+                'losing_trades': int(row['losses'] or 0),
+                'win_rate': round(wins / total * 100, 2) if total > 0 else 0,
+                'total_pnl': round(row['total_pnl'] or 0, 2),
+                'avg_pnl_percent': round(row['avg_pnl_percent'] or 0, 2)
+            }
+        return {'total_trades': 0, 'winning_trades': 0, 'losing_trades': 0, 
+                'win_rate': 0, 'total_pnl': 0, 'avg_pnl_percent': 0}
     
-    def get_signal_stats(self) -> Dict:
-        """获取信号统计"""
-        conn = self._get_connection()
-        cursor = conn.cursor()
-        
-        # 总信号数
-        cursor.execute('SELECT COUNT(*) as total FROM signals')
-        total = cursor.fetchone()['total']
-        
-        # 执行的信号数
-        cursor.execute('SELECT COUNT(*) as executed FROM signals WHERE executed = TRUE')
-        executed = cursor.fetchone()['executed']
-        
-        # 按币种统计
-        cursor.execute('''
-            SELECT symbol, COUNT(*) as count, 
-                   SUM(CASE WHEN executed = TRUE THEN 1 ELSE 0 END) as executed
-            FROM signals 
-            GROUP BY symbol
-        ''')
-        by_symbol = [dict(row) for row in cursor.fetchall()]
-        
-        # 按信号类型统计
-        cursor.execute('''
-            SELECT signal_type, COUNT(*) as count
-            FROM signals 
-            GROUP BY signal_type
-        ''')
-        by_type = [dict(row) for row in cursor.fetchall()]
-        
-        conn.close()
-        
-        return {
-            'total': total,
-            'executed': executed,
-            'pass_rate': round(executed / total * 100, 2) if total > 0 else 0,
-            'by_symbol': by_symbol,
-            'by_type': by_type
-        }
+    # =========================================================================
+    # 持仓操作
+    # =========================================================================
     
-    # ==================== 持仓管理 ====================
-    
-    def update_position(self, symbol: str, side: str, entry_price: float, 
-                      quantity: float, leverage: int, current_price: float = None):
+    def update_position(self, symbol: str, side: str, entry_price: float,
+                       quantity: float, leverage: int, current_price: float):
         """更新持仓"""
         conn = self._get_connection()
         cursor = conn.cursor()
         
-        unrealized_pnl = 0
-        if current_price and entry_price:
-            if side == 'long':
-                unrealized_pnl = (current_price - entry_price) * quantity
-            else:
-                unrealized_pnl = (entry_price - current_price) * quantity
+        # 计算未实现盈亏
+        if side == 'long':
+            unrealized_pnl = (current_price - entry_price) * quantity
+        else:
+            unrealized_pnl = (entry_price - current_price) * quantity
         
-        cursor.execute('''
+        cursor.execute("""
             INSERT OR REPLACE INTO positions 
-            (symbol, side, entry_price, quantity, leverage, current_price, unrealized_pnl, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (symbol, side, entry_price, quantity, leverage, current_price, unrealized_pnl, datetime.now().isoformat()))
+            (symbol, side, entry_price, current_price, quantity, leverage, 
+             unrealized_pnl, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        """, (symbol, side, entry_price, current_price, quantity, leverage, unrealized_pnl))
         
-        conn.commit()
-        conn.close()
-    
-    def close_position(self, symbol: str):
-        """平仓"""
-        conn = self._get_connection()
-        cursor = conn.cursor()
-        cursor.execute('DELETE FROM positions WHERE symbol = ?', (symbol,))
         conn.commit()
         conn.close()
     
     def get_positions(self) -> List[Dict]:
-        """获取所有持仓"""
+        """获取当前持仓"""
         conn = self._get_connection()
-        cursor = conn.cursor()
-        cursor.execute('SELECT * FROM positions')
-        rows = cursor.fetchall()
+        df = pd.read_sql_query("SELECT * FROM positions", conn)
         conn.close()
-        return [dict(row) for row in rows]
+        return df.to_dict('records')
     
-    # ==================== 统计 ====================
+    def close_position(self, symbol: str):
+        """平仓(删除持仓记录)"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM positions WHERE symbol = ?", (symbol,))
+        conn.commit()
+        conn.close()
     
-    def get_dashboard_stats(self) -> Dict:
-        """获取仪表盘统计数据"""
+    # =========================================================================
+    # 策略分析操作
+    # =========================================================================
+    
+    def record_strategy_analysis(self, signal_id: int, strategy_name: str,
+                                 triggered: bool, strength: int = 0,
+                                 confidence: float = 0, action: str = None,
+                                 details: str = None):
+        """记录策略分析"""
         conn = self._get_connection()
         cursor = conn.cursor()
         
-        # 交易统计
-        cursor.execute('''
-            SELECT 
-                COUNT(*) as total_trades,
-                SUM(CASE WHEN status = 'closed' THEN 1 ELSE 0 END) as closed_trades,
-                SUM(CASE WHEN status = 'open' THEN 1 ELSE 0 END) as open_trades,
-                SUM(CASE WHEN pnl > 0 THEN pnl ELSE 0 END) as total_profit,
-                SUM(CASE WHEN pnl < 0 THEN ABS(pnl) ELSE 0 END) as total_loss,
-                SUM(pnl) as net_pnl
-            FROM trades
-        ''')
-        trade_stats = dict(cursor.fetchone())
+        cursor.execute("""
+            INSERT INTO strategy_analysis 
+            (signal_id, strategy_name, triggered, strength, confidence, action, details)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (signal_id, strategy_name, triggered, strength, confidence, action, details))
         
-        # 信号统计
-        cursor.execute('''
+        conn.commit()
+        conn.close()
+    
+    def get_strategy_stats(self, days: int = 30) -> Dict:
+        """获取策略统计"""
+        conn = self._get_connection()
+        
+        query = """
             SELECT 
+                strategy_name,
                 COUNT(*) as total_signals,
-                SUM(CASE WHEN executed = TRUE THEN 1 ELSE 0 END) as executed_signals
-            FROM signals
-        ''')
-        signal_stats = dict(cursor.fetchone())
+                SUM(CASE WHEN triggered = 1 THEN 1 ELSE 0 END) as triggered_count,
+                AVG(confidence) as avg_confidence
+            FROM strategy_analysis
+            WHERE created_at >= datetime('now', '-' || ? || ' days')
+            GROUP BY strategy_name
+        """
         
-        # 今日统计
-        today = datetime.now().date().isoformat()
-        cursor.execute('''
-            SELECT COUNT(*) as today_signals FROM signals 
-            WHERE created_at LIKE ?
-        ''', (f'{today}%',))
-        today_signals = cursor.fetchone()['today_signals']
-        
+        df = pd.read_sql_query(query, conn, params=(days,))
         conn.close()
+        return df.to_dict('records')
+    
+    # =========================================================================
+    # 日志操作
+    # =========================================================================
+    
+    def log(self, level: str, message: str, details: Dict = None):
+        """记录日志"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
         
-        return {
-            **trade_stats,
-            **signal_stats,
-            'today_signals': today_signals,
-            'pass_rate': round(signal_stats['executed_signals'] / signal_stats['total_signals'] * 100, 2) 
-                        if signal_stats['total_signals'] > 0 else 0
-        }
+        cursor.execute("""
+            INSERT INTO system_logs (level, message, details)
+            VALUES (?, ?, ?)
+        """, (level, message, json.dumps(details) if details else None))
+        
+        conn.commit()
+        conn.close()
+    
+    # =========================================================================
+    # 清理操作
+    # =========================================================================
+    
+    def cleanup_old_data(self, signals_days: int = 90, 
+                         trades_days: int = 365, logs_days: int = 30):
+        """清理旧数据"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("DELETE FROM signals WHERE created_at < datetime('now', '-' || ? || ' days')", (signals_days,))
+        cursor.execute("DELETE FROM trades WHERE open_time < datetime('now', '-' || ? || ' days')", (trades_days,))
+        cursor.execute("DELETE FROM system_logs WHERE created_at < datetime('now', '-' || ? || ' days')", (logs_days,))
+        
+        deleted = cursor.rowcount
+        conn.commit()
+        conn.close()
+        return deleted
 
 
 # 全局数据库实例

@@ -1,0 +1,570 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OKX量化交易仪表盘</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        :root {
+            --primary: #00d4aa;
+            --secondary: #6366f1;
+            --danger: #ef4444;
+            --success: #22c55e;
+            --warning: #f59e0b;
+            --dark: #0f172a;
+            --dark2: #1e293b;
+            --dark3: #334155;
+            --text: #f8fafc;
+            --text2: #94a3b8;
+        }
+        
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--dark);
+            color: var(--text);
+            min-height: 100vh;
+        }
+        
+        /* Header */
+        .header {
+            background: var(--dark2);
+            padding: 1rem 2rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid var(--dark3);
+        }
+        
+        .logo {
+            font-size: 1.5rem;
+            font-weight: bold;
+            color: var(--primary);
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        
+        .status-badge {
+            padding: 0.25rem 0.75rem;
+            border-radius: 9999px;
+            font-size: 0.875rem;
+            background: rgba(34, 197, 94, 0.2);
+            color: var(--success);
+        }
+        
+        /* Main Layout */
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 1.5rem;
+        }
+        
+        /* Stats Grid */
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+            gap: 1rem;
+            margin-bottom: 1.5rem;
+        }
+        
+        .stat-card {
+            background: var(--dark2);
+            border-radius: 0.75rem;
+            padding: 1.25rem;
+            border: 1px solid var(--dark3);
+        }
+        
+        .stat-label {
+            color: var(--text2);
+            font-size: 0.875rem;
+            margin-bottom: 0.5rem;
+        }
+        
+        .stat-value {
+            font-size: 1.75rem;
+            font-weight: bold;
+        }
+        
+        .stat-value.positive { color: var(--success); }
+        .stat-value.negative { color: var(--danger); }
+        
+        .stat-sub {
+            font-size: 0.75rem;
+            color: var(--text2);
+            margin-top: 0.25rem;
+        }
+        
+        /* Content Grid */
+        .content-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1.5rem;
+        }
+        
+        @media (max-width: 1024px) {
+            .content-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+        
+        .card {
+            background: var(--dark2);
+            border-radius: 0.75rem;
+            border: 1px solid var(--dark3);
+            overflow: hidden;
+        }
+        
+        .card-header {
+            padding: 1rem 1.25rem;
+            border-bottom: 1px solid var(--dark3);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .card-title {
+            font-weight: 600;
+            font-size: 1rem;
+        }
+        
+        .card-body {
+            padding: 1.25rem;
+        }
+        
+        /* Table */
+        .table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        
+        .table th,
+        .table td {
+            padding: 0.75rem 1rem;
+            text-align: left;
+            border-bottom: 1px solid var(--dark3);
+        }
+        
+        .table th {
+            color: var(--text2);
+            font-weight: 500;
+            font-size: 0.875rem;
+        }
+        
+        .table td {
+            font-size: 0.875rem;
+        }
+        
+        .table tr:hover {
+            background: var(--dark3);
+        }
+        
+        /* Position Badge */
+        .badge {
+            padding: 0.25rem 0.5rem;
+            border-radius: 0.25rem;
+            font-size: 0.75rem;
+            font-weight: 500;
+        }
+        
+        .badge-long {
+            background: rgba(34, 197, 94, 0.2);
+            color: var(--success);
+        }
+        
+        .badge-short {
+            background: rgba(239, 68, 68, 0.2);
+            color: var(--danger);
+        }
+        
+        /* Buttons */
+        .btn {
+            padding: 0.5rem 1rem;
+            border-radius: 0.5rem;
+            border: none;
+            cursor: pointer;
+            font-size: 0.875rem;
+            font-weight: 500;
+            transition: all 0.2s;
+        }
+        
+        .btn-primary {
+            background: var(--primary);
+            color: var(--dark);
+        }
+        
+        .btn-primary:hover {
+            opacity: 0.9;
+        }
+        
+        /* Refresh */
+        .refresh-btn {
+            background: var(--dark3);
+            color: var(--text);
+            border: none;
+            padding: 0.5rem 1rem;
+            border-radius: 0.5rem;
+            cursor: pointer;
+            font-size: 0.875rem;
+        }
+        
+        .refresh-btn:hover {
+            background: var(--dark3);
+            opacity: 0.8;
+        }
+        
+        /* Loading */
+        .loading {
+            text-align: center;
+            padding: 2rem;
+            color: var(--text2);
+        }
+        
+        /* Symbol Pills */
+        .symbols {
+            display: flex;
+            gap: 0.5rem;
+            flex-wrap: wrap;
+        }
+        
+        .symbol-pill {
+            padding: 0.25rem 0.75rem;
+            background: var(--dark3);
+            border-radius: 9999px;
+            font-size: 0.75rem;
+        }
+        
+        /* Strategy Tags */
+        .strategy-tag {
+            display: inline-block;
+            padding: 0.125rem 0.375rem;
+            background: rgba(99, 102, 241, 0.2);
+            color: var(--secondary);
+            border-radius: 0.25rem;
+            font-size: 0.625rem;
+            margin: 0.125rem;
+        }
+        
+        /* Chart */
+        .chart-container {
+            height: 250px;
+            position: relative;
+        }
+    </style>
+</head>
+<body>
+    <header class="header">
+        <div class="logo">
+            <span>📊</span>
+            <span>OKX量化交易仪表盘</span>
+        </div>
+        <div style="display: flex; align-items: center; gap: 1rem;">
+            <span class="status-badge">● 运行中</span>
+            <button class="refresh-btn" onclick="refreshAll()">🔄 刷新</button>
+        </div>
+    </header>
+    
+    <div class="container">
+        <!-- Stats Overview -->
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-label">总持仓价值</div>
+                <div class="stat-value" id="totalValue">--</div>
+                <div class="stat-sub">未实现盈亏: <span id="unrealizedPnl">--</span></div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">30天交易统计</div>
+                <div class="stat-value" id="totalTrades">--</div>
+                <div class="stat-sub">胜率: <span id="winRate">--</span> | 盈亏: <span id="totalPnl">--</span></div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">今日信号</div>
+                <div class="stat-value" id="todaySignals">--</div>
+                <div class="stat-sub">执行率: <span id="execRate">--</span></div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">当前持仓数</div>
+                <div class="stat-value" id="positionCount">--</div>
+                <div class="stat-sub" id="symbolList">--</div>
+            </div>
+        </div>
+        
+        <!-- Content -->
+        <div class="content-grid">
+            <!-- Positions -->
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">当前持仓</span>
+                    <span style="color: var(--text2); font-size: 0.875rem;">实时更新</span>
+                </div>
+                <div class="card-body">
+                    <table class="table">
+                        <thead>
+                            <tr>
+                                <th>币种</th>
+                                <th>方向</th>
+                                <th>数量</th>
+                                <th>开仓价</th>
+                                <th>当前价</th>
+                                <th>盈亏</th>
+                            </tr>
+                        </thead>
+                        <tbody id="positionsTable">
+                            <tr><td colspan="6" class="loading">加载中...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            
+            <!-- PnL Chart -->
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">盈亏趋势 (30天)</span>
+                </div>
+                <div class="card-body">
+                    <div class="chart-container">
+                        <canvas id="pnlChart"></canvas>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Recent Trades -->
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">最近交易</span>
+                </div>
+                <div class="card-body">
+                    <table class="table">
+                        <thead>
+                            <tr>
+                                <th>时间</th>
+                                <th>币种</th>
+                                <th>方向</th>
+                                <th>数量</th>
+                                <th>盈亏</th>
+                            </tr>
+                        </thead>
+                        <tbody id="tradesTable">
+                            <tr><td colspan="5" class="loading">加载中...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            
+            <!-- Strategy Stats -->
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">策略触发统计</span>
+                </div>
+                <div class="card-body" id="strategyStats">
+                    <div class="loading">加载中...</div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        const API_BASE = '';
+        
+        // Chart instance
+        let pnlChart = null;
+        
+        // Load all data
+        async function refreshAll() {
+            await Promise.all([
+                loadSystemStatus(),
+                loadPositions(),
+                loadTrades(),
+                loadDailySummary(),
+                loadSignalStats()
+            ]);
+        }
+        
+        // System Status
+        async function loadSystemStatus() {
+            try {
+                const res = await fetch(`${API_BASE}/api/system/status`);
+                const data = await res.json();
+                
+                if (data.success) {
+                    const d = data.data;
+                    document.getElementById('totalValue').textContent = `$${d.portfolio.total_value.toFixed(2)}`;
+                    
+                    const pnlEl = document.getElementById('unrealizedPnl');
+                    pnlEl.textContent = `$${d.portfolio.unrealized_pnl.toFixed(2)}`;
+                    pnlEl.className = d.portfolio.unrealized_pnl >= 0 ? 'stat-value positive' : 'stat-value negative';
+                    
+                    document.getElementById('totalTrades').textContent = d.trading.total_trades_30d;
+                    document.getElementById('winRate').textContent = `${d.trading.win_rate}%`;
+                    
+                    const pnlEl2 = document.getElementById('totalPnl');
+                    pnlEl2.textContent = `$${d.trading.total_pnl.toFixed(2)}`;
+                    pnlEl2.className = d.trading.total_pnl >= 0 ? 'positive' : 'negative';
+                    
+                    document.getElementById('todaySignals').textContent = d.signals.today_signals;
+                    document.getElementById('execRate').textContent = `${d.signals.execution_rate}%`;
+                    
+                    document.getElementById('positionCount').textContent = d.portfolio.total_positions;
+                }
+            } catch (e) {
+                console.error('Status error:', e);
+            }
+        }
+        
+        // Positions
+        async function loadPositions() {
+            try {
+                const res = await fetch(`${API_BASE}/api/positions`);
+                const data = await res.json();
+                
+                if (data.success && data.data.length > 0) {
+                    const tbody = document.getElementById('positionsTable');
+                    tbody.innerHTML = data.data.map(p => `
+                        <tr>
+                            <td>${p.symbol}</td>
+                            <td><span class="badge badge-${p.side}">${p.side.toUpperCase()}</span></td>
+                            <td>${p.quantity}</td>
+                            <td>$${p.entry_price.toFixed(2)}</td>
+                            <td>$${p.current_price?.toFixed(2) || '--'}</td>
+                            <td class="${p.unrealized_pnl >= 0 ? 'positive' : 'negative'}">
+                                $${p.unrealized_pnl?.toFixed(2) || '0.00'}
+                            </td>
+                        </tr>
+                    `).join('');
+                    
+                    // Symbol list
+                    const symbols = [...new Set(data.data.map(p => p.symbol))];
+                    document.getElementById('symbolList').innerHTML = 
+                        `<div class="symbols">${symbols.map(s => `<span class="symbol-pill">${s}</span>`).join('')}</div>`;
+                } else {
+                    document.getElementById('positionsTable').innerHTML = 
+                        '<tr><td colspan="6" style="text-align: center; color: var(--text2);">暂无持仓</td></tr>';
+                }
+            } catch (e) {
+                console.error('Positions error:', e);
+            }
+        }
+        
+        // Trades
+        async function loadTrades() {
+            try {
+                const res = await fetch(`${API_BASE}/api/trades?limit=10`);
+                const data = await res.json();
+                
+                if (data.success) {
+                    const tbody = document.getElementById('tradesTable');
+                    if (data.data.length > 0) {
+                        tbody.innerHTML = data.data.map(t => `
+                            <tr>
+                                <td>${t.open_time?.slice(0, 16) || '--'}</td>
+                                <td>${t.symbol}</td>
+                                <td><span class="badge badge-${t.side}">${t.side.toUpperCase()}</span></td>
+                                <td>${t.quantity}</td>
+                                <td class="${t.pnl >= 0 ? 'positive' : 'negative'}">
+                                    $${t.pnl?.toFixed(2) || '0.00'}
+                                </td>
+                            </tr>
+                        `).join('');
+                    } else {
+                        tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: var(--text2);">暂无交易记录</td></tr>';
+                    }
+                }
+            } catch (e) {
+                console.error('Trades error:', e);
+            }
+        }
+        
+        // Daily Summary
+        async function loadDailySummary() {
+            try {
+                const res = await fetch(`${API_BASE}/api/daily/summary?days=30`);
+                const data = await res.json();
+                
+                if (data.success && data.data.length > 0) {
+                    const labels = data.data.map(d => d.date.slice(5)).reverse();
+                    const values = data.data.map(d => d.pnl).reverse();
+                    
+                    if (pnlChart) {
+                        pnlChart.destroy();
+                    }
+                    
+                    const ctx = document.getElementById('pnlChart').getContext('2d');
+                    pnlChart = new Chart(ctx, {
+                        type: 'bar',
+                        data: {
+                            labels: labels,
+                            datasets: [{
+                                label: '每日盈亏',
+                                data: values,
+                                backgroundColor: values.map(v => v >= 0 ? '#22c55e' : '#ef4444'),
+                                borderRadius: 4
+                            }]
+                        },
+                        options: {
+                            responsive: true,
+                            maintainAspectRatio: false,
+                            plugins: {
+                                legend: { display: false }
+                            },
+                            scales: {
+                                x: {
+                                    grid: { color: '#334155' },
+                                    ticks: { color: '#94a3b8' }
+                                },
+                                y: {
+                                    grid: { color: '#334155' },
+                                    ticks: { color: '#94a3b8' }
+                                }
+                            }
+                        }
+                    });
+                }
+            } catch (e) {
+                console.error('Summary error:', e);
+            }
+        }
+        
+        // Signal Stats
+        async function loadSignalStats() {
+            try {
+                const res = await fetch(`${API_BASE}/api/signals/stats?days=30`);
+                const data = await res.json();
+                
+                if (data.success) {
+                    const d = data.data;
+                    const stats = document.getElementById('strategyStats');
+                    
+                    let html = `<div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 1rem;">`;
+                    html += `<div><div style="color: var(--text2); font-size: 0.75rem;">总信号</div><div style="font-size: 1.5rem; font-weight: bold;">${d.total_signals}</div></div>`;
+                    html += `<div><div style="color: var(--text2); font-size: 0.75rem;">已执行</div><div style="font-size: 1.5rem; font-weight: bold; color: var(--success);">${d.executed_signals}</div></div>`;
+                    html += `<div><div style="color: var(--text2); font-size: 0.75rem;">已过滤</div><div style="font-size: 1.5rem; font-weight: bold; color: var(--warning);">${d.filtered_signals}</div></div>`;
+                    html += `<div><div style="color: var(--text2); font-size: 0.75rem;">执行率</div><div style="font-size: 1.5rem; font-weight: bold;">${d.execution_rate}%</div></div>`;
+                    html += `</div>`;
+                    
+                    if (d.strategy_counts) {
+                        html += `<div style="margin-top: 1rem;"><div style="color: var(--text2); font-size: 0.75rem; margin-bottom: 0.5rem;">策略触发</div>`;
+                        for (const [name, count] of Object.entries(d.strategy_counts)) {
+                            html += `<span class="strategy-tag">${name}: ${count}</span>`;
+                        }
+                        html += `</div>`;
+                    }
+                    
+                    stats.innerHTML = html;
+                }
+            } catch (e) {
+                console.error('Signal stats error:', e);
+            }
+        }
+        
+        // Auto refresh
+        refreshAll();
+        setInterval(refreshAll, 30000); // 30秒刷新
+    </script>
+</body>
+</html>

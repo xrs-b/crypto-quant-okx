@@ -1,158 +1,126 @@
-# =============================================================================
-# OKX量化交易系统配置文件
-# =============================================================================
-# 使用说明：
-# 1. 复制此文件为 config.yaml
-# 2. 填入你的API密钥
-# 3. 根据需要修改交易参数
-# =============================================================================
-
-# -----------------------------------------------------------------------------
-# 交易所配置
-# -----------------------------------------------------------------------------
-exchange:
-  name: okx                     # 交易所名称
-  mode: testnet               # testnet (模拟) / real (真实)
-  default_type: swap          # swap (永续) / futures (期货)
-
-# -----------------------------------------------------------------------------
-# API密钥配置 (必须)
-# -----------------------------------------------------------------------------
-# 获取方式：登录OKX → API管理 → 创建API
-# 注意：必须开启 "合约交易" 权限
 api:
-  key: "your_api_key"        # API Key
-  secret: "your_secret"      # Secret
-  passphrase: "your_passphrase"  # Passphrase
-
-# -----------------------------------------------------------------------------
-# 交易对配置
-# -----------------------------------------------------------------------------
-symbols:
-  # 交易对列表
-  list:
-    - BTC/USDT
-    - ETH/USDT
-    - SOL/USDT
-    - XRP/USDT
-    - HYPE/USDT
-
-  # 每个币种独立配置
-  configs:
-    BTC:
-      enabled: true
-      weight: 0.3        # 仓位权重
-    ETH:
-      enabled: true
-      weight: 0.3
-    SOL:
-      enabled: true
-      weight: 0.2
-    XRP:
-      enabled: true
-      weight: 0.1
-    HYPE:
-      enabled: true
-      weight: 0.1
-
-# -----------------------------------------------------------------------------
-# 仓位管理
-# -----------------------------------------------------------------------------
-position:
-  total_limit: 0.3           # 总仓位上限 (30%)
-  single_limit: 0.1         # 单笔仓位上限 (10%)
-  leverage: 10               # 杠杆倍数 (1-50)
-  min_balance: 1000         # 最小保留余额
-
-# -----------------------------------------------------------------------------
-# 风险管理
-# -----------------------------------------------------------------------------
-risk:
-  stop_loss: 0.02           # 止损比例 (2%)
-  take_profit: 0.04         # 止盈比例 (4%)
-  trailing_stop: 0.02       # 追踪止损 (2%)
-  max_daily_loss: 0.10      # 单日最大亏损 (10%)
-
-# -----------------------------------------------------------------------------
-# 策略配置
-# -----------------------------------------------------------------------------
+  key: your_api_key
+  passphrase: your_passphrase
+  secret: your_api_secret
+dashboard:
+  auto_refresh_seconds: 30
+  enabled: true
+  host: 0.0.0.0
+  port: 8050
+  theme: dark
+  title: OKX量化交易仪表盘
+database:
+  path: data/trading.db
+  retention:
+    logs_days: 30
+    signals_days: 90
+    trades_days: 365
+  type: sqlite
+exchange:
+  default_leverage: 10
+  mode: testnet
+  name: okx
+logging:
+  backup_count: 5
+  file: logs/trading.log
+  format: '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+  level: INFO
+  max_size_mb: 10
+ml:
+  enabled: true
+  features:
+  - RSI
+  - MACD
+  - MACD_signal
+  - BB_upper
+  - BB_lower
+  - volume
+  - returns
+  min_confidence: 0.6
+  model_path: ml/models
+notification:
+  discord:
+    channel_id: '1468585288770125876'
+    enabled: true
+    notify_errors: true
+    notify_signals: true
+    notify_trades: true
+  email:
+    enabled: false
+    password: your_app_password
+    smtp_host: smtp.gmail.com
+    smtp_port: 587
+    to_address: your_email@gmail.com
+    username: your_email@gmail.com
+  telegram:
+    bot_token: ''
+    chat_id: ''
+    enabled: false
+runtime:
+  interval_seconds: 3600
+  max_runtime_minutes: 30
+  mode: interval
+  schedule: 0 * * * *
 strategies:
-  # RSI策略
-  rsi:
+  adx:
     enabled: true
-    period: 14               # RSI周期
-    oversold: 35            # 超卖阈值
-    overbought: 65          # 超买阈值
-    weight: 0.2              # 策略权重
-
-  # MACD策略
-  macd:
-    enabled: true
-    fast: 12                # 快线
-    slow: 26                 # 慢线
-    signal: 9                # 信号线
-    weight: 0.2
-
-  # 均线交叉策略
-  ma_cross:
-    enabled: true
-    fast_period: 5           # 快线周期
-    slow_period: 20          # 慢线周期
-    weight: 0.2
-
-  # 布林带策略
+    period: 14
+    strength_weight: 20
+    threshold: 25
   bollinger:
     enabled: true
-    period: 20              # 周期
-    std: 2                  # 标准差倍数
-    weight: 0.2
-
-  # 组合策略
+    period: 20
+    std_multiplier: 2
+    strength_weight: 20
   composite:
     enabled: true
-    min_strength: 70         # 最小信号强度
-    require_multi: true     # 需要多策略确认
-    weight: 0.2
-
-# -----------------------------------------------------------------------------
-# 信号过滤
-# -----------------------------------------------------------------------------
-filters:
-  min_price_change: 0.02    # 最小价格变动 (2%)
-  trend_confirmation: true   # 趋势确认
-  multi_timeframe: false    # 多时间周期
-  volume_confirm: false     # 成交量确认
-
-# -----------------------------------------------------------------------------
-# 机器学习
-# -----------------------------------------------------------------------------
-ml:
-  enabled: true              # 启用ML预测
-  model_path: ./ml/models/  # 模型路径
-  min_confidence: 0.65      # 最小置信度
-
-# -----------------------------------------------------------------------------
-# Discord通知
-# -----------------------------------------------------------------------------
-notifications:
-  discord:
+    min_strategy_count: 2
+    min_strength: 70
+  divergence:
     enabled: true
-    channel_id: "your_channel_id"
-
-# -----------------------------------------------------------------------------
-# 仪表盘配置
-# -----------------------------------------------------------------------------
-dashboard:
-  host: 0.0.0.0
-  port: 8080
-  username: admin
-  password: admin
-
-# =============================================================================
-# 风险提示
-# =============================================================================
-# ⚠️ 合约交易风险极高，可能亏损全部资金！
-# ⚠️ 请先用模拟盘(testnet)充分测试
-# ⚠️ 请设置合理的止损止盈比例
-# ⚠️ 不要投入超过承受能力的资金
-# =============================================================================
+    lookback: 20
+    strength_weight: 30
+  ma_cross:
+    enabled: true
+    fast_period: 5
+    slow_period: 20
+    strength_weight: 25
+  macd:
+    enabled: true
+    fast_period: 12
+    signal_period: 9
+    slow_period: 26
+    strength_weight: 25
+  pattern:
+    enabled: true
+    strength_weight: 20
+  rsi:
+    enabled: true
+    overbought: 65
+    oversold: 35
+    period: 14
+    strength_weight: 30
+  volume:
+    enabled: true
+    strength_weight: 15
+    volume_ma_period: 20
+    volume_multiplier: 1.5
+symbols:
+  quote_currency: USDT
+  watch_list:
+  - BTC/USDT
+  - ETH/USDT
+  - SOL/USDT
+  - XRP/USDT
+  - HYPE/USDT
+trading:
+  cooldown_minutes: 15
+  leverage: 10
+  max_exposure: 0.3
+  max_position_per_symbol: 0.15
+  max_trades_per_day: 10
+  min_trade_interval: 300
+  position_size: 0.1
+  stop_loss: 0.02
+  take_profit: 0.04
+  trailing_stop: 0.015

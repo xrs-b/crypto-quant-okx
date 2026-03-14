@@ -262,7 +262,11 @@
             });
         }
         async function loadOverview() {
-            const status = await api('/api/system/status');
+            const [status, changes, alerts] = await Promise.all([
+                api('/api/system/status'),
+                api('/api/changes/recent'),
+                api('/api/alerts')
+            ]);
             document.getElementById('systemStatus').textContent = `● ${status.system.status}`;
             document.getElementById('totalValue').textContent = money(status.portfolio.total_value);
             document.getElementById('unrealizedPnl').textContent = money(status.portfolio.unrealized_pnl);
@@ -278,11 +282,14 @@
             const positions = await api('/api/positions');
             document.getElementById('overviewPositions').innerHTML = positions.length ? positions.map(p => `<tr><td>${p.symbol}</td><td>${badge(p.side, p.side === 'long' ? 'long' : 'short')}</td><td>${p.quantity}</td><td>${money(p.entry_price)}</td><td>${money(p.current_price)}</td><td class="${Number(p.unrealized_pnl || 0) >= 0 ? 'pos' : 'neg'}">${money(p.unrealized_pnl)}</td></tr>`).join('') : '<tr><td colspan="6" class="muted">暂无持仓</td></tr>';
             const mode = await api('/api/mode/status');
+            const alertHtml = (alerts || []).map(a => `${a.level.toUpperCase()}: ${a.message}`).join('<br>') || '--';
+            const changesHtml = (changes || []).slice(0,3).map(c => `${c.time}｜${c.type}｜${c.title}｜${c.detail}`).join('<br>') || '--';
             document.getElementById('overviewList').innerHTML = `
                 <div class="item"><strong>模拟盘模式</strong><div class="muted">当前只做测试策略可靠性，不推进实盘执行。</div></div>
                 <div class="item"><strong>当前预设 / 模式</strong><div class="muted">preset: ${safe(mode.current_preset)} ｜ mode: ${safe(mode.selection_mode)} ｜ 主池: ${(mode.watch_list || []).join(', ') || '--'}</div></div>
                 <div class="item"><strong>风控状态</strong><div class="muted">当前风险状态：${status.risk.status} ｜ 风险占用 ${pct(status.risk.current_exposure)}</div></div>
-                <div class="item"><strong>信号执行</strong><div class="muted">今日信号 ${status.signals.today_signals} 个，已执行 ${status.signals.executed_today} 个。</div></div>
+                <div class="item"><strong>系统提醒</strong><div class="muted">${alertHtml}</div></div>
+                <div class="item"><strong>最近变化</strong><div class="muted">${changesHtml}</div></div>
                 <div class="item"><strong>最近更新时间</strong><div class="muted">${status.system.last_update}</div></div>`;
         }
         async function loadPositions() {

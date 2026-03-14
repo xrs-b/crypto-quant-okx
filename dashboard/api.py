@@ -387,6 +387,52 @@ def apply_preset():
     return jsonify({'success': True, 'data': result})
 
 
+@app.route('/api/changes/recent')
+def get_recent_changes():
+    """获取最近变化汇总"""
+    preset_history = db.get_preset_history(limit=5)
+    candidate_history = db.get_candidate_reviews(limit=5)
+    rows = []
+    for item in preset_history:
+        rows.append({
+            'time': item.get('created_at'),
+            'type': 'preset_apply',
+            'title': item.get('preset_name'),
+            'detail': ', '.join(item.get('watch_list', []))
+        })
+    for item in candidate_history:
+        rows.append({
+            'time': item.get('created_at'),
+            'type': 'candidate_review',
+            'title': item.get('symbol'),
+            'detail': f"{item.get('decision')} | {item.get('reason')}"
+        })
+    rows.sort(key=lambda x: str(x.get('time', '')), reverse=True)
+    return jsonify({'success': True, 'data': rows[:10]})
+
+
+@app.route('/api/alerts')
+def get_alerts():
+    """获取当前需要留意的告警"""
+    alerts = []
+    risk = risk_manager.get_risk_status()
+    if risk.get('daily_drawdown', 0) >= risk.get('max_daily_drawdown', 1):
+        alerts.append({'level': 'danger', 'message': '已达到日内回撤熔断阈值'})
+    elif risk.get('daily_drawdown', 0) >= risk.get('max_daily_drawdown', 1) * 0.7:
+        alerts.append({'level': 'warn', 'message': '日内回撤接近熔断阈值'})
+    if risk.get('consecutive_losses', 0) >= risk.get('max_consecutive_losses', 99):
+        alerts.append({'level': 'danger', 'message': '连续亏损已触发熔断'})
+    promotions = optimizer.run().get('candidate_promotions', [])
+    for row in promotions:
+        if row.get('decision') == 'promote':
+            alerts.append({'level': 'info', 'message': f"候选币 {row.get('symbol')} 可考虑升级主池"})
+        elif row.get('decision') == 'keep_candidate':
+            alerts.append({'level': 'warn', 'message': f"候选币 {row.get('symbol')} 仍需继续观察"})
+    if not alerts:
+        alerts.append({'level': 'info', 'message': '当前无重大异常，系统处于观察运行状态'})
+    return jsonify({'success': True, 'data': alerts})
+
+
 @app.route('/api/config')
 def get_config():
     """获取配置(脱敏)"""

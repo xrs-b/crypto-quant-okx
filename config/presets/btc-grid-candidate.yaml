@@ -87,7 +87,7 @@ strategies:
   composite:
     enabled: true
     min_strategy_count: 2
-    min_strength: 28
+    min_strength: 26
   divergence:
     enabled: true
     lookback: 20
@@ -140,7 +140,7 @@ trading:
   position_size: 0.1
   stop_loss: 0.02
   take_profit: 0.04
-  trailing_stop: 0.015
+  trailing_stop: 0.01
   max_consecutive_losses: 3
   max_daily_drawdown: 0.03
 market_filters:

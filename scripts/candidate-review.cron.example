@@ -1,0 +1,2 @@
+# 每天上午9点复查候选币
+0 9 * * * cd /Volumes/MacHD/Projects/crypto-quant-okx && /usr/bin/python3 scripts/review_candidates.py >> /tmp/okx-candidate-review.log 2>&1

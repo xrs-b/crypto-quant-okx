@@ -3,7 +3,10 @@ from __future__ import annotations
 
 from copy import deepcopy
 from datetime import datetime
+from pathlib import Path
 from typing import Dict, List, Optional
+
+import yaml
 
 from core.config import Config
 from core.database import Database
@@ -44,6 +47,8 @@ class ParameterOptimizer:
         symbol_advice = self._build_symbol_advice(best)
         strategy_advice = self._build_strategy_advice(best)
         focused_sets = self._run_focused_symbol_sets(best)
+        symbol_specific = self._run_symbol_specific_experiments(best)
+        presets = self._write_presets(best, symbol_specific)
 
         result = {
             'best_experiment': best,
@@ -51,6 +56,8 @@ class ParameterOptimizer:
             'symbol_advice': symbol_advice,
             'strategy_advice': strategy_advice,
             'focused_sets': focused_sets,
+            'symbol_specific': symbol_specific,
+            'presets': presets,
         }
         self._cache = result
         self._cache_at = now
@@ -177,6 +184,96 @@ class ParameterOptimizer:
             })
         rows.sort(key=lambda x: x['score'], reverse=True)
         return rows
+
+    def _run_symbol_specific_experiments(self, best_experiment: Optional[Dict]) -> Dict:
+        base_patch = best_experiment['patch'] if best_experiment else {}
+        suites = {
+            'BTC/USDT': [
+                {
+                    'name': 'btc_safe',
+                    'description': 'BTC稳健型',
+                    'patch': {'trading': {'take_profit': 0.03, 'trailing_stop': 0.012}, 'strategies': {'composite': {'min_strength': 30, 'min_strategy_count': 2}}}
+                },
+                {
+                    'name': 'btc_trend',
+                    'description': 'BTC趋势跟随加强',
+                    'patch': {'strategies': {'macd': {'strength_weight': 26}, 'ma_cross': {'strength_weight': 30}, 'rsi': {'strength_weight': 32}, 'composite': {'min_strength': 26, 'min_strategy_count': 2}}}
+                },
+            ],
+            'XRP/USDT': [
+                {
+                    'name': 'xrp_candidate',
+                    'description': 'XRP候选观察',
+                    'patch': {'trading': {'take_profit': 0.035, 'trailing_stop': 0.014}, 'market_filters': {'min_volatility': 0.005}, 'strategies': {'composite': {'min_strength': 30, 'min_strategy_count': 2}}}
+                },
+                {
+                    'name': 'xrp_fast',
+                    'description': 'XRP高波动快进快出',
+                    'patch': {'trading': {'stop_loss': 0.018, 'take_profit': 0.028, 'trailing_stop': 0.01}, 'strategies': {'volume': {'strength_weight': 32}, 'macd': {'strength_weight': 24}, 'composite': {'min_strength': 24, 'min_strategy_count': 1}}}
+                },
+            ],
+        }
+        result = {}
+        for symbol, experiments in suites.items():
+            rows = []
+            for exp in experiments:
+                cfg = Config(self.config.config_path)
+                merged = self._deep_merge(deepcopy(self.config.all), base_patch)
+                merged = self._deep_merge(merged, exp['patch'])
+                merged.setdefault('symbols', {})['watch_list'] = [symbol]
+                cfg._config = merged
+                summary = StrategyBacktester(cfg).run_all([symbol], use_cache=False)['summary']
+                rows.append({
+                    'symbol': symbol,
+                    'name': exp['name'],
+                    'description': exp['description'],
+                    'patch': exp['patch'],
+                    'summary': summary,
+                    'score': round(self._score(summary), 4),
+                })
+            rows.sort(key=lambda x: x['score'], reverse=True)
+            result[symbol] = rows
+        return result
+
+    def _write_presets(self, best_experiment: Optional[Dict], symbol_specific: Dict) -> List[Dict]:
+        presets_dir = Path(self.config.config_path).parent / 'presets'
+        presets_dir.mkdir(parents=True, exist_ok=True)
+        written = []
+
+        presets = {
+            'btc-focused.yaml': self._build_preset_config(best_experiment, ['BTC/USDT'], ['XRP/USDT'], ['ETH/USDT', 'SOL/USDT', 'HYPE/USDT']),
+            'xrp-candidate.yaml': self._build_preset_config(best_experiment, ['XRP/USDT'], ['BTC/USDT'], ['ETH/USDT', 'SOL/USDT', 'HYPE/USDT']),
+            'safe-mode.yaml': self._build_preset_config(best_experiment, ['BTC/USDT'], [], ['XRP/USDT', 'ETH/USDT', 'SOL/USDT', 'HYPE/USDT'], extra_patch={'trading': {'position_size': 0.08}, 'strategies': {'composite': {'min_strength': 30, 'min_strategy_count': 2}}}),
+        }
+
+        # 如果有专项实验最优 patch，则叠加进对应 preset
+        if symbol_specific.get('BTC/USDT'):
+            presets['btc-focused.yaml'] = self._deep_merge(presets['btc-focused.yaml'], symbol_specific['BTC/USDT'][0]['patch'])
+        if symbol_specific.get('XRP/USDT'):
+            presets['xrp-candidate.yaml'] = self._deep_merge(presets['xrp-candidate.yaml'], symbol_specific['XRP/USDT'][0]['patch'])
+
+        for filename, data in presets.items():
+            path = presets_dir / filename
+            with open(path, 'w', encoding='utf-8') as f:
+                yaml.dump(data, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
+            written.append({'name': filename.replace('.yaml', ''), 'path': str(path)})
+        return written
+
+    def _build_preset_config(self, best_experiment: Optional[Dict], watch_list: List[str], candidate: List[str], paused: List[str], extra_patch: Optional[Dict] = None) -> Dict:
+        base = deepcopy(self.config.all)
+        if best_experiment:
+            base = self._deep_merge(base, best_experiment['patch'])
+        if extra_patch:
+            base = self._deep_merge(base, extra_patch)
+        base.setdefault('symbols', {})['selection_mode'] = 'focused'
+        base['symbols']['watch_list'] = watch_list
+        base['symbols']['candidate_watch_list'] = candidate
+        base['symbols']['paused_watch_list'] = paused
+        if 'api' in base:
+            base['api']['key'] = 'your_api_key'
+            base['api']['secret'] = 'your_api_secret'
+            base['api']['passphrase'] = 'your_passphrase'
+        return base
 
     def _build_strategy_advice(self, best_experiment: Optional[Dict]) -> List[Dict]:
         name = best_experiment['name'] if best_experiment else 'baseline'

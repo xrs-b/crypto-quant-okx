@@ -22,7 +22,7 @@ from core.presets import PresetManager
 from signals import SignalDetector, SignalValidator, SignalRecorder
 from trading import TradingExecutor, RiskManager
 from ml.engine import MLEngine, ModelTrainer, DataCollector
-from analytics import StrategyBacktester, SignalQualityAnalyzer, ParameterOptimizer
+from analytics import StrategyBacktester, SignalQualityAnalyzer, ParameterOptimizer, GovernanceEngine
 
 
 class TradingBot:
@@ -214,6 +214,7 @@ def main():
     parser.add_argument('--list-presets', action='store_true', help='列出可用预设')
     parser.add_argument('--apply-preset', type=str, help='应用预设配置')
     parser.add_argument('--mode-status', action='store_true', help='显示当前模式状态')
+    parser.add_argument('--daily-summary', action='store_true', help='生成日报摘要')
     parser.add_argument('--port', type=int, default=8050, help='仪表盘端口')
     
     args = parser.parse_args()
@@ -334,6 +335,13 @@ def main():
         pm = PresetManager(Config())
         print("\n🧭 当前模式:\n")
         print(pm.status())
+
+    elif args.daily_summary:
+        cfg = Config()
+        db = Database(cfg.db_path)
+        gov = GovernanceEngine(cfg, db)
+        print("\n📰 今日日报:\n")
+        print(gov.generate_daily_summary())
 
     else:
         # 运行交易

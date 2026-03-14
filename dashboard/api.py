@@ -17,7 +17,7 @@ from core.database import Database
 from core.presets import PresetManager
 from trading.executor import RiskManager
 from ml.engine import MLEngine
-from analytics import StrategyBacktester, SignalQualityAnalyzer, ParameterOptimizer
+from analytics import StrategyBacktester, SignalQualityAnalyzer, ParameterOptimizer, GovernanceEngine
 
 # 初始化
 config = Config()
@@ -28,6 +28,7 @@ backtester = StrategyBacktester(config)
 signal_quality_analyzer = SignalQualityAnalyzer(config, db)
 optimizer = ParameterOptimizer(config, db)
 preset_manager = PresetManager(config)
+governance = GovernanceEngine(config, db)
 
 
 # ============================================================================
@@ -370,6 +371,7 @@ def get_preset_history():
 @app.route('/api/presets/apply', methods=['POST'])
 def apply_preset():
     """应用预设"""
+    global risk_manager, ml_engine, backtester, signal_quality_analyzer, optimizer, governance, preset_manager
     payload = request.get_json(silent=True) or {}
     name = payload.get('name') or request.args.get('name')
     auto_restart = bool(payload.get('auto_restart', True))
@@ -378,13 +380,26 @@ def apply_preset():
     result = preset_manager.apply_preset(name, auto_restart=auto_restart)
     # refresh globals using updated config
     config.reload()
-    global risk_manager, ml_engine, backtester, signal_quality_analyzer, optimizer
     risk_manager = RiskManager(config, db)
     ml_engine = MLEngine(config.all)
     backtester = StrategyBacktester(config)
     signal_quality_analyzer = SignalQualityAnalyzer(config, db)
     optimizer = ParameterOptimizer(config, db)
+    governance = GovernanceEngine(config, db)
+    preset_manager = PresetManager(config)
     return jsonify({'success': True, 'data': result})
+
+
+@app.route('/api/governance/status')
+def get_governance_status():
+    """获取治理状态"""
+    return jsonify({'success': True, 'data': governance.evaluate()})
+
+
+@app.route('/api/daily-summary')
+def get_daily_summary_report():
+    """生成/获取今日摘要"""
+    return jsonify({'success': True, 'data': governance.generate_daily_summary()})
 
 
 @app.route('/api/changes/recent')

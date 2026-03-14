@@ -156,6 +156,30 @@ class Database:
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+
+        # 治理决策历史
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS governance_decisions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                decision_type TEXT NOT NULL,
+                level TEXT,
+                approval_required INTEGER DEFAULT 0,
+                recommended_preset TEXT,
+                message TEXT,
+                details TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        # 日报
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS daily_reports (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                report_date DATE NOT NULL,
+                summary TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
         
         # 创建索引
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_signals_symbol ON signals(symbol)")
@@ -498,6 +522,40 @@ class Database:
             df['details'] = df['details'].apply(lambda x: json.loads(x) if x else {})
         return df.to_dict('records')
 
+    def record_governance_decision(self, decision_type: str, level: str = None, approval_required: int = 0,
+                                   recommended_preset: str = None, message: str = None, details: Dict = None):
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO governance_decisions (decision_type, level, approval_required, recommended_preset, message, details)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (decision_type, level, approval_required, recommended_preset, message, json.dumps(details) if details else None))
+        conn.commit()
+        conn.close()
+
+    def get_governance_decisions(self, limit: int = 50) -> List[Dict]:
+        conn = self._get_connection()
+        df = pd.read_sql_query("SELECT * FROM governance_decisions ORDER BY created_at DESC LIMIT ?", conn, params=(limit,))
+        conn.close()
+        if not df.empty:
+            df['details'] = df['details'].apply(lambda x: json.loads(x) if x else {})
+        return df.to_dict('records')
+
+    def record_daily_report(self, report_date: str, summary: Dict):
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO daily_reports (report_date, summary) VALUES (?, ?)", (report_date, json.dumps(summary)))
+        conn.commit()
+        conn.close()
+
+    def get_daily_reports(self, limit: int = 30) -> List[Dict]:
+        conn = self._get_connection()
+        df = pd.read_sql_query("SELECT * FROM daily_reports ORDER BY created_at DESC LIMIT ?", conn, params=(limit,))
+        conn.close()
+        if not df.empty:
+            df['summary'] = df['summary'].apply(lambda x: json.loads(x) if x else {})
+        return df.to_dict('records')
+
     # =========================================================================
     # 清理操作
     # =========================================================================
@@ -513,6 +571,8 @@ class Database:
         cursor.execute("DELETE FROM system_logs WHERE created_at < datetime('now', '-' || ? || ' days')", (logs_days,))
         cursor.execute("DELETE FROM candidate_reviews WHERE created_at < datetime('now', '-90 days')")
         cursor.execute("DELETE FROM preset_history WHERE created_at < datetime('now', '-180 days')")
+        cursor.execute("DELETE FROM governance_decisions WHERE created_at < datetime('now', '-180 days')")
+        cursor.execute("DELETE FROM daily_reports WHERE created_at < datetime('now', '-365 days')")
         
         deleted = cursor.rowcount
         conn.commit()

@@ -402,6 +402,70 @@ def get_daily_summary_report():
     return jsonify({'success': True, 'data': governance.generate_daily_summary()})
 
 
+@app.route('/api/approvals/pending')
+def get_pending_approvals():
+    """获取待审批的建议"""
+    gov = governance.evaluate(use_cache=True)
+    pending = []
+    for alert in gov.get('alerts', []):
+        if alert.get('approval_required'):
+            pending.append({
+                'type': alert.get('type'),
+                'target': alert.get('recommended_preset'),
+                'message': alert.get('message'),
+                'details': alert,
+            })
+    return jsonify({'success': True, 'data': pending})
+
+
+@app.route('/api/approvals/execute', methods=['POST'])
+def execute_approval():
+    """执行审批操作"""
+    global risk_manager, ml_engine, backtester, signal_quality_analyzer, optimizer, governance, preset_manager
+    payload = request.get_json(silent=True) or {}
+    approval_type = payload.get('type')
+    target = payload.get('target')
+    decision = payload.get('decision', 'approved')
+    
+    if not approval_type or not target:
+        return jsonify({'success': False, 'error': 'missing type or target'}), 400
+    
+    db.record_approval(approval_type, target, decision, payload)
+    
+    if decision == 'approved' and approval_type == 'btc_grid_upgrade':
+        result = preset_manager.apply_preset(target, auto_restart=True)
+        config.reload()
+        risk_manager = RiskManager(config, db)
+        ml_engine = MLEngine(config.all)
+        backtester = StrategyBacktester(config)
+        signal_quality_analyzer = SignalQualityAnalyzer(config, db)
+        optimizer = ParameterOptimizer(config, db)
+        governance = GovernanceEngine(config, db)
+        preset_manager = PresetManager(config)
+        return jsonify({'success': True, 'data': {'action': 'preset_applied', 'result': result}})
+    
+    if decision == 'approved' and approval_type == 'main_pool_downgrade':
+        result = preset_manager.apply_preset(target, auto_restart=True)
+        config.reload()
+        risk_manager = RiskManager(config, db)
+        ml_engine = MLEngine(config.all)
+        backtester = StrategyBacktester(config)
+        signal_quality_analyzer = SignalQualityAnalyzer(config, db)
+        optimizer = ParameterOptimizer(config, db)
+        governance = GovernanceEngine(config, db)
+        preset_manager = PresetManager(config)
+        return jsonify({'success': True, 'data': {'action': 'preset_applied', 'result': result}})
+    
+    return jsonify({'success': True, 'data': {'action': 'recorded', 'decision': decision}})
+
+
+@app.route('/api/approvals/history')
+def get_approval_history():
+    """获取审批历史"""
+    limit = int(request.args.get('limit', 50))
+    return jsonify({'success': True, 'data': db.get_approval_history(limit=limit)})
+
+
 @app.route('/api/changes/recent')
 def get_recent_changes():
     """获取最近变化汇总"""

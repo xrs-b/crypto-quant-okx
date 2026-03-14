@@ -180,6 +180,18 @@ class Database:
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+
+        # 审批历史
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS approval_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                approval_type TEXT NOT NULL,
+                target TEXT,
+                decision TEXT NOT NULL,
+                details TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
         
         # 创建索引
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_signals_symbol ON signals(symbol)")
@@ -554,6 +566,24 @@ class Database:
         conn.close()
         if not df.empty:
             df['summary'] = df['summary'].apply(lambda x: json.loads(x) if x else {})
+        return df.to_dict('records')
+
+    def record_approval(self, approval_type: str, target: str, decision: str, details: Dict = None):
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO approval_history (approval_type, target, decision, details)
+            VALUES (?, ?, ?, ?)
+        """, (approval_type, target, decision, json.dumps(details) if details else None))
+        conn.commit()
+        conn.close()
+
+    def get_approval_history(self, limit: int = 50) -> List[Dict]:
+        conn = self._get_connection()
+        df = pd.read_sql_query("SELECT * FROM approval_history ORDER BY created_at DESC LIMIT ?", conn, params=(limit,))
+        conn.close()
+        if not df.empty:
+            df['details'] = df['details'].apply(lambda x: json.loads(x) if x else {})
         return df.to_dict('records')
 
     # =========================================================================

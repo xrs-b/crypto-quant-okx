@@ -89,6 +89,7 @@
             <button class="tab-btn" data-tab="backtest">回测分析</button>
             <button class="tab-btn" data-tab="quality">信号质量</button>
             <button class="tab-btn" data-tab="optimizer">优化建议</button>
+            <button class="tab-btn" data-tab="governance">治理审批</button>
             <button class="tab-btn" data-tab="risk">风控状态</button>
             <button class="tab-btn" data-tab="config">系统配置</button>
         </div>
@@ -207,6 +208,22 @@
                     <table><thead><tr><th>时间</th><th>对象</th><th>动作</th><th>说明</th></tr></thead><tbody id="optimizerHistory"></tbody></table>
                     <div style="height:12px"></div>
                     <table><thead><tr><th>预设</th><th>路径</th><th>操作</th></tr></thead><tbody id="optimizerPresets"></tbody></table>
+                </div>
+            </div>
+        </div>
+
+        <div class="card panel" id="tab-governance">
+            <div class="panel-grid">
+                <div class="card mini">
+                    <div class="section-title">待审批建议</div>
+                    <div class="list" id="pendingApprovals"></div>
+                </div>
+                <div class="card mini">
+                    <div class="section-title">今日日报摘要</div>
+                    <pre id="dailySummaryBlock" style="max-height:400px;overflow-y:auto;">加载中...</pre>
+                    <div style="height:12px"></div>
+                    <div class="section-title">审批历史</div>
+                    <table><thead><tr><th>时间</th><th>类型</th><th>目标</th><th>决定</th></tr></thead><tbody id="approvalHistoryTable"></tbody></table>
                 </div>
             </div>
         </div>
@@ -384,6 +401,40 @@
             const presets = data.presets || [];
             document.getElementById('optimizerPresets').innerHTML = presets.length ? presets.map(p => `<tr><td>${p.name}</td><td>${p.path}</td><td><button onclick="applyPreset('${p.name}')">应用</button></td></tr>`).join('') : '<tr><td colspan="3" class="muted">暂无预设</td></tr>';
         }
+        async function loadGovernance() {
+            const [pending, summary, history] = await Promise.all([
+                api('/api/approvals/pending'),
+                api('/api/daily-summary'),
+                fetch('/api/approvals/history?limit=20').then(r => r.json()).then(j => j.data || [])
+            ]);
+            document.getElementById('pendingApprovals').innerHTML = pending.length ? pending.map(p => `
+                <div class="item">
+                    <strong>${p.type === 'btc_grid_upgrade' ? 'BTC 网格升级' : p.type === 'main_pool_downgrade' ? '主池降级' : p.type}</strong>
+                    <div class="muted">${p.message}</div>
+                    <div style="margin-top:8px">
+                        <button onclick="executeApproval('${p.type}', '${p.target}', 'approved')" style="background:var(--primary)">批准</button>
+                        <button onclick="executeApproval('${p.type}', '${p.target}', 'rejected')" style="background:var(--border);color:var(--text)">拒绝</button>
+                    </div>
+                </div>`).join('') : '<div class="item muted">暂无待审批建议</div>';
+            document.getElementById('dailySummaryBlock').textContent = JSON.stringify(summary, null, 2);
+            document.getElementById('approvalHistoryTable').innerHTML = history.length ? history.map(h => `<tr><td>${h.created_at}</td><td>${h.approval_type}</td><td>${h.target}</td><td>${badge(h.decision, h.decision === 'approved' ? 'ok' : 'bad')}</td></tr>`).join('') : '<tr><td colspan="4" class="muted">暂无审批历史</td></tr>';
+        }
+        async function executeApproval(type, target, decision) {
+            const r = await fetch('/api/approvals/execute', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({type, target, decision})
+            });
+            const j = await r.json();
+            if (!j.success) {
+                alert('审批操作失败: ' + (j.error || 'unknown'));
+                return;
+            }
+            const msg = j.data?.action === 'preset_applied' ? `已批准并自动应用 preset: ${target}` : `已记录审批: ${decision}`;
+            alert(msg);
+            await loadGovernance();
+            await refreshAll();
+        }
         async function loadRisk() {
             const [risk, events] = await Promise.all([api('/api/risk/status'), api('/api/risk/events')]);
             document.getElementById('riskCurrentExposure').textContent = pct(risk.current_exposure);
@@ -403,7 +454,7 @@
             document.getElementById('configBlock').textContent = JSON.stringify(cfg, null, 2);
         }
         async function refreshAll() {
-            await Promise.all([loadOverview(), loadPositions(), loadTrades(), loadSignals(), loadStrategy(), loadBacktest(), loadQuality(), loadOptimizer(), loadRisk(), loadConfig()]);
+            await Promise.all([loadOverview(), loadPositions(), loadTrades(), loadSignals(), loadStrategy(), loadBacktest(), loadQuality(), loadOptimizer(), loadGovernance(), loadRisk(), loadConfig()]);
         }
         mountTabs(); refreshAll(); setInterval(refreshAll, 30000);
     </script>

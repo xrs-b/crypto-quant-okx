@@ -467,6 +467,14 @@ def get_approval_history():
     return jsonify({'success': True, 'data': db.get_approval_history(limit=limit)})
 
 
+@app.route('/api/runtime/cleanup', methods=['GET', 'POST'])
+def runtime_cleanup():
+    """预览/执行运行期重复记录清理"""
+    dry_run = request.method != 'POST'
+    result = db.cleanup_duplicate_runtime_records(dry_run=dry_run)
+    return jsonify({'success': True, 'data': result})
+
+
 @app.route('/api/changes/recent')
 def get_recent_changes():
     """获取最近变化汇总"""

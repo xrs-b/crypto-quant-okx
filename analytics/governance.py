@@ -1,7 +1,7 @@
 """策略治理：升级/降级建议、审批逻辑、日报摘要"""
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 
 from core.config import Config
@@ -106,6 +106,7 @@ class GovernanceEngine:
         promote_passed = bool(candidate_promotion and candidate_promotion.get('decision') == 'promote')
         score_passed = candidate_score > current_score
         candidate_in_pool = candidate_symbol in candidate_watch
+        hold_passed, hold_detail, next_recheck_at = self._check_pool_switch_hold_window(mode)
         diagnosis = self._build_pool_switch_diagnosis(
             mode=mode,
             current_symbol=current_symbol,
@@ -117,11 +118,14 @@ class GovernanceEngine:
             score_passed=score_passed,
             candidate_in_pool=candidate_in_pool,
             focused_mode=focused_mode,
+            hold_passed=hold_passed,
+            hold_detail=hold_detail,
+            next_recheck_at=next_recheck_at,
         )
         target_preset = 'xrp-candidate' if candidate_symbol == 'XRP/USDT' else 'btc-focused' if candidate_symbol == 'BTC/USDT' else None
         candidate_label = candidate_symbol.replace('/USDT', '') if candidate_symbol else '--'
         current_label = current_symbol.replace('/USDT', '') if current_symbol else '--'
-        if promote_passed and score_passed and target_preset:
+        if promote_passed and score_passed and hold_passed and target_preset:
             return {
                 'type': 'pool_switch',
                 'level': 'warn',
@@ -134,6 +138,8 @@ class GovernanceEngine:
                 'candidate_symbol': candidate_symbol,
                 'current_pool': current_watch,
                 'candidate_pool': candidate_watch,
+                'hold_window_passed': True,
+                'next_recheck_at': next_recheck_at,
                 'last_change_reason': diagnosis.get('summary'),
                 'decision_path': diagnosis,
             }
@@ -149,6 +155,8 @@ class GovernanceEngine:
             'candidate_symbol': candidate_symbol,
             'current_pool': current_watch,
             'candidate_pool': candidate_watch,
+            'hold_window_passed': hold_passed,
+            'next_recheck_at': next_recheck_at,
             'last_change_reason': diagnosis.get('summary'),
             'decision_path': diagnosis,
         }
@@ -156,7 +164,23 @@ class GovernanceEngine:
     def _find_focused_set_for_symbol(self, focused_sets: Dict, symbol: str) -> Optional[Dict]:
         return next((row for row in focused_sets.values() if row.get('symbols') == [symbol]), None)
 
-    def _build_pool_switch_diagnosis(self, mode: Dict, current_symbol: str, candidate_symbol: str, current_score: float, candidate_score: float, candidate_promotion: Optional[Dict], promote_passed: bool, score_passed: bool, candidate_in_pool: bool, focused_mode: bool) -> Dict:
+    def _check_pool_switch_hold_window(self, mode: Dict, min_hold_hours: int = 6):
+        last_applied_at = mode.get('last_applied_at')
+        if not last_applied_at:
+            return True, '缺少 last_applied_at，暂按可评估处理', None
+        try:
+            applied_at = datetime.fromisoformat(str(last_applied_at))
+        except Exception:
+            return True, 'last_applied_at 无法解析，暂按可评估处理', None
+        next_recheck_at = applied_at + timedelta(hours=min_hold_hours)
+        now = datetime.now()
+        if now >= next_recheck_at:
+            held_hours = round((now - applied_at).total_seconds() / 3600, 2)
+            return True, f'已持有 {held_hours}h，超过最小观察期 {min_hold_hours}h', next_recheck_at.isoformat()
+        remaining_hours = round((next_recheck_at - now).total_seconds() / 3600, 2)
+        return False, f'最小观察期未满，还需等待约 {remaining_hours}h', next_recheck_at.isoformat()
+
+    def _build_pool_switch_diagnosis(self, mode: Dict, current_symbol: str, candidate_symbol: str, current_score: float, candidate_score: float, candidate_promotion: Optional[Dict], promote_passed: bool, score_passed: bool, candidate_in_pool: bool, focused_mode: bool, hold_passed: bool, hold_detail: str, next_recheck_at: Optional[str]) -> Dict:
         candidate_label = candidate_symbol.replace('/USDT', '') if candidate_symbol else '--'
         current_label = current_symbol.replace('/USDT', '') if current_symbol else '--'
         promotion_reason = candidate_promotion.get('reason') if candidate_promotion else f'暂无 {candidate_label} 候选审查结果'
@@ -173,6 +197,12 @@ class GovernanceEngine:
                 'label': '当前运行模式允许聚焦切池',
                 'passed': focused_mode,
                 'detail': f"当前 selection_mode = {mode.get('selection_mode')}" if mode.get('selection_mode') else 'selection_mode 缺失',
+            },
+            {
+                'key': 'hold_window',
+                'label': '最小观察期已满足',
+                'passed': hold_passed,
+                'detail': hold_detail,
             },
             {
                 'key': 'candidate_promotion',
@@ -199,6 +229,9 @@ class GovernanceEngine:
             'candidate_score': round(candidate_score, 4),
             'promotion_decision': candidate_decision,
             'promotion_reason': promotion_reason,
+            'hold_window_passed': hold_passed,
+            'hold_window_detail': hold_detail,
+            'next_recheck_at': next_recheck_at,
             'summary': summary,
             'blocking_gate': blocker['key'] if blocker else None,
             'blocking_label': blocker['label'] if blocker else None,

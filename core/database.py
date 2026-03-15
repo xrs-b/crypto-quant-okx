@@ -586,6 +586,22 @@ class Database:
             df['details'] = df['details'].apply(lambda x: json.loads(x) if x else {})
         return df.to_dict('records')
 
+    def get_latest_approval(self, approval_type: str, target: str = None) -> Optional[Dict]:
+        conn = self._get_connection()
+        query = "SELECT * FROM approval_history WHERE approval_type = ?"
+        params = [approval_type]
+        if target is not None:
+            query += " AND target = ?"
+            params.append(target)
+        query += " ORDER BY created_at DESC, id DESC LIMIT 1"
+        df = pd.read_sql_query(query, conn, params=params)
+        conn.close()
+        if df.empty:
+            return None
+        row = df.iloc[0].to_dict()
+        row['details'] = json.loads(row['details']) if row.get('details') else {}
+        return row
+
     # =========================================================================
     # 清理操作
     # =========================================================================

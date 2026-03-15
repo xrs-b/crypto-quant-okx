@@ -53,8 +53,8 @@
 ```
 crypto-quant-okx/
 ├── bot/
-│   ├── okx_trade.py           # 主交易机器人 (完整版)
-│   └── okx_trade_simple.py    # 简化版
+│   ├── main.py                # 主入口（旧版兼容）
+│   └── run.py                 # 当前主运行入口 / CLI / dashboard
 ├── ml/
 │   ├── train_model.py         # 训练模型
 │   ├── simple_model.py        # 简单模型
@@ -99,11 +99,11 @@ vim config/config.yaml
 ### 4. 运行
 
 ```bash
-# 手动运行
-python3 bot/okx_trade.py
+# 手动运行（当前主入口）
+python3 bot/run.py
 
-# 或使用简化版
-python3 bot/okx_trade_simple.py
+# 启动 dashboard
+python3 bot/run.py --dashboard --port 8050
 ```
 
 ## ⚙️ 配置说明
@@ -245,8 +245,8 @@ api:
 ### 自动运行 (Cron)
 
 ```bash
-# 每10分钟运行一次
-*/10 * * * * cd /path/to/crypto-quant-okx && python3 bot/okx_trade.py
+# 每5分钟运行一次（当前主入口）
+*/5 * * * * cd /path/to/crypto-quant-okx && python3 bot/run.py
 ```
 
 ### ML模型训练

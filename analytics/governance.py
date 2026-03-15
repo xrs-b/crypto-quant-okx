@@ -34,21 +34,22 @@ class GovernanceEngine:
 
         upgrade_candidate = self._assess_btc_grid_upgrade(current_preset, current_main, best_btc_grid)
         if upgrade_candidate:
-            alerts.append(upgrade_candidate)
+            alerts.append(self._attach_approval_status(upgrade_candidate))
 
         pool_switch = self._assess_pool_switch(mode, focused_sets, promotions)
         if pool_switch:
-            alerts.append(pool_switch)
+            alerts.append(self._attach_approval_status(pool_switch))
 
         downgrade = self._assess_main_pool_downgrade(mode, current_main)
         if downgrade:
-            alerts.append(downgrade)
+            alerts.append(self._attach_approval_status(downgrade))
 
+        alerts = [self._attach_approval_status(x) for x in alerts if x]
         result = {
             'mode': mode,
-            'upgrade_candidate': upgrade_candidate,
-            'pool_switch_review': pool_switch,
-            'downgrade_review': downgrade,
+            'upgrade_candidate': alerts[0] if len(alerts) > 0 else None,
+            'pool_switch_review': next((x for x in alerts if x.get('type') == 'pool_switch'), None),
+            'downgrade_review': next((x for x in alerts if x.get('type') == 'main_pool_downgrade'), None),
             'alerts': alerts,
             'generated_at': datetime.now().isoformat(),
         }
@@ -138,6 +139,21 @@ class GovernanceEngine:
             'total_return_pct': round(total_return, 4),
             'max_drawdown_pct': round(drawdown, 4),
         }
+
+    def _attach_approval_status(self, row: Dict) -> Dict:
+        enriched = dict(row)
+        approval_type = enriched.get('type')
+        target = enriched.get('recommended_preset')
+        latest = self.db.get_latest_approval(approval_type, target)
+        if latest:
+            enriched['approval_status'] = latest.get('decision')
+            enriched['approval_last_at'] = latest.get('created_at')
+            enriched['approval_pending'] = False if latest.get('decision') in ('approved', 'rejected') else True
+        else:
+            enriched['approval_status'] = 'pending' if enriched.get('approval_required') else 'not_required'
+            enriched['approval_last_at'] = None
+            enriched['approval_pending'] = bool(enriched.get('approval_required'))
+        return enriched
 
     def generate_daily_summary(self) -> Dict:
         mode = self.preset_manager.status()

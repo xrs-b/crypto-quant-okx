@@ -6,266 +6,488 @@
     <title>OKX量化交易仪表盘</title>
     <style>
         :root {
-            --bg: #08111f;
-            --panel: #0f1b2d;
-            --panel-2: #13233a;
-            --border: #243750;
-            --text: #e6edf7;
-            --muted: #8ca0be;
-            --primary: #35d0a1;
-            --danger: #ff6b6b;
-            --warn: #ffb84d;
-            --info: #7aa2ff;
+            --bg: #05060a;
+            --bg-soft: #0b0d12;
+            --panel: #111318;
+            --panel-2: #171a20;
+            --panel-3: #1d2129;
+            --border: #262b34;
+            --text: #f5f7fa;
+            --muted: #8b93a7;
+            --okx-accent: #ffffff;
+            --binance-yellow: #f0b90b;
+            --binance-yellow-soft: rgba(240,185,11,.14);
+            --primary: #f0b90b;
+            --success: #22c55e;
+            --danger: #ef4444;
+            --warn: #f59e0b;
+            --info: #60a5fa;
+            --shadow: 0 18px 40px rgba(0,0,0,.28);
         }
         * { box-sizing: border-box; }
-        body { margin: 0; font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; background: linear-gradient(180deg, #08111f 0%, #0b1324 100%); color: var(--text); }
-        .wrap { max-width: 1500px; margin: 0 auto; padding: 24px; }
-        .topbar { display:flex; justify-content:space-between; align-items:center; gap:16px; margin-bottom:20px; padding:18px 22px; border:1px solid var(--border); background: rgba(15,27,45,.9); border-radius: 18px; backdrop-filter: blur(12px); }
-        .title h1 { margin:0; font-size: 24px; }
-        .title p { margin:6px 0 0; color: var(--muted); font-size: 13px; }
-        .actions { display:flex; align-items:center; gap:12px; }
-        .pill { padding:6px 12px; border-radius:999px; font-size:12px; background:rgba(53,208,161,.12); color:var(--primary); border:1px solid rgba(53,208,161,.25); }
-        button { border: 0; border-radius: 12px; padding: 10px 14px; cursor: pointer; background: var(--primary); color: #04231a; font-weight: 700; }
-        .stats { display:grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom:18px; }
-        .card { background: rgba(15,27,45,.95); border:1px solid var(--border); border-radius: 18px; box-shadow: 0 10px 30px rgba(0,0,0,.18); }
-        .stat { padding:18px; }
+        html, body { height: 100%; }
+        body {
+            margin: 0;
+            font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+            background: radial-gradient(circle at top left, #141821 0%, #090b10 45%, #05060a 100%);
+            color: var(--text);
+        }
+        button {
+            border: 0;
+            border-radius: 12px;
+            padding: 10px 14px;
+            cursor: pointer;
+            background: var(--primary);
+            color: #241900;
+            font-weight: 700;
+            transition: transform .15s ease, opacity .15s ease, box-shadow .15s ease;
+        }
+        button:hover { transform: translateY(-1px); box-shadow: 0 10px 20px rgba(240,185,11,.15); }
+        .app-shell {
+            min-height: 100vh;
+            display: grid;
+            grid-template-columns: 260px minmax(0, 1fr);
+        }
+        .sidebar {
+            border-right: 1px solid var(--border);
+            background: linear-gradient(180deg, rgba(11,13,18,.98) 0%, rgba(7,8,11,.98) 100%);
+            padding: 22px 18px;
+            position: sticky;
+            top: 0;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            gap: 18px;
+        }
+        .brand {
+            padding: 16px;
+            border-radius: 18px;
+            background: linear-gradient(145deg, rgba(255,255,255,.05), rgba(240,185,11,.06));
+            border: 1px solid rgba(255,255,255,.06);
+        }
+        .brand h1 { margin: 0; font-size: 20px; letter-spacing: .2px; }
+        .brand p { margin: 8px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+        .sidebar-section-title {
+            font-size: 11px;
+            letter-spacing: .12em;
+            text-transform: uppercase;
+            color: var(--muted);
+            padding: 0 10px;
+        }
+        .nav-list { display: grid; gap: 8px; }
+        .nav-btn {
+            width: 100%;
+            text-align: left;
+            background: transparent;
+            color: var(--text);
+            border: 1px solid transparent;
+            padding: 12px 14px;
+            border-radius: 14px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-weight: 600;
+        }
+        .nav-btn:hover { background: rgba(255,255,255,.04); box-shadow: none; transform: none; }
+        .nav-btn.active {
+            background: linear-gradient(135deg, rgba(240,185,11,.18), rgba(255,255,255,.08));
+            border-color: rgba(240,185,11,.32);
+            color: #fff7d6;
+            box-shadow: inset 0 0 0 1px rgba(240,185,11,.1);
+        }
+        .nav-dot {
+            width: 8px; height: 8px; border-radius: 999px; background: rgba(255,255,255,.22);
+        }
+        .nav-btn.active .nav-dot { background: var(--binance-yellow); box-shadow: 0 0 10px rgba(240,185,11,.6); }
+        .sidebar-footer {
+            margin-top: auto;
+            padding: 14px;
+            border-radius: 16px;
+            background: rgba(255,255,255,.03);
+            border: 1px solid rgba(255,255,255,.05);
+        }
+        .sidebar-footer .muted { font-size: 12px; line-height: 1.5; }
+        .main {
+            min-width: 0;
+            display: flex;
+            flex-direction: column;
+        }
+        .topbar {
+            position: sticky;
+            top: 0;
+            z-index: 20;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 18px;
+            padding: 18px 28px;
+            border-bottom: 1px solid var(--border);
+            backdrop-filter: blur(14px);
+            background: rgba(5,6,10,.82);
+        }
+        .page-title h2 { margin: 0; font-size: 24px; }
+        .page-title p { margin: 6px 0 0; color: var(--muted); font-size: 13px; }
+        .topbar-actions { display:flex; align-items:center; gap:12px; flex-wrap: wrap; justify-content: flex-end; }
+        .pill {
+            padding: 6px 12px;
+            border-radius: 999px;
+            font-size: 12px;
+            background: rgba(34,197,94,.1);
+            color: #86efac;
+            border: 1px solid rgba(34,197,94,.2);
+        }
+        .account-box {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 10px 14px;
+            border-radius: 14px;
+            background: rgba(255,255,255,.04);
+            border: 1px solid rgba(255,255,255,.06);
+        }
+        .avatar {
+            width: 34px; height: 34px; border-radius: 999px;
+            display:flex; align-items:center; justify-content:center;
+            background: linear-gradient(135deg, rgba(240,185,11,.22), rgba(255,255,255,.12));
+            color: #fff2c2; font-weight: 800;
+        }
+        .account-meta strong { display:block; font-size: 13px; }
+        .account-meta span { color: var(--muted); font-size: 12px; }
+        .content {
+            padding: 26px 28px 30px;
+            min-width: 0;
+        }
+        .stats { display:grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; margin-bottom: 20px; }
+        .card {
+            background: rgba(17,19,24,.96);
+            border: 1px solid var(--border);
+            border-radius: 20px;
+            box-shadow: var(--shadow);
+        }
+        .stat { padding: 18px; }
         .label { color: var(--muted); font-size: 13px; margin-bottom: 8px; }
         .value { font-size: 28px; font-weight: 800; }
         .sub { color: var(--muted); font-size: 12px; margin-top: 8px; }
-        .pos { color: var(--primary); }
-        .neg { color: var(--danger); }
-        .tabs { display:flex; gap:10px; flex-wrap:wrap; margin-bottom:18px; }
-        .tab-btn { background: var(--panel); color: var(--text); border:1px solid var(--border); font-weight:600; }
-        .tab-btn.active { background: linear-gradient(135deg, #35d0a1 0%, #6dd5ff 100%); color:#04131e; }
-        .panel { display:none; padding:18px; }
+        .content-head {
+            display:flex; justify-content:space-between; align-items:center; gap:16px;
+            margin-bottom: 16px;
+        }
+        .content-head .muted { font-size: 13px; }
+        .page-actions { display:flex; gap:10px; flex-wrap:wrap; }
+        .page-actions button.secondary,
+        .secondary {
+            background: rgba(255,255,255,.05);
+            color: var(--text);
+            border: 1px solid rgba(255,255,255,.08);
+        }
+        .panel { display:none; }
         .panel.active { display:block; }
         .panel-grid { display:grid; grid-template-columns: 1.2fr .8fr; gap: 16px; }
         .section-title { font-size: 16px; font-weight: 700; margin: 0 0 14px; }
         table { width:100%; border-collapse: collapse; }
-        th, td { padding: 12px 10px; border-bottom:1px solid rgba(140,160,190,.12); font-size:13px; text-align:left; }
+        th, td { padding: 12px 10px; border-bottom:1px solid rgba(255,255,255,.06); font-size:13px; text-align:left; }
         th { color: var(--muted); font-weight:600; }
         tr:hover td { background: rgba(255,255,255,.02); }
         .badge { display:inline-block; padding:4px 8px; border-radius:999px; font-size:12px; font-weight:700; }
-        .long, .buy, .ok { background: rgba(53,208,161,.12); color: var(--primary); }
-        .short, .sell, .bad { background: rgba(255,107,107,.12); color: var(--danger); }
-        .hold, .warn { background: rgba(255,184,77,.14); color: var(--warn); }
+        .long, .buy, .ok { background: rgba(34,197,94,.12); color: #86efac; }
+        .short, .sell, .bad { background: rgba(239,68,68,.12); color: #fca5a5; }
+        .hold, .warn { background: rgba(240,185,11,.14); color: #f8d56b; }
         .kpis { display:grid; grid-template-columns: repeat(2,1fr); gap:12px; }
         .mini { padding:16px; }
         .mini .value { font-size:22px; }
         .list { display:grid; gap:10px; }
-        .item { padding:14px; border-radius:14px; background: var(--panel-2); border:1px solid rgba(140,160,190,.08); }
+        .item {
+            padding:14px;
+            border-radius:16px;
+            background: var(--panel-2);
+            border:1px solid rgba(255,255,255,.06);
+        }
         .muted { color: var(--muted); }
         pre { white-space: pre-wrap; word-break: break-word; margin:0; font-size:12px; line-height:1.55; color:#d8e3f3; }
         .split-3 { display:grid; grid-template-columns: repeat(3,1fr); gap:16px; }
-        @media (max-width: 1100px) { .stats, .panel-grid, .kpis, .split-3 { grid-template-columns:1fr; } }
+        .toast-host {
+            position: fixed;
+            right: 24px;
+            bottom: 24px;
+            display: grid;
+            gap: 10px;
+            z-index: 999;
+        }
+        .toast {
+            min-width: 280px;
+            max-width: 420px;
+            padding: 14px 16px;
+            border-radius: 16px;
+            background: rgba(17,19,24,.98);
+            border: 1px solid rgba(255,255,255,.08);
+            box-shadow: var(--shadow);
+        }
+        .toast.ok { border-color: rgba(34,197,94,.3); }
+        .toast.warn { border-color: rgba(240,185,11,.34); }
+        .toast.bad { border-color: rgba(239,68,68,.34); }
+        .toast.info { border-color: rgba(96,165,250,.34); }
+        @media (max-width: 1280px) {
+            .stats, .panel-grid, .kpis, .split-3 { grid-template-columns:1fr; }
+        }
+        @media (max-width: 980px) {
+            .app-shell { grid-template-columns: 1fr; }
+            .sidebar {
+                position: relative;
+                height: auto;
+                border-right: 0;
+                border-bottom: 1px solid var(--border);
+            }
+            .topbar, .content { padding-left: 18px; padding-right: 18px; }
+        }
     </style>
 </head>
 <body>
-    <div class="wrap">
-        <div class="topbar card">
-            <div class="title">
-                <h1>📊 OKX 量化交易仪表盘</h1>
-                <p>模拟盘专用 · 合约策略观察台 · 多标签查看信号 / 交易 / 风控 / 配置 / ML</p>
+    <div class="app-shell">
+        <aside class="sidebar">
+            <div class="brand">
+                <h1>OKX Quant Desk</h1>
+                <p>OKX 骨架 × Binance 点缀。模拟盘、治理审批、风控与量化观察统一控制台。</p>
             </div>
-            <div class="actions">
-                <span class="pill" id="systemStatus">● running</span>
-                <button onclick="refreshAll()">刷新数据</button>
+
+            <div class="sidebar-section-title">Navigation</div>
+            <div class="nav-list">
+                <button class="nav-btn active" data-tab="overview"><span class="nav-dot"></span><span>总览</span></button>
+                <button class="nav-btn" data-tab="positions"><span class="nav-dot"></span><span>持仓</span></button>
+                <button class="nav-btn" data-tab="trades"><span class="nav-dot"></span><span>交易记录</span></button>
+                <button class="nav-btn" data-tab="signals"><span class="nav-dot"></span><span>信号记录</span></button>
+                <button class="nav-btn" data-tab="strategy"><span class="nav-dot"></span><span>策略分析</span></button>
+                <button class="nav-btn" data-tab="backtest"><span class="nav-dot"></span><span>回测分析</span></button>
+                <button class="nav-btn" data-tab="quality"><span class="nav-dot"></span><span>信号质量</span></button>
+                <button class="nav-btn" data-tab="optimizer"><span class="nav-dot"></span><span>优化建议</span></button>
+                <button class="nav-btn" data-tab="governance"><span class="nav-dot"></span><span>治理审批</span></button>
+                <button class="nav-btn" data-tab="risk"><span class="nav-dot"></span><span>风控状态</span></button>
+                <button class="nav-btn" data-tab="config"><span class="nav-dot"></span><span>系统配置</span></button>
             </div>
-        </div>
 
-        <div class="stats">
-            <div class="card stat"><div class="label">持仓总价值</div><div class="value" id="totalValue">--</div><div class="sub">未实现盈亏 <span id="unrealizedPnl">--</span></div></div>
-            <div class="card stat"><div class="label">30天交易</div><div class="value" id="totalTrades">--</div><div class="sub">胜率 <span id="winRate">--</span> · 总盈亏 <span id="totalPnl">--</span></div></div>
-            <div class="card stat"><div class="label">今日信号</div><div class="value" id="todaySignals">--</div><div class="sub">执行率 <span id="execRate">--</span></div></div>
-            <div class="card stat"><div class="label">风险占用</div><div class="value" id="riskExposure">--</div><div class="sub">连续亏损 <span id="lossStreak">--</span> · 日内回撤 <span id="dailyDd">--</span></div></div>
-        </div>
-
-        <div class="tabs">
-            <button class="tab-btn active" data-tab="overview">总览</button>
-            <button class="tab-btn" data-tab="positions">持仓</button>
-            <button class="tab-btn" data-tab="trades">交易记录</button>
-            <button class="tab-btn" data-tab="signals">信号记录</button>
-            <button class="tab-btn" data-tab="strategy">策略分析</button>
-            <button class="tab-btn" data-tab="backtest">回测分析</button>
-            <button class="tab-btn" data-tab="quality">信号质量</button>
-            <button class="tab-btn" data-tab="optimizer">优化建议</button>
-            <button class="tab-btn" data-tab="governance">治理审批</button>
-            <button class="tab-btn" data-tab="risk">风控状态</button>
-            <button class="tab-btn" data-tab="config">系统配置</button>
-        </div>
-
-        <div class="card panel active" id="tab-overview">
-            <div class="panel-grid">
-                <div class="card mini">
-                    <div class="section-title">当前持仓概览</div>
-                    <table><thead><tr><th>币种</th><th>方向</th><th>数量</th><th>开仓价</th><th>现价</th><th>未实现盈亏</th></tr></thead><tbody id="overviewPositions"></tbody></table>
-                </div>
-                <div class="list" id="overviewList"></div>
+            <div class="sidebar-footer">
+                <strong style="display:block;margin-bottom:8px;">交易后台结构</strong>
+                <div class="muted">顶部账户信息、左侧导航、右侧内容区。后续功能会继续沿呢个骨架扩展。</div>
             </div>
-        </div>
+        </aside>
 
-        <div class="card panel" id="tab-positions">
-            <div class="section-title">持仓详情</div>
-            <table><thead><tr><th>币种</th><th>方向</th><th>数量</th><th>杠杆</th><th>开仓价</th><th>现价</th><th>未实现盈亏</th><th>更新时间</th></tr></thead><tbody id="positionsTable"></tbody></table>
-        </div>
-
-        <div class="card panel" id="tab-trades">
-            <div class="section-title">交易记录</div>
-            <table><thead><tr><th>ID</th><th>币种</th><th>方向</th><th>状态</th><th>开仓价</th><th>平仓价</th><th>数量</th><th>盈亏</th><th>开仓时间</th></tr></thead><tbody id="tradesTable"></tbody></table>
-        </div>
-
-        <div class="card panel" id="tab-signals">
-            <div class="panel-grid">
-                <div class="card mini">
-                    <div class="section-title">信号记录</div>
-                    <table><thead><tr><th>时间</th><th>币种</th><th>信号</th><th>强度</th><th>策略</th><th>是否过滤</th><th>过滤原因</th></tr></thead><tbody id="signalsTable"></tbody></table>
+        <main class="main">
+            <header class="topbar">
+                <div class="page-title">
+                    <h2>量化交易管理后台</h2>
+                    <p>模拟盘专用 · 交易观察 · 治理审批 · 风控监控 · ML 策略看板</p>
                 </div>
-                <div class="card mini">
-                    <div class="section-title">过滤原因 Top</div>
-                    <table><thead><tr><th>原因</th><th>次数</th></tr></thead><tbody id="filterReasonTable"></tbody></table>
-                </div>
-            </div>
-        </div>
-
-        <div class="card panel" id="tab-strategy">
-            <div class="split-3">
-                <div class="card mini">
-                    <div class="section-title">策略统计</div>
-                    <table><thead><tr><th>策略</th><th>信号数</th><th>触发数</th><th>平均置信度</th></tr></thead><tbody id="strategyTable"></tbody></table>
-                </div>
-                <div class="card mini">
-                    <div class="section-title">币种表现</div>
-                    <table><thead><tr><th>币种</th><th>交易数</th><th>胜率</th><th>盈亏</th></tr></thead><tbody id="symbolPerfTable"></tbody></table>
-                </div>
-                <div class="card mini">
-                    <div class="section-title">日汇总</div>
-                    <table><thead><tr><th>日期</th><th>交易数</th><th>胜</th><th>负</th><th>盈亏</th></tr></thead><tbody id="dailyTable"></tbody></table>
-                </div>
-            </div>
-            <div style="height:16px"></div>
-            <div class="card mini">
-                <div class="section-title">ML 模型评估</div>
-                <table><thead><tr><th>币种</th><th>训练准确率</th><th>测试准确率</th><th>F1</th><th>Top Features</th></tr></thead><tbody id="mlMetricsTable"></tbody></table>
-            </div>
-        </div>
-
-        <div class="card panel" id="tab-backtest">
-            <div class="panel-grid">
-                <div class="card mini">
-                    <div class="section-title">回测总览</div>
-                    <div class="list" id="backtestSummaryCards"></div>
-                </div>
-                <div class="card mini">
-                    <div class="section-title">分币种回测</div>
-                    <table><thead><tr><th>币种</th><th>交易数</th><th>胜率</th><th>总收益</th><th>最大回撤</th></tr></thead><tbody id="backtestTable"></tbody></table>
-                </div>
-            </div>
-        </div>
-
-        <div class="card panel" id="tab-quality">
-            <div class="panel-grid">
-                <div class="card mini">
-                    <div class="section-title">信号质量总览</div>
-                    <div class="list" id="qualitySummaryCards"></div>
-                    <div style="height:12px"></div>
-                    <table><thead><tr><th>币种</th><th>信号数</th><th>正向率</th><th>平均质量</th></tr></thead><tbody id="qualityBySymbolTable"></tbody></table>
-                </div>
-                <div class="card mini">
-                    <div class="section-title">最近信号质量</div>
-                    <table><thead><tr><th>时间</th><th>币种</th><th>方向</th><th>1h</th><th>3h</th><th>6h</th><th>平均</th></tr></thead><tbody id="qualityRecentTable"></tbody></table>
-                </div>
-            </div>
-        </div>
-
-        <div class="card panel" id="tab-optimizer">
-            <div class="panel-grid">
-                <div class="card mini">
-                    <div class="section-title">最佳实验</div>
-                    <div class="list" id="optimizerBest"></div>
-                    <div style="height:12px"></div>
-                    <table><thead><tr><th>实验</th><th>评分</th><th>总收益</th><th>胜率</th><th>回撤</th></tr></thead><tbody id="optimizerExperiments"></tbody></table>
-                </div>
-                <div class="card mini">
-                    <div class="section-title">币种分层建议</div>
-                    <table><thead><tr><th>币种</th><th>层级</th><th>回测</th><th>质量</th><th>建议</th></tr></thead><tbody id="optimizerSymbols"></tbody></table>
-                    <div style="height:12px"></div>
-                    <div class="section-title">策略建议</div>
-                    <div class="list" id="optimizerStrategyAdvice"></div>
-                    <div style="height:12px"></div>
-                    <div class="section-title">聚焦币池实验</div>
-                    <table><thead><tr><th>组合</th><th>评分</th><th>收益</th><th>胜率</th><th>回撤</th></tr></thead><tbody id="optimizerFocusedSets"></tbody></table>
-                    <div style="height:12px"></div>
-                    <div class="section-title">专项实验与预设</div>
-                    <div class="list" id="optimizerSymbolSpecific"></div>
-                    <div style="height:12px"></div>
-                    <div class="section-title">BTC 微调网格 Top</div>
-                    <table><thead><tr><th>参数</th><th>评分</th><th>收益</th><th>回撤</th></tr></thead><tbody id="optimizerBtcGrid"></tbody></table>
-                    <div style="height:12px"></div>
-                    <div class="section-title">候选晋升建议</div>
-                    <table><thead><tr><th>币种</th><th>决定</th><th>原因</th></tr></thead><tbody id="optimizerPromotions"></tbody></table>
-                    <div style="height:12px"></div>
-                    <div class="section-title">候选历史 / Preset 历史</div>
-                    <table><thead><tr><th>时间</th><th>对象</th><th>动作</th><th>说明</th></tr></thead><tbody id="optimizerHistory"></tbody></table>
-                    <div style="height:12px"></div>
-                    <table><thead><tr><th>预设</th><th>路径</th><th>操作</th></tr></thead><tbody id="optimizerPresets"></tbody></table>
-                </div>
-            </div>
-        </div>
-
-        <div class="card panel" id="tab-governance">
-            <div class="panel-grid">
-                <div class="card mini">
-                    <div class="section-title">待审批建议</div>
-                    <div class="list" id="pendingApprovals"></div>
-                    <div style="height:12px"></div>
-                    <div class="section-title">最新审批状态</div>
-                    <div class="list" id="approvalStatusSummary"></div>
-                </div>
-                <div class="card mini">
-                    <div class="section-title">今日日报摘要</div>
-                    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;">
-                        <button onclick="refreshDailySummary(true)">强制刷新日报</button>
-                        <button onclick="previewRuntimeCleanup()" style="background:var(--info);color:#04131e;">预览清理</button>
-                        <button onclick="executeRuntimeCleanup()" style="background:var(--warn);color:#241400;">执行清理</button>
+                <div class="topbar-actions">
+                    <span class="pill" id="systemStatus">● running</span>
+                    <button onclick="refreshAll()">刷新数据</button>
+                    <div class="account-box">
+                        <div class="avatar">Q</div>
+                        <div class="account-meta">
+                            <strong>Quant Admin</strong>
+                            <span>OKX Sandbox / Dashboard Control</span>
+                        </div>
                     </div>
-                    <pre id="dailySummaryBlock" style="max-height:400px;overflow-y:auto;">加载中...</pre>
-                    <div style="height:12px"></div>
-                    <div class="section-title">运行期记录清理预览</div>
-                    <pre id="runtimeCleanupBlock" style="max-height:180px;overflow-y:auto;">未检查</pre>
-                    <div style="height:12px"></div>
-                    <div class="section-title">审批历史</div>
-                    <table><thead><tr><th>时间</th><th>类型</th><th>目标</th><th>决定</th></tr></thead><tbody id="approvalHistoryTable"></tbody></table>
                 </div>
-            </div>
-        </div>
+            </header>
 
-        <div class="card panel" id="tab-risk">
-            <div class="panel-grid">
-                <div>
-                    <div class="kpis">
-                        <div class="card mini"><div class="label">当前风险占用</div><div class="value" id="riskCurrentExposure">--</div></div>
-                        <div class="card mini"><div class="label">日内回撤</div><div class="value" id="riskDailyDrawdown">--</div></div>
-                        <div class="card mini"><div class="label">连续亏损</div><div class="value" id="riskConsecutiveLosses">--</div></div>
-                        <div class="card mini"><div class="label">今日交易次数</div><div class="value" id="riskTodayTrades">--</div></div>
+            <section class="content">
+                <div class="stats">
+                    <div class="card stat"><div class="label">持仓总价值</div><div class="value" id="totalValue">--</div><div class="sub">未实现盈亏 <span id="unrealizedPnl">--</span></div></div>
+                    <div class="card stat"><div class="label">30天交易</div><div class="value" id="totalTrades">--</div><div class="sub">胜率 <span id="winRate">--</span> · 总盈亏 <span id="totalPnl">--</span></div></div>
+                    <div class="card stat"><div class="label">今日信号</div><div class="value" id="todaySignals">--</div><div class="sub">执行率 <span id="execRate">--</span></div></div>
+                    <div class="card stat"><div class="label">风险占用</div><div class="value" id="riskExposure">--</div><div class="sub">连续亏损 <span id="lossStreak">--</span> · 日内回撤 <span id="dailyDd">--</span></div></div>
+                </div>
+
+                <div class="content-head">
+                    <div>
+                        <strong>主内容区</strong>
+                        <div class="muted">左侧导航切换模块，右侧集中展示页面内容。现阶段先完成后台骨架重构。</div>
+                    </div>
+                    <div class="page-actions">
+                        <button class="secondary" onclick="refreshDailySummary(true)">强制刷新日报</button>
+                        <button class="secondary" onclick="previewRuntimeCleanup()">预览清理</button>
+                    </div>
+                </div>
+
+                <div class="panel active" id="tab-overview">
+                    <div class="card" style="padding:18px; margin-bottom:16px;">
+                        <div class="section-title">总览中心</div>
+                        <div class="muted">这里系默认首页，集中展示组合状态、系统提醒、最近变化与核心持仓。</div>
+                    </div>
+                    <div class="panel-grid">
+                        <div class="card mini">
+                            <div class="section-title">当前持仓概览</div>
+                            <table><thead><tr><th>币种</th><th>方向</th><th>数量</th><th>开仓价</th><th>现价</th><th>未实现盈亏</th></tr></thead><tbody id="overviewPositions"></tbody></table>
+                        </div>
+                        <div class="list" id="overviewList"></div>
+                    </div>
+                </div>
+
+                <div class="card panel" id="tab-positions">
+                    <div class="section-title">持仓详情</div>
+                    <table><thead><tr><th>币种</th><th>方向</th><th>数量</th><th>杠杆</th><th>开仓价</th><th>现价</th><th>未实现盈亏</th><th>更新时间</th></tr></thead><tbody id="positionsTable"></tbody></table>
+                </div>
+
+                <div class="card panel" id="tab-trades">
+                    <div class="section-title">交易记录</div>
+                    <table><thead><tr><th>ID</th><th>币种</th><th>方向</th><th>状态</th><th>开仓价</th><th>平仓价</th><th>数量</th><th>盈亏</th><th>开仓时间</th></tr></thead><tbody id="tradesTable"></tbody></table>
+                </div>
+
+                <div class="card panel" id="tab-signals">
+                    <div class="panel-grid">
+                        <div class="card mini">
+                            <div class="section-title">信号记录</div>
+                            <table><thead><tr><th>时间</th><th>币种</th><th>信号</th><th>强度</th><th>策略</th><th>是否过滤</th><th>过滤原因</th></tr></thead><tbody id="signalsTable"></tbody></table>
+                        </div>
+                        <div class="card mini">
+                            <div class="section-title">过滤原因 Top</div>
+                            <table><thead><tr><th>原因</th><th>次数</th></tr></thead><tbody id="filterReasonTable"></tbody></table>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card panel" id="tab-strategy">
+                    <div class="split-3">
+                        <div class="card mini">
+                            <div class="section-title">策略统计</div>
+                            <table><thead><tr><th>策略</th><th>信号数</th><th>触发数</th><th>平均置信度</th></tr></thead><tbody id="strategyTable"></tbody></table>
+                        </div>
+                        <div class="card mini">
+                            <div class="section-title">币种表现</div>
+                            <table><thead><tr><th>币种</th><th>交易数</th><th>胜率</th><th>盈亏</th></tr></thead><tbody id="symbolPerfTable"></tbody></table>
+                        </div>
+                        <div class="card mini">
+                            <div class="section-title">日汇总</div>
+                            <table><thead><tr><th>日期</th><th>交易数</th><th>胜</th><th>负</th><th>盈亏</th></tr></thead><tbody id="dailyTable"></tbody></table>
+                        </div>
                     </div>
                     <div style="height:16px"></div>
                     <div class="card mini">
-                        <div class="section-title">风险哨兵</div>
-                        <div class="list" id="riskCards"></div>
+                        <div class="section-title">ML 模型评估</div>
+                        <table><thead><tr><th>币种</th><th>训练准确率</th><th>测试准确率</th><th>F1</th><th>Top Features</th></tr></thead><tbody id="mlMetricsTable"></tbody></table>
                     </div>
                 </div>
-                <div class="card mini">
-                    <div class="section-title">最近风控事件</div>
-                    <table><thead><tr><th>时间</th><th>币种</th><th>原因</th></tr></thead><tbody id="riskEventsTable"></tbody></table>
-                </div>
-            </div>
-        </div>
 
-        <div class="card panel" id="tab-config">
-            <div class="section-title">系统配置（脱敏）</div>
-            <pre id="configBlock">加载中...</pre>
-        </div>
+                <div class="card panel" id="tab-backtest">
+                    <div class="panel-grid">
+                        <div class="card mini">
+                            <div class="section-title">回测总览</div>
+                            <div class="list" id="backtestSummaryCards"></div>
+                        </div>
+                        <div class="card mini">
+                            <div class="section-title">分币种回测</div>
+                            <table><thead><tr><th>币种</th><th>交易数</th><th>胜率</th><th>总收益</th><th>最大回撤</th></tr></thead><tbody id="backtestTable"></tbody></table>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card panel" id="tab-quality">
+                    <div class="panel-grid">
+                        <div class="card mini">
+                            <div class="section-title">信号质量总览</div>
+                            <div class="list" id="qualitySummaryCards"></div>
+                            <div style="height:12px"></div>
+                            <table><thead><tr><th>币种</th><th>信号数</th><th>正向率</th><th>平均质量</th></tr></thead><tbody id="qualityBySymbolTable"></tbody></table>
+                        </div>
+                        <div class="card mini">
+                            <div class="section-title">最近信号质量</div>
+                            <table><thead><tr><th>时间</th><th>币种</th><th>方向</th><th>1h</th><th>3h</th><th>6h</th><th>平均</th></tr></thead><tbody id="qualityRecentTable"></tbody></table>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card panel" id="tab-optimizer">
+                    <div class="panel-grid">
+                        <div class="card mini">
+                            <div class="section-title">最佳实验</div>
+                            <div class="list" id="optimizerBest"></div>
+                            <div style="height:12px"></div>
+                            <table><thead><tr><th>实验</th><th>评分</th><th>总收益</th><th>胜率</th><th>回撤</th></tr></thead><tbody id="optimizerExperiments"></tbody></table>
+                        </div>
+                        <div class="card mini">
+                            <div class="section-title">币种分层建议</div>
+                            <table><thead><tr><th>币种</th><th>层级</th><th>回测</th><th>质量</th><th>建议</th></tr></thead><tbody id="optimizerSymbols"></tbody></table>
+                            <div style="height:12px"></div>
+                            <div class="section-title">策略建议</div>
+                            <div class="list" id="optimizerStrategyAdvice"></div>
+                            <div style="height:12px"></div>
+                            <div class="section-title">聚焦币池实验</div>
+                            <table><thead><tr><th>组合</th><th>评分</th><th>收益</th><th>胜率</th><th>回撤</th></tr></thead><tbody id="optimizerFocusedSets"></tbody></table>
+                            <div style="height:12px"></div>
+                            <div class="section-title">专项实验与预设</div>
+                            <div class="list" id="optimizerSymbolSpecific"></div>
+                            <div style="height:12px"></div>
+                            <div class="section-title">BTC 微调网格 Top</div>
+                            <table><thead><tr><th>参数</th><th>评分</th><th>收益</th><th>回撤</th></tr></thead><tbody id="optimizerBtcGrid"></tbody></table>
+                            <div style="height:12px"></div>
+                            <div class="section-title">候选晋升建议</div>
+                            <table><thead><tr><th>币种</th><th>决定</th><th>原因</th></tr></thead><tbody id="optimizerPromotions"></tbody></table>
+                            <div style="height:12px"></div>
+                            <div class="section-title">候选历史 / Preset 历史</div>
+                            <table><thead><tr><th>时间</th><th>对象</th><th>动作</th><th>说明</th></tr></thead><tbody id="optimizerHistory"></tbody></table>
+                            <div style="height:12px"></div>
+                            <table><thead><tr><th>预设</th><th>路径</th><th>操作</th></tr></thead><tbody id="optimizerPresets"></tbody></table>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card panel" id="tab-governance">
+                    <div class="panel-grid">
+                        <div class="card mini">
+                            <div class="section-title">待审批建议</div>
+                            <div class="list" id="pendingApprovals"></div>
+                            <div style="height:12px"></div>
+                            <div class="section-title">最新审批状态</div>
+                            <div class="list" id="approvalStatusSummary"></div>
+                        </div>
+                        <div class="card mini">
+                            <div class="section-title">今日日报摘要</div>
+                            <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;">
+                                <button onclick="refreshDailySummary(true)">强制刷新日报</button>
+                                <button onclick="previewRuntimeCleanup()" class="secondary">预览清理</button>
+                                <button onclick="executeRuntimeCleanup()" style="background:var(--warn);color:#241400;">执行清理</button>
+                            </div>
+                            <pre id="dailySummaryBlock" style="max-height:400px;overflow-y:auto;">加载中...</pre>
+                            <div style="height:12px"></div>
+                            <div class="section-title">运行期记录清理预览</div>
+                            <pre id="runtimeCleanupBlock" style="max-height:180px;overflow-y:auto;">未检查</pre>
+                            <div style="height:12px"></div>
+                            <div class="section-title">审批历史</div>
+                            <table><thead><tr><th>时间</th><th>类型</th><th>目标</th><th>决定</th></tr></thead><tbody id="approvalHistoryTable"></tbody></table>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card panel" id="tab-risk">
+                    <div class="panel-grid">
+                        <div>
+                            <div class="kpis">
+                                <div class="card mini"><div class="label">当前风险占用</div><div class="value" id="riskCurrentExposure">--</div></div>
+                                <div class="card mini"><div class="label">日内回撤</div><div class="value" id="riskDailyDrawdown">--</div></div>
+                                <div class="card mini"><div class="label">连续亏损</div><div class="value" id="riskConsecutiveLosses">--</div></div>
+                                <div class="card mini"><div class="label">今日交易次数</div><div class="value" id="riskTodayTrades">--</div></div>
+                            </div>
+                            <div style="height:16px"></div>
+                            <div class="card mini">
+                                <div class="section-title">风险哨兵</div>
+                                <div class="list" id="riskCards"></div>
+                            </div>
+                        </div>
+                        <div class="card mini">
+                            <div class="section-title">最近风控事件</div>
+                            <table><thead><tr><th>时间</th><th>币种</th><th>原因</th></tr></thead><tbody id="riskEventsTable"></tbody></table>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card panel" id="tab-config">
+                    <div class="section-title">系统配置（脱敏）</div>
+                    <pre id="configBlock">加载中...</pre>
+                </div>
+            </section>
+        </main>
     </div>
+
+    <div class="toast-host" id="toastHost"></div>
 
     <script>
         const money = v => `${Number(v || 0).toFixed(2)}`;
@@ -274,15 +496,23 @@
         const filteredTag = row => row.filtered ? badge('已过滤', 'bad') : badge('通过', 'ok');
         const safe = v => v == null ? '--' : v;
 
+        function toast(message, level='info') {
+            const host = document.getElementById('toastHost');
+            const el = document.createElement('div');
+            el.className = `toast ${level}`;
+            el.textContent = message;
+            host.appendChild(el);
+            setTimeout(() => el.remove(), 2800);
+        }
         async function api(url) {
             const r = await fetch(url);
             const j = await r.json();
             return j.data;
         }
         function mountTabs() {
-            document.querySelectorAll('.tab-btn').forEach(btn => {
+            document.querySelectorAll('.nav-btn').forEach(btn => {
                 btn.addEventListener('click', () => {
-                    document.querySelectorAll('.tab-btn').forEach(x => x.classList.remove('active'));
+                    document.querySelectorAll('.nav-btn').forEach(x => x.classList.remove('active'));
                     document.querySelectorAll('.panel').forEach(x => x.classList.remove('active'));
                     btn.classList.add('active');
                     document.getElementById(`tab-${btn.dataset.tab}`).classList.add('active');
@@ -371,11 +601,11 @@
             });
             const j = await r.json();
             if (!j.success) {
-                alert('应用 preset 失败: ' + (j.error || 'unknown'));
+                toast('应用 preset 失败: ' + (j.error || 'unknown'), 'bad');
                 return;
             }
             const msg = j.data?.message || `已应用 preset: ${name}`;
-            alert(msg + `\n主池: ${(j.data?.watch_list || []).join(', ') || '--'}`);
+            toast(msg, 'ok');
             await refreshAll();
         }
         async function loadOptimizer() {
@@ -425,8 +655,8 @@
                     <div class="muted">${p.message}</div>
                     <div class="muted" style="margin-top:6px">目标 preset: ${p.target || '--'}</div>
                     <div style="margin-top:8px">
-                        <button onclick="executeApproval('${p.type}', '${p.target}', 'approved')" style="background:var(--primary)">批准</button>
-                        <button onclick="executeApproval('${p.type}', '${p.target}', 'rejected')" style="background:var(--border);color:var(--text)">拒绝</button>
+                        <button onclick="executeApproval('${p.type}', '${p.target}', 'approved')">批准</button>
+                        <button onclick="executeApproval('${p.type}', '${p.target}', 'rejected')" class="secondary">拒绝</button>
                     </div>
                 </div>`).join('') : '<div class="item muted">暂无待审批建议</div>';
             const statusMap = {};
@@ -468,11 +698,11 @@
             });
             const j = await r.json();
             if (!j.success) {
-                alert('审批操作失败: ' + (j.error || 'unknown'));
+                toast('审批操作失败: ' + (j.error || 'unknown'), 'bad');
                 return;
             }
             const msg = j.data?.action === 'preset_applied' ? `已批准并自动应用 preset: ${target}` : `已记录审批: ${decision}`;
-            alert(msg);
+            toast(msg, 'ok');
             await loadGovernance();
             await refreshAll();
         }
@@ -480,27 +710,28 @@
             const url = force ? '/api/daily-summary?refresh=1' : '/api/daily-summary';
             const data = await api(url);
             document.getElementById('dailySummaryBlock').textContent = JSON.stringify(data, null, 2);
-            if (force) alert('今日日报已强制刷新');
+            if (force) toast('今日日报已强制刷新', 'ok');
         }
         async function previewRuntimeCleanup() {
             const r = await fetch('/api/runtime/cleanup');
             const j = await r.json();
             if (!j.success) {
-                alert('清理预览失败: ' + (j.error || 'unknown'));
+                toast('清理预览失败: ' + (j.error || 'unknown'), 'bad');
                 return;
             }
             document.getElementById('runtimeCleanupBlock').textContent = JSON.stringify(j.data, null, 2);
+            toast('已更新清理预览', 'info');
         }
         async function executeRuntimeCleanup() {
             if (!confirm('确定执行运行期重复记录清理？此操作会删除重复历史记录。')) return;
             const r = await fetch('/api/runtime/cleanup', {method: 'POST'});
             const j = await r.json();
             if (!j.success) {
-                alert('执行清理失败: ' + (j.error || 'unknown'));
+                toast('执行清理失败: ' + (j.error || 'unknown'), 'bad');
                 return;
             }
             document.getElementById('runtimeCleanupBlock').textContent = JSON.stringify(j.data, null, 2);
-            alert(`清理完成：删除 ${j.data?.total_deleted || 0} 条记录`);
+            toast(`清理完成：删除 ${j.data?.total_deleted || 0} 条记录`, 'ok');
             await loadGovernance();
             await refreshAll();
         }

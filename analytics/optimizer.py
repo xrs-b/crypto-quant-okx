@@ -271,9 +271,9 @@ class ParameterOptimizer:
         written = []
 
         presets = {
-            'btc-focused.yaml': self._build_preset_config(best_experiment, ['BTC/USDT'], ['XRP/USDT'], ['ETH/USDT', 'SOL/USDT', 'HYPE/USDT']),
-            'xrp-candidate.yaml': self._build_preset_config(best_experiment, ['XRP/USDT'], ['BTC/USDT'], ['ETH/USDT', 'SOL/USDT', 'HYPE/USDT']),
-            'safe-mode.yaml': self._build_preset_config(best_experiment, ['BTC/USDT'], [], ['XRP/USDT', 'ETH/USDT', 'SOL/USDT', 'HYPE/USDT'], extra_patch={'trading': {'position_size': 0.08}, 'strategies': {'composite': {'min_strength': 30, 'min_strategy_count': 2}}}),
+            'btc-focused.yaml': self._build_preset_config('btc-focused', best_experiment, ['BTC/USDT'], ['XRP/USDT'], ['ETH/USDT', 'SOL/USDT', 'HYPE/USDT']),
+            'xrp-candidate.yaml': self._build_preset_config('xrp-candidate', best_experiment, ['XRP/USDT'], ['BTC/USDT'], ['ETH/USDT', 'SOL/USDT', 'HYPE/USDT']),
+            'safe-mode.yaml': self._build_preset_config('safe-mode', best_experiment, ['BTC/USDT'], [], ['XRP/USDT', 'ETH/USDT', 'SOL/USDT', 'HYPE/USDT'], extra_patch={'trading': {'position_size': 0.08}, 'strategies': {'composite': {'min_strength': 30, 'min_strategy_count': 2}}}),
         }
 
         # BTC focused 保持当前最佳主运行配置，不叠加更差专项 patch
@@ -283,6 +283,7 @@ class ParameterOptimizer:
         if btc_grid:
             best_grid = btc_grid[0]
             presets['btc-grid-candidate.yaml'] = self._build_preset_config(
+                'btc-grid-candidate',
                 best_experiment,
                 ['BTC/USDT'],
                 ['XRP/USDT'],
@@ -303,8 +304,13 @@ class ParameterOptimizer:
             written.append({'name': filename.replace('.yaml', ''), 'path': str(path)})
         return written
 
-    def _build_preset_config(self, best_experiment: Optional[Dict], watch_list: List[str], candidate: List[str], paused: List[str], extra_patch: Optional[Dict] = None) -> Dict:
-        base = deepcopy(self.config.all)
+    def _build_preset_config(self, preset_name: str, best_experiment: Optional[Dict], watch_list: List[str], candidate: List[str], paused: List[str], extra_patch: Optional[Dict] = None) -> Dict:
+        stable_cfg = Config(self.config.config_path)
+        stable_cfg.reload()
+        base = deepcopy(stable_cfg.all)
+        base.setdefault('runtime_meta', {})['current_preset'] = preset_name
+        base['runtime_meta'].pop('last_applied_at', None)
+        base['runtime_meta'].pop('last_backup', None)
         if best_experiment:
             base = self._deep_merge(base, best_experiment['patch'])
         if extra_patch:

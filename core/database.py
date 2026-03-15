@@ -568,6 +568,20 @@ class Database:
             df['summary'] = df['summary'].apply(lambda x: json.loads(x) if x else {})
         return df.to_dict('records')
 
+    def get_latest_daily_report(self, report_date: str) -> Optional[Dict]:
+        conn = self._get_connection()
+        df = pd.read_sql_query(
+            "SELECT * FROM daily_reports WHERE report_date = ? ORDER BY created_at DESC, id DESC LIMIT 1",
+            conn,
+            params=(report_date,)
+        )
+        conn.close()
+        if df.empty:
+            return None
+        row = df.iloc[0].to_dict()
+        row['summary'] = json.loads(row['summary']) if row.get('summary') else {}
+        return row
+
     def record_approval(self, approval_type: str, target: str, decision: str, details: Dict = None):
         conn = self._get_connection()
         cursor = conn.cursor()

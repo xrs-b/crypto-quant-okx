@@ -393,19 +393,20 @@ def apply_preset():
 @app.route('/api/governance/status')
 def get_governance_status():
     """获取治理状态"""
-    return jsonify({'success': True, 'data': governance.evaluate()})
+    return jsonify({'success': True, 'data': governance.evaluate(persist=False)})
 
 
 @app.route('/api/daily-summary')
 def get_daily_summary_report():
     """生成/获取今日摘要"""
-    return jsonify({'success': True, 'data': governance.generate_daily_summary()})
+    force_refresh = str(request.args.get('refresh', '')).lower() in ('1', 'true', 'yes')
+    return jsonify({'success': True, 'data': governance.generate_daily_summary(force_refresh=force_refresh)})
 
 
 @app.route('/api/approvals/pending')
 def get_pending_approvals():
     """获取待审批的建议"""
-    gov = governance.evaluate(use_cache=True)
+    gov = governance.evaluate(use_cache=True, persist=False)
     pending = []
     for alert in gov.get('alerts', []):
         if alert.get('approval_required') and alert.get('approval_pending', True):
@@ -510,7 +511,7 @@ def get_alerts():
     if risk.get('consecutive_losses', 0) >= risk.get('max_consecutive_losses', 99):
         alerts.append({'level': 'danger', 'message': '连续亏损已触发熔断'})
 
-    gov = governance.evaluate(use_cache=True)
+    gov = governance.evaluate(use_cache=True, persist=False)
     for row in gov.get('alerts', []):
         status = row.get('approval_status')
         suffix = ''

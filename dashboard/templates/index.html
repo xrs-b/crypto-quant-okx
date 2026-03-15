@@ -482,6 +482,19 @@
                             </div>
                         </div>
 
+                        <div class="compact-grid">
+                            <div class="card mini">
+                                <div class="section-title">Champion / 当前主池</div>
+                                <div class="section-note">站在运营角度，先看当前主池是否仍然守得住冠军位。</div>
+                                <div class="list" id="optimizerChampion"></div>
+                            </div>
+                            <div class="card mini">
+                                <div class="section-title">Challenger / 候选挑战者</div>
+                                <div class="section-note">快速看候选池有冇真正具备挑战主池资格，以及失败原因。</div>
+                                <div class="list" id="optimizerChallenger"></div>
+                            </div>
+                        </div>
+
                         <div class="card mini">
                             <div class="section-title">实验结果总览</div>
                             <table><thead><tr><th>实验</th><th>评分</th><th>总收益</th><th>胜率</th><th>回撤</th></tr></thead><tbody id="optimizerExperiments"></tbody></table>
@@ -552,6 +565,19 @@
                                 <div class="section-title">切池决策链</div>
                                 <div class="section-note">按顺序显示切池是否通过：候选池、模式、晋升审查、分数对比。</div>
                                 <div class="list" id="poolSwitchDecisionPath"></div>
+                            </div>
+                        </div>
+
+                        <div class="compact-grid">
+                            <div class="card mini">
+                                <div class="section-title">主池卫冕状态</div>
+                                <div class="section-note">像运营驾驶舱一样，看当前主池是否仍有足够优势守擂。</div>
+                                <div class="list" id="governanceChampionStatus"></div>
+                            </div>
+                            <div class="card mini">
+                                <div class="section-title">候选挑战者状态</div>
+                                <div class="section-note">集中显示当前 challenger 及其失败原因、审批状态与切池距离。</div>
+                                <div class="list" id="governanceChallengerStatus"></div>
                             </div>
                         </div>
 
@@ -754,10 +780,12 @@
             await refreshAll();
         }
         async function loadOptimizer() {
-            const [data, candidateHistory, presetHistory] = await Promise.all([
+            const [data, candidateHistory, presetHistory, mode, gov] = await Promise.all([
                 api('/api/optimizer/results'),
                 api('/api/candidates/history?limit=10'),
-                api('/api/presets/history?limit=10')
+                api('/api/presets/history?limit=10'),
+                api('/api/mode/status'),
+                api('/api/governance/status')
             ]);
             const best = data.best_experiment || {};
             document.getElementById('optimizerBest').innerHTML = `
@@ -765,12 +793,26 @@
                 <div class="item"><strong>综合评分</strong><div class="muted">${safe(best.score)}</div></div>
                 <div class="item"><strong>结果总览</strong><div class="muted">收益 ${safe(best.summary?.total_return_pct)}% ｜ 胜率 ${safe(best.summary?.win_rate)}% ｜ 回撤 ${safe(best.summary?.max_drawdown_pct)}%</div></div>`;
             const exps = data.experiments || [];
+            const sets = data.focused_sets || [];
+            const currentPool = (mode.watch_list || [])[0] || '--';
+            const candidatePool = (mode.candidate_watch_list || [])[0] || '--';
+            const champion = sets.find(s => (s.symbols || [])[0] === currentPool) || {};
+            const challenger = sets.find(s => (s.symbols || [])[0] === candidatePool) || {};
+            const challengerReview = (data.candidate_promotions || []).find(p => p.symbol === candidatePool) || {};
+            const switchReview = gov.pool_switch_review || {};
+            document.getElementById('optimizerChampion').innerHTML = `
+                <div class="item"><strong>当前冠军</strong><div class="muted">${currentPool}</div></div>
+                <div class="item"><strong>守擂成绩</strong><div class="muted">评分 ${safe(champion.score)} ｜ 收益 ${safe(champion.summary?.total_return_pct)}% ｜ 胜率 ${safe(champion.summary?.win_rate)}%</div></div>
+                <div class="item"><strong>当前结论</strong><div class="muted">${safe(switchReview.message) || '暂无'} </div></div>`;
+            document.getElementById('optimizerChallenger').innerHTML = `
+                <div class="item"><strong>当前挑战者</strong><div class="muted">${candidatePool}</div></div>
+                <div class="item"><strong>挑战成绩</strong><div class="muted">评分 ${safe(challenger.score)} ｜ 收益 ${safe(challenger.summary?.total_return_pct)}% ｜ 胜率 ${safe(challenger.summary?.win_rate)}%</div></div>
+                <div class="item"><strong>失败原因 / 状态</strong><div class="muted">${safe(challengerReview.reason) || safe(switchReview.last_change_reason) || '--'}</div></div>`;
             document.getElementById('optimizerExperiments').innerHTML = exps.length ? exps.map(r => `<tr><td>${r.name}</td><td>${r.score}</td><td class="${Number(r.summary?.total_return_pct || 0) >= 0 ? 'pos' : 'neg'}">${safe(r.summary?.total_return_pct)}%</td><td>${safe(r.summary?.win_rate)}%</td><td class="${Number(r.summary?.max_drawdown_pct || 0) >= 0 ? 'pos' : 'neg'}">${safe(r.summary?.max_drawdown_pct)}%</td></tr>`).join('') : '<tr><td colspan="5" class="muted">暂无实验</td></tr>';
             const syms = data.symbol_advice || [];
             document.getElementById('optimizerSymbols').innerHTML = syms.length ? syms.map(r => `<tr><td>${r.symbol}</td><td>${badge(r.tier, r.tier === 'keep' ? 'ok' : r.tier === 'watch' ? 'warn' : 'bad')}</td><td class="${Number(r.backtest_return_pct || 0) >= 0 ? 'pos' : 'neg'}">${safe(r.backtest_return_pct)}%</td><td class="${Number(r.avg_quality_pct || 0) >= 0 ? 'pos' : 'neg'}">${safe(r.avg_quality_pct)}%</td><td>${r.action}</td></tr>`).join('') : '<tr><td colspan="5" class="muted">暂无建议</td></tr>';
             const adv = data.strategy_advice || [];
             document.getElementById('optimizerStrategyAdvice').innerHTML = adv.length ? adv.map(a => `<div class="item"><strong>${a.topic}</strong><div class="muted">${a.advice}</div></div>`).join('') : '<div class="item muted">暂无策略建议</div>';
-            const sets = data.focused_sets || [];
             document.getElementById('optimizerFocusedSets').innerHTML = sets.length ? sets.map(s => `<tr><td>${s.description}</td><td>${s.score}</td><td class="${Number(s.summary?.total_return_pct || 0) >= 0 ? 'pos' : 'neg'}">${safe(s.summary?.total_return_pct)}%</td><td>${safe(s.summary?.win_rate)}%</td><td class="${Number(s.summary?.max_drawdown_pct || 0) >= 0 ? 'pos' : 'neg'}">${safe(s.summary?.max_drawdown_pct)}%</td></tr>`).join('') : '<tr><td colspan="5" class="muted">暂无聚焦实验</td></tr>';
             const specs = data.symbol_specific || {};
             const specHtml = Object.keys(specs).length ? Object.entries(specs).map(([symbol, rows]) => `<div class="item"><strong>${symbol}</strong><div class="muted">${rows.map(r => `${r.description}: ${r.summary?.total_return_pct}% / win ${r.summary?.win_rate}% / dd ${r.summary?.max_drawdown_pct}%`).join('<br>')}</div></div>`).join('') : '<div class="item muted">暂无专项实验</div>';
@@ -839,10 +881,18 @@
             document.getElementById('poolSwitchSnapshot').innerHTML = `
                 <div class="item"><strong>当前主池</strong><div class="muted">${(path.current_pool || gov.mode?.watch_list || []).join(', ') || '--'}</div></div>
                 <div class="item"><strong>当前候选池</strong><div class="muted">${(path.candidate_pool || gov.mode?.candidate_watch_list || []).join(', ') || '--'}</div></div>
-                <div class="item"><strong>切池比分</strong><div class="muted">XRP ${safe(path.xrp_score)} vs BTC ${safe(path.btc_score)}</div></div>
+                <div class="item"><strong>切池比分</strong><div class="muted">${safe(path.candidate_symbol || '候选')} ${safe(path.candidate_score)} vs ${safe(path.current_symbol || '主池')} ${safe(path.current_score)}</div></div>
                 <div class="item"><strong>最后变化原因</strong><div class="muted">${safe(path.summary) || safe(switchReview.last_change_reason) || '--'}</div></div>
                 <div class="item"><strong>当前卡点</strong><div class="muted">${safe(path.blocking_label) || '无，已可进入审批'}</div></div>`;
             document.getElementById('poolSwitchDecisionPath').innerHTML = gates.length ? gates.map(g => `<div class="item"><strong>${g.label}</strong><div style="margin:6px 0">${badge(g.passed ? 'passed' : 'blocked', g.passed ? 'ok' : 'bad')}</div><div class="muted">${g.detail || '--'}</div></div>`).join('') : '<div class="item muted">暂无切池诊断链</div>';
+            document.getElementById('governanceChampionStatus').innerHTML = `
+                <div class="item"><strong>当前主池</strong><div class="muted">${safe(path.current_symbol) || '--'} ｜ preset: ${safe(gov.mode?.current_preset)}</div></div>
+                <div class="item"><strong>守擂成绩</strong><div class="muted">评分 ${safe(path.current_score)} ｜ 当前审批状态 ${safe(switchReview.approval_status)}</div></div>
+                <div class="item"><strong>卫冕结论</strong><div class="muted">${safe(switchReview.message) || '--'}</div></div>`;
+            document.getElementById('governanceChallengerStatus').innerHTML = `
+                <div class="item"><strong>当前挑战者</strong><div class="muted">${safe(path.candidate_symbol) || '--'}</div></div>
+                <div class="item"><strong>挑战结论</strong><div class="muted">${safe(path.promotion_reason) || '--'}</div></div>
+                <div class="item"><strong>切池距离</strong><div class="muted">${safe(path.blocking_label) || '已可发起审批'} ｜ ${safe(path.summary) || '--'}</div></div>`;
             document.getElementById('dailySummaryBlock').textContent = JSON.stringify(summary, null, 2);
             document.getElementById('runtimeCleanupBlock').textContent = JSON.stringify(cleanupPreview, null, 2);
             document.getElementById('approvalHistoryTable').innerHTML = history.length ? history.map(h => `<tr><td>${h.created_at}</td><td>${h.approval_type}</td><td>${h.target}</td><td>${badge(h.decision, h.decision === 'approved' ? 'ok' : h.decision === 'pending' ? 'warn' : 'bad')}</td></tr>`).join('') : '<tr><td colspan="4" class="muted">暂无审批历史</td></tr>';

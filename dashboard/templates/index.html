@@ -218,6 +218,10 @@
         .muted { color: var(--muted); }
         pre { white-space: pre-wrap; word-break: break-word; margin:0; font-size:12px; line-height:1.55; color:#d8e3f3; }
         .split-3 { display:grid; grid-template-columns: repeat(3,1fr); gap:16px; }
+        .stack { display:grid; gap:16px; }
+        .compact-grid { display:grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap:16px; }
+        .section-note { color: var(--muted); font-size: 12px; margin: -6px 0 12px; }
+        .toolbar-inline { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:12px; }
         .toast-host {
             position: fixed;
             right: 24px;
@@ -409,62 +413,99 @@
                     </div>
                 </div>
 
-                <div class="card panel" id="tab-optimizer">
-                    <div class="panel-grid">
+                <div class="panel" id="tab-optimizer">
+                    <div class="stack">
+                        <div class="compact-grid">
+                            <div class="card mini">
+                                <div class="section-title">最佳实验</div>
+                                <div class="section-note">优先看当前最值得采用既实验结果，再向下比对全部实验。</div>
+                                <div class="list" id="optimizerBest"></div>
+                            </div>
+                            <div class="card mini">
+                                <div class="section-title">策略建议</div>
+                                <div class="section-note">偏运营视角：先睇应该做咩，而唔系先睇原始数据表。</div>
+                                <div class="list" id="optimizerStrategyAdvice"></div>
+                            </div>
+                        </div>
+
                         <div class="card mini">
-                            <div class="section-title">最佳实验</div>
-                            <div class="list" id="optimizerBest"></div>
-                            <div style="height:12px"></div>
+                            <div class="section-title">实验结果总览</div>
                             <table><thead><tr><th>实验</th><th>评分</th><th>总收益</th><th>胜率</th><th>回撤</th></tr></thead><tbody id="optimizerExperiments"></tbody></table>
                         </div>
+
+                        <div class="compact-grid">
+                            <div class="card mini">
+                                <div class="section-title">币种分层建议</div>
+                                <table><thead><tr><th>币种</th><th>层级</th><th>回测</th><th>质量</th><th>建议</th></tr></thead><tbody id="optimizerSymbols"></tbody></table>
+                            </div>
+                            <div class="card mini">
+                                <div class="section-title">候选晋升建议</div>
+                                <table><thead><tr><th>币种</th><th>决定</th><th>原因</th></tr></thead><tbody id="optimizerPromotions"></tbody></table>
+                            </div>
+                        </div>
+
+                        <div class="compact-grid">
+                            <div class="card mini">
+                                <div class="section-title">聚焦币池实验</div>
+                                <table><thead><tr><th>组合</th><th>评分</th><th>收益</th><th>胜率</th><th>回撤</th></tr></thead><tbody id="optimizerFocusedSets"></tbody></table>
+                            </div>
+                            <div class="card mini">
+                                <div class="section-title">BTC 微调网格 Top</div>
+                                <table><thead><tr><th>参数</th><th>评分</th><th>收益</th><th>回撤</th></tr></thead><tbody id="optimizerBtcGrid"></tbody></table>
+                            </div>
+                        </div>
+
+                        <div class="compact-grid">
+                            <div class="card mini">
+                                <div class="section-title">专项实验</div>
+                                <div class="list" id="optimizerSymbolSpecific"></div>
+                            </div>
+                            <div class="card mini">
+                                <div class="section-title">预设管理</div>
+                                <table><thead><tr><th>预设</th><th>路径</th><th>操作</th></tr></thead><tbody id="optimizerPresets"></tbody></table>
+                            </div>
+                        </div>
+
                         <div class="card mini">
-                            <div class="section-title">币种分层建议</div>
-                            <table><thead><tr><th>币种</th><th>层级</th><th>回测</th><th>质量</th><th>建议</th></tr></thead><tbody id="optimizerSymbols"></tbody></table>
-                            <div style="height:12px"></div>
-                            <div class="section-title">策略建议</div>
-                            <div class="list" id="optimizerStrategyAdvice"></div>
-                            <div style="height:12px"></div>
-                            <div class="section-title">聚焦币池实验</div>
-                            <table><thead><tr><th>组合</th><th>评分</th><th>收益</th><th>胜率</th><th>回撤</th></tr></thead><tbody id="optimizerFocusedSets"></tbody></table>
-                            <div style="height:12px"></div>
-                            <div class="section-title">专项实验与预设</div>
-                            <div class="list" id="optimizerSymbolSpecific"></div>
-                            <div style="height:12px"></div>
-                            <div class="section-title">BTC 微调网格 Top</div>
-                            <table><thead><tr><th>参数</th><th>评分</th><th>收益</th><th>回撤</th></tr></thead><tbody id="optimizerBtcGrid"></tbody></table>
-                            <div style="height:12px"></div>
-                            <div class="section-title">候选晋升建议</div>
-                            <table><thead><tr><th>币种</th><th>决定</th><th>原因</th></tr></thead><tbody id="optimizerPromotions"></tbody></table>
-                            <div style="height:12px"></div>
                             <div class="section-title">候选历史 / Preset 历史</div>
                             <table><thead><tr><th>时间</th><th>对象</th><th>动作</th><th>说明</th></tr></thead><tbody id="optimizerHistory"></tbody></table>
-                            <div style="height:12px"></div>
-                            <table><thead><tr><th>预设</th><th>路径</th><th>操作</th></tr></thead><tbody id="optimizerPresets"></tbody></table>
                         </div>
                     </div>
                 </div>
 
-                <div class="card panel" id="tab-governance">
-                    <div class="panel-grid">
-                        <div class="card mini">
-                            <div class="section-title">待审批建议</div>
-                            <div class="list" id="pendingApprovals"></div>
-                            <div style="height:12px"></div>
-                            <div class="section-title">最新审批状态</div>
-                            <div class="list" id="approvalStatusSummary"></div>
-                        </div>
-                        <div class="card mini">
-                            <div class="section-title">今日日报摘要</div>
-                            <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;">
-                                <button onclick="refreshDailySummary(true)">强制刷新日报</button>
-                                <button onclick="previewRuntimeCleanup()" class="secondary">预览清理</button>
-                                <button onclick="executeRuntimeCleanup()" style="background:var(--warn);color:#241400;">执行清理</button>
+                <div class="panel" id="tab-governance">
+                    <div class="stack">
+                        <div class="compact-grid">
+                            <div class="card mini">
+                                <div class="section-title">待审批建议</div>
+                                <div class="section-note">需要你作决定既项目集中喺呢度，优先处理真正 pending 既审批。</div>
+                                <div class="list" id="pendingApprovals"></div>
                             </div>
-                            <pre id="dailySummaryBlock" style="max-height:400px;overflow-y:auto;">加载中...</pre>
-                            <div style="height:12px"></div>
-                            <div class="section-title">运行期记录清理预览</div>
-                            <pre id="runtimeCleanupBlock" style="max-height:180px;overflow-y:auto;">未检查</pre>
-                            <div style="height:12px"></div>
+                            <div class="card mini">
+                                <div class="section-title">最新审批状态</div>
+                                <div class="section-note">快速查看每类审批既最新结果，以及最近有冇状态变化。</div>
+                                <div class="list" id="approvalStatusSummary"></div>
+                            </div>
+                        </div>
+
+                        <div class="compact-grid">
+                            <div class="card mini">
+                                <div class="section-title">今日日报摘要</div>
+                                <div class="toolbar-inline">
+                                    <button onclick="refreshDailySummary(true)">强制刷新日报</button>
+                                    <button onclick="previewRuntimeCleanup()" class="secondary">预览清理</button>
+                                    <button onclick="executeRuntimeCleanup()" style="background:var(--warn);color:#241400;">执行清理</button>
+                                </div>
+                                <pre id="dailySummaryBlock" style="max-height:400px;overflow-y:auto;">加载中...</pre>
+                            </div>
+                            <div class="card mini">
+                                <div class="section-title">运行期记录清理预览</div>
+                                <div class="section-note">这里会显示去重清理预览或执行结果，方便你确认影响范围。</div>
+                                <pre id="runtimeCleanupBlock" style="max-height:400px;overflow-y:auto;">未检查</pre>
+                            </div>
+                        </div>
+
+                        <div class="card mini">
                             <div class="section-title">审批历史</div>
                             <table><thead><tr><th>时间</th><th>类型</th><th>目标</th><th>决定</th></tr></thead><tbody id="approvalHistoryTable"></tbody></table>
                         </div>

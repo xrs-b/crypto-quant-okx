@@ -666,6 +666,18 @@
                 .replaceAll(' 超过 <= ', ' > ')
                 .replaceAll('；', ' ｜ ');
         };
+        const hoursSince = iso => {
+            if (!iso) return null;
+            const t = new Date(iso).getTime();
+            if (Number.isNaN(t)) return null;
+            return (Date.now() - t) / 3600000;
+        };
+        const holdWindowHint = (iso, minHours = 6) => {
+            const h = hoursSince(iso);
+            if (h == null) return '观察期未知，建议保守处理';
+            if (h >= minHours) return `已持有 ${h.toFixed(1)}h，可重新评估回切`; 
+            return `已持有 ${h.toFixed(1)}h，建议至少观察 ${minHours}h`; 
+        };
         const stateClass = text => {
             const s = String(text || '').toLowerCase();
             if (s.includes('promote') || s.includes('approved') || s.includes('通过') || s.includes('守擂')) return 'ok';
@@ -828,8 +840,9 @@
             const switchReview = gov.pool_switch_review || {};
             const championState = switchReview.approval_required ? '挑战中' : '守擂中';
             const challengerState = challengerReview.decision || (switchReview.approval_required ? 'pending' : 'reject');
-            const championAction = switchReview.approval_required ? '建议先处理挑战审批，再决定是否守擂' : '建议继续观察 challenger，暂不动作';
-            const challengerAction = switchReview.approval_required ? `建议审批 ${switchReview.recommended_preset || candidatePool}` : (challengerReview.decision === 'keep_candidate' ? '建议保留候选位继续观察' : '建议继续观察，暂不发起回切');
+            const holdHint = holdWindowHint(mode.last_applied_at, 6);
+            const championAction = switchReview.approval_required ? '建议先处理挑战审批，再决定是否守擂' : `建议继续观察 challenger，${holdHint}`;
+            const challengerAction = switchReview.approval_required ? `建议审批 ${switchReview.recommended_preset || candidatePool}` : (challengerReview.decision === 'keep_candidate' ? `建议保留候选位继续观察｜${holdHint}` : `建议继续观察，暂不发起回切｜${holdHint}`);
             document.getElementById('optimizerChampion').innerHTML = `
                 <div class="item"><strong>当前冠军</strong><div class="muted">${currentPool}</div><div style="margin-top:6px">${badge(championState, stateClass(championState))}</div></div>
                 <div class="item"><strong>守擂成绩</strong><div class="muted">评分 ${safe(champion.score)} ｜ 收益 ${safe(champion.summary?.total_return_pct)}% ｜ 胜率 ${safe(champion.summary?.win_rate)}%</div></div>
@@ -862,7 +875,8 @@
             document.getElementById('recentPoolSwitchSummary').innerHTML = latestSwitch ? `
                 <div class="item"><strong>最近切池</strong><div class="muted">${latestSwitch.preset_name} ｜ ${(latestSwitch.watch_list || []).join(', ') || '--'}</div></div>
                 <div class="item"><strong>发生时间</strong><div class="muted">${latestSwitch.created_at || '--'}</div></div>
-                <div class="item"><strong>切后格局</strong><div class="muted">主池 ${currentPool} ｜ 候选 ${candidatePool}</div></div>` : '<div class="item muted">暂无切池摘要</div>';
+                <div class="item"><strong>切后格局</strong><div class="muted">主池 ${currentPool} ｜ 候选 ${candidatePool}</div></div>
+                <div class="item"><strong>观察窗口</strong><div class="muted">${holdHint}</div></div>` : '<div class="item muted">暂无切池摘要</div>';
             document.getElementById('optimizerHistory').innerHTML = historyRows.length ? historyRows.slice(0,12).map(h => `<tr><td>${h.time}</td><td>${h.object}</td><td>${h.action}</td><td>${shortReason(h.note)}</td></tr>`).join('') : '<tr><td colspan="4" class="muted">暂无历史记录</td></tr>';
             const presets = data.presets || [];
             document.getElementById('optimizerPresets').innerHTML = presets.length ? presets.map(p => `<tr><td>${p.name}</td><td>${p.path}</td><td><button onclick="applyPreset('${p.name}')">应用</button></td></tr>`).join('') : '<tr><td colspan="3" class="muted">暂无预设</td></tr>';
@@ -916,8 +930,9 @@
             const switchReview = gov.pool_switch_review || {};
             const path = switchReview.decision_path || {};
             const gates = path.gates || [];
+            const holdHint = holdWindowHint(gov.mode?.last_applied_at, 6);
             const governanceAction = switchReview.approval_required ? `建议审批 ${switchReview.recommended_preset || '--'}` : (path.blocking_gate ? `建议继续观察，优先解决：${path.blocking_label}` : '当前无额外动作');
-            const governanceWait = path.blocking_gate === 'candidate_promotion' ? '等 challenger 回测 / 胜率 / 质量进一步改善' : path.blocking_gate === 'score_compare' ? '等 challenger 分数真正反超主池' : '维持观察';
+            const governanceWait = path.blocking_gate === 'candidate_promotion' ? `等 challenger 回测 / 胜率 / 质量进一步改善｜${holdHint}` : path.blocking_gate === 'score_compare' ? `等 challenger 分数真正反超主池｜${holdHint}` : holdHint;
             document.getElementById('poolSwitchSnapshot').innerHTML = `
                 <div class="item"><strong>当前主池</strong><div class="muted">${(path.current_pool || gov.mode?.watch_list || []).join(', ') || '--'}</div></div>
                 <div class="item"><strong>当前候选池</strong><div class="muted">${(path.candidate_pool || gov.mode?.candidate_watch_list || []).join(', ') || '--'}</div></div>

@@ -544,6 +544,19 @@
 
                         <div class="compact-grid">
                             <div class="card mini">
+                                <div class="section-title">主池 / 候选池一眼图</div>
+                                <div class="section-note">直接看当前主池、候选池、切换卡点与最后变化原因。</div>
+                                <div class="list" id="poolSwitchSnapshot"></div>
+                            </div>
+                            <div class="card mini">
+                                <div class="section-title">切池决策链</div>
+                                <div class="section-note">按顺序显示切池是否通过：候选池、模式、晋升审查、分数对比。</div>
+                                <div class="list" id="poolSwitchDecisionPath"></div>
+                            </div>
+                        </div>
+
+                        <div class="compact-grid">
+                            <div class="card mini">
                                 <div class="section-title">今日日报摘要</div>
                                 <div class="toolbar-inline">
                                     <button onclick="refreshDailySummary(true)">强制刷新日报</button>
@@ -775,17 +788,19 @@
             document.getElementById('optimizerPresets').innerHTML = presets.length ? presets.map(p => `<tr><td>${p.name}</td><td>${p.path}</td><td><button onclick="applyPreset('${p.name}')">应用</button></td></tr>`).join('') : '<tr><td colspan="3" class="muted">暂无预设</td></tr>';
         }
         async function loadGovernance() {
-            const [pending, summary, history, cleanupPreview] = await Promise.all([
+            const [pending, summary, history, cleanupPreview, gov] = await Promise.all([
                 api('/api/approvals/pending'),
                 api('/api/daily-summary'),
                 fetch('/api/approvals/history?limit=20').then(r => r.json()).then(j => j.data || []),
-                fetch('/api/runtime/cleanup').then(r => r.json()).then(j => j.data || {})
+                fetch('/api/runtime/cleanup').then(r => r.json()).then(j => j.data || {}),
+                api('/api/governance/status')
             ]);
             document.getElementById('pendingApprovals').innerHTML = pending.length ? pending.map(p => `
                 <div class="item">
                     <strong>${p.type === 'btc_grid_upgrade' ? 'BTC 网格升级' : p.type === 'main_pool_downgrade' ? '主池降级' : p.type === 'pool_switch' ? '主池切换审批' : p.type}</strong>
                     <div class="muted">${p.message}</div>
                     <div class="muted" style="margin-top:6px">目标 preset: ${p.target || '--'}</div>
+                    <div class="muted" style="margin-top:6px">最后变化原因: ${safe(p.details?.last_change_reason) || safe(p.details?.message)}</div>
                     <div style="margin-top:8px">
                         <button onclick="executeApproval('${p.type}', '${p.target}', 'approved')">批准</button>
                         <button onclick="executeApproval('${p.type}', '${p.target}', 'rejected')" class="secondary">拒绝</button>
@@ -818,6 +833,16 @@
                 const changeTag = s.changed ? `<span style="margin-left:8px">${badge('刚变化', 'warn')}</span>` : '';
                 return `<div class="item"><strong>${label}</strong>${changeTag}<div class="muted">目标: ${s.target || '--'} ｜ 最近时间: ${s.created_at || '--'}</div><div style="margin-top:6px">${badge(s.decision, cls)}</div></div>`;
             }).join('') : '<div class="item muted">暂无审批状态</div>';
+            const switchReview = gov.pool_switch_review || {};
+            const path = switchReview.decision_path || {};
+            const gates = path.gates || [];
+            document.getElementById('poolSwitchSnapshot').innerHTML = `
+                <div class="item"><strong>当前主池</strong><div class="muted">${(path.current_pool || gov.mode?.watch_list || []).join(', ') || '--'}</div></div>
+                <div class="item"><strong>当前候选池</strong><div class="muted">${(path.candidate_pool || gov.mode?.candidate_watch_list || []).join(', ') || '--'}</div></div>
+                <div class="item"><strong>切池比分</strong><div class="muted">XRP ${safe(path.xrp_score)} vs BTC ${safe(path.btc_score)}</div></div>
+                <div class="item"><strong>最后变化原因</strong><div class="muted">${safe(path.summary) || safe(switchReview.last_change_reason) || '--'}</div></div>
+                <div class="item"><strong>当前卡点</strong><div class="muted">${safe(path.blocking_label) || '无，已可进入审批'}</div></div>`;
+            document.getElementById('poolSwitchDecisionPath').innerHTML = gates.length ? gates.map(g => `<div class="item"><strong>${g.label}</strong><div style="margin:6px 0">${badge(g.passed ? 'passed' : 'blocked', g.passed ? 'ok' : 'bad')}</div><div class="muted">${g.detail || '--'}</div></div>`).join('') : '<div class="item muted">暂无切池诊断链</div>';
             document.getElementById('dailySummaryBlock').textContent = JSON.stringify(summary, null, 2);
             document.getElementById('runtimeCleanupBlock').textContent = JSON.stringify(cleanupPreview, null, 2);
             document.getElementById('approvalHistoryTable').innerHTML = history.length ? history.map(h => `<tr><td>${h.created_at}</td><td>${h.approval_type}</td><td>${h.target}</td><td>${badge(h.decision, h.decision === 'approved' ? 'ok' : h.decision === 'pending' ? 'warn' : 'bad')}</td></tr>`).join('') : '<tr><td colspan="4" class="muted">暂无审批历史</td></tr>';

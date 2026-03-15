@@ -95,7 +95,21 @@ class GovernanceEngine:
 
         xrp_score = float(xrp_focus.get('score', -999) or -999)
         btc_score = float(btc_focus.get('score', -999) or -999)
-        if xrp_promotion and xrp_promotion.get('decision') == 'promote' and xrp_score > btc_score:
+        promote_passed = bool(xrp_promotion and xrp_promotion.get('decision') == 'promote')
+        score_passed = xrp_score > btc_score
+        candidate_in_pool = 'XRP/USDT' in (mode.get('candidate_watch_list') or [])
+        focused_mode = mode.get('selection_mode') == 'focused'
+        diagnosis = self._build_pool_switch_diagnosis(
+            mode=mode,
+            xrp_score=xrp_score,
+            btc_score=btc_score,
+            xrp_promotion=xrp_promotion,
+            promote_passed=promote_passed,
+            score_passed=score_passed,
+            candidate_in_pool=candidate_in_pool,
+            focused_mode=focused_mode,
+        )
+        if promote_passed and score_passed:
             return {
                 'type': 'pool_switch',
                 'level': 'warn',
@@ -104,6 +118,10 @@ class GovernanceEngine:
                 'message': '候选池 XRP 已达到升级条件，且单币得分优于 BTC，可申请切换主池',
                 'btc_score': round(btc_score, 4),
                 'xrp_score': round(xrp_score, 4),
+                'current_pool': mode.get('watch_list', []),
+                'candidate_pool': mode.get('candidate_watch_list', []),
+                'last_change_reason': diagnosis.get('summary'),
+                'decision_path': diagnosis,
             }
         return {
             'type': 'pool_switch',
@@ -113,6 +131,55 @@ class GovernanceEngine:
             'message': '当前不建议切换主池，继续维持 BTC-focused',
             'btc_score': round(btc_score, 4),
             'xrp_score': round(xrp_score, 4),
+            'current_pool': mode.get('watch_list', []),
+            'candidate_pool': mode.get('candidate_watch_list', []),
+            'last_change_reason': diagnosis.get('summary'),
+            'decision_path': diagnosis,
+        }
+
+    def _build_pool_switch_diagnosis(self, mode: Dict, xrp_score: float, btc_score: float, xrp_promotion: Optional[Dict], promote_passed: bool, score_passed: bool, candidate_in_pool: bool, focused_mode: bool) -> Dict:
+        promotion_reason = xrp_promotion.get('reason') if xrp_promotion else '暂无 XRP 候选审查结果'
+        xrp_decision = xrp_promotion.get('decision') if xrp_promotion else 'missing'
+        gates = [
+            {
+                'key': 'candidate_watch_list',
+                'label': '候选池已挂入 XRP',
+                'passed': candidate_in_pool,
+                'detail': 'XRP 已在 candidate_watch_list 中' if candidate_in_pool else 'XRP 未出现在 candidate_watch_list 中',
+            },
+            {
+                'key': 'selection_mode',
+                'label': '当前运行模式允许聚焦切池',
+                'passed': focused_mode,
+                'detail': f"当前 selection_mode = {mode.get('selection_mode')}" if mode.get('selection_mode') else 'selection_mode 缺失',
+            },
+            {
+                'key': 'candidate_promotion',
+                'label': '候选晋升审查通过',
+                'passed': promote_passed,
+                'detail': f"decision = {xrp_decision} ｜ {promotion_reason}",
+            },
+            {
+                'key': 'score_compare',
+                'label': 'XRP 聚焦得分高于 BTC 主池',
+                'passed': score_passed,
+                'detail': f"XRP {round(xrp_score, 4)} vs BTC {round(btc_score, 4)}",
+            },
+        ]
+        blocker = next((g for g in gates if not g['passed']), None)
+        summary = blocker['detail'] if blocker else '所有切池条件已通过，等待审批执行'
+        return {
+            'current_preset': mode.get('current_preset'),
+            'current_pool': mode.get('watch_list', []),
+            'candidate_pool': mode.get('candidate_watch_list', []),
+            'xrp_score': round(xrp_score, 4),
+            'btc_score': round(btc_score, 4),
+            'promotion_decision': xrp_decision,
+            'promotion_reason': promotion_reason,
+            'summary': summary,
+            'blocking_gate': blocker['key'] if blocker else None,
+            'blocking_label': blocker['label'] if blocker else None,
+            'gates': gates,
         }
 
     def _assess_main_pool_downgrade(self, mode: Dict, current_main: Optional[Dict]) -> Optional[Dict]:

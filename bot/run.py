@@ -215,6 +215,8 @@ def main():
     parser.add_argument('--apply-preset', type=str, help='应用预设配置')
     parser.add_argument('--mode-status', action='store_true', help='显示当前模式状态')
     parser.add_argument('--daily-summary', action='store_true', help='生成日报摘要')
+    parser.add_argument('--cleanup-runtime-records', action='store_true', help='清理重复的治理/日报运行记录')
+    parser.add_argument('--dry-run', action='store_true', help='配合清理命令，仅预览不删除')
     parser.add_argument('--port', type=int, default=8050, help='仪表盘端口')
     
     args = parser.parse_args()
@@ -342,6 +344,12 @@ def main():
         gov = GovernanceEngine(cfg, db)
         print("\n📰 今日日报:\n")
         print(gov.generate_daily_summary())
+
+    elif args.cleanup_runtime_records:
+        cfg = Config()
+        db = Database(cfg.db_path)
+        print("\n🧹 清理运行期重复记录:\n")
+        print(db.cleanup_duplicate_runtime_records(dry_run=args.dry_run))
 
     else:
         # 运行交易

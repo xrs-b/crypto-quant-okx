@@ -639,6 +639,70 @@ class Database:
         conn.close()
         return deleted
 
+    def cleanup_duplicate_reports(self, dry_run: bool = True) -> Dict:
+        """清理重复日报：每个 report_date 仅保留最新一条"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT COUNT(*) FROM daily_reports
+            WHERE id NOT IN (
+                SELECT MAX(id) FROM daily_reports GROUP BY report_date
+            )
+        """)
+        duplicate_count = cursor.fetchone()[0]
+        result = {'table': 'daily_reports', 'duplicates': duplicate_count, 'deleted': 0, 'dry_run': dry_run}
+        if not dry_run and duplicate_count > 0:
+            cursor.execute("""
+                DELETE FROM daily_reports
+                WHERE id NOT IN (
+                    SELECT MAX(id) FROM daily_reports GROUP BY report_date
+                )
+            """)
+            result['deleted'] = cursor.rowcount
+            conn.commit()
+        conn.close()
+        return result
+
+    def cleanup_duplicate_governance_decisions(self, dry_run: bool = True) -> Dict:
+        """清理重复治理记录：相同 decision_type + preset + message 仅保留最新一条"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT COUNT(*) FROM governance_decisions
+            WHERE id NOT IN (
+                SELECT MAX(id)
+                FROM governance_decisions
+                GROUP BY decision_type, COALESCE(recommended_preset, ''), COALESCE(message, '')
+            )
+        """)
+        duplicate_count = cursor.fetchone()[0]
+        result = {'table': 'governance_decisions', 'duplicates': duplicate_count, 'deleted': 0, 'dry_run': dry_run}
+        if not dry_run and duplicate_count > 0:
+            cursor.execute("""
+                DELETE FROM governance_decisions
+                WHERE id NOT IN (
+                    SELECT MAX(id)
+                    FROM governance_decisions
+                    GROUP BY decision_type, COALESCE(recommended_preset, ''), COALESCE(message, '')
+                )
+            """)
+            result['deleted'] = cursor.rowcount
+            conn.commit()
+        conn.close()
+        return result
+
+    def cleanup_duplicate_runtime_records(self, dry_run: bool = True) -> Dict:
+        """清理运行期重复记录（日报 + 治理决策）"""
+        reports = self.cleanup_duplicate_reports(dry_run=dry_run)
+        governance = self.cleanup_duplicate_governance_decisions(dry_run=dry_run)
+        return {
+            'dry_run': dry_run,
+            'daily_reports': reports,
+            'governance_decisions': governance,
+            'total_duplicates': reports['duplicates'] + governance['duplicates'],
+            'total_deleted': reports['deleted'] + governance['deleted'],
+        }
+
 
 # 全局数据库实例
 db = Database()

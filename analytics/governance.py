@@ -20,7 +20,7 @@ class GovernanceEngine:
         self.backtester = StrategyBacktester(config)
         self.signal_quality = SignalQualityAnalyzer(config, self.db)
 
-    def evaluate(self, use_cache: bool = True) -> Dict:
+    def evaluate(self, use_cache: bool = True, persist: bool = True) -> Dict:
         optimizer_result = self.optimizer.run(use_cache=use_cache)
         mode = self.preset_manager.status()
         current_preset = mode.get('current_preset', 'manual')
@@ -53,7 +53,8 @@ class GovernanceEngine:
             'alerts': alerts,
             'generated_at': datetime.now().isoformat(),
         }
-        self._record_governance(result)
+        if persist:
+            self._record_governance(result)
         return result
 
     def _assess_btc_grid_upgrade(self, current_preset: str, current_main: Optional[Dict], best_btc_grid: Optional[Dict]) -> Optional[Dict]:
@@ -155,11 +156,16 @@ class GovernanceEngine:
             enriched['approval_pending'] = bool(enriched.get('approval_required'))
         return enriched
 
-    def generate_daily_summary(self) -> Dict:
-        mode = self.preset_manager.status()
-        governance = self.evaluate(use_cache=False)
-        signals = self.db.get_signals(limit=500)
+    def generate_daily_summary(self, force_refresh: bool = False) -> Dict:
         today = datetime.now().strftime('%Y-%m-%d')
+        if not force_refresh:
+            latest = self.db.get_latest_daily_report(today)
+            if latest and latest.get('summary'):
+                return latest.get('summary')
+
+        mode = self.preset_manager.status()
+        governance = self.evaluate(use_cache=False, persist=False)
+        signals = self.db.get_signals(limit=500)
         today_signals = [s for s in signals if str(s.get('created_at', '')).startswith(today)]
         executed_today = sum(1 for s in today_signals if s.get('executed'))
         filtered_today = sum(1 for s in today_signals if s.get('filtered'))

@@ -173,6 +173,19 @@
             margin-bottom: 16px;
         }
         .content-head .muted { font-size: 13px; }
+        .section-chip {
+            display:inline-flex;
+            align-items:center;
+            gap:8px;
+            padding:6px 12px;
+            border-radius:999px;
+            border:1px solid rgba(240,185,11,.18);
+            background: var(--binance-yellow-soft);
+            color:#f8d56b;
+            font-size:12px;
+            font-weight:700;
+            margin-bottom:8px;
+        }
         .page-actions { display:flex; gap:10px; flex-wrap:wrap; }
         .page-actions button.secondary,
         .secondary {
@@ -299,8 +312,9 @@
 
                 <div class="content-head">
                     <div>
-                        <strong>主内容区</strong>
-                        <div class="muted">左侧导航切换模块，右侧集中展示页面内容。现阶段先完成后台骨架重构。</div>
+                        <div class="section-chip" id="currentSectionChip">当前模块 · 总览</div>
+                        <strong id="currentSectionTitle">主内容区</strong>
+                        <div class="muted" id="currentSectionDesc">左侧导航切换模块，右侧集中展示页面内容。现阶段先完成后台骨架重构。</div>
                     </div>
                     <div class="page-actions">
                         <button class="secondary" onclick="refreshDailySummary(true)">强制刷新日报</button>
@@ -509,6 +523,25 @@
             const j = await r.json();
             return j.data;
         }
+        function updateSectionHeader(tab) {
+            const map = {
+                overview: ['当前模块 · 总览', '主内容区', '总览中心，集中展示组合状态、系统提醒、最近变化与核心持仓。'],
+                positions: ['当前模块 · 持仓', '持仓管理', '查看当前仓位、杠杆、未实现盈亏与更新状态。'],
+                trades: ['当前模块 · 交易记录', '交易流水', '集中查看最近交易记录、开平仓状态与盈亏表现。'],
+                signals: ['当前模块 · 信号记录', '信号观察', '查看策略触发记录、过滤原因与执行通过率。'],
+                strategy: ['当前模块 · 策略分析', '策略分析', '观察策略统计、币种表现、日汇总与 ML 模型评估。'],
+                backtest: ['当前模块 · 回测分析', '回测分析', '回顾历史回测表现，快速对比收益、胜率与回撤。'],
+                quality: ['当前模块 · 信号质量', '信号质量', '追踪信号后验表现，观察质量分与正向率。'],
+                optimizer: ['当前模块 · 优化建议', '优化建议', '查看实验评分、分层建议、专项实验与预设配置。'],
+                governance: ['当前模块 · 治理审批', '治理审批', '管理审批建议、今日日报、清理动作与审批历史。'],
+                risk: ['当前模块 · 风控状态', '风控状态', '查看风险占用、连续亏损、回撤与风控事件。'],
+                config: ['当前模块 · 系统配置', '系统配置', '查看当前系统配置与运行环境的脱敏信息。']
+            };
+            const [chip, title, desc] = map[tab] || map.overview;
+            document.getElementById('currentSectionChip').textContent = chip;
+            document.getElementById('currentSectionTitle').textContent = title;
+            document.getElementById('currentSectionDesc').textContent = desc;
+        }
         function mountTabs() {
             document.querySelectorAll('.nav-btn').forEach(btn => {
                 btn.addEventListener('click', () => {
@@ -516,6 +549,7 @@
                     document.querySelectorAll('.panel').forEach(x => x.classList.remove('active'));
                     btn.classList.add('active');
                     document.getElementById(`tab-${btn.dataset.tab}`).classList.add('active');
+                    updateSectionHeader(btn.dataset.tab);
                 });
             });
         }

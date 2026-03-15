@@ -538,12 +538,35 @@ class Database:
                                    recommended_preset: str = None, message: str = None, details: Dict = None):
         conn = self._get_connection()
         cursor = conn.cursor()
+        details_json = json.dumps(details) if details else None
+
+        cursor.execute("""
+            SELECT id, level, approval_required, recommended_preset, message, details
+            FROM governance_decisions
+            WHERE decision_type = ?
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
+        """, (decision_type,))
+        last = cursor.fetchone()
+        if last:
+            same_as_latest = (
+                (last['level'] or '') == (level or '') and
+                int(last['approval_required'] or 0) == int(approval_required or 0) and
+                (last['recommended_preset'] or '') == (recommended_preset or '') and
+                (last['message'] or '') == (message or '') and
+                (last['details'] or '') == (details_json or '')
+            )
+            if same_as_latest:
+                conn.close()
+                return False
+
         cursor.execute("""
             INSERT INTO governance_decisions (decision_type, level, approval_required, recommended_preset, message, details)
             VALUES (?, ?, ?, ?, ?, ?)
-        """, (decision_type, level, approval_required, recommended_preset, message, json.dumps(details) if details else None))
+        """, (decision_type, level, approval_required, recommended_preset, message, details_json))
         conn.commit()
         conn.close()
+        return True
 
     def get_governance_decisions(self, limit: int = 50) -> List[Dict]:
         conn = self._get_connection()
@@ -556,9 +579,29 @@ class Database:
     def record_daily_report(self, report_date: str, summary: Dict):
         conn = self._get_connection()
         cursor = conn.cursor()
-        cursor.execute("INSERT INTO daily_reports (report_date, summary) VALUES (?, ?)", (report_date, json.dumps(summary)))
+        summary_json = json.dumps(summary)
+        cursor.execute(
+            "SELECT id, summary FROM daily_reports WHERE report_date = ? ORDER BY created_at DESC, id DESC LIMIT 1",
+            (report_date,)
+        )
+        existing = cursor.fetchone()
+        if existing:
+            if (existing['summary'] or '') == summary_json:
+                conn.close()
+                return {'action': 'noop', 'id': existing['id']}
+            cursor.execute(
+                "UPDATE daily_reports SET summary = ?, created_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (summary_json, existing['id'])
+            )
+            conn.commit()
+            conn.close()
+            return {'action': 'updated', 'id': existing['id']}
+
+        cursor.execute("INSERT INTO daily_reports (report_date, summary) VALUES (?, ?)", (report_date, summary_json))
+        row_id = cursor.lastrowid
         conn.commit()
         conn.close()
+        return {'action': 'inserted', 'id': row_id}
 
     def get_daily_reports(self, limit: int = 30) -> List[Dict]:
         conn = self._get_connection()

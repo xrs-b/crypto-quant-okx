@@ -344,17 +344,47 @@ class ParameterOptimizer:
                 focused_score = focused_map['xrp_only']['score']
             decision = 'reject'
             reason = '当前专项结果不足以升级'
+            diagnostics = {
+                'return_gate': False,
+                'win_gate': False,
+                'drawdown_gate': False,
+                'quality_gate': False,
+            }
             if best_row:
                 ret = float(best_row['summary'].get('total_return_pct', -999) or -999)
                 dd = abs(float(best_row['summary'].get('max_drawdown_pct', 0) or 0))
                 win = float(best_row['summary'].get('win_rate', 0) or 0)
                 quality = float(advice.get('avg_quality_pct', -999) or -999)
-                if ret > -2.5 and win >= 45 and dd <= 6 and quality >= -0.03:
+                diagnostics = {
+                    'return_gate': ret > -2.5,
+                    'win_gate': win >= 45,
+                    'drawdown_gate': dd <= 6,
+                    'quality_gate': quality >= -0.03,
+                    'soft_return_gate': ret > -5,
+                    'soft_win_gate': win >= 40,
+                    'soft_quality_gate': quality >= -0.05,
+                    'return_pct': round(ret, 4),
+                    'max_drawdown_pct': round(dd, 4),
+                    'win_rate': round(win, 2),
+                    'avg_quality_pct': round(quality, 4) if quality > -900 else None,
+                }
+                if diagnostics['return_gate'] and diagnostics['win_gate'] and diagnostics['drawdown_gate'] and diagnostics['quality_gate']:
                     decision = 'promote'
                     reason = '回测与质量均接近可接受，可升入主池试跑'
-                elif ret > -5 and win >= 40 and quality >= -0.05:
+                elif diagnostics['soft_return_gate'] and diagnostics['soft_win_gate'] and diagnostics['soft_quality_gate']:
                     decision = 'keep_candidate'
                     reason = '已有潜力，但仍需继续观察'
+                else:
+                    blockers = []
+                    if not diagnostics['return_gate']:
+                        blockers.append(f"收益 {diagnostics['return_pct']}% 未达 > -2.5%")
+                    if not diagnostics['win_gate']:
+                        blockers.append(f"胜率 {diagnostics['win_rate']}% 未达 >= 45%")
+                    if not diagnostics['drawdown_gate']:
+                        blockers.append(f"回撤 {diagnostics['max_drawdown_pct']}% 超过 <= 6%")
+                    if diagnostics.get('avg_quality_pct') is not None and not diagnostics['quality_gate']:
+                        blockers.append(f"质量 {diagnostics['avg_quality_pct']} 未达 >= -0.03")
+                    reason = '；'.join(blockers) if blockers else reason
             results.append({
                 'symbol': symbol,
                 'best_variant': best_row['name'] if best_row else None,
@@ -363,6 +393,7 @@ class ParameterOptimizer:
                 'score': best_row['score'] if best_row else None,
                 'focused_score': focused_score,
                 'summary': best_row['summary'] if best_row else None,
+                'diagnostics': diagnostics,
             })
         return results
 

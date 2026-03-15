@@ -258,16 +258,20 @@ class SignalQualityAnalyzer:
         self._cache = None
         self._cache_at = None
 
-    def analyze(self, limit: int = 200, use_cache: bool = True) -> Dict:
+    def analyze(self, limit: int = 200, use_cache: bool = True, symbols: Optional[List[str]] = None) -> Dict:
         now = datetime.now()
-        if use_cache and self._cache is not None and self._cache_at and (now - self._cache_at).total_seconds() < 300:
+        cache_allowed = use_cache and symbols is None
+        if cache_allowed and self._cache is not None and self._cache_at and (now - self._cache_at).total_seconds() < 300:
             return self._cache
 
+        target_symbols = list(dict.fromkeys(symbols or []))
         signals = self.db.get_signals(limit=limit)
         by_symbol = {}
         rows = []
         for signal in signals:
             symbol = signal.get('symbol')
+            if target_symbols and symbol not in target_symbols:
+                continue
             if symbol not in by_symbol:
                 df = self.loader.load_symbol(symbol)
                 by_symbol[symbol] = df
@@ -278,12 +282,17 @@ class SignalQualityAnalyzer:
             if row:
                 rows.append(row)
 
-        if not rows or not any(r.get('avg_quality_pct') is not None for r in rows):
-            rows = self._analyze_historical_generated_signals()
+        valid_symbols = {r.get('symbol') for r in rows if r.get('avg_quality_pct') is not None}
+        missing_symbols = [s for s in target_symbols if s not in valid_symbols]
+        if (not rows or not any(r.get('avg_quality_pct') is not None for r in rows)):
+            rows = self._analyze_historical_generated_signals(symbols=target_symbols or None)
+        elif missing_symbols:
+            rows.extend(self._analyze_historical_generated_signals(symbols=missing_symbols))
 
         summary = self._summarize(rows)
-        self._cache = summary
-        self._cache_at = now
+        if cache_allowed:
+            self._cache = summary
+            self._cache_at = now
         return summary
 
     def _score_signal(self, signal: Dict, df: pd.DataFrame) -> Optional[Dict]:
@@ -334,9 +343,9 @@ class SignalQualityAnalyzer:
             'avg_quality_pct': avg,
         }
 
-    def _analyze_historical_generated_signals(self) -> List[Dict]:
+    def _analyze_historical_generated_signals(self, symbols: Optional[List[str]] = None) -> List[Dict]:
         rows = []
-        symbols = self.config.symbols
+        symbols = symbols or self.config.symbols
         for symbol in symbols:
             df = self.loader.load_symbol(symbol)
             if df is None or len(df) < 150:

@@ -133,8 +133,9 @@ class ParameterOptimizer:
         return total_return * 1.8 + win_rate * 0.35 - max_drawdown * 1.5 + trade_factor * 5
 
     def _build_symbol_advice(self, best_experiment: Optional[Dict]) -> List[Dict]:
-        quality = SignalQualityAnalyzer(self.config, self.db).analyze(use_cache=False)
-        backtest = StrategyBacktester(self.config).run_all(use_cache=False)
+        universe = list(dict.fromkeys(list(self.config.symbols) + ['XRP/USDT', 'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'HYPE/USDT']))
+        quality = SignalQualityAnalyzer(self.config, self.db).analyze(use_cache=False, symbols=universe)
+        backtest = StrategyBacktester(self.config).run_all(universe, use_cache=False)
         quality_map = {x['symbol']: x for x in quality.get('by_symbol', [])}
         backtest_map = {x['symbol']: x for x in backtest.get('symbols', [])}
         symbols = sorted(set(list(quality_map.keys()) + list(backtest_map.keys())))

@@ -215,8 +215,8 @@ class ParameterOptimizer:
                 },
                 {
                     'name': 'xrp_fast',
-                    'description': 'XRP高波动快进快出',
-                    'patch': {'trading': {'stop_loss': 0.018, 'take_profit': 0.028, 'trailing_stop': 0.01}, 'strategies': {'volume': {'strength_weight': 32}, 'macd': {'strength_weight': 24}, 'composite': {'min_strength': 24, 'min_strategy_count': 1}}}
+                    'description': 'XRP高波动快进快出（加强信号强度过滤）',
+                    'patch': {'trading': {'stop_loss': 0.018, 'take_profit': 0.028, 'trailing_stop': 0.01}, 'strategies': {'volume': {'strength_weight': 32}, 'macd': {'strength_weight': 24}, 'composite': {'min_strength': 28, 'min_strategy_count': 1}}}
                 },
             ],
         }
@@ -360,10 +360,10 @@ class ParameterOptimizer:
                     'return_gate': ret > -2.5,
                     'win_gate': win >= 45,
                     'drawdown_gate': dd <= 6,
-                    'quality_gate': quality >= -0.03,
+                    'quality_gate': quality >= -0.25,
                     'soft_return_gate': ret > -5,
                     'soft_win_gate': win >= 40,
-                    'soft_quality_gate': quality >= -0.05,
+                    'soft_quality_gate': quality >= -0.25,
                     'return_pct': round(ret, 4),
                     'max_drawdown_pct': round(dd, 4),
                     'win_rate': round(win, 2),
@@ -384,7 +384,7 @@ class ParameterOptimizer:
                     if not diagnostics['drawdown_gate']:
                         blockers.append(f"回撤 {diagnostics['max_drawdown_pct']}% 超过 <= 6%")
                     if diagnostics.get('avg_quality_pct') is not None and not diagnostics['quality_gate']:
-                        blockers.append(f"质量 {diagnostics['avg_quality_pct']} 未达 >= -0.03")
+                        blockers.append(f"质量 {diagnostics['avg_quality_pct']} 未达 >= -0.25")
                     reason = '；'.join(blockers) if blockers else reason
             results.append({
                 'symbol': symbol,

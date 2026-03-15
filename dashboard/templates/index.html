@@ -409,8 +409,9 @@
             ]);
             document.getElementById('pendingApprovals').innerHTML = pending.length ? pending.map(p => `
                 <div class="item">
-                    <strong>${p.type === 'btc_grid_upgrade' ? 'BTC 网格升级' : p.type === 'main_pool_downgrade' ? '主池降级' : p.type}</strong>
+                    <strong>${p.type === 'btc_grid_upgrade' ? 'BTC 网格升级' : p.type === 'main_pool_downgrade' ? '主池降级' : p.type === 'pool_switch' ? '主池切换审批' : p.type}</strong>
                     <div class="muted">${p.message}</div>
+                    <div class="muted" style="margin-top:6px">目标 preset: ${p.target || '--'}</div>
                     <div style="margin-top:8px">
                         <button onclick="executeApproval('${p.type}', '${p.target}', 'approved')" style="background:var(--primary)">批准</button>
                         <button onclick="executeApproval('${p.type}', '${p.target}', 'rejected')" style="background:var(--border);color:var(--text)">拒绝</button>

@@ -408,7 +408,7 @@ def get_pending_approvals():
     gov = governance.evaluate(use_cache=True)
     pending = []
     for alert in gov.get('alerts', []):
-        if alert.get('approval_required'):
+        if alert.get('approval_required') and alert.get('approval_pending', True):
             pending.append({
                 'type': alert.get('type'),
                 'target': alert.get('recommended_preset'),
@@ -444,7 +444,7 @@ def execute_approval():
         preset_manager = PresetManager(config)
         return jsonify({'success': True, 'data': {'action': 'preset_applied', 'result': result}})
     
-    if decision == 'approved' and approval_type == 'main_pool_downgrade':
+    if decision == 'approved' and approval_type in ('main_pool_downgrade', 'pool_switch'):
         result = preset_manager.apply_preset(target, auto_restart=True)
         config.reload()
         risk_manager = RiskManager(config, db)
@@ -471,6 +471,7 @@ def get_recent_changes():
     """获取最近变化汇总"""
     preset_history = db.get_preset_history(limit=5)
     candidate_history = db.get_candidate_reviews(limit=5)
+    approval_history = db.get_approval_history(limit=5)
     rows = []
     for item in preset_history:
         rows.append({
@@ -485,6 +486,13 @@ def get_recent_changes():
             'type': 'candidate_review',
             'title': item.get('symbol'),
             'detail': f"{item.get('decision')} | {item.get('reason')}"
+        })
+    for item in approval_history:
+        rows.append({
+            'time': item.get('created_at'),
+            'type': 'approval',
+            'title': item.get('approval_type'),
+            'detail': f"{item.get('decision')} | {item.get('target') or '--'}"
         })
     rows.sort(key=lambda x: str(x.get('time', '')), reverse=True)
     return jsonify({'success': True, 'data': rows[:10]})
@@ -501,12 +509,26 @@ def get_alerts():
         alerts.append({'level': 'warn', 'message': '日内回撤接近熔断阈值'})
     if risk.get('consecutive_losses', 0) >= risk.get('max_consecutive_losses', 99):
         alerts.append({'level': 'danger', 'message': '连续亏损已触发熔断'})
-    promotions = optimizer.run().get('candidate_promotions', [])
-    for row in promotions:
-        if row.get('decision') == 'promote':
-            alerts.append({'level': 'info', 'message': f"候选币 {row.get('symbol')} 可考虑升级主池"})
-        elif row.get('decision') == 'keep_candidate':
-            alerts.append({'level': 'warn', 'message': f"候选币 {row.get('symbol')} 仍需继续观察"})
+
+    gov = governance.evaluate(use_cache=True)
+    for row in gov.get('alerts', []):
+        status = row.get('approval_status')
+        suffix = ''
+        if row.get('approval_required'):
+            if row.get('approval_pending'):
+                suffix = '（待审批）'
+            elif status == 'approved':
+                suffix = '（已批准）'
+            elif status == 'rejected':
+                suffix = '（已拒绝）'
+        alerts.append({
+            'level': row.get('level', 'info'),
+            'message': f"{row.get('message')}{suffix}",
+            'type': row.get('type'),
+            'approval_status': status,
+            'approval_pending': row.get('approval_pending', False),
+        })
+
     if not alerts:
         alerts.append({'level': 'info', 'message': '当前无重大异常，系统处于观察运行状态'})
     return jsonify({'success': True, 'data': alerts})

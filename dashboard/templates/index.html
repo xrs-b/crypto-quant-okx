@@ -533,9 +533,16 @@
                             </div>
                         </div>
 
-                        <div class="card mini">
-                            <div class="section-title">候选历史 / Preset 历史</div>
-                            <table><thead><tr><th>时间</th><th>对象</th><th>动作</th><th>说明</th></tr></thead><tbody id="optimizerHistory"></tbody></table>
+                        <div class="compact-grid">
+                            <div class="card mini">
+                                <div class="section-title">最近切池摘要</div>
+                                <div class="section-note">浓缩最近一次主池切换或审批变化，方便你快速扫一眼。</div>
+                                <div class="list" id="recentPoolSwitchSummary"></div>
+                            </div>
+                            <div class="card mini">
+                                <div class="section-title">候选历史 / Preset 历史</div>
+                                <table><thead><tr><th>时间</th><th>对象</th><th>动作</th><th>说明</th></tr></thead><tbody id="optimizerHistory"></tbody></table>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -646,6 +653,22 @@
         const badge = (text, cls) => `<span class="badge ${cls}">${text}</span>`;
         const filteredTag = row => row.filtered ? badge('已过滤', 'bad') : badge('通过', 'ok');
         const safe = v => v == null ? '--' : v;
+        const shortReason = text => {
+            if (!text) return '--';
+            return String(text)
+                .replaceAll('收益 ', '收益')
+                .replaceAll('胜率 ', '胜率')
+                .replaceAll('质量 ', '质量')
+                .replaceAll(' 未达 ', ' < ')
+                .replaceAll(' 超过 ', ' > ')
+                .replaceAll('；', ' ｜ ');
+        };
+        const stateClass = text => {
+            const s = String(text || '').toLowerCase();
+            if (s.includes('promote') || s.includes('approved') || s.includes('通过') || s.includes('守擂')) return 'ok';
+            if (s.includes('keep') || s.includes('pending') || s.includes('观察') || s.includes('挑战中')) return 'warn';
+            return 'bad';
+        };
 
         function toast(message, level='info') {
             const host = document.getElementById('toastHost');
@@ -800,14 +823,16 @@
             const challenger = sets.find(s => (s.symbols || [])[0] === candidatePool) || {};
             const challengerReview = (data.candidate_promotions || []).find(p => p.symbol === candidatePool) || {};
             const switchReview = gov.pool_switch_review || {};
+            const championState = switchReview.approval_required ? '挑战中' : '守擂中';
+            const challengerState = challengerReview.decision || (switchReview.approval_required ? 'pending' : 'reject');
             document.getElementById('optimizerChampion').innerHTML = `
-                <div class="item"><strong>当前冠军</strong><div class="muted">${currentPool}</div></div>
+                <div class="item"><strong>当前冠军</strong><div class="muted">${currentPool}</div><div style="margin-top:6px">${badge(championState, stateClass(championState))}</div></div>
                 <div class="item"><strong>守擂成绩</strong><div class="muted">评分 ${safe(champion.score)} ｜ 收益 ${safe(champion.summary?.total_return_pct)}% ｜ 胜率 ${safe(champion.summary?.win_rate)}%</div></div>
-                <div class="item"><strong>当前结论</strong><div class="muted">${safe(switchReview.message) || '暂无'} </div></div>`;
+                <div class="item"><strong>当前结论</strong><div class="muted">${shortReason(safe(switchReview.message) || '暂无')}</div></div>`;
             document.getElementById('optimizerChallenger').innerHTML = `
-                <div class="item"><strong>当前挑战者</strong><div class="muted">${candidatePool}</div></div>
+                <div class="item"><strong>当前挑战者</strong><div class="muted">${candidatePool}</div><div style="margin-top:6px">${badge(challengerState, stateClass(challengerState))}</div></div>
                 <div class="item"><strong>挑战成绩</strong><div class="muted">评分 ${safe(challenger.score)} ｜ 收益 ${safe(challenger.summary?.total_return_pct)}% ｜ 胜率 ${safe(challenger.summary?.win_rate)}%</div></div>
-                <div class="item"><strong>失败原因 / 状态</strong><div class="muted">${safe(challengerReview.reason) || safe(switchReview.last_change_reason) || '--'}</div></div>`;
+                <div class="item"><strong>失败原因 / 状态</strong><div class="muted">${shortReason(challengerReview.reason || switchReview.last_change_reason || '--')}</div></div>`;
             document.getElementById('optimizerExperiments').innerHTML = exps.length ? exps.map(r => `<tr><td>${r.name}</td><td>${r.score}</td><td class="${Number(r.summary?.total_return_pct || 0) >= 0 ? 'pos' : 'neg'}">${safe(r.summary?.total_return_pct)}%</td><td>${safe(r.summary?.win_rate)}%</td><td class="${Number(r.summary?.max_drawdown_pct || 0) >= 0 ? 'pos' : 'neg'}">${safe(r.summary?.max_drawdown_pct)}%</td></tr>`).join('') : '<tr><td colspan="5" class="muted">暂无实验</td></tr>';
             const syms = data.symbol_advice || [];
             document.getElementById('optimizerSymbols').innerHTML = syms.length ? syms.map(r => `<tr><td>${r.symbol}</td><td>${badge(r.tier, r.tier === 'keep' ? 'ok' : r.tier === 'watch' ? 'warn' : 'bad')}</td><td class="${Number(r.backtest_return_pct || 0) >= 0 ? 'pos' : 'neg'}">${safe(r.backtest_return_pct)}%</td><td class="${Number(r.avg_quality_pct || 0) >= 0 ? 'pos' : 'neg'}">${safe(r.avg_quality_pct)}%</td><td>${r.action}</td></tr>`).join('') : '<tr><td colspan="5" class="muted">暂无建议</td></tr>';
@@ -825,7 +850,12 @@
             (candidateHistory || []).forEach(h => historyRows.push({time: h.created_at, object: h.symbol, action: h.decision, note: h.reason || h.best_variant || '--'}));
             (presetHistory || []).forEach(h => historyRows.push({time: h.created_at, object: h.preset_name, action: 'preset_apply', note: (h.watch_list || []).join(', ') || '--'}));
             historyRows.sort((a,b) => String(b.time).localeCompare(String(a.time)));
-            document.getElementById('optimizerHistory').innerHTML = historyRows.length ? historyRows.slice(0,12).map(h => `<tr><td>${h.time}</td><td>${h.object}</td><td>${h.action}</td><td>${h.note}</td></tr>`).join('') : '<tr><td colspan="4" class="muted">暂无历史记录</td></tr>';
+            const latestSwitch = (presetHistory || [])[0];
+            document.getElementById('recentPoolSwitchSummary').innerHTML = latestSwitch ? `
+                <div class="item"><strong>最近切池</strong><div class="muted">${latestSwitch.preset_name} ｜ ${(latestSwitch.watch_list || []).join(', ') || '--'}</div></div>
+                <div class="item"><strong>发生时间</strong><div class="muted">${latestSwitch.created_at || '--'}</div></div>
+                <div class="item"><strong>切后格局</strong><div class="muted">主池 ${currentPool} ｜ 候选 ${candidatePool}</div></div>` : '<div class="item muted">暂无切池摘要</div>';
+            document.getElementById('optimizerHistory').innerHTML = historyRows.length ? historyRows.slice(0,12).map(h => `<tr><td>${h.time}</td><td>${h.object}</td><td>${h.action}</td><td>${shortReason(h.note)}</td></tr>`).join('') : '<tr><td colspan="4" class="muted">暂无历史记录</td></tr>';
             const presets = data.presets || [];
             document.getElementById('optimizerPresets').innerHTML = presets.length ? presets.map(p => `<tr><td>${p.name}</td><td>${p.path}</td><td><button onclick="applyPreset('${p.name}')">应用</button></td></tr>`).join('') : '<tr><td colspan="3" class="muted">暂无预设</td></tr>';
         }
@@ -886,13 +916,13 @@
                 <div class="item"><strong>当前卡点</strong><div class="muted">${safe(path.blocking_label) || '无，已可进入审批'}</div></div>`;
             document.getElementById('poolSwitchDecisionPath').innerHTML = gates.length ? gates.map(g => `<div class="item"><strong>${g.label}</strong><div style="margin:6px 0">${badge(g.passed ? 'passed' : 'blocked', g.passed ? 'ok' : 'bad')}</div><div class="muted">${g.detail || '--'}</div></div>`).join('') : '<div class="item muted">暂无切池诊断链</div>';
             document.getElementById('governanceChampionStatus').innerHTML = `
-                <div class="item"><strong>当前主池</strong><div class="muted">${safe(path.current_symbol) || '--'} ｜ preset: ${safe(gov.mode?.current_preset)}</div></div>
-                <div class="item"><strong>守擂成绩</strong><div class="muted">评分 ${safe(path.current_score)} ｜ 当前审批状态 ${safe(switchReview.approval_status)}</div></div>
-                <div class="item"><strong>卫冕结论</strong><div class="muted">${safe(switchReview.message) || '--'}</div></div>`;
+                <div class="item"><strong>当前主池</strong><div class="muted">${safe(path.current_symbol) || '--'} ｜ preset: ${safe(gov.mode?.current_preset)}</div><div style="margin-top:6px">${badge('守擂中', 'ok')}</div></div>
+                <div class="item"><strong>守擂成绩</strong><div class="muted">评分 ${safe(path.current_score)} ｜ 审批状态 ${safe(switchReview.approval_status)}</div></div>
+                <div class="item"><strong>卫冕结论</strong><div class="muted">${shortReason(safe(switchReview.message) || '--')}</div></div>`;
             document.getElementById('governanceChallengerStatus').innerHTML = `
-                <div class="item"><strong>当前挑战者</strong><div class="muted">${safe(path.candidate_symbol) || '--'}</div></div>
-                <div class="item"><strong>挑战结论</strong><div class="muted">${safe(path.promotion_reason) || '--'}</div></div>
-                <div class="item"><strong>切池距离</strong><div class="muted">${safe(path.blocking_label) || '已可发起审批'} ｜ ${safe(path.summary) || '--'}</div></div>`;
+                <div class="item"><strong>当前挑战者</strong><div class="muted">${safe(path.candidate_symbol) || '--'}</div><div style="margin-top:6px">${badge(safe(path.blocking_label) || '可审批', path.blocking_label ? 'bad' : 'ok')}</div></div>
+                <div class="item"><strong>挑战结论</strong><div class="muted">${shortReason(safe(path.promotion_reason) || '--')}</div></div>
+                <div class="item"><strong>切池距离</strong><div class="muted">${safe(path.blocking_label) || '已可发起审批'} ｜ ${shortReason(safe(path.summary) || '--')}</div></div>`;
             document.getElementById('dailySummaryBlock').textContent = JSON.stringify(summary, null, 2);
             document.getElementById('runtimeCleanupBlock').textContent = JSON.stringify(cleanupPreview, null, 2);
             document.getElementById('approvalHistoryTable').innerHTML = history.length ? history.map(h => `<tr><td>${h.created_at}</td><td>${h.approval_type}</td><td>${h.target}</td><td>${badge(h.decision, h.decision === 'approved' ? 'ok' : h.decision === 'pending' ? 'warn' : 'bad')}</td></tr>`).join('') : '<tr><td colspan="4" class="muted">暂无审批历史</td></tr>';

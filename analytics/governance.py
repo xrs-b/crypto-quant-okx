@@ -87,39 +87,53 @@ class GovernanceEngine:
         }
 
     def _assess_pool_switch(self, mode: Dict, focused_sets: Dict, promotions: List[Dict]) -> Optional[Dict]:
-        xrp_focus = focused_sets.get('xrp_only')
-        btc_focus = focused_sets.get('btc_only')
-        xrp_promotion = next((x for x in promotions if x.get('symbol') == 'XRP/USDT'), None)
-        if not xrp_focus or not btc_focus:
+        current_watch = (mode.get('watch_list') or [])
+        candidate_watch = (mode.get('candidate_watch_list') or [])
+        current_symbol = current_watch[0] if current_watch else None
+        candidate_symbol = candidate_watch[0] if candidate_watch else None
+        focused_mode = mode.get('selection_mode') == 'focused'
+        if not current_symbol or not candidate_symbol:
             return None
 
-        xrp_score = float(xrp_focus.get('score', -999) or -999)
-        btc_score = float(btc_focus.get('score', -999) or -999)
-        promote_passed = bool(xrp_promotion and xrp_promotion.get('decision') == 'promote')
-        score_passed = xrp_score > btc_score
-        candidate_in_pool = 'XRP/USDT' in (mode.get('candidate_watch_list') or [])
-        focused_mode = mode.get('selection_mode') == 'focused'
+        current_focus = self._find_focused_set_for_symbol(focused_sets, current_symbol)
+        candidate_focus = self._find_focused_set_for_symbol(focused_sets, candidate_symbol)
+        candidate_promotion = next((x for x in promotions if x.get('symbol') == candidate_symbol), None)
+        if not current_focus or not candidate_focus:
+            return None
+
+        current_score = float(current_focus.get('score', -999) or -999)
+        candidate_score = float(candidate_focus.get('score', -999) or -999)
+        promote_passed = bool(candidate_promotion and candidate_promotion.get('decision') == 'promote')
+        score_passed = candidate_score > current_score
+        candidate_in_pool = candidate_symbol in candidate_watch
         diagnosis = self._build_pool_switch_diagnosis(
             mode=mode,
-            xrp_score=xrp_score,
-            btc_score=btc_score,
-            xrp_promotion=xrp_promotion,
+            current_symbol=current_symbol,
+            candidate_symbol=candidate_symbol,
+            current_score=current_score,
+            candidate_score=candidate_score,
+            candidate_promotion=candidate_promotion,
             promote_passed=promote_passed,
             score_passed=score_passed,
             candidate_in_pool=candidate_in_pool,
             focused_mode=focused_mode,
         )
-        if promote_passed and score_passed:
+        target_preset = 'xrp-candidate' if candidate_symbol == 'XRP/USDT' else 'btc-focused' if candidate_symbol == 'BTC/USDT' else None
+        candidate_label = candidate_symbol.replace('/USDT', '') if candidate_symbol else '--'
+        current_label = current_symbol.replace('/USDT', '') if current_symbol else '--'
+        if promote_passed and score_passed and target_preset:
             return {
                 'type': 'pool_switch',
                 'level': 'warn',
                 'approval_required': True,
-                'recommended_preset': 'xrp-candidate',
-                'message': '候选池 XRP 已达到升级条件，且单币得分优于 BTC，可申请切换主池',
-                'btc_score': round(btc_score, 4),
-                'xrp_score': round(xrp_score, 4),
-                'current_pool': mode.get('watch_list', []),
-                'candidate_pool': mode.get('candidate_watch_list', []),
+                'recommended_preset': target_preset,
+                'message': f'候选池 {candidate_label} 已达到升级条件，且单币得分优于 {current_label}，可申请切换主池',
+                'current_score': round(current_score, 4),
+                'candidate_score': round(candidate_score, 4),
+                'current_symbol': current_symbol,
+                'candidate_symbol': candidate_symbol,
+                'current_pool': current_watch,
+                'candidate_pool': candidate_watch,
                 'last_change_reason': diagnosis.get('summary'),
                 'decision_path': diagnosis,
             }
@@ -128,24 +142,31 @@ class GovernanceEngine:
             'level': 'muted',
             'approval_required': False,
             'recommended_preset': None,
-            'message': '当前不建议切换主池，继续维持 BTC-focused',
-            'btc_score': round(btc_score, 4),
-            'xrp_score': round(xrp_score, 4),
-            'current_pool': mode.get('watch_list', []),
-            'candidate_pool': mode.get('candidate_watch_list', []),
+            'message': f'当前不建议切换主池，继续维持 {current_label}-focused',
+            'current_score': round(current_score, 4),
+            'candidate_score': round(candidate_score, 4),
+            'current_symbol': current_symbol,
+            'candidate_symbol': candidate_symbol,
+            'current_pool': current_watch,
+            'candidate_pool': candidate_watch,
             'last_change_reason': diagnosis.get('summary'),
             'decision_path': diagnosis,
         }
 
-    def _build_pool_switch_diagnosis(self, mode: Dict, xrp_score: float, btc_score: float, xrp_promotion: Optional[Dict], promote_passed: bool, score_passed: bool, candidate_in_pool: bool, focused_mode: bool) -> Dict:
-        promotion_reason = xrp_promotion.get('reason') if xrp_promotion else '暂无 XRP 候选审查结果'
-        xrp_decision = xrp_promotion.get('decision') if xrp_promotion else 'missing'
+    def _find_focused_set_for_symbol(self, focused_sets: Dict, symbol: str) -> Optional[Dict]:
+        return next((row for row in focused_sets.values() if row.get('symbols') == [symbol]), None)
+
+    def _build_pool_switch_diagnosis(self, mode: Dict, current_symbol: str, candidate_symbol: str, current_score: float, candidate_score: float, candidate_promotion: Optional[Dict], promote_passed: bool, score_passed: bool, candidate_in_pool: bool, focused_mode: bool) -> Dict:
+        candidate_label = candidate_symbol.replace('/USDT', '') if candidate_symbol else '--'
+        current_label = current_symbol.replace('/USDT', '') if current_symbol else '--'
+        promotion_reason = candidate_promotion.get('reason') if candidate_promotion else f'暂无 {candidate_label} 候选审查结果'
+        candidate_decision = candidate_promotion.get('decision') if candidate_promotion else 'missing'
         gates = [
             {
                 'key': 'candidate_watch_list',
-                'label': '候选池已挂入 XRP',
+                'label': f'候选池已挂入 {candidate_label}',
                 'passed': candidate_in_pool,
-                'detail': 'XRP 已在 candidate_watch_list 中' if candidate_in_pool else 'XRP 未出现在 candidate_watch_list 中',
+                'detail': f'{candidate_label} 已在 candidate_watch_list 中' if candidate_in_pool else f'{candidate_label} 未出现在 candidate_watch_list 中',
             },
             {
                 'key': 'selection_mode',
@@ -157,13 +178,13 @@ class GovernanceEngine:
                 'key': 'candidate_promotion',
                 'label': '候选晋升审查通过',
                 'passed': promote_passed,
-                'detail': f"decision = {xrp_decision} ｜ {promotion_reason}",
+                'detail': f"decision = {candidate_decision} ｜ {promotion_reason}",
             },
             {
                 'key': 'score_compare',
-                'label': 'XRP 聚焦得分高于 BTC 主池',
+                'label': f'{candidate_label} 聚焦得分高于 {current_label} 主池',
                 'passed': score_passed,
-                'detail': f"XRP {round(xrp_score, 4)} vs BTC {round(btc_score, 4)}",
+                'detail': f"{candidate_label} {round(candidate_score, 4)} vs {current_label} {round(current_score, 4)}",
             },
         ]
         blocker = next((g for g in gates if not g['passed']), None)
@@ -172,9 +193,11 @@ class GovernanceEngine:
             'current_preset': mode.get('current_preset'),
             'current_pool': mode.get('watch_list', []),
             'candidate_pool': mode.get('candidate_watch_list', []),
-            'xrp_score': round(xrp_score, 4),
-            'btc_score': round(btc_score, 4),
-            'promotion_decision': xrp_decision,
+            'current_symbol': current_symbol,
+            'candidate_symbol': candidate_symbol,
+            'current_score': round(current_score, 4),
+            'candidate_score': round(candidate_score, 4),
+            'promotion_decision': candidate_decision,
             'promotion_reason': promotion_reason,
             'summary': summary,
             'blocking_gate': blocker['key'] if blocker else None,

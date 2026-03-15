@@ -327,27 +327,52 @@
                 </div>
 
                 <div class="panel active" id="tab-overview">
-                    <div class="card" style="padding:18px; margin-bottom:16px;">
-                        <div class="section-title">总览中心</div>
-                        <div class="muted">这里系默认首页，集中展示组合状态、系统提醒、最近变化与核心持仓。</div>
-                    </div>
-                    <div class="panel-grid">
-                        <div class="card mini">
-                            <div class="section-title">当前持仓概览</div>
-                            <table><thead><tr><th>币种</th><th>方向</th><th>数量</th><th>开仓价</th><th>现价</th><th>未实现盈亏</th></tr></thead><tbody id="overviewPositions"></tbody></table>
+                    <div class="stack">
+                        <div class="card" style="padding:18px;">
+                            <div class="section-title">总览中心</div>
+                            <div class="section-note">默认首页，先看组合状态、系统提醒、最近变化，再往下看持仓细节。</div>
+                            <div class="compact-grid">
+                                <div class="item">
+                                    <strong>组合状态</strong>
+                                    <div class="muted" style="margin-top:6px;">聚焦总资产、信号执行率、回撤与风险占用，适合作为首页第一眼判断。</div>
+                                </div>
+                                <div class="item">
+                                    <strong>操作建议</strong>
+                                    <div class="muted" style="margin-top:6px;">先看系统提醒与最近变化，再决定要唔要进入治理审批、优化建议或风控状态页。</div>
+                                </div>
+                            </div>
                         </div>
-                        <div class="list" id="overviewList"></div>
+                        <div class="compact-grid">
+                            <div class="card mini">
+                                <div class="section-title">当前持仓概览</div>
+                                <table><thead><tr><th>币种</th><th>方向</th><th>数量</th><th>开仓价</th><th>现价</th><th>未实现盈亏</th></tr></thead><tbody id="overviewPositions"></tbody></table>
+                            </div>
+                            <div class="card mini">
+                                <div class="section-title">系统脉搏</div>
+                                <div class="list" id="overviewList"></div>
+                            </div>
+                        </div>
                     </div>
                 </div>
 
-                <div class="card panel" id="tab-positions">
-                    <div class="section-title">持仓详情</div>
-                    <table><thead><tr><th>币种</th><th>方向</th><th>数量</th><th>杠杆</th><th>开仓价</th><th>现价</th><th>未实现盈亏</th><th>更新时间</th></tr></thead><tbody id="positionsTable"></tbody></table>
+                <div class="panel" id="tab-positions">
+                    <div class="stack">
+                        <div class="card mini">
+                            <div class="section-title">持仓详情</div>
+                            <div class="section-note">集中查看当前持仓结构，重点观察方向、杠杆、现价与未实现盈亏。</div>
+                            <table><thead><tr><th>币种</th><th>方向</th><th>数量</th><th>杠杆</th><th>开仓价</th><th>现价</th><th>未实现盈亏</th><th>更新时间</th></tr></thead><tbody id="positionsTable"></tbody></table>
+                        </div>
+                    </div>
                 </div>
 
-                <div class="card panel" id="tab-trades">
-                    <div class="section-title">交易记录</div>
-                    <table><thead><tr><th>ID</th><th>币种</th><th>方向</th><th>状态</th><th>开仓价</th><th>平仓价</th><th>数量</th><th>盈亏</th><th>开仓时间</th></tr></thead><tbody id="tradesTable"></tbody></table>
+                <div class="panel" id="tab-trades">
+                    <div class="stack">
+                        <div class="card mini">
+                            <div class="section-title">交易记录</div>
+                            <div class="section-note">追踪开平仓流水与盈亏表现，适合快速回看最近策略执行结果。</div>
+                            <table><thead><tr><th>ID</th><th>币种</th><th>方向</th><th>状态</th><th>开仓价</th><th>平仓价</th><th>数量</th><th>盈亏</th><th>开仓时间</th></tr></thead><tbody id="tradesTable"></tbody></table>
+                        </div>
+                    </div>
                 </div>
 
                 <div class="card panel" id="tab-signals">
@@ -512,24 +537,27 @@
                     </div>
                 </div>
 
-                <div class="card panel" id="tab-risk">
-                    <div class="panel-grid">
-                        <div>
+                <div class="panel" id="tab-risk">
+                    <div class="stack">
+                        <div class="card mini">
+                            <div class="section-title">风险总览</div>
+                            <div class="section-note">优先看四个关键风险指标，再判断是否需要查看最近事件或风控哨兵建议。</div>
                             <div class="kpis">
                                 <div class="card mini"><div class="label">当前风险占用</div><div class="value" id="riskCurrentExposure">--</div></div>
                                 <div class="card mini"><div class="label">日内回撤</div><div class="value" id="riskDailyDrawdown">--</div></div>
                                 <div class="card mini"><div class="label">连续亏损</div><div class="value" id="riskConsecutiveLosses">--</div></div>
                                 <div class="card mini"><div class="label">今日交易次数</div><div class="value" id="riskTodayTrades">--</div></div>
                             </div>
-                            <div style="height:16px"></div>
+                        </div>
+                        <div class="compact-grid">
                             <div class="card mini">
                                 <div class="section-title">风险哨兵</div>
                                 <div class="list" id="riskCards"></div>
                             </div>
-                        </div>
-                        <div class="card mini">
-                            <div class="section-title">最近风控事件</div>
-                            <table><thead><tr><th>时间</th><th>币种</th><th>原因</th></tr></thead><tbody id="riskEventsTable"></tbody></table>
+                            <div class="card mini">
+                                <div class="section-title">最近风控事件</div>
+                                <table><thead><tr><th>时间</th><th>币种</th><th>原因</th></tr></thead><tbody id="riskEventsTable"></tbody></table>
+                            </div>
                         </div>
                     </div>
                 </div>

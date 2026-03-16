@@ -578,6 +578,43 @@ def get_symbols_config():
     })
 
 
+@app.route('/api/config/governance', methods=['POST'])
+def update_governance_config():
+    """更新治理参数配置"""
+    global risk_manager, ml_engine, backtester, signal_quality_analyzer, optimizer, governance, preset_manager
+    payload = request.get_json(silent=True) or {}
+    pool_switch = payload.get('pool_switch') or {}
+
+    min_hold_hours = int(pool_switch.get('min_hold_hours', config.get('governance.pool_switch.min_hold_hours', 6) or 6))
+    score_margin = float(pool_switch.get('score_margin', config.get('governance.pool_switch.score_margin', 1.0) or 1.0))
+
+    if min_hold_hours < 0:
+        return jsonify({'success': False, 'error': 'min_hold_hours must be >= 0'}), 400
+    if score_margin < 0:
+        return jsonify({'success': False, 'error': 'score_margin must be >= 0'}), 400
+
+    config.set('governance.pool_switch.min_hold_hours', min_hold_hours)
+    config.set('governance.pool_switch.score_margin', score_margin)
+    config.save()
+    config.reload()
+
+    risk_manager = RiskManager(config, db)
+    ml_engine = MLEngine(config.all)
+    backtester = StrategyBacktester(config)
+    signal_quality_analyzer = SignalQualityAnalyzer(config, db)
+    optimizer = ParameterOptimizer(config, db)
+    governance = GovernanceEngine(config, db)
+    preset_manager = PresetManager(config)
+
+    return jsonify({
+        'success': True,
+        'data': {
+            'governance': config.get('governance', {}),
+            'message': '治理参数已保存并重新加载。'
+        }
+    })
+
+
 # ============================================================================
 # 健康检查
 # ============================================================================

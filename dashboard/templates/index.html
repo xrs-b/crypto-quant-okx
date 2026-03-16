@@ -970,9 +970,10 @@
                 <div class="item"><strong>切池距离</strong><div class="muted">${safe(path.blocking_label) || '已可发起审批'} ｜ ${shortReason(safe(path.summary) || '--')}</div></div>
                 <div class="item"><strong>建议等待条件</strong><div class="muted">${governanceWait}</div></div>`;
             document.getElementById('governanceRuleCards').innerHTML = `
-                <div class="item"><strong>最小观察期</strong><div class="muted">${safe(govRules.min_hold_hours)}h ｜ 当前提示：${holdHint}</div></div>
+                <div class="item"><strong>最小观察期</strong><div class="muted">当前 ${safe(govRules.min_hold_hours)}h ｜ ${holdHint}</div></div>
                 <div class="item"><strong>分差防抖</strong><div class="muted">score margin = ${safe(govRules.score_margin)} ｜ challenger 需明显领先主池先可发起切池</div></div>
-                <div class="item"><strong>下次可评估时间</strong><div class="muted">${safe(path.next_recheck_at) || '--'}</div></div>`;
+                <div class="item"><strong>下次可评估时间</strong><div class="muted">${safe(path.next_recheck_at) || '--'}</div></div>
+                <div class="item"><strong>页内调整</strong><div class="muted">观察期(h): <input id="govMinHoldHoursInput" type="number" min="0" step="1" value="${safe(govRules.min_hold_hours)}" style="width:90px; margin-left:6px;"> ｜ 分差阈值: <input id="govScoreMarginInput" type="number" min="0" step="0.1" value="${safe(govRules.score_margin)}" style="width:90px; margin-left:6px;"></div><div style="margin-top:10px"><button onclick="saveGovernanceConfig()">保存治理参数</button></div></div>`;
             document.getElementById('dailySummaryBlock').textContent = JSON.stringify(summary, null, 2);
             document.getElementById('runtimeCleanupBlock').textContent = JSON.stringify(cleanupPreview, null, 2);
             document.getElementById('approvalHistoryTable').innerHTML = history.length ? history.map(h => {
@@ -1046,8 +1047,26 @@
             document.getElementById('configGovernanceSummary').innerHTML = `
                 <div class="item"><strong>min_hold_hours</strong><div class="muted">${safe(rules.min_hold_hours)} 小时</div></div>
                 <div class="item"><strong>score_margin</strong><div class="muted">${safe(rules.score_margin)} 分</div></div>
-                <div class="item"><strong>当前用途</strong><div class="muted">用于主池切换审批既观察窗与防抖门槛。</div></div>`;
+                <div class="item"><strong>当前用途</strong><div class="muted">用于主池切换审批既观察窗与防抖门槛。</div></div>
+                <div class="item"><strong>修改入口</strong><div class="muted">可直接喺治理页「治理规则」卡片内调整并保存。</div></div>`;
             document.getElementById('configBlock').textContent = JSON.stringify(cfg, null, 2);
+        }
+
+        async function saveGovernanceConfig() {
+            const minHoldHours = Number(document.getElementById('govMinHoldHoursInput')?.value || 0);
+            const scoreMargin = Number(document.getElementById('govScoreMarginInput')?.value || 0);
+            const r = await fetch('/api/config/governance', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({pool_switch: {min_hold_hours: minHoldHours, score_margin: scoreMargin}})
+            });
+            const j = await r.json();
+            if (!j.success) {
+                toast('保存治理参数失败: ' + (j.error || 'unknown'), 'bad');
+                return;
+            }
+            toast(j.data?.message || '治理参数已保存', 'ok');
+            await refreshAll();
         }
         async function refreshAll() {
             await Promise.all([loadOverview(), loadPositions(), loadTrades(), loadSignals(), loadStrategy(), loadBacktest(), loadQuality(), loadOptimizer(), loadGovernance(), loadRisk(), loadConfig()]);

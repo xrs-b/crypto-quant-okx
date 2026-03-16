@@ -803,7 +803,9 @@
                                             <select id="governanceSnapshotCompareA" style="min-width:220px; padding:10px 12px; border-radius:12px; border:1px solid rgba(255,255,255,.08); background:rgba(255,255,255,.04); color:#fff;" onchange="renderGovernanceSnapshotComparison()"></select>
                                             <select id="governanceSnapshotCompareB" style="min-width:220px; padding:10px 12px; border-radius:12px; border:1px solid rgba(255,255,255,.08); background:rgba(255,255,255,.04); color:#fff;" onchange="renderGovernanceSnapshotComparison()"></select>
                                             <button class="chip-btn" onclick="copyGovernanceSnapshotComparison()">复制对比摘要</button>
+                                            <button class="chip-btn" onclick="copyGovernanceSnapshotConclusion()">复制结论</button>
                                         </div>
+                                        <div class="risk-strip" id="governanceSnapshotConclusion"></div>
                                         <div class="risk-strip" id="governanceSnapshotComparison"></div>
                                     </div>
                                     <div class="timeline-list" id="governanceReportSnapshots"></div>
@@ -1222,15 +1224,35 @@
                 `仅B重点：${onlyB.join(' ｜ ') || '无明显独有内容'}`
             ].join('\n');
         }
+        function buildGovernanceSnapshotConclusion(a, b) {
+            if (!a || !b) return '请先选择两份快照再生成结论。';
+            const tagsA = a.tags || [];
+            const tagsB = b.tags || [];
+            const toneChanged = a.styleLabel !== b.styleLabel;
+            const moreRollback = !tagsA.includes('rollback') && tagsB.includes('rollback');
+            const lessRollback = tagsA.includes('rollback') && !tagsB.includes('rollback');
+            const toAggressive = !tagsA.includes('aggressive') && tagsB.includes('aggressive');
+            const toConservative = !tagsA.includes('conservative') && tagsB.includes('conservative');
+            let summary = '本次对比显示治理口径整体延续，未见重大方向转折。';
+            if (moreRollback && toConservative) summary = '本次汇报较上一版更偏风险控制，回滚主题上升，同时整体语义更保守。';
+            else if (moreRollback) summary = '本次汇报较上一版更强调回滚与防守，说明治理关注点向风险控制倾斜。';
+            else if (toAggressive) summary = '本次汇报较上一版更偏试探与进攻，治理重心开始向激进尝试倾斜。';
+            else if (toConservative) summary = '本次汇报较上一版更偏保守，治理重点转向稳定与观察。';
+            else if (lessRollback) summary = '本次汇报较上一版减少回滚相关表述，说明风险压力有所缓和。';
+            if (toneChanged) summary += ` 同时汇报语气由 ${a.styleLabel} 切换为 ${b.styleLabel}。`;
+            return summary;
+        }
         function renderGovernanceSnapshotComparison() {
             const host = document.getElementById('governanceSnapshotComparison');
+            const conclusionHost = document.getElementById('governanceSnapshotConclusion');
             const selectA = document.getElementById('governanceSnapshotCompareA');
             const selectB = document.getElementById('governanceSnapshotCompareB');
-            if (!host || !selectA || !selectB) return;
+            if (!host || !selectA || !selectB || !conclusionHost) return;
             const items = getGovernanceReportSnapshots();
             const a = items.find(x => x.id === selectA.value);
             const b = items.find(x => x.id === selectB.value);
             if (!a || !b) {
+                conclusionHost.innerHTML = `<div class="risk-alert info">请先选择两份快照再生成结论。</div>`;
                 host.innerHTML = `<div class="risk-alert info">请先选择两份快照再对比。</div>`;
                 return;
             }
@@ -1242,6 +1264,8 @@
             const rollbackDiff = tagsA.includes('rollback') === tagsB.includes('rollback') ? '回滚主题无明显变化' : tagsB.includes('rollback') ? 'B 比 A 更偏回滚主题' : 'B 比 A 更少回滚主题';
             const styleTrend = tagsA.includes('aggressive') && tagsB.includes('conservative') ? '由激进转向保守' : tagsA.includes('conservative') && tagsB.includes('aggressive') ? '由保守转向激进' : tagsB.includes('aggressive') ? 'B 偏激进' : tagsB.includes('conservative') ? 'B 偏保守' : '风格变化不明显';
             const text = buildGovernanceSnapshotComparisonText(a, b);
+            const conclusion = buildGovernanceSnapshotConclusion(a, b);
+            conclusionHost.innerHTML = `<div class="risk-alert ok"><strong>自动结论</strong><br>${conclusion}</div>`;
             host.innerHTML = `
                 <div class="risk-alert info"><strong>A：</strong> ${a.title} ｜ ${a.styleLabel} ｜ ${a.savedAt}<br><strong>B：</strong> ${b.title} ｜ ${b.styleLabel} ｜ ${b.savedAt}</div>
                 <div class="risk-alert warn">标签新增/移除：A独有 [${onlyTagsA.join(' / ') || '--'}] ｜ B独有 [${onlyTagsB.join(' / ') || '--'}]</div>
@@ -1261,6 +1285,20 @@
                 toast('快照对比摘要已复制', 'ok');
             } catch (e) {
                 toast('复制快照对比失败，请手动复制', 'bad');
+            }
+        }
+        async function copyGovernanceSnapshotConclusion() {
+            const items = getGovernanceReportSnapshots();
+            const aId = document.getElementById('governanceSnapshotCompareA')?.value;
+            const bId = document.getElementById('governanceSnapshotCompareB')?.value;
+            const a = items.find(x => x.id === aId);
+            const b = items.find(x => x.id === bId);
+            const text = buildGovernanceSnapshotConclusion(a, b);
+            try {
+                await navigator.clipboard.writeText(text);
+                toast('快照对比结论已复制', 'ok');
+            } catch (e) {
+                toast('复制快照对比结论失败，请手动复制', 'bad');
             }
         }
         function renderGovernanceReportSnapshots() {

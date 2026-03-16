@@ -1494,6 +1494,22 @@
             }
             await copyGovernanceSnapshotCompareRecord(item.id);
         }
+        async function copyLatestGovernanceCompareRecord() {
+            const item = getGovernanceSnapshotCompareRecords()[0];
+            if (!item) {
+                toast('暂无对比记录可复制', 'bad');
+                return;
+            }
+            await copyGovernanceSnapshotCompareRecord(item.id);
+        }
+        async function copyLatestGovernanceCompareByTag(tag) {
+            const item = getGovernanceSnapshotCompareRecords().find(x => (x.tags || []).includes(tag));
+            if (!item) {
+                toast('当前标签下暂无对比记录', 'bad');
+                return;
+            }
+            await copyGovernanceSnapshotCompareRecord(item.id);
+        }
         function deleteGovernanceSnapshotCompareRecord(id) {
             const items = getGovernanceSnapshotCompareRecords().filter(x => x.id !== id);
             setGovernanceSnapshotCompareRecords(items);

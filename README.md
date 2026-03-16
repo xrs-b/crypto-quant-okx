@@ -105,6 +105,9 @@ python3 bot/run.py
 # 只读诊断交易所/合约参数（不会下单）
 python3 bot/run.py --exchange-diagnose
 
+# 生成最小 testnet 验收计划（默认只预演，不会下单）
+python3 bot/run.py --exchange-smoke --symbol BTC/USDT --side long
+
 # 启动 dashboard
 python3 bot/run.py --dashboard --port 8050
 ```

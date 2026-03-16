@@ -16,7 +16,7 @@ from core.exchange import Exchange
 from signals import SignalDetector, SignalValidator, SignalRecorder
 from trading import TradingExecutor, RiskManager
 from strategies.strategy_library import StrategyManager
-from bot.run import build_exchange_diagnostics
+from bot.run import build_exchange_diagnostics, build_exchange_smoke_plan
 
 
 class FakeExchange:
@@ -400,6 +400,21 @@ class TestDiagnostics(unittest.TestCase):
         self.assertNotIn('posSide', btc['order_params_preview'])
         self.assertFalse(doge['is_futures_symbol'])
         self.assertEqual(doge['reason'], 'not-swap-market')
+
+    def test_build_exchange_smoke_plan(self):
+        cfg = Config()
+        cfg._config['symbols'] = {'watch_list': ['BTC/USDT']}
+        cfg._config.setdefault('exchange', {})['position_mode'] = 'hedge'
+        cfg._config.setdefault('trading', {})['position_size'] = 0.1
+        cfg._config['trading']['leverage'] = 10
+        plan = build_exchange_smoke_plan(cfg, DiagnosticExchangeStub(), symbol='BTC/USDT', side='long')
+
+        self.assertEqual(plan['symbol'], 'BTC/USDT')
+        self.assertTrue(plan['execute_ready'])
+        self.assertEqual(plan['open_preview']['side'], 'buy')
+        self.assertEqual(plan['close_preview']['side'], 'sell')
+        self.assertIn('posSide', plan['open_preview']['params'])
+        self.assertTrue(plan['close_preview']['params']['reduceOnly'])
 
 
 class TestTradingExecutor(unittest.TestCase):

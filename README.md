@@ -102,6 +102,9 @@ vim config/config.yaml
 # 手动运行（当前主入口）
 python3 bot/run.py
 
+# 只读诊断交易所/合约参数（不会下单）
+python3 bot/run.py --exchange-diagnose
+
 # 启动 dashboard
 python3 bot/run.py --dashboard --port 8050
 ```
@@ -118,6 +121,10 @@ exchange: okx                     # 交易所名称
 
 # 交易模式: testnet (模拟) / real (真实)
 mode: testnet
+
+# 持仓模式: oneway(单向) / hedge(双向)
+# 必须与 OKX 账户设置一致，否则容易触发 posSide / 平仓方向错误
+position_mode: oneway
 
 # -----------------------------------------------------------------------------
 # API密钥配置 (必须)

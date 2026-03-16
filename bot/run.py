@@ -25,6 +25,49 @@ from ml.engine import MLEngine, ModelTrainer, DataCollector
 from analytics import StrategyBacktester, SignalQualityAnalyzer, ParameterOptimizer, GovernanceEngine
 
 
+def build_exchange_diagnostics(cfg: Config, exchange: Exchange) -> dict:
+    """构建交易所诊断信息（只读，不下单）"""
+    report = {
+        'exchange_mode': cfg.exchange_mode,
+        'position_mode': cfg.position_mode,
+        'symbols': [],
+        'balance_error': None,
+    }
+
+    available = 0
+    try:
+        balance = exchange.fetch_balance()
+        available = float((balance.get('free') or {}).get('USDT', 0) or 0)
+        report['available_usdt'] = round(available, 4)
+    except Exception as e:
+        report['available_usdt'] = 0
+        report['balance_error'] = str(e)
+
+    desired_notional = available * float(cfg.position_size or 0) * float(cfg.leverage or 0)
+
+    for symbol in cfg.symbols:
+        row = {'symbol': symbol}
+        try:
+            row['is_futures_symbol'] = bool(exchange.is_futures_symbol(symbol))
+            if row['is_futures_symbol']:
+                row['order_symbol'] = exchange.get_order_symbol(symbol)
+                ticker = exchange.fetch_ticker(symbol)
+                row['last_price'] = ticker.get('last')
+                if row['last_price']:
+                    row['sample_amount'] = exchange.normalize_contract_amount(symbol, desired_notional, row['last_price'])
+                preview = {'tdMode': 'isolated'}
+                if str(cfg.position_mode).lower() not in {'oneway', 'one-way', 'net', 'single'}:
+                    preview['posSide'] = 'long'
+                row['order_params_preview'] = preview
+            else:
+                row['reason'] = 'not-swap-market'
+        except Exception as e:
+            row['error'] = str(e)
+        report['symbols'].append(row)
+
+    return report
+
+
 class TradingBot:
     """交易机器人主类"""
     
@@ -217,6 +260,7 @@ def main():
     parser.add_argument('--mode-status', action='store_true', help='显示当前模式状态')
     parser.add_argument('--daily-summary', action='store_true', help='生成日报摘要')
     parser.add_argument('--cleanup-runtime-records', action='store_true', help='清理重复的治理/日报运行记录')
+    parser.add_argument('--exchange-diagnose', action='store_true', help='只读诊断交易所/合约参数，不执行下单')
     parser.add_argument('--dry-run', action='store_true', help='配合清理命令，仅预览不删除')
     parser.add_argument('--port', type=int, default=8050, help='仪表盘端口')
     
@@ -351,6 +395,31 @@ def main():
         db = Database(cfg.db_path)
         print("\n🧹 清理运行期重复记录:\n")
         print(db.cleanup_duplicate_runtime_records(dry_run=args.dry_run))
+
+    elif args.exchange_diagnose:
+        cfg = Config()
+        exchange = Exchange(cfg.all)
+        report = build_exchange_diagnostics(cfg, exchange)
+        print("\n🩺 交易所只读诊断:\n")
+        print(f"模式: {report['exchange_mode']} | 持仓模式: {report['position_mode']} | 可用USDT: {report.get('available_usdt', 0)}")
+        if report.get('balance_error'):
+            print(f"余额读取异常: {report['balance_error']}")
+        for row in report['symbols']:
+            print(f"\n[{row['symbol']}]")
+            if row.get('error'):
+                print(f"  错误: {row['error']}")
+                continue
+            print(f"  futures: {'yes' if row.get('is_futures_symbol') else 'no'}")
+            if row.get('order_symbol'):
+                print(f"  order_symbol: {row['order_symbol']}")
+            if row.get('last_price') is not None:
+                print(f"  last_price: {row['last_price']}")
+            if row.get('sample_amount') is not None:
+                print(f"  sample_amount: {row['sample_amount']}")
+            if row.get('order_params_preview'):
+                print(f"  order_params_preview: {row['order_params_preview']}")
+            if row.get('reason'):
+                print(f"  reason: {row['reason']}")
 
     else:
         # 运行交易

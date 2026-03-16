@@ -264,6 +264,21 @@
             color: #fff0b8;
             border-color: rgba(240,185,11,.3);
         }
+        .summary-strip {
+            display:grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 10px;
+            margin-bottom: 12px;
+        }
+        .summary-pill {
+            padding: 12px;
+            border-radius: 14px;
+            background: var(--panel-2);
+            border: 1px solid rgba(255,255,255,.06);
+        }
+        .summary-pill .k { color: var(--muted); font-size: 12px; margin-bottom: 6px; }
+        .summary-pill .v { font-size: 18px; font-weight: 800; }
+        .summary-pill .s { color: var(--muted); font-size: 12px; margin-top: 6px; }
         .history-card-list { display:grid; gap:12px; }
         .history-card {
             padding: 14px;
@@ -337,7 +352,7 @@
         .toast.bad { border-color: rgba(239,68,68,.34); }
         .toast.info { border-color: rgba(96,165,250,.34); }
         @media (max-width: 1280px) {
-            .stats, .panel-grid, .kpis, .split-3, .diff-grid { grid-template-columns:1fr; }
+            .stats, .panel-grid, .kpis, .split-3, .diff-grid, .summary-strip { grid-template-columns:1fr; }
         }
         @media (max-width: 980px) {
             .app-shell { grid-template-columns: 1fr; }
@@ -718,6 +733,7 @@
                             <div class="card mini">
                                 <div class="section-title">最近治理参数变更</div>
                                 <div class="section-note">卡片化显示参数版本、变更字段、当前生效状态与回滚入口。</div>
+                                <div class="summary-strip" id="governanceHistorySummary"></div>
                                 <div class="toolbar-inline" id="governanceHistoryToolbar">
                                     <button class="chip-btn active" onclick="setGovernanceHistoryFilter('all')">全部</button>
                                     <button class="chip-btn" onclick="setGovernanceHistoryFilter('manual')">人工调参</button>
@@ -813,6 +829,33 @@
                 return byType && byExpanded;
             });
             return {rows: filtered, currentIndex};
+        }
+        function formatHoursAgoFromDate(dateText) {
+            if (!dateText) return '--';
+            const t = new Date(String(dateText).replace(' ', 'T')).getTime();
+            if (Number.isNaN(t)) return '--';
+            const hours = Math.max(0, (Date.now() - t) / 3600000);
+            if (hours < 1) return `${Math.round(hours * 60)} 分钟`;
+            if (hours < 24) return `${hours.toFixed(1)} 小时`;
+            return `${(hours / 24).toFixed(1)} 天`;
+        }
+        function renderGovernanceHistorySummary(history = [], currentRules = {}, currentIndex = -1) {
+            const now = Date.now();
+            const last7d = history.filter(row => {
+                const t = new Date(String(row.created_at || '').replace(' ', 'T')).getTime();
+                return !Number.isNaN(t) && (now - t) <= 7 * 24 * 3600000;
+            });
+            const manualCount = history.filter(row => governanceNoteKind(row.details?.note || '').type === 'manual').length;
+            const testCount = history.filter(row => governanceNoteKind(row.details?.note || '').type === 'test').length;
+            const rollbackCount = history.filter(row => governanceNoteKind(row.details?.note || '').type === 'rollback').length;
+            const latestManual = history.find(row => governanceNoteKind(row.details?.note || '').type === 'manual');
+            const currentRow = currentIndex >= 0 ? history[currentIndex] : null;
+            return `
+                <div class="summary-pill"><div class="k">最近 7 天调参</div><div class="v">${last7d.length}</div><div class="s">观察治理节奏有冇过密</div></div>
+                <div class="summary-pill"><div class="k">类型分布</div><div class="v">人 ${manualCount} / 测 ${testCount} / 回 ${rollbackCount}</div><div class="s">人工 / 测试 / 回滚</div></div>
+                <div class="summary-pill"><div class="k">最近正式调参</div><div class="v">${latestManual?.created_at || '--'}</div><div class="s">${latestManual ? `${formatHoursAgoFromDate(latestManual.created_at)} 前` : '暂无人工调参记录'}</div></div>
+                <div class="summary-pill"><div class="k">当前版本已生效</div><div class="v">${currentRow ? formatHoursAgoFromDate(currentRow.created_at) : '--'}</div><div class="s">${currentRow ? summarizeGovernanceDiff(currentRow.before_value || {}, currentRow.after_value || {}) : '未定位到当前版本'}</div></div>
+            `;
         }
         function updateGovernanceHistoryToolbar() {
             const toolbar = document.getElementById('governanceHistoryToolbar');
@@ -1279,6 +1322,7 @@
             const rules = cfg.governance?.pool_switch || {};
             const {rows: visibleHistory, currentIndex} = filterGovernanceHistoryRows(history, rules);
             updateGovernanceHistoryToolbar();
+            document.getElementById('governanceHistorySummary').innerHTML = renderGovernanceHistorySummary(history, rules, currentIndex);
             document.getElementById('configGovernanceSummary').innerHTML = `
                 <div class="item"><strong>min_hold_hours</strong><div class="muted">${safe(rules.min_hold_hours)} 小时</div></div>
                 <div class="item"><strong>score_margin</strong><div class="muted">${safe(rules.score_margin)} 分</div></div>

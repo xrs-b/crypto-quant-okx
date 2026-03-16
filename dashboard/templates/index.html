@@ -756,6 +756,7 @@
                                 <div class="summary-strip" id="governanceBaselineSummary"></div>
                                 <div class="risk-strip" id="governanceGuidance"></div>
                                 <div class="toolbar-inline" id="governancePresetBar"></div>
+                                <div class="risk-strip" id="governancePresetPreview"></div>
                                 <div class="list" id="configGovernanceSummary"></div>
                             </div>
                             <div class="card mini">
@@ -844,6 +845,7 @@
         let latestGovernanceConfigHistory = [];
         let governanceHistoryFilter = 'all';
         let governanceHistoryExpanded = false;
+        let governanceSelectedPreset = 'balanced';
         const stateClass = text => {
             const s = String(text || '').toLowerCase();
             if (s.includes('promote') || s.includes('approved') || s.includes('通过') || s.includes('守擂')) return 'ok';
@@ -932,13 +934,28 @@
         }
         function renderGovernancePresetBar(currentRules = {}) {
             return Object.entries(governanceQuickPresets).map(([key, preset]) => {
-                const active = isSameGovernanceConfig(currentRules, preset.values);
-                return `<button class="chip-btn ${active ? 'active' : ''}" onclick="applyGovernancePreset('${key}')">${preset.label}</button>`;
+                const sameAsCurrent = isSameGovernanceConfig(currentRules, preset.values);
+                const active = governanceSelectedPreset === key || sameAsCurrent;
+                const suffix = sameAsCurrent ? ' · 当前' : '';
+                return `<button class="chip-btn ${active ? 'active' : ''}" onclick="applyGovernancePreset('${key}')">${preset.label}${suffix}</button>`;
             }).join('');
+        }
+        function renderGovernancePresetPreview(currentRules = {}) {
+            const preset = governanceQuickPresets[governanceSelectedPreset] || governanceQuickPresets.balanced;
+            const target = preset.values || {};
+            const holdDiff = Number(target.min_hold_hours ?? 0) - Number(currentRules.min_hold_hours ?? 0);
+            const scoreDiff = Number(target.score_margin ?? 0) - Number(currentRules.score_margin ?? 0);
+            const direction = holdDiff > 0 || scoreDiff > 0 ? '整体偏保守' : holdDiff < 0 || scoreDiff < 0 ? '整体偏激进' : '与当前一致';
+            return `
+                <div class="risk-alert info"><strong>${preset.label} 预览</strong><br>观察期：${currentRules.min_hold_hours ?? '--'}h → ${target.min_hold_hours ?? '--'}h ｜ 分差：${currentRules.score_margin ?? '--'} → ${target.score_margin ?? '--'} ｜ ${direction}</div>
+                <div class="risk-alert ok">适合场景：${preset.desc}</div>
+                <div class="risk-alert warn">套用后只会回填到治理表单，仍需你确认后手动保存先会生效。</div>
+            `;
         }
         function applyGovernancePreset(key) {
             const preset = governanceQuickPresets[key];
             if (!preset) return;
+            governanceSelectedPreset = key;
             activateTab('governance');
             const holdInput = document.getElementById('govMinHoldHoursInput');
             const scoreInput = document.getElementById('govScoreMarginInput');
@@ -947,6 +964,7 @@
             if (scoreInput) scoreInput.value = preset.values.score_margin;
             if (noteInput) noteInput.value = preset.note;
             syncGovernanceDraftState();
+            loadConfig();
             toast(`${preset.label} 已回填：观察期 ${preset.values.min_hold_hours}h ｜ 分差 ${preset.values.score_margin} ｜ ${preset.desc}`, 'info');
         }
         function renderGovernanceHistoryRisks(history = [], currentIndex = -1) {
@@ -1441,11 +1459,14 @@
             latestGovernanceConfigHistory = history || [];
             const rules = cfg.governance?.pool_switch || {};
             const baseline = governanceDefaultBaseline;
+            const matchedPreset = Object.entries(governanceQuickPresets).find(([, preset]) => isSameGovernanceConfig(rules, preset.values));
+            if (matchedPreset) governanceSelectedPreset = matchedPreset[0];
             const {rows: visibleHistory, currentIndex} = filterGovernanceHistoryRows(history, rules);
             updateGovernanceHistoryToolbar();
             document.getElementById('governanceBaselineSummary').innerHTML = renderGovernanceBaselineSummary(rules, baseline);
             document.getElementById('governanceGuidance').innerHTML = renderGovernanceGuidance(rules, baseline);
             document.getElementById('governancePresetBar').innerHTML = renderGovernancePresetBar(rules);
+            document.getElementById('governancePresetPreview').innerHTML = renderGovernancePresetPreview(rules);
             document.getElementById('governanceHistorySummary').innerHTML = renderGovernanceHistorySummary(history, rules, currentIndex);
             document.getElementById('governanceHistoryRisks').innerHTML = renderGovernanceHistoryRisks(history, currentIndex);
             document.getElementById('governanceHistoryTimeline').innerHTML = renderGovernanceHistoryTimeline(history);

@@ -103,6 +103,10 @@ class TestConfig(unittest.TestCase):
         self.assertGreater(self.config.stop_loss, 0)
         self.assertGreater(self.config.take_profit, self.config.stop_loss)
 
+    def test_position_mode(self):
+        """测试持仓模式配置"""
+        self.assertIn(self.config.position_mode, ['oneway', 'hedge', 'one-way', 'net', 'single'])
+
 
 class TestDatabase(unittest.TestCase):
     """数据库模块测试"""
@@ -344,6 +348,17 @@ class TestExchange(unittest.TestCase):
         self.assertTrue(ex.exchange.calls[0]['params'].get('reduceOnly'))
         self.assertTrue(ex.exchange.calls[1]['params'].get('reduceOnly'))
         self.assertNotIn('posSide', ex.exchange.calls[1]['params'])
+
+    def test_oneway_mode_omits_posside_from_start(self):
+        ex = Exchange.__new__(Exchange)
+        ex.config = {'exchange': {'position_mode': 'oneway'}}
+        ex.exchange = RawOrderExchangeStub()
+        ex.get_order_symbol = lambda symbol: 'BTC/USDT:USDT'
+
+        result = ex.create_order('BTC/USDT', 'buy', 1.5, posSide='long')
+        self.assertEqual(result['id'], 'buy-ok')
+        self.assertEqual(len(ex.exchange.calls), 1)
+        self.assertNotIn('posSide', ex.exchange.calls[0]['params'])
 
 
 class TestTradingExecutor(unittest.TestCase):

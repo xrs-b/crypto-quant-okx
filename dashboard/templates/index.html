@@ -961,6 +961,20 @@
         let overviewSmokeExecuting = false;
         let overviewSmokeState = null;
         let overviewSmokeLastImpact = null;
+        function getOverviewSmokeLastImpact() {
+            try {
+                return JSON.parse(localStorage.getItem('overview_smoke_last_impact') || 'null');
+            } catch (e) {
+                return null;
+            }
+        }
+        function setOverviewSmokeLastImpact(value) {
+            overviewSmokeLastImpact = value || null;
+            try {
+                if (overviewSmokeLastImpact) localStorage.setItem('overview_smoke_last_impact', JSON.stringify(overviewSmokeLastImpact));
+                else localStorage.removeItem('overview_smoke_last_impact');
+            } catch (e) {}
+        }
         const stateClass = text => {
             const s = String(text || '').toLowerCase();
             if (s.includes('promote') || s.includes('approved') || s.includes('通过') || s.includes('守擂')) return 'ok';
@@ -2079,14 +2093,14 @@
                 ]);
                 const afterTrades = (await api('/api/trades?limit=50')).length;
                 const afterPositions = (await api('/api/positions')).length;
-                overviewSmokeLastImpact = {
+                setOverviewSmokeLastImpact({
                     smokeRunId: j.data?.smoke_run_id,
                     symbol,
                     side,
                     tradeDelta: afterTrades - beforeTrades,
                     positionDelta: afterPositions - beforePositions,
                     error: j.data?.error || null,
-                };
+                });
                 renderOverviewSmokeControls();
             } catch (e) {
                 if (status) status.innerHTML = `<div class="risk-alert bad">Smoke 验收失败：${e.message || e}</div>`;
@@ -2151,6 +2165,7 @@
             const mode = await api('/api/mode/status');
             overviewSmokeSymbols = (mode.watch_list || []).slice();
             overviewSmokeState = smokeState || null;
+            if (!overviewSmokeLastImpact) overviewSmokeLastImpact = getOverviewSmokeLastImpact();
             renderOverviewSmokeControls();
             const alertHtml = (alerts || []).map(a => `${a.level.toUpperCase()}: ${a.message}`).join('<br>') || '--';
             const changesHtml = (changes || []).slice(0,3).map(c => `${c.time}｜${c.type}｜${c.title}｜${c.detail}`).join('<br>') || '--';

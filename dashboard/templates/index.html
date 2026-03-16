@@ -829,6 +829,8 @@
                                             <button class="chip-btn" onclick="copyLatestGovernanceCompareByTag('risk')">复制最新风险控制</button>
                                             <button class="chip-btn" onclick="copyLatestGovernanceCompareByTag('probe')">复制最新试探</button>
                                             <button class="chip-btn" onclick="copyGovernanceCompareDigest()">复制对比摘要汇总</button>
+                                            <button class="chip-btn" onclick="copyGovernanceCompareDigestByTag('risk')">复制风险控制汇总</button>
+                                            <button class="chip-btn" onclick="copyGovernanceCompareDigestByTag('probe')">复制试探汇总</button>
                                         </div>
                                         <div class="risk-strip" id="governanceCompareDigestPreview"></div>
                                         <div class="timeline-list" id="governanceSnapshotCompareHistory"></div>
@@ -1437,6 +1439,12 @@
             if (!items.length) return '暂无快照对比记录可汇总。';
             return ['治理对比摘要汇总', ...items.map((item, idx) => `${idx + 1}. ${item.title} ｜ ${item.savedAt} ｜ ${item.preview}`)].join('\n');
         }
+        function buildGovernanceCompareDigestByTag(tag) {
+            const items = getGovernanceSnapshotCompareRecords().filter(x => (x.tags || []).includes(tag)).slice(0, 3);
+            if (!items.length) return '当前标签下暂无快照对比记录可汇总。';
+            const title = tag === 'risk' ? '风险控制对比摘要汇总' : tag === 'probe' ? '试探对比摘要汇总' : `标签 ${tag} 对比摘要汇总`;
+            return [title, ...items.map((item, idx) => `${idx + 1}. ${item.title} ｜ ${item.savedAt} ｜ ${item.preview}`)].join('\n');
+        }
         function renderGovernanceCompareDigestPreview() {
             const host = document.getElementById('governanceCompareDigestPreview');
             if (!host) return;
@@ -1515,6 +1523,15 @@
                 toast('对比摘要汇总已复制', 'ok');
             } catch (e) {
                 toast('复制对比摘要汇总失败，请手动复制', 'bad');
+            }
+        }
+        async function copyGovernanceCompareDigestByTag(tag) {
+            const text = buildGovernanceCompareDigestByTag(tag);
+            try {
+                await navigator.clipboard.writeText(text);
+                toast('标签对比摘要汇总已复制', 'ok');
+            } catch (e) {
+                toast('复制标签对比摘要汇总失败，请手动复制', 'bad');
             }
         }
         async function copyLatestGovernanceCompareRecord() {

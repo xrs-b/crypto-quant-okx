@@ -767,6 +767,15 @@
                                 <div class="summary-strip" id="governanceStabilityScore"></div>
                                 <div class="risk-strip" id="governanceStyleTrend"></div>
                                 <div class="risk-strip" id="governanceHistoryRisks"></div>
+                                <div class="card mini" style="margin-bottom:12px; padding:12px;">
+                                    <div class="section-title">治理日报 / 周报</div>
+                                    <div class="section-note">自动汇总最近治理动作、风格变化与稳定度，方便复制发汇报。</div>
+                                    <div class="toolbar-inline">
+                                        <button class="chip-btn" onclick="copyGovernanceReport('daily')">复制日报</button>
+                                        <button class="chip-btn" onclick="copyGovernanceReport('weekly')">复制周报</button>
+                                    </div>
+                                    <div class="risk-strip" id="governanceReportSummary"></div>
+                                </div>
                                 <div class="timeline-list" id="governanceHistoryTimeline"></div>
                                 <div class="toolbar-inline" id="governanceHistoryToolbar">
                                     <button class="chip-btn active" onclick="setGovernanceHistoryFilter('all')">全部</button>
@@ -994,6 +1003,52 @@
                 <div class="summary-pill"><div class="k">一句话判断</div><div class="v">${score.label}</div><div class="s">综合当前模板、回滚频率与趋势</div></div>
                 <div class="summary-pill"><div class="k">当前建议</div><div class="v">${score.stability >= 70 ? '可继续观察' : '建议先收敛'}</div><div class="s">${score.label === '风格摇摆' ? '先减少调参频率' : '保持现配置观察表现'}</div></div>
             `;
+        }
+        function generateGovernanceReport(history = [], currentRules = {}, currentIndex = -1, mode = 'daily') {
+            const days = mode === 'weekly' ? 7 : 1;
+            const now = Date.now();
+            const scoped = history.filter(row => {
+                const t = new Date(String(row.created_at || '').replace(' ', 'T')).getTime();
+                return !Number.isNaN(t) && (now - t) <= days * 24 * 3600000;
+            });
+            const score = computeGovernanceStability(history, currentRules, currentIndex);
+            const currentPreset = getClosestGovernancePreset(currentRules || {});
+            const manual = scoped.filter(row => governanceNoteKind(row.details?.note || '').type === 'manual').length;
+            const test = scoped.filter(row => governanceNoteKind(row.details?.note || '').type === 'test').length;
+            const rollback = scoped.filter(row => governanceNoteKind(row.details?.note || '').type === 'rollback').length;
+            const trend = summarizePresetTrend(scoped.length ? scoped : history, Math.min(mode === 'weekly' ? 5 : 3, scoped.length || history.length || 1));
+            const title = mode === 'weekly' ? '治理周报' : '治理日报';
+            const text = [
+                `${title}`,
+                `- 当前风格：${currentPreset.label}`,
+                `- 当前参数：观察期 ${currentRules.min_hold_hours ?? '--'}h / 分差 ${currentRules.score_margin ?? '--'}`,
+                `- 周期内动作：人工 ${manual} / 测试 ${test} / 回滚 ${rollback}`,
+                `- 风格趋势：${trend.text}`,
+                `- 稳定度：${score.stability} ｜ 波动分：${score.volatility}`,
+                `- 当前判断：${score.label}`,
+                `- 建议：${score.stability >= 70 ? '继续观察当前配置表现' : '先减少调参频率，观察审批表现再决定下一步'}`
+            ].join('\n');
+            return {title, text, scopedCount: scoped.length};
+        }
+        function renderGovernanceReportSummary(history = [], currentRules = {}, currentIndex = -1) {
+            const daily = generateGovernanceReport(history, currentRules, currentIndex, 'daily');
+            const weekly = generateGovernanceReport(history, currentRules, currentIndex, 'weekly');
+            return `
+                <div class="risk-alert info"><strong>日报摘要</strong><br>${daily.text.replaceAll('\n', '<br>')}</div>
+                <div class="risk-alert ok"><strong>周报摘要</strong><br>${weekly.text.replaceAll('\n', '<br>')}</div>
+            `;
+        }
+        async function copyGovernanceReport(mode = 'daily') {
+            const rules = window.__lastGovernanceRules || {};
+            const history = latestGovernanceConfigHistory || [];
+            const currentIndex = getCurrentGovernanceHistoryIndex(history, rules);
+            const report = generateGovernanceReport(history, rules, currentIndex, mode);
+            try {
+                await navigator.clipboard.writeText(report.text);
+                toast(`${report.title} 已复制，可直接发汇报`, 'ok');
+            } catch (e) {
+                toast(`${report.title} 复制失败，请手动复制`, 'bad');
+            }
         }
         function renderGovernanceBaselineSummary(currentRules = {}, baseline = {}) {
             const holdDiff = Number(currentRules.min_hold_hours ?? 0) - Number(baseline.min_hold_hours ?? 0);
@@ -1547,6 +1602,7 @@
             latestGovernanceConfigHistory = history || [];
             const rules = cfg.governance?.pool_switch || {};
             const baseline = governanceDefaultBaseline;
+            window.__lastGovernanceRules = rules;
             const matchedPreset = Object.entries(governanceQuickPresets).find(([, preset]) => isSameGovernanceConfig(rules, preset.values));
             if (matchedPreset) governanceSelectedPreset = matchedPreset[0];
             const {rows: visibleHistory, currentIndex} = filterGovernanceHistoryRows(history, rules);
@@ -1560,6 +1616,7 @@
             document.getElementById('governanceStabilityScore').innerHTML = renderGovernanceStabilityScore(history, rules, currentIndex);
             document.getElementById('governanceStyleTrend').innerHTML = renderGovernanceStyleTrend(history);
             document.getElementById('governanceHistoryRisks').innerHTML = renderGovernanceHistoryRisks(history, currentIndex);
+            document.getElementById('governanceReportSummary').innerHTML = renderGovernanceReportSummary(history, rules, currentIndex);
             document.getElementById('governanceHistoryTimeline').innerHTML = renderGovernanceHistoryTimeline(history);
             document.getElementById('configGovernanceSummary').innerHTML = `
                 <div class="item"><strong>min_hold_hours</strong><div class="muted">${safe(rules.min_hold_hours)} 小时</div></div>

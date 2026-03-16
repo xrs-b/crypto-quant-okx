@@ -828,7 +828,9 @@
                                             <button class="chip-btn" onclick="copyLatestGovernanceCompareRecord()">复制最新记录</button>
                                             <button class="chip-btn" onclick="copyLatestGovernanceCompareByTag('risk')">复制最新风险控制</button>
                                             <button class="chip-btn" onclick="copyLatestGovernanceCompareByTag('probe')">复制最新试探</button>
+                                            <button class="chip-btn" onclick="copyGovernanceCompareDigest()">复制对比摘要汇总</button>
                                         </div>
+                                        <div class="risk-strip" id="governanceCompareDigestPreview"></div>
                                         <div class="timeline-list" id="governanceSnapshotCompareHistory"></div>
                                     </div>
                                     <div class="timeline-list" id="governanceReportSnapshots"></div>
@@ -1430,6 +1432,17 @@
             const latest = getGovernanceSnapshotCompareRecords()[0];
             host.innerHTML = latest ? `<div class="risk-alert info"><strong>最新对比记录</strong><br>${latest.title} ｜ ${latest.savedAt}<br>${latest.preview}</div>` : '<div class="risk-alert info">暂无最新对比记录可预览。</div>';
         }
+        function buildGovernanceCompareDigest() {
+            const items = getGovernanceSnapshotCompareRecords().slice(0, 3);
+            if (!items.length) return '暂无快照对比记录可汇总。';
+            return ['治理对比摘要汇总', ...items.map((item, idx) => `${idx + 1}. ${item.title} ｜ ${item.savedAt} ｜ ${item.preview}`)].join('\n');
+        }
+        function renderGovernanceCompareDigestPreview() {
+            const host = document.getElementById('governanceCompareDigestPreview');
+            if (!host) return;
+            const text = buildGovernanceCompareDigest();
+            host.innerHTML = `<div class="risk-alert ok"><strong>对比摘要汇总预览</strong><br><pre>${text}</pre></div>`;
+        }
         function renderGovernanceSnapshotCompareHistory() {
             const host = document.getElementById('governanceSnapshotCompareHistory');
             if (!host) return;
@@ -1464,6 +1477,7 @@
             setGovernanceSnapshotCompareRecords(records);
             renderGovernanceCompareRecordAnalytics();
             renderGovernanceCompareRecordPreview();
+            renderGovernanceCompareDigestPreview();
             renderGovernanceSnapshotCompareHistory();
             updateGovernanceCompareRecordToolbar();
             toast('快照对比记录已保存到本地', 'ok');
@@ -1494,6 +1508,15 @@
             }
             await copyGovernanceSnapshotCompareRecord(item.id);
         }
+        async function copyGovernanceCompareDigest() {
+            const text = buildGovernanceCompareDigest();
+            try {
+                await navigator.clipboard.writeText(text);
+                toast('对比摘要汇总已复制', 'ok');
+            } catch (e) {
+                toast('复制对比摘要汇总失败，请手动复制', 'bad');
+            }
+        }
         async function copyLatestGovernanceCompareRecord() {
             const item = getGovernanceSnapshotCompareRecords()[0];
             if (!item) {
@@ -1515,6 +1538,7 @@
             setGovernanceSnapshotCompareRecords(items);
             renderGovernanceCompareRecordAnalytics();
             renderGovernanceCompareRecordPreview();
+            renderGovernanceCompareDigestPreview();
             renderGovernanceSnapshotCompareHistory();
             updateGovernanceCompareRecordToolbar();
             toast('快照对比记录已删除', 'info');
@@ -1523,6 +1547,7 @@
             localStorage.removeItem('governance_snapshot_compare_records');
             renderGovernanceCompareRecordAnalytics();
             renderGovernanceCompareRecordPreview();
+            renderGovernanceCompareDigestPreview();
             renderGovernanceSnapshotCompareHistory();
             updateGovernanceCompareRecordToolbar();
             toast('快照对比记录已清空', 'info');
@@ -1533,6 +1558,7 @@
             setGovernanceSnapshotCompareRecords(items);
             renderGovernanceCompareRecordAnalytics();
             renderGovernanceCompareRecordPreview();
+            renderGovernanceCompareDigestPreview();
             renderGovernanceSnapshotCompareHistory();
             updateGovernanceCompareRecordToolbar();
             toast('对比记录置顶状态已更新', 'ok');
@@ -2185,6 +2211,7 @@
             renderGovernanceSnapshotComparison();
             renderGovernanceCompareRecordAnalytics();
             renderGovernanceCompareRecordPreview();
+            renderGovernanceCompareDigestPreview();
             renderGovernanceSnapshotCompareHistory();
             updateGovernanceCompareRecordToolbar();
             updateGovernanceSnapshotToolbar();

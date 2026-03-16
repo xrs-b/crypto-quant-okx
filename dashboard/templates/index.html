@@ -493,6 +493,7 @@
                                 <button class="chip-btn" id="overviewSmokeLongBtn" onclick="executeOverviewSmoke('long')">验收开多</button>
                                 <button class="chip-btn" id="overviewSmokeShortBtn" onclick="executeOverviewSmoke('short')">验收开空</button>
                             </div>
+                            <div class="summary-strip" id="overviewSmokeGlobalState"></div>
                             <div class="risk-strip" id="overviewSmokeExecutionStatus"></div>
                             <div class="toolbar-inline" id="overviewSmokeToolbar">
                                 <button class="chip-btn active" onclick="setOverviewSmokeFilter('all')">全部</button>
@@ -957,6 +958,7 @@
         let overviewSmokeFilter = 'all';
         let overviewSmokeSymbols = [];
         let overviewSmokeExecuting = false;
+        let overviewSmokeState = null;
         const stateClass = text => {
             const s = String(text || '').toLowerCase();
             if (s.includes('promote') || s.includes('approved') || s.includes('通过') || s.includes('守擂')) return 'ok';
@@ -2006,6 +2008,7 @@
         function renderOverviewSmokeControls() {
             const select = document.getElementById('overviewSmokeSymbol');
             const status = document.getElementById('overviewSmokeExecutionStatus');
+            const stateHost = document.getElementById('overviewSmokeGlobalState');
             const longBtn = document.getElementById('overviewSmokeLongBtn');
             const shortBtn = document.getElementById('overviewSmokeShortBtn');
             if (select) {
@@ -2014,8 +2017,19 @@
                 if (current && overviewSmokeSymbols.includes(current)) select.value = current;
             }
             if (status && !status.dataset.locked) status.innerHTML = '<div class="risk-alert info">可直接从 dashboard 触发 testnet smoke 验收，执行完成后会自动刷新记录。</div>';
-            if (longBtn) longBtn.disabled = overviewSmokeExecuting || !overviewSmokeSymbols.length;
-            if (shortBtn) shortBtn.disabled = overviewSmokeExecuting || !overviewSmokeSymbols.length;
+            if (stateHost) {
+                const last = overviewSmokeState?.last_result || null;
+                if (overviewSmokeState?.running) {
+                    stateHost.innerHTML = `<div class="summary-pill"><div class="k">执行状态</div><div class="v">执行中</div><div class="s">${overviewSmokeState.symbol || '--'} ｜ ${overviewSmokeState.side === 'short' ? '开空' : '开多'} ｜ ${overviewSmokeState.started_at || '--'}</div></div>`;
+                } else if (last) {
+                    stateHost.innerHTML = `<div class="summary-pill"><div class="k">最近执行</div><div class="v">${last.success ? '成功' : '失败'}</div><div class="s">${last.symbol || '--'} ｜ ${last.side === 'short' ? '开空' : '开多'} ｜ ${last.finished_at || '--'}</div></div>`;
+                } else {
+                    stateHost.innerHTML = `<div class="summary-pill"><div class="k">执行状态</div><div class="v">空闲</div><div class="s">当前无进行中的 smoke 验收</div></div>`;
+                }
+            }
+            const locked = overviewSmokeExecuting || Boolean(overviewSmokeState?.running);
+            if (longBtn) longBtn.disabled = locked || !overviewSmokeSymbols.length;
+            if (shortBtn) shortBtn.disabled = locked || !overviewSmokeSymbols.length;
         }
         async function executeOverviewSmoke(side = 'long') {
             if (overviewSmokeExecuting) return;
@@ -2081,11 +2095,12 @@
             `).join('') : '<div class="empty-state"><div class="icon">🧪</div><div>当前筛选下暂无 smoke 验收记录</div></div>';
         }
         async function loadOverview() {
-            const [status, changes, alerts, smokeRuns] = await Promise.all([
+            const [status, changes, alerts, smokeRuns, smokeState] = await Promise.all([
                 api('/api/system/status'),
                 api('/api/changes/recent'),
                 api('/api/alerts'),
-                api('/api/system/smoke-runs?limit=20')
+                api('/api/system/smoke-runs?limit=20'),
+                api('/api/system/smoke-state')
             ]);
             document.getElementById('systemStatus').textContent = `● ${status.system.status}`;
             document.getElementById('totalValue').textContent = money(status.portfolio.total_value);
@@ -2103,6 +2118,7 @@
             document.getElementById('overviewPositions').innerHTML = positions.length ? positions.map(p => `<tr><td>${p.symbol}</td><td>${badge(p.side, p.side === 'long' ? 'long' : 'short')}</td><td>${p.quantity}</td><td>${money(p.entry_price)}</td><td>${money(p.current_price)}</td><td class="${Number(p.unrealized_pnl || 0) >= 0 ? 'pos' : 'neg'}">${money(p.unrealized_pnl)}</td></tr>`).join('') : '<tr><td colspan="6" class="muted">暂无持仓</td></tr>';
             const mode = await api('/api/mode/status');
             overviewSmokeSymbols = (mode.watch_list || []).slice();
+            overviewSmokeState = smokeState || null;
             renderOverviewSmokeControls();
             const alertHtml = (alerts || []).map(a => `${a.level.toUpperCase()}: ${a.message}`).join('<br>') || '--';
             const changesHtml = (changes || []).slice(0,3).map(c => `${c.time}｜${c.type}｜${c.title}｜${c.detail}`).join('<br>') || '--';

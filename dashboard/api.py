@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 import pandas as pd
 from typing import Dict, List, Any
 import os
+import threading
 
 # 初始化Flask
 app = Flask(__name__, static_folder='templates', static_url_path='')
@@ -31,6 +32,14 @@ signal_quality_analyzer = SignalQualityAnalyzer(config, db)
 optimizer = ParameterOptimizer(config, db)
 preset_manager = PresetManager(config)
 governance = GovernanceEngine(config, db)
+smoke_execution_lock = threading.Lock()
+smoke_execution_state = {
+    'running': False,
+    'symbol': None,
+    'side': None,
+    'started_at': None,
+    'last_result': None,
+}
 
 
 # ============================================================================
@@ -249,6 +258,12 @@ def get_smoke_runs():
     return jsonify({'success': True, 'data': data, 'count': len(data)})
 
 
+@app.route('/api/system/smoke-state')
+def get_smoke_state():
+    """获取 smoke 执行状态"""
+    return jsonify({'success': True, 'data': smoke_execution_state})
+
+
 @app.route('/api/system/smoke-execute', methods=['POST'])
 def execute_smoke_run():
     """从 dashboard 触发 testnet smoke 验收"""
@@ -257,15 +272,41 @@ def execute_smoke_run():
     side = str(payload.get('side') or 'long').lower()
     if side not in {'long', 'short'}:
         return jsonify({'success': False, 'error': 'side must be long or short'}), 400
+    if not smoke_execution_lock.acquire(blocking=False):
+        return jsonify({'success': False, 'error': '已有 smoke 验收执行中，请稍候', 'data': smoke_execution_state}), 409
+    smoke_execution_state.update({
+        'running': True,
+        'symbol': symbol,
+        'side': side,
+        'started_at': datetime.now().isoformat(),
+    })
     try:
         cfg = Config()
         exchange = Exchange(cfg.all)
         result = execute_exchange_smoke(cfg, exchange, symbol=symbol, side=side, db=Database(cfg.db_path))
+        smoke_execution_state['last_result'] = {
+            'success': not bool(result.get('error')),
+            'symbol': symbol,
+            'side': side,
+            'finished_at': datetime.now().isoformat(),
+            'error': result.get('error'),
+            'smoke_run_id': result.get('smoke_run_id'),
+        }
         if result.get('error'):
             return jsonify({'success': False, 'error': result['error'], 'data': result}), 400
         return jsonify({'success': True, 'data': result})
     except Exception as e:
+        smoke_execution_state['last_result'] = {
+            'success': False,
+            'symbol': symbol,
+            'side': side,
+            'finished_at': datetime.now().isoformat(),
+            'error': str(e),
+        }
         return jsonify({'success': False, 'error': str(e)}), 500
+    finally:
+        smoke_execution_state.update({'running': False, 'symbol': None, 'side': None, 'started_at': None})
+        smoke_execution_lock.release()
 
 
 @app.route('/api/system/status')

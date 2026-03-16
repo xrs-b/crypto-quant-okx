@@ -16,7 +16,7 @@ from core.exchange import Exchange
 from signals import SignalDetector, SignalValidator, SignalRecorder
 from trading import TradingExecutor, RiskManager
 from strategies.strategy_library import StrategyManager
-from bot.run import build_exchange_diagnostics, build_exchange_smoke_plan
+from bot.run import build_exchange_diagnostics, build_exchange_smoke_plan, execute_exchange_smoke
 
 
 class FakeExchange:
@@ -89,6 +89,20 @@ class DiagnosticExchangeStub:
 
     def normalize_contract_amount(self, symbol, desired_notional, price):
         return round(desired_notional / price, 6)
+
+
+class ExecutableExchangeStub(DiagnosticExchangeStub):
+    def __init__(self):
+        self.open_calls = []
+        self.close_calls = []
+
+    def create_order(self, symbol, side, amount, posSide=None):
+        self.open_calls.append({'symbol': symbol, 'side': side, 'amount': amount, 'posSide': posSide})
+        return {'id': 'open-ok', 'symbol': symbol, 'side': side}
+
+    def close_order(self, symbol, side, amount, posSide=None):
+        self.close_calls.append({'symbol': symbol, 'side': side, 'amount': amount, 'posSide': posSide})
+        return {'id': 'close-ok', 'symbol': symbol, 'side': side}
 
 
 class TestConfig(unittest.TestCase):
@@ -415,6 +429,34 @@ class TestDiagnostics(unittest.TestCase):
         self.assertEqual(plan['close_preview']['side'], 'sell')
         self.assertIn('posSide', plan['open_preview']['params'])
         self.assertTrue(plan['close_preview']['params']['reduceOnly'])
+
+    def test_execute_exchange_smoke_in_testnet(self):
+        cfg = Config()
+        cfg._config['symbols'] = {'watch_list': ['BTC/USDT']}
+        cfg._config.setdefault('exchange', {})['position_mode'] = 'hedge'
+        cfg._config['exchange']['mode'] = 'testnet'
+        cfg._config.setdefault('trading', {})['position_size'] = 0.1
+        cfg._config['trading']['leverage'] = 10
+        ex = ExecutableExchangeStub()
+        result = execute_exchange_smoke(cfg, ex, symbol='BTC/USDT', side='long')
+
+        self.assertTrue(result['opened'])
+        self.assertTrue(result['closed'])
+        self.assertEqual(ex.open_calls[0]['side'], 'buy')
+        self.assertEqual(ex.close_calls[0]['side'], 'sell')
+        self.assertEqual(ex.open_calls[0]['posSide'], 'long')
+
+    def test_execute_exchange_smoke_rejects_real_mode(self):
+        cfg = Config()
+        cfg._config['symbols'] = {'watch_list': ['BTC/USDT']}
+        cfg._config.setdefault('exchange', {})['position_mode'] = 'oneway'
+        cfg._config['exchange']['mode'] = 'real'
+        cfg._config.setdefault('trading', {})['position_size'] = 0.1
+        cfg._config['trading']['leverage'] = 10
+        result = execute_exchange_smoke(cfg, ExecutableExchangeStub(), symbol='BTC/USDT', side='short')
+
+        self.assertFalse(result['opened'])
+        self.assertIn('testnet', result['error'])
 
 
 class TestTradingExecutor(unittest.TestCase):

@@ -68,6 +68,64 @@ def build_exchange_diagnostics(cfg: Config, exchange: Exchange) -> dict:
     return report
 
 
+def build_exchange_smoke_plan(cfg: Config, exchange: Exchange, symbol: str = None, side: str = 'long') -> dict:
+    """构建最小 testnet 验收计划；默认只预演，不落单"""
+    selected_symbol = symbol or (cfg.symbols[0] if cfg.symbols else None)
+    plan = {
+        'exchange_mode': cfg.exchange_mode,
+        'position_mode': cfg.position_mode,
+        'symbol': selected_symbol,
+        'side': side,
+        'execute_ready': False,
+        'steps': [
+            '读取余额',
+            '检查目标是否为 U 本位永续',
+            '获取最新价格',
+            '换算最小验收仓位数量',
+            '预览开仓参数',
+            '预览平仓参数',
+        ]
+    }
+    if not selected_symbol:
+        plan['error'] = '未配置任何 watch_list 币种'
+        return plan
+    try:
+        balance = exchange.fetch_balance()
+        available = float((balance.get('free') or {}).get('USDT', 0) or 0)
+        plan['available_usdt'] = round(available, 4)
+        plan['is_futures_symbol'] = bool(exchange.is_futures_symbol(selected_symbol))
+        if not plan['is_futures_symbol']:
+            plan['error'] = '目标币种不是可用合约'
+            return plan
+        ticker = exchange.fetch_ticker(selected_symbol)
+        last_price = float(ticker.get('last') or 0)
+        plan['last_price'] = last_price
+        smoke_notional = max(5.0, available * 0.01)
+        plan['smoke_notional'] = round(smoke_notional, 4)
+        plan['sample_amount'] = exchange.normalize_contract_amount(selected_symbol, smoke_notional, last_price)
+        preview_open = {'tdMode': 'isolated'}
+        preview_close = {'tdMode': 'isolated', 'reduceOnly': True}
+        if str(cfg.position_mode).lower() not in {'oneway', 'one-way', 'net', 'single'}:
+            preview_open['posSide'] = side
+            preview_close['posSide'] = side
+        plan['open_preview'] = {
+            'symbol': exchange.get_order_symbol(selected_symbol),
+            'side': 'buy' if side == 'long' else 'sell',
+            'amount': plan['sample_amount'],
+            'params': preview_open,
+        }
+        plan['close_preview'] = {
+            'symbol': exchange.get_order_symbol(selected_symbol),
+            'side': 'sell' if side == 'long' else 'buy',
+            'amount': plan['sample_amount'],
+            'params': preview_close,
+        }
+        plan['execute_ready'] = True
+    except Exception as e:
+        plan['error'] = str(e)
+    return plan
+
+
 class TradingBot:
     """交易机器人主类"""
     
@@ -261,6 +319,10 @@ def main():
     parser.add_argument('--daily-summary', action='store_true', help='生成日报摘要')
     parser.add_argument('--cleanup-runtime-records', action='store_true', help='清理重复的治理/日报运行记录')
     parser.add_argument('--exchange-diagnose', action='store_true', help='只读诊断交易所/合约参数，不执行下单')
+    parser.add_argument('--exchange-smoke', action='store_true', help='生成最小 testnet 验收计划；默认只预演')
+    parser.add_argument('--execute', action='store_true', help='配合 smoke 验收命令，显式允许执行 testnet 开平仓')
+    parser.add_argument('--symbol', type=str, help='指定 smoke/diagnose 目标币种')
+    parser.add_argument('--side', type=str, default='long', choices=['long', 'short'], help='smoke 验收方向')
     parser.add_argument('--dry-run', action='store_true', help='配合清理命令，仅预览不删除')
     parser.add_argument('--port', type=int, default=8050, help='仪表盘端口')
     
@@ -405,6 +467,8 @@ def main():
         if report.get('balance_error'):
             print(f"余额读取异常: {report['balance_error']}")
         for row in report['symbols']:
+            if args.symbol and row['symbol'] != args.symbol:
+                continue
             print(f"\n[{row['symbol']}]")
             if row.get('error'):
                 print(f"  错误: {row['error']}")
@@ -420,6 +484,27 @@ def main():
                 print(f"  order_params_preview: {row['order_params_preview']}")
             if row.get('reason'):
                 print(f"  reason: {row['reason']}")
+
+    elif args.exchange_smoke:
+        cfg = Config()
+        exchange = Exchange(cfg.all)
+        plan = build_exchange_smoke_plan(cfg, exchange, symbol=args.symbol, side=args.side)
+        print("\n🧪 Testnet 最小验收计划:\n")
+        if plan.get('error'):
+            print(f"错误: {plan['error']}")
+        else:
+            print(f"模式: {plan['exchange_mode']} | 持仓模式: {plan['position_mode']} | 目标: {plan['symbol']} | 方向: {plan['side']}")
+            print(f"可用USDT: {plan.get('available_usdt', 0)} | 最新价: {plan.get('last_price')} | 验收名义价值: {plan.get('smoke_notional')}")
+            print(f"样例数量: {plan.get('sample_amount')} | 可执行: {'yes' if plan.get('execute_ready') else 'no'}")
+            print('步骤:')
+            for step in plan.get('steps', []):
+                print(f"  - {step}")
+            if plan.get('open_preview'):
+                print(f"开仓预览: {plan['open_preview']}")
+            if plan.get('close_preview'):
+                print(f"平仓预览: {plan['close_preview']}")
+        if args.execute:
+            print("\n⚠️ 当前版本只开放 smoke plan 预演；真实 testnet 开平仓执行将放到下一轮 A-6。")
 
     else:
         # 运行交易

@@ -832,6 +832,8 @@
                                             <button class="chip-btn" onclick="copyGovernanceCompareDigest()">复制对比摘要汇总</button>
                                             <button class="chip-btn" onclick="copyGovernanceCompareDigestByTag('risk')">复制风险控制汇总</button>
                                             <button class="chip-btn" onclick="copyGovernanceCompareDigestByTag('probe')">复制试探汇总</button>
+                                            <button class="chip-btn" onclick="copyGovernanceCompareDigestByTag('rollback')">复制回滚汇总</button>
+                                            <button class="chip-btn" onclick="copyGovernanceCompareDigestByTag('conservative')">复制保守汇总</button>
                                         </div>
                                         <div class="risk-strip" id="governanceCompareDigestPreview"></div>
                                         <div class="summary-strip" id="governanceCompareTagDigestPreview"></div>
@@ -1482,9 +1484,13 @@
             if (!host) return;
             const risk = buildGovernanceCompareDigestByTag('risk');
             const probe = buildGovernanceCompareDigestByTag('probe');
+            const rollback = buildGovernanceCompareDigestByTag('rollback');
+            const conservative = buildGovernanceCompareDigestByTag('conservative');
             host.innerHTML = `
                 <div class="summary-pill"><div class="k">风险控制摘要</div><div class="v">risk</div><div class="s">${risk.split('\n').slice(0,2).join(' ｜ ')}</div></div>
                 <div class="summary-pill"><div class="k">试探摘要</div><div class="v">probe</div><div class="s">${probe.split('\n').slice(0,2).join(' ｜ ')}</div></div>
+                <div class="summary-pill"><div class="k">回滚摘要</div><div class="v">rollback</div><div class="s">${rollback.split('\n').slice(0,2).join(' ｜ ')}</div></div>
+                <div class="summary-pill"><div class="k">保守摘要</div><div class="v">conservative</div><div class="s">${conservative.split('\n').slice(0,2).join(' ｜ ')}</div></div>
             `;
         }
         function renderGovernanceCompareTagHighlights() {

@@ -753,6 +753,8 @@
                             <div class="card mini">
                                 <div class="section-title">治理参数总览</div>
                                 <div class="section-note">这里集中展示当前生效既 pool switch 治理规则，方便你核对配置。</div>
+                                <div class="summary-strip" id="governanceBaselineSummary"></div>
+                                <div class="risk-strip" id="governanceGuidance"></div>
                                 <div class="list" id="configGovernanceSummary"></div>
                             </div>
                             <div class="card mini">
@@ -817,6 +819,7 @@
             if (h >= minHours) return `已持有 ${h.toFixed(1)}h，可重新评估回切`; 
             return `已持有 ${h.toFixed(1)}h，建议至少观察 ${minHours}h`; 
         };
+        const governanceDefaultBaseline = { min_hold_hours: 6, score_margin: 1.0 };
         let latestGovernanceConfigHistory = [];
         let governanceHistoryFilter = 'all';
         let governanceHistoryExpanded = false;
@@ -883,6 +886,28 @@
                 <div class="summary-pill"><div class="k">最近正式调参</div><div class="v">${latestManual?.created_at || '--'}</div><div class="s">${latestManual ? `${formatHoursAgoFromDate(latestManual.created_at)} 前` : '暂无人工调参记录'}</div></div>
                 <div class="summary-pill"><div class="k">当前版本已生效</div><div class="v">${currentRow ? formatHoursAgoFromDate(currentRow.created_at) : '--'}</div><div class="s">${currentRow ? summarizeGovernanceDiff(currentRow.before_value || {}, currentRow.after_value || {}) : '未定位到当前版本'}</div></div>
             `;
+        }
+        function renderGovernanceBaselineSummary(currentRules = {}, baseline = {}) {
+            const holdDiff = Number(currentRules.min_hold_hours ?? 0) - Number(baseline.min_hold_hours ?? 0);
+            const scoreDiff = Number(currentRules.score_margin ?? 0) - Number(baseline.score_margin ?? 0);
+            return `
+                <div class="summary-pill"><div class="k">默认观察期</div><div class="v">${baseline.min_hold_hours ?? '--'}h</div><div class="s">当前 ${currentRules.min_hold_hours ?? '--'}h ｜ 差值 ${holdDiff >= 0 ? '+' : ''}${holdDiff}</div></div>
+                <div class="summary-pill"><div class="k">默认分差阈值</div><div class="v">${baseline.score_margin ?? '--'}</div><div class="s">当前 ${currentRules.score_margin ?? '--'} ｜ 差值 ${scoreDiff >= 0 ? '+' : ''}${scoreDiff.toFixed(1)}</div></div>
+                <div class="summary-pill"><div class="k">观察风格</div><div class="v">${holdDiff > 0 ? '更保守' : holdDiff < 0 ? '更激进' : '默认'}</div><div class="s">观察期越长，切池节奏越慢</div></div>
+                <div class="summary-pill"><div class="k">切换门槛</div><div class="v">${scoreDiff > 0 ? '更保守' : scoreDiff < 0 ? '更激进' : '默认'}</div><div class="s">分差越高，challenger 越难上位</div></div>
+            `;
+        }
+        function renderGovernanceGuidance(currentRules = {}, baseline = {}) {
+            const hold = Number(currentRules.min_hold_hours ?? baseline.min_hold_hours ?? 0);
+            const score = Number(currentRules.score_margin ?? baseline.score_margin ?? 0);
+            const tips = [];
+            if (hold <= 3) tips.push({cls: 'warn', text: '观察期偏短，切池会更灵敏，但亦更容易来回抖动。'});
+            if (hold >= 12) tips.push({cls: 'ok', text: '观察期偏长，适合保守运行，但新 challenger 上位会更慢。'});
+            if (score < 1) tips.push({cls: 'warn', text: '分差阈值低于默认基线，challenger 更容易触发审批，记得留意假突破。'});
+            if (score >= 1.5) tips.push({cls: 'ok', text: '分差阈值高于默认基线，主池更稳，但可能错过较早期既切换机会。'});
+            if (!tips.length) tips.push({cls: 'ok', text: '当前参数接近默认基线，整体属于平衡型治理配置。'});
+            tips.push({cls: 'warn', text: `如果执行历史回滚，主要影响审批观察窗（${hold}h）同 challenger 领先门槛（${score}）。`});
+            return tips.map(t => `<div class="risk-alert ${t.cls}">${t.text}</div>`).join('');
         }
         function renderGovernanceHistoryRisks(history = [], currentIndex = -1) {
             const now = Date.now();
@@ -1050,7 +1075,8 @@
                 return;
             }
             const summary = summarizeGovernanceDiff(row.before_value || {}, afterValue || {});
-            if (!confirm(`确定一键回滚并保存？\n${summary}\n备注：${note || '无'}`)) return;
+            const impact = `会影响审批观察窗（${minHoldHours}h）同 challenger 领先门槛（${scoreMargin}）。`;
+            if (!confirm(`确定一键回滚并保存？\n${summary}\n${impact}\n备注：${note || '无'}`)) return;
             const rollbackNote = note ? `历史回滚：${note}` : '历史回滚';
             const r = await fetch('/api/config/governance', {
                 method: 'POST',
@@ -1374,8 +1400,11 @@
             ]);
             latestGovernanceConfigHistory = history || [];
             const rules = cfg.governance?.pool_switch || {};
+            const baseline = governanceDefaultBaseline;
             const {rows: visibleHistory, currentIndex} = filterGovernanceHistoryRows(history, rules);
             updateGovernanceHistoryToolbar();
+            document.getElementById('governanceBaselineSummary').innerHTML = renderGovernanceBaselineSummary(rules, baseline);
+            document.getElementById('governanceGuidance').innerHTML = renderGovernanceGuidance(rules, baseline);
             document.getElementById('governanceHistorySummary').innerHTML = renderGovernanceHistorySummary(history, rules, currentIndex);
             document.getElementById('governanceHistoryRisks').innerHTML = renderGovernanceHistoryRisks(history, currentIndex);
             document.getElementById('governanceHistoryTimeline').innerHTML = renderGovernanceHistoryTimeline(history);

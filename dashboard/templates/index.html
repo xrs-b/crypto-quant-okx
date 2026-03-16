@@ -590,6 +590,11 @@
 
                         <div class="compact-grid">
                             <div class="card mini">
+                                <div class="section-title">治理规则</div>
+                                <div class="section-note">当前 pool switch 既治理阈值，会直接影响主池切换审批节奏。</div>
+                                <div class="list" id="governanceRuleCards"></div>
+                            </div>
+                            <div class="card mini">
                                 <div class="section-title">今日日报摘要</div>
                                 <div class="toolbar-inline">
                                     <button onclick="refreshDailySummary(true)">强制刷新日报</button>
@@ -598,11 +603,12 @@
                                 </div>
                                 <pre id="dailySummaryBlock" style="max-height:400px;overflow-y:auto;">加载中...</pre>
                             </div>
-                            <div class="card mini">
-                                <div class="section-title">运行期记录清理预览</div>
-                                <div class="section-note">这里会显示去重清理预览或执行结果，方便你确认影响范围。</div>
-                                <pre id="runtimeCleanupBlock" style="max-height:400px;overflow-y:auto;">未检查</pre>
-                            </div>
+                        </div>
+
+                        <div class="card mini">
+                            <div class="section-title">运行期记录清理预览</div>
+                            <div class="section-note">这里会显示去重清理预览或执行结果，方便你确认影响范围。</div>
+                            <pre id="runtimeCleanupBlock" style="max-height:400px;overflow-y:auto;">未检查</pre>
                         </div>
 
                         <div class="card mini">
@@ -637,9 +643,18 @@
                     </div>
                 </div>
 
-                <div class="card panel" id="tab-config">
-                    <div class="section-title">系统配置（脱敏）</div>
-                    <pre id="configBlock">加载中...</pre>
+                <div class="panel" id="tab-config">
+                    <div class="stack">
+                        <div class="card mini">
+                            <div class="section-title">治理参数总览</div>
+                            <div class="section-note">这里集中展示当前生效既 pool switch 治理规则，方便你核对配置。</div>
+                            <div class="list" id="configGovernanceSummary"></div>
+                        </div>
+                        <div class="card mini">
+                            <div class="section-title">系统配置（脱敏）</div>
+                            <pre id="configBlock">加载中...</pre>
+                        </div>
+                    </div>
                 </div>
             </section>
         </main>
@@ -930,7 +945,8 @@
             const switchReview = gov.pool_switch_review || {};
             const path = switchReview.decision_path || {};
             const gates = path.gates || [];
-            const holdHint = holdWindowHint(gov.mode?.last_applied_at, Number(path.hold_window_hours || 6));
+            const govRules = (await api('/api/config')).governance?.pool_switch || {};
+            const holdHint = holdWindowHint(gov.mode?.last_applied_at, Number(path.hold_window_hours || govRules.min_hold_hours || 6));
             const governanceAction = switchReview.approval_required ? `建议审批 ${switchReview.recommended_preset || '--'}` : (path.blocking_gate ? `建议继续观察，优先解决：${path.blocking_label}` : '当前无额外动作');
             const governanceWait = path.blocking_gate === 'candidate_promotion' ? `等 challenger 回测 / 胜率 / 质量进一步改善｜${holdHint}` : path.blocking_gate === 'score_compare' ? `等 challenger 分数至少领先 ${safe(path.score_margin)} ｜ ${holdHint}` : holdHint;
             document.getElementById('poolSwitchSnapshot').innerHTML = `
@@ -953,6 +969,10 @@
                 <div class="item"><strong>挑战结论</strong><div class="muted">${shortReason(safe(path.promotion_reason) || '--')}</div></div>
                 <div class="item"><strong>切池距离</strong><div class="muted">${safe(path.blocking_label) || '已可发起审批'} ｜ ${shortReason(safe(path.summary) || '--')}</div></div>
                 <div class="item"><strong>建议等待条件</strong><div class="muted">${governanceWait}</div></div>`;
+            document.getElementById('governanceRuleCards').innerHTML = `
+                <div class="item"><strong>最小观察期</strong><div class="muted">${safe(govRules.min_hold_hours)}h ｜ 当前提示：${holdHint}</div></div>
+                <div class="item"><strong>分差防抖</strong><div class="muted">score margin = ${safe(govRules.score_margin)} ｜ challenger 需明显领先主池先可发起切池</div></div>
+                <div class="item"><strong>下次可评估时间</strong><div class="muted">${safe(path.next_recheck_at) || '--'}</div></div>`;
             document.getElementById('dailySummaryBlock').textContent = JSON.stringify(summary, null, 2);
             document.getElementById('runtimeCleanupBlock').textContent = JSON.stringify(cleanupPreview, null, 2);
             document.getElementById('approvalHistoryTable').innerHTML = history.length ? history.map(h => {
@@ -1022,6 +1042,11 @@
         }
         async function loadConfig() {
             const cfg = await api('/api/config');
+            const rules = cfg.governance?.pool_switch || {};
+            document.getElementById('configGovernanceSummary').innerHTML = `
+                <div class="item"><strong>min_hold_hours</strong><div class="muted">${safe(rules.min_hold_hours)} 小时</div></div>
+                <div class="item"><strong>score_margin</strong><div class="muted">${safe(rules.score_margin)} 分</div></div>
+                <div class="item"><strong>当前用途</strong><div class="muted">用于主池切换审批既观察窗与防抖门槛。</div></div>`;
             document.getElementById('configBlock').textContent = JSON.stringify(cfg, null, 2);
         }
         async function refreshAll() {

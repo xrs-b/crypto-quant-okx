@@ -485,6 +485,11 @@
                                 <div class="list" id="overviewList"></div>
                             </div>
                         </div>
+                        <div class="card mini">
+                            <div class="section-title">Smoke 验收记录</div>
+                            <div class="section-note">展示最近 testnet 最小开平仓验收结果，方便快速判断执行链路是否稳定。</div>
+                            <div class="list" id="overviewSmokeRuns"></div>
+                        </div>
                     </div>
                 </div>
 
@@ -1975,10 +1980,11 @@
             await Promise.all([loadGovernance(), loadConfig(), loadOptimizer()]);
         }
         async function loadOverview() {
-            const [status, changes, alerts] = await Promise.all([
+            const [status, changes, alerts, smokeRuns] = await Promise.all([
                 api('/api/system/status'),
                 api('/api/changes/recent'),
-                api('/api/alerts')
+                api('/api/alerts'),
+                api('/api/system/smoke-runs?limit=5')
             ]);
             document.getElementById('systemStatus').textContent = `● ${status.system.status}`;
             document.getElementById('totalValue').textContent = money(status.portfolio.total_value);
@@ -2004,6 +2010,13 @@
                 <div class="item"><strong>系统提醒</strong><div class="muted">${alertHtml}</div></div>
                 <div class="item"><strong>最近变化</strong><div class="muted">${changesHtml}</div></div>
                 <div class="item"><strong>最近更新时间</strong><div class="muted">${status.system.last_update}</div></div>`;
+            document.getElementById('overviewSmokeRuns').innerHTML = smokeRuns.length ? smokeRuns.map(run => `
+                <div class="item">
+                    <strong>${run.success ? '✅' : '❌'} ${run.symbol} ｜ ${run.side === 'long' ? '开多验收' : '开空验收'}</strong>
+                    <div class="muted" style="margin-top:6px;">${run.created_at} ｜ ${run.exchange_mode} ｜ ${run.position_mode} ｜ 数量 ${run.amount ?? '--'}</div>
+                    <div class="muted" style="margin-top:6px;">${run.error || (run.success ? '开平仓链路验收通过' : '执行完成，但需检查详情')}</div>
+                </div>
+            `).join('') : '<div class="empty-state"><div class="icon">🧪</div><div>暂无 smoke 验收记录</div></div>';
         }
         async function loadPositions() {
             const rows = await api('/api/positions');

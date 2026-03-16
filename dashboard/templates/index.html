@@ -812,6 +812,7 @@
                                         <div class="risk-strip" id="governanceSnapshotAdvice"></div>
                                         <div class="risk-strip" id="governanceSnapshotComparison"></div>
                                         <div class="summary-strip" id="governanceCompareRecordAnalytics"></div>
+                                        <div class="summary-strip" id="governanceCompareRecordActivity"></div>
                                         <div class="toolbar-inline" id="governanceCompareRecordToolbar">
                                             <button class="chip-btn active" onclick="setGovernanceCompareRecordFilter('all')">全部记录</button>
                                             <button class="chip-btn" onclick="setGovernanceCompareRecordFilter('risk')">风险控制</button>
@@ -1404,6 +1405,29 @@
                 <div class="summary-pill"><div class="k">保守 / 回滚</div><div class="v">保 ${conservative} / 回 ${rollback}</div><div class="s">保守迁移同回滚相关记录</div></div>
             `;
         }
+        function renderGovernanceCompareRecordActivity() {
+            const host = document.getElementById('governanceCompareRecordActivity');
+            if (!host) return;
+            const items = getGovernanceSnapshotCompareRecords();
+            const now = Date.now();
+            const parseTs = item => new Date(String(item.savedAt || '').replace(/\//g, '-')).getTime();
+            const last24h = items.filter(item => {
+                const t = parseTs(item);
+                return !Number.isNaN(t) && (now - t) <= 24 * 3600000;
+            });
+            const last7d = items.filter(item => {
+                const t = parseTs(item);
+                return !Number.isNaN(t) && (now - t) <= 7 * 24 * 3600000;
+            });
+            const pinned = items.filter(item => item.pinned).length;
+            const latest = items[0];
+            host.innerHTML = `
+                <div class="summary-pill"><div class="k">24h 对比活跃</div><div class="v">${last24h.length}</div><div class="s">最近 24 小时新增对比记录</div></div>
+                <div class="summary-pill"><div class="k">7d 对比活跃</div><div class="v">${last7d.length}</div><div class="s">最近 7 天新增对比记录</div></div>
+                <div class="summary-pill"><div class="k">置顶记录</div><div class="v">${pinned}</div><div class="s">已置顶既重点对比档案</div></div>
+                <div class="summary-pill"><div class="k">最近一次保存</div><div class="v">${latest?.savedAt || '--'}</div><div class="s">${latest?.title || '暂无对比记录'}</div></div>
+            `;
+        }
         function updateGovernanceCompareRecordToolbar() {
             const toolbar = document.getElementById('governanceCompareRecordToolbar');
             if (!toolbar) return;
@@ -1499,6 +1523,7 @@
             records.sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)));
             setGovernanceSnapshotCompareRecords(records);
             renderGovernanceCompareRecordAnalytics();
+            renderGovernanceCompareRecordActivity();
             renderGovernanceCompareRecordPreview();
             renderGovernanceCompareDigestPreview();
             renderGovernanceCompareTagHighlights();
@@ -1570,6 +1595,7 @@
             const items = getGovernanceSnapshotCompareRecords().filter(x => x.id !== id);
             setGovernanceSnapshotCompareRecords(items);
             renderGovernanceCompareRecordAnalytics();
+            renderGovernanceCompareRecordActivity();
             renderGovernanceCompareRecordPreview();
             renderGovernanceCompareDigestPreview();
             renderGovernanceCompareTagHighlights();
@@ -1580,6 +1606,7 @@
         function clearGovernanceCompareRecords() {
             localStorage.removeItem('governance_snapshot_compare_records');
             renderGovernanceCompareRecordAnalytics();
+            renderGovernanceCompareRecordActivity();
             renderGovernanceCompareRecordPreview();
             renderGovernanceCompareDigestPreview();
             renderGovernanceCompareTagHighlights();
@@ -1592,6 +1619,7 @@
             items.sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)));
             setGovernanceSnapshotCompareRecords(items);
             renderGovernanceCompareRecordAnalytics();
+            renderGovernanceCompareRecordActivity();
             renderGovernanceCompareRecordPreview();
             renderGovernanceCompareDigestPreview();
             renderGovernanceCompareTagHighlights();
@@ -2246,6 +2274,7 @@
             renderGovernanceSnapshotCompareSelectors();
             renderGovernanceSnapshotComparison();
             renderGovernanceCompareRecordAnalytics();
+            renderGovernanceCompareRecordActivity();
             renderGovernanceCompareRecordPreview();
             renderGovernanceCompareDigestPreview();
             renderGovernanceCompareTagHighlights();

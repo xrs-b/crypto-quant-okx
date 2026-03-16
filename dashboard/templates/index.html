@@ -763,6 +763,7 @@
                                 <div class="section-title">最近治理参数变更</div>
                                 <div class="section-note">卡片化显示参数版本、变更字段、当前生效状态与回滚入口。</div>
                                 <div class="summary-strip" id="governanceHistorySummary"></div>
+                                <div class="summary-strip" id="governancePresetStats"></div>
                                 <div class="risk-strip" id="governanceHistoryRisks"></div>
                                 <div class="timeline-list" id="governanceHistoryTimeline"></div>
                                 <div class="toolbar-inline" id="governanceHistoryToolbar">
@@ -870,6 +871,14 @@
             if (text.includes('测试')) return {label: '测试改动', cls: 'pending', card: 'test', type: 'test'};
             return {label: '人工调参', cls: 'ok', type: 'manual'};
         }
+        function getClosestGovernancePreset(values = {}) {
+            const entries = Object.entries(governanceQuickPresets).map(([key, preset]) => {
+                const holdGap = Math.abs(Number(values.min_hold_hours ?? 0) - Number(preset.values.min_hold_hours ?? 0));
+                const scoreGap = Math.abs(Number(values.score_margin ?? 0) - Number(preset.values.score_margin ?? 0));
+                return {key, label: preset.label, score: holdGap + scoreGap, preset};
+            }).sort((a, b) => a.score - b.score);
+            return entries[0] || {key: 'balanced', label: '平衡型', score: 0};
+        }
         function getCurrentGovernanceHistoryIndex(history = [], currentRules = {}) {
             return history.findIndex(row => isSameGovernanceConfig(row.after_value || {}, currentRules || {}));
         }
@@ -908,6 +917,21 @@
                 <div class="summary-pill"><div class="k">类型分布</div><div class="v">人 ${manualCount} / 测 ${testCount} / 回 ${rollbackCount}</div><div class="s">人工 / 测试 / 回滚</div></div>
                 <div class="summary-pill"><div class="k">最近正式调参</div><div class="v">${latestManual?.created_at || '--'}</div><div class="s">${latestManual ? `${formatHoursAgoFromDate(latestManual.created_at)} 前` : '暂无人工调参记录'}</div></div>
                 <div class="summary-pill"><div class="k">当前版本已生效</div><div class="v">${currentRow ? formatHoursAgoFromDate(currentRow.created_at) : '--'}</div><div class="s">${currentRow ? summarizeGovernanceDiff(currentRow.before_value || {}, currentRow.after_value || {}) : '未定位到当前版本'}</div></div>
+            `;
+        }
+        function renderGovernancePresetStats(history = [], currentRules = {}) {
+            const counts = { conservative: 0, balanced: 0, aggressive: 0 };
+            history.forEach(row => {
+                const closest = getClosestGovernancePreset(row.after_value || {});
+                if (counts[closest.key] != null) counts[closest.key] += 1;
+            });
+            const currentPreset = getClosestGovernancePreset(currentRules || {});
+            const dominant = Object.entries(counts).sort((a, b) => b[1] - a[1])[0] || ['balanced', 0];
+            return `
+                <div class="summary-pill"><div class="k">当前最接近模板</div><div class="v">${currentPreset.label}</div><div class="s">按当前参数自动归类</div></div>
+                <div class="summary-pill"><div class="k">模板命中</div><div class="v">保 ${counts.conservative} / 平 ${counts.balanced} / 激 ${counts.aggressive}</div><div class="s">基于历史 after_value 归类</div></div>
+                <div class="summary-pill"><div class="k">历史主风格</div><div class="v">${governanceQuickPresets[dominant[0]]?.label || '平衡型'}</div><div class="s">最近历史最常命中既模板</div></div>
+                <div class="summary-pill"><div class="k">当前运行倾向</div><div class="v">${currentPreset.key === 'conservative' ? '偏保守' : currentPreset.key === 'aggressive' ? '偏激进' : '偏平衡'}</div><div class="s">可配合模板按钮快速微调</div></div>
             `;
         }
         function renderGovernanceBaselineSummary(currentRules = {}, baseline = {}) {
@@ -991,7 +1015,8 @@
             if (!rows.length) return '<div class="empty-state"><div class="icon">🕒</div><div>暂无治理时间线</div></div>';
             return rows.map(row => {
                 const noteKind = governanceNoteKind(row.details?.note || '');
-                return `<div class="timeline-item"><div class="timeline-time">${row.created_at || '--'}</div><div class="timeline-body"><strong>${noteKind.label} ｜ ${summarizeGovernanceDiff(row.before_value || {}, row.after_value || {})}</strong><div class="muted">${row.details?.note || '无补充说明'} ｜ ${row.config_key || 'governance.pool_switch'}</div></div></div>`;
+                const closest = getClosestGovernancePreset(row.after_value || {});
+                return `<div class="timeline-item"><div class="timeline-time">${row.created_at || '--'}</div><div class="timeline-body"><strong>${noteKind.label} ｜ ${summarizeGovernanceDiff(row.before_value || {}, row.after_value || {})}</strong><div class="muted">${row.details?.note || '无补充说明'} ｜ 最接近 ${closest.label} ｜ ${row.config_key || 'governance.pool_switch'}</div></div></div>`;
             }).join('');
         }
         function updateGovernanceHistoryToolbar() {
@@ -1022,13 +1047,15 @@
             const after = row.after_value || {};
             const note = row.details?.note || '';
             const noteKind = governanceNoteKind(note);
+            const closest = getClosestGovernancePreset(after);
             const isCurrent = index === currentIndex;
             const minChanged = Number(before.min_hold_hours) !== Number(after.min_hold_hours);
             const scoreChanged = Number(before.score_margin) !== Number(after.score_margin);
             const cardClass = [isCurrent ? 'current' : '', noteKind.card || ''].filter(Boolean).join(' ');
             const badgeHtml = [
                 isCurrent ? badge('当前生效版本', 'ok') : '',
-                badge(noteKind.label, noteKind.cls)
+                badge(noteKind.label, noteKind.cls),
+                badge(`贴近${closest.label}`, 'pending')
             ].filter(Boolean).join('');
             return `<div class="history-card ${cardClass}">
                 <div class="history-card-head">
@@ -1468,6 +1495,7 @@
             document.getElementById('governancePresetBar').innerHTML = renderGovernancePresetBar(rules);
             document.getElementById('governancePresetPreview').innerHTML = renderGovernancePresetPreview(rules);
             document.getElementById('governanceHistorySummary').innerHTML = renderGovernanceHistorySummary(history, rules, currentIndex);
+            document.getElementById('governancePresetStats').innerHTML = renderGovernancePresetStats(history, rules);
             document.getElementById('governanceHistoryRisks').innerHTML = renderGovernanceHistoryRisks(history, currentIndex);
             document.getElementById('governanceHistoryTimeline').innerHTML = renderGovernanceHistoryTimeline(history);
             document.getElementById('configGovernanceSummary').innerHTML = `

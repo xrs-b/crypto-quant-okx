@@ -2054,8 +2054,12 @@
                 const j = await r.json();
                 if (!j.success) throw new Error(j.error || 'smoke execute failed');
                 if (status) status.innerHTML = `<div class="risk-alert ok">${symbol} ${side === 'long' ? '开多' : '开空'} smoke 验收完成 ｜ run #${j.data?.smoke_run_id || '--'}</div>`;
-                toast('Smoke 验收执行完成', 'ok');
-                await loadOverview();
+                toast('Smoke 验收执行完成，正在同步刷新总览/持仓/交易...', 'ok');
+                await Promise.all([
+                    loadOverview(),
+                    loadPositions(),
+                    loadTrades()
+                ]);
             } catch (e) {
                 if (status) status.innerHTML = `<div class="risk-alert bad">Smoke 验收失败：${e.message || e}</div>`;
                 toast('Smoke 验收失败', 'bad');

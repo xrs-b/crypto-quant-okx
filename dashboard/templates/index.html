@@ -932,11 +932,12 @@
             const gates = path.gates || [];
             const holdHint = holdWindowHint(gov.mode?.last_applied_at, 6);
             const governanceAction = switchReview.approval_required ? `建议审批 ${switchReview.recommended_preset || '--'}` : (path.blocking_gate ? `建议继续观察，优先解决：${path.blocking_label}` : '当前无额外动作');
-            const governanceWait = path.blocking_gate === 'candidate_promotion' ? `等 challenger 回测 / 胜率 / 质量进一步改善｜${holdHint}` : path.blocking_gate === 'score_compare' ? `等 challenger 分数真正反超主池｜${holdHint}` : holdHint;
+            const governanceWait = path.blocking_gate === 'candidate_promotion' ? `等 challenger 回测 / 胜率 / 质量进一步改善｜${holdHint}` : path.blocking_gate === 'score_compare' ? `等 challenger 分数至少领先 ${safe(path.score_margin)} ｜ ${holdHint}` : holdHint;
             document.getElementById('poolSwitchSnapshot').innerHTML = `
                 <div class="item"><strong>当前主池</strong><div class="muted">${(path.current_pool || gov.mode?.watch_list || []).join(', ') || '--'}</div></div>
                 <div class="item"><strong>当前候选池</strong><div class="muted">${(path.candidate_pool || gov.mode?.candidate_watch_list || []).join(', ') || '--'}</div></div>
-                <div class="item"><strong>切池比分</strong><div class="muted">${safe(path.candidate_symbol || '候选')} ${safe(path.candidate_score)} vs ${safe(path.current_symbol || '主池')} ${safe(path.current_score)}</div></div>
+                <div class="item"><strong>切池比分</strong><div class="muted">${safe(path.candidate_symbol || '候选')} ${safe(path.candidate_score)} vs ${safe(path.current_symbol || '主池')} ${safe(path.current_score)} ｜ 需领先 ${safe(path.score_margin)}</div></div>
+                <div class="item"><strong>下次可评估时间</strong><div class="muted">${safe(path.next_recheck_at) || '--'}</div></div>
                 <div class="item"><strong>最后变化原因</strong><div class="muted">${safe(path.summary) || safe(switchReview.last_change_reason) || '--'}</div></div>
                 <div class="item"><strong>当前卡点</strong><div class="muted">${safe(path.blocking_label) || '无，已可进入审批'}</div></div>`;
             document.getElementById('poolSwitchDecisionPath').innerHTML = gates.length ? gates.map(g => `<div class="item"><strong>${g.label}</strong><div style="margin:6px 0">${badge(g.passed ? 'passed' : 'blocked', g.passed ? 'ok' : 'bad')}</div><div class="muted">${g.detail || '--'}</div></div>`).join('') : '<div class="item muted">暂无切池诊断链</div>';

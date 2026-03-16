@@ -204,6 +204,22 @@ class Database:
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+
+        # smoke 验收执行历史
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS smoke_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                exchange_mode TEXT,
+                position_mode TEXT,
+                symbol TEXT NOT NULL,
+                side TEXT NOT NULL,
+                amount REAL,
+                success INTEGER DEFAULT 0,
+                error TEXT,
+                details TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
         
         # 创建索引
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_signals_symbol ON signals(symbol)")
@@ -211,6 +227,8 @@ class Database:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades(symbol)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_positions_symbol ON positions(symbol)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_smoke_runs_symbol ON smoke_runs(symbol)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_smoke_runs_created ON smoke_runs(created_at)")
         
         conn.commit()
         conn.close()
@@ -716,6 +734,40 @@ class Database:
         row = df.iloc[0].to_dict()
         row['details'] = json.loads(row['details']) if row.get('details') else {}
         return row
+
+    def record_smoke_run(self, exchange_mode: str, position_mode: str, symbol: str, side: str,
+                         amount: float = None, success: bool = False, error: str = None, details: Dict = None) -> int:
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO smoke_runs (exchange_mode, position_mode, symbol, side, amount, success, error, details)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                exchange_mode,
+                position_mode,
+                symbol,
+                side,
+                amount,
+                int(bool(success)),
+                error,
+                json.dumps(details, ensure_ascii=False) if details else None,
+            )
+        )
+        row_id = cursor.lastrowid
+        conn.commit()
+        conn.close()
+        return row_id
+
+    def get_smoke_runs(self, limit: int = 20) -> List[Dict]:
+        conn = self._get_connection()
+        df = pd.read_sql_query("SELECT * FROM smoke_runs ORDER BY created_at DESC, id DESC LIMIT ?", conn, params=(limit,))
+        conn.close()
+        if not df.empty:
+            df['success'] = df['success'].astype(bool)
+            df['details'] = df['details'].apply(lambda x: json.loads(x) if x else {})
+        return df.to_dict('records')
 
     # =========================================================================
     # 清理操作

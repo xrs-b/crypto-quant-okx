@@ -778,9 +778,12 @@
                                         <button class="chip-btn" onclick="copyGovernanceReport('daily', 'casual')">口语版</button>
                                         <button class="chip-btn" onclick="copyGovernanceReport('daily', 'markdown')">Markdown</button>
                                         <button class="chip-btn" onclick="copyGovernanceReport('weekly', 'markdown')">周报MD</button>
+                                        <button class="chip-btn" onclick="saveGovernanceReportSnapshot('daily', 'markdown')">存日报快照</button>
+                                        <button class="chip-btn" onclick="saveGovernanceReportSnapshot('weekly', 'formal')">存周报快照</button>
                                     </div>
                                     <div class="risk-strip" id="governanceReportSummary"></div>
                                     <div class="risk-strip" id="governanceArchivePreview"></div>
+                                    <div class="timeline-list" id="governanceReportSnapshots"></div>
                                 </div>
                                 <div class="timeline-list" id="governanceHistoryTimeline"></div>
                                 <div class="toolbar-inline" id="governanceHistoryToolbar">
@@ -1101,6 +1104,50 @@
                 toast(`${report.title}（${styleLabel}）已复制，可直接发汇报`, 'ok');
             } catch (e) {
                 toast(`${report.title}（${styleLabel}）复制失败，请手动复制`, 'bad');
+            }
+        }
+        function getGovernanceReportSnapshots() {
+            try {
+                return JSON.parse(localStorage.getItem('governance_report_snapshots') || '[]');
+            } catch (e) {
+                return [];
+            }
+        }
+        function setGovernanceReportSnapshots(items) {
+            localStorage.setItem('governance_report_snapshots', JSON.stringify(items.slice(0, 12)));
+        }
+        function renderGovernanceReportSnapshots() {
+            const host = document.getElementById('governanceReportSnapshots');
+            if (!host) return;
+            const items = getGovernanceReportSnapshots();
+            host.innerHTML = items.length ? items.map((item, index) => `<div class="timeline-item"><div class="timeline-time">${item.savedAt}</div><div class="timeline-body"><strong>${item.title} ｜ ${item.styleLabel}</strong><div class="muted">${item.preview}</div><div style="margin-top:8px"><button class="secondary" onclick="copyGovernanceSnapshot(${index})">复制快照</button></div></div></div>`).join('') : '<div class="empty-state"><div class="icon">🗂️</div><div>暂无治理汇报快照</div></div>';
+        }
+        async function saveGovernanceReportSnapshot(mode = 'daily', style = 'markdown') {
+            const rules = window.__lastGovernanceRules || {};
+            const history = latestGovernanceConfigHistory || [];
+            const currentIndex = getCurrentGovernanceHistoryIndex(history, rules);
+            const report = generateGovernanceReport(history, rules, currentIndex, mode, style);
+            const styleLabel = style === 'brief' ? '短版' : style === 'formal' ? '正式版' : style === 'casual' ? '口语版' : style === 'markdown' ? 'Markdown版' : '标准版';
+            const items = getGovernanceReportSnapshots();
+            items.unshift({
+                savedAt: new Date().toLocaleString('zh-CN', { hour12: false }),
+                title: report.title,
+                styleLabel,
+                text: report.text,
+                preview: report.text.split('\n').slice(0, 3).join(' ｜ ')
+            });
+            setGovernanceReportSnapshots(items);
+            renderGovernanceReportSnapshots();
+            toast(`${report.title}快照已保存到本地`, 'ok');
+        }
+        async function copyGovernanceSnapshot(index) {
+            const item = getGovernanceReportSnapshots()[index];
+            if (!item) return;
+            try {
+                await navigator.clipboard.writeText(item.text);
+                toast(`已复制快照：${item.title}`, 'ok');
+            } catch (e) {
+                toast('复制快照失败，请手动复制', 'bad');
             }
         }
         function renderGovernanceBaselineSummary(currentRules = {}, baseline = {}) {
@@ -1671,6 +1718,7 @@
             document.getElementById('governanceHistoryRisks').innerHTML = renderGovernanceHistoryRisks(history, currentIndex);
             document.getElementById('governanceReportSummary').innerHTML = renderGovernanceReportSummary(history, rules, currentIndex);
             document.getElementById('governanceArchivePreview').innerHTML = renderGovernanceArchivePreview(history, rules, currentIndex);
+            renderGovernanceReportSnapshots();
             document.getElementById('governanceHistoryTimeline').innerHTML = renderGovernanceHistoryTimeline(history);
             document.getElementById('configGovernanceSummary').innerHTML = `
                 <div class="item"><strong>min_hold_hours</strong><div class="muted">${safe(rules.min_hold_hours)} 小时</div></div>

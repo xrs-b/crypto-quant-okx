@@ -834,6 +834,7 @@
                                             <button class="chip-btn" onclick="copyGovernanceCompareDigestByTag('probe')">复制试探汇总</button>
                                         </div>
                                         <div class="risk-strip" id="governanceCompareDigestPreview"></div>
+                                        <div class="summary-strip" id="governanceCompareTagDigestPreview"></div>
                                         <div class="summary-strip" id="governanceCompareTagHighlights"></div>
                                         <div class="timeline-list" id="governanceSnapshotCompareHistory"></div>
                                     </div>
@@ -1476,6 +1477,16 @@
             const text = buildGovernanceCompareDigest();
             host.innerHTML = `<div class="risk-alert ok"><strong>对比摘要汇总预览</strong><br><pre>${text}</pre></div>`;
         }
+        function renderGovernanceCompareTagDigestPreview() {
+            const host = document.getElementById('governanceCompareTagDigestPreview');
+            if (!host) return;
+            const risk = buildGovernanceCompareDigestByTag('risk');
+            const probe = buildGovernanceCompareDigestByTag('probe');
+            host.innerHTML = `
+                <div class="summary-pill"><div class="k">风险控制摘要</div><div class="v">risk</div><div class="s">${risk.split('\n').slice(0,2).join(' ｜ ')}</div></div>
+                <div class="summary-pill"><div class="k">试探摘要</div><div class="v">probe</div><div class="s">${probe.split('\n').slice(0,2).join(' ｜ ')}</div></div>
+            `;
+        }
         function renderGovernanceCompareTagHighlights() {
             const host = document.getElementById('governanceCompareTagHighlights');
             if (!host) return;
@@ -1526,6 +1537,7 @@
             renderGovernanceCompareRecordActivity();
             renderGovernanceCompareRecordPreview();
             renderGovernanceCompareDigestPreview();
+            renderGovernanceCompareTagDigestPreview();
             renderGovernanceCompareTagHighlights();
             renderGovernanceSnapshotCompareHistory();
             updateGovernanceCompareRecordToolbar();
@@ -1598,6 +1610,7 @@
             renderGovernanceCompareRecordActivity();
             renderGovernanceCompareRecordPreview();
             renderGovernanceCompareDigestPreview();
+            renderGovernanceCompareTagDigestPreview();
             renderGovernanceCompareTagHighlights();
             renderGovernanceSnapshotCompareHistory();
             updateGovernanceCompareRecordToolbar();
@@ -1609,6 +1622,7 @@
             renderGovernanceCompareRecordActivity();
             renderGovernanceCompareRecordPreview();
             renderGovernanceCompareDigestPreview();
+            renderGovernanceCompareTagDigestPreview();
             renderGovernanceCompareTagHighlights();
             renderGovernanceSnapshotCompareHistory();
             updateGovernanceCompareRecordToolbar();
@@ -1622,6 +1636,7 @@
             renderGovernanceCompareRecordActivity();
             renderGovernanceCompareRecordPreview();
             renderGovernanceCompareDigestPreview();
+            renderGovernanceCompareTagDigestPreview();
             renderGovernanceCompareTagHighlights();
             renderGovernanceSnapshotCompareHistory();
             updateGovernanceCompareRecordToolbar();
@@ -2277,6 +2292,7 @@
             renderGovernanceCompareRecordActivity();
             renderGovernanceCompareRecordPreview();
             renderGovernanceCompareDigestPreview();
+            renderGovernanceCompareTagDigestPreview();
             renderGovernanceCompareTagHighlights();
             renderGovernanceSnapshotCompareHistory();
             updateGovernanceCompareRecordToolbar();

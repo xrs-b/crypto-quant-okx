@@ -103,8 +103,9 @@ class GovernanceEngine:
 
         current_score = float(current_focus.get('score', -999) or -999)
         candidate_score = float(candidate_focus.get('score', -999) or -999)
+        score_margin = 1.0
         promote_passed = bool(candidate_promotion and candidate_promotion.get('decision') == 'promote')
-        score_passed = candidate_score > current_score
+        score_passed = candidate_score > current_score + score_margin
         candidate_in_pool = candidate_symbol in candidate_watch
         hold_passed, hold_detail, next_recheck_at = self._check_pool_switch_hold_window(mode)
         diagnosis = self._build_pool_switch_diagnosis(
@@ -121,6 +122,7 @@ class GovernanceEngine:
             hold_passed=hold_passed,
             hold_detail=hold_detail,
             next_recheck_at=next_recheck_at,
+            score_margin=score_margin,
         )
         target_preset = 'xrp-candidate' if candidate_symbol == 'XRP/USDT' else 'btc-focused' if candidate_symbol == 'BTC/USDT' else None
         candidate_label = candidate_symbol.replace('/USDT', '') if candidate_symbol else '--'
@@ -134,6 +136,7 @@ class GovernanceEngine:
                 'message': f'候选池 {candidate_label} 已达到升级条件，且单币得分优于 {current_label}，可申请切换主池',
                 'current_score': round(current_score, 4),
                 'candidate_score': round(candidate_score, 4),
+                'score_margin': score_margin,
                 'current_symbol': current_symbol,
                 'candidate_symbol': candidate_symbol,
                 'current_pool': current_watch,
@@ -151,6 +154,7 @@ class GovernanceEngine:
             'message': f'当前不建议切换主池，继续维持 {current_label}-focused',
             'current_score': round(current_score, 4),
             'candidate_score': round(candidate_score, 4),
+            'score_margin': score_margin,
             'current_symbol': current_symbol,
             'candidate_symbol': candidate_symbol,
             'current_pool': current_watch,
@@ -180,7 +184,7 @@ class GovernanceEngine:
         remaining_hours = round((next_recheck_at - now).total_seconds() / 3600, 2)
         return False, f'最小观察期未满，还需等待约 {remaining_hours}h', next_recheck_at.isoformat()
 
-    def _build_pool_switch_diagnosis(self, mode: Dict, current_symbol: str, candidate_symbol: str, current_score: float, candidate_score: float, candidate_promotion: Optional[Dict], promote_passed: bool, score_passed: bool, candidate_in_pool: bool, focused_mode: bool, hold_passed: bool, hold_detail: str, next_recheck_at: Optional[str]) -> Dict:
+    def _build_pool_switch_diagnosis(self, mode: Dict, current_symbol: str, candidate_symbol: str, current_score: float, candidate_score: float, candidate_promotion: Optional[Dict], promote_passed: bool, score_passed: bool, candidate_in_pool: bool, focused_mode: bool, hold_passed: bool, hold_detail: str, next_recheck_at: Optional[str], score_margin: float) -> Dict:
         candidate_label = candidate_symbol.replace('/USDT', '') if candidate_symbol else '--'
         current_label = current_symbol.replace('/USDT', '') if current_symbol else '--'
         promotion_reason = candidate_promotion.get('reason') if candidate_promotion else f'暂无 {candidate_label} 候选审查结果'
@@ -214,7 +218,7 @@ class GovernanceEngine:
                 'key': 'score_compare',
                 'label': f'{candidate_label} 聚焦得分高于 {current_label} 主池',
                 'passed': score_passed,
-                'detail': f"{candidate_label} {round(candidate_score, 4)} vs {current_label} {round(current_score, 4)}",
+                'detail': f"{candidate_label} {round(candidate_score, 4)} vs {current_label} {round(current_score, 4)} ｜ 需至少领先 {round(score_margin, 2)}",
             },
         ]
         blocker = next((g for g in gates if not g['passed']), None)
@@ -227,6 +231,7 @@ class GovernanceEngine:
             'candidate_symbol': candidate_symbol,
             'current_score': round(current_score, 4),
             'candidate_score': round(candidate_score, 4),
+            'score_margin': round(score_margin, 4),
             'promotion_decision': candidate_decision,
             'promotion_reason': promotion_reason,
             'hold_window_passed': hold_passed,

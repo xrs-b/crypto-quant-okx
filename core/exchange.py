@@ -97,29 +97,46 @@ class Exchange:
         except Exception:
             pass
 
+    def _is_oneway_mode(self) -> bool:
+        mode = str(self.config.get('exchange', {}).get('position_mode', 'hedge')).lower()
+        return mode in {'oneway', 'one-way', 'net', 'single'}
+
+    def _build_order_params(self, posSide: str = None, reduce_only: bool = False, include_pos_side: bool = True) -> Dict:
+        params = {'tdMode': 'isolated'}
+        if reduce_only:
+            params['reduceOnly'] = True
+        if posSide and include_pos_side and not self._is_oneway_mode():
+            params['posSide'] = posSide
+        return params
+
+    def _submit_market_order(self, contract_symbol: str, side: str, amount: float, params: Dict) -> Dict:
+        if side in ['buy', 'long']:
+            return self.exchange.create_market_buy_order(contract_symbol, amount, params)
+        return self.exchange.create_market_sell_order(contract_symbol, amount, params)
+
     def create_order(self, symbol: str, side: str, amount: float, posSide: str = None) -> Dict:
         contract_symbol = self.get_order_symbol(symbol)
-        params = {'tdMode': 'isolated'}
-        if posSide:
-            params['posSide'] = posSide
+        params = self._build_order_params(posSide=posSide)
         try:
-            if side in ['buy', 'long']:
-                return self.exchange.create_market_buy_order(contract_symbol, amount, params)
-            return self.exchange.create_market_sell_order(contract_symbol, amount, params)
+            return self._submit_market_order(contract_symbol, side, amount, params)
         except Exception as e:
+            message = str(e)
+            if 'posSide' in params and 'Parameter posSide error' in message:
+                fallback_params = self._build_order_params(posSide=posSide, include_pos_side=False)
+                return self._submit_market_order(contract_symbol, side, amount, fallback_params)
             print(f'开仓错误: {e}')
             raise
 
     def close_order(self, symbol: str, side: str, amount: float, posSide: str = None) -> Dict:
         contract_symbol = self.get_order_symbol(symbol)
-        params = {'tdMode': 'isolated'}
-        if posSide:
-            params['posSide'] = posSide
+        params = self._build_order_params(posSide=posSide, reduce_only=True)
         try:
-            if side in ['sell', 'short']:
-                return self.exchange.create_market_sell_order(contract_symbol, amount, params)
-            return self.exchange.create_market_buy_order(contract_symbol, amount, params)
+            return self._submit_market_order(contract_symbol, side, amount, params)
         except Exception as e:
+            message = str(e)
+            if 'posSide' in params and ('Parameter posSide error' in message or '51169' in message):
+                fallback_params = self._build_order_params(posSide=posSide, reduce_only=True, include_pos_side=False)
+                return self._submit_market_order(contract_symbol, side, amount, fallback_params)
             print(f'平仓错误: {e}')
             raise
 

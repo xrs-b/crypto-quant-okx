@@ -805,10 +805,13 @@
                                             <button class="chip-btn" onclick="copyGovernanceSnapshotComparison()">复制对比摘要</button>
                                             <button class="chip-btn" onclick="copyGovernanceSnapshotConclusion()">复制结论</button>
                                             <button class="chip-btn" onclick="copyGovernanceSnapshotAdvice()">复制建议</button>
+                                            <button class="chip-btn" onclick="copyGovernanceSnapshotComparePack()">复制完整包</button>
+                                            <button class="chip-btn" onclick="saveGovernanceSnapshotComparisonRecord()">存对比记录</button>
                                         </div>
                                         <div class="risk-strip" id="governanceSnapshotConclusion"></div>
                                         <div class="risk-strip" id="governanceSnapshotAdvice"></div>
                                         <div class="risk-strip" id="governanceSnapshotComparison"></div>
+                                        <div class="timeline-list" id="governanceSnapshotCompareHistory"></div>
                                     </div>
                                     <div class="timeline-list" id="governanceReportSnapshots"></div>
                                 </div>
@@ -1335,6 +1338,78 @@
             } catch (e) {
                 toast('复制快照对比建议失败，请手动复制', 'bad');
             }
+        }
+        function buildGovernanceSnapshotComparePack(a, b) {
+            return [
+                buildGovernanceSnapshotConclusion(a, b),
+                buildGovernanceSnapshotAdvice(a, b),
+                buildGovernanceSnapshotComparisonText(a, b)
+            ].join('\n\n');
+        }
+        function getGovernanceSnapshotCompareRecords() {
+            try {
+                return JSON.parse(localStorage.getItem('governance_snapshot_compare_records') || '[]');
+            } catch (e) {
+                return [];
+            }
+        }
+        function setGovernanceSnapshotCompareRecords(items) {
+            localStorage.setItem('governance_snapshot_compare_records', JSON.stringify(items.slice(0, 10)));
+        }
+        async function copyGovernanceSnapshotComparePack() {
+            const items = getGovernanceReportSnapshots();
+            const a = items.find(x => x.id === document.getElementById('governanceSnapshotCompareA')?.value);
+            const b = items.find(x => x.id === document.getElementById('governanceSnapshotCompareB')?.value);
+            const text = buildGovernanceSnapshotComparePack(a, b);
+            try {
+                await navigator.clipboard.writeText(text);
+                toast('快照对比完整包已复制', 'ok');
+            } catch (e) {
+                toast('复制快照对比完整包失败，请手动复制', 'bad');
+            }
+        }
+        function renderGovernanceSnapshotCompareHistory() {
+            const host = document.getElementById('governanceSnapshotCompareHistory');
+            if (!host) return;
+            const items = getGovernanceSnapshotCompareRecords();
+            host.innerHTML = items.length ? items.map(item => `<div class="timeline-item"><div class="timeline-time">${item.savedAt}</div><div class="timeline-body"><strong>${item.title}</strong><div class="muted">${item.preview}</div><div style="margin-top:8px"><button class="secondary" onclick="copyGovernanceSnapshotCompareRecord('${item.id}')">复制记录</button><button style="margin-left:8px" onclick="deleteGovernanceSnapshotCompareRecord('${item.id}')">删除</button></div></div></div>`).join('') : '<div class="empty-state"><div class="icon">🧾</div><div>暂无快照对比记录</div></div>';
+        }
+        function saveGovernanceSnapshotComparisonRecord() {
+            const items = getGovernanceReportSnapshots();
+            const a = items.find(x => x.id === document.getElementById('governanceSnapshotCompareA')?.value);
+            const b = items.find(x => x.id === document.getElementById('governanceSnapshotCompareB')?.value);
+            if (!a || !b) {
+                toast('请先选择两份快照再保存对比记录', 'bad');
+                return;
+            }
+            const records = getGovernanceSnapshotCompareRecords();
+            const text = buildGovernanceSnapshotComparePack(a, b);
+            records.unshift({
+                id: `compare_${Date.now()}`,
+                savedAt: new Date().toLocaleString('zh-CN', { hour12: false }),
+                title: `${a.title} vs ${b.title}`,
+                preview: buildGovernanceSnapshotConclusion(a, b),
+                text
+            });
+            setGovernanceSnapshotCompareRecords(records);
+            renderGovernanceSnapshotCompareHistory();
+            toast('快照对比记录已保存到本地', 'ok');
+        }
+        async function copyGovernanceSnapshotCompareRecord(id) {
+            const item = getGovernanceSnapshotCompareRecords().find(x => x.id === id);
+            if (!item) return;
+            try {
+                await navigator.clipboard.writeText(item.text);
+                toast('快照对比记录已复制', 'ok');
+            } catch (e) {
+                toast('复制快照对比记录失败，请手动复制', 'bad');
+            }
+        }
+        function deleteGovernanceSnapshotCompareRecord(id) {
+            const items = getGovernanceSnapshotCompareRecords().filter(x => x.id !== id);
+            setGovernanceSnapshotCompareRecords(items);
+            renderGovernanceSnapshotCompareHistory();
+            toast('快照对比记录已删除', 'info');
         }
         function renderGovernanceReportSnapshots() {
             const host = document.getElementById('governanceReportSnapshots');
@@ -1982,6 +2057,7 @@
             renderGovernanceReportSnapshots();
             renderGovernanceSnapshotCompareSelectors();
             renderGovernanceSnapshotComparison();
+            renderGovernanceSnapshotCompareHistory();
             updateGovernanceSnapshotToolbar();
             document.getElementById('governanceHistoryTimeline').innerHTML = renderGovernanceHistoryTimeline(history);
             document.getElementById('configGovernanceSummary').innerHTML = `

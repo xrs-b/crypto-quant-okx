@@ -796,6 +796,16 @@
                                     <div class="risk-strip" id="governanceReportSummary"></div>
                                     <div class="summary-strip" id="governanceSnapshotAnalytics"></div>
                                     <div class="risk-strip" id="governanceArchivePreview"></div>
+                                    <div class="card mini" style="margin-bottom:12px; padding:12px;">
+                                        <div class="section-title">快照对比 / 差异查看</div>
+                                        <div class="section-note">选两份快照，快速睇标题、语气、标签同正文重点差异。</div>
+                                        <div class="toolbar-inline">
+                                            <select id="governanceSnapshotCompareA" style="min-width:220px; padding:10px 12px; border-radius:12px; border:1px solid rgba(255,255,255,.08); background:rgba(255,255,255,.04); color:#fff;" onchange="renderGovernanceSnapshotComparison()"></select>
+                                            <select id="governanceSnapshotCompareB" style="min-width:220px; padding:10px 12px; border-radius:12px; border:1px solid rgba(255,255,255,.08); background:rgba(255,255,255,.04); color:#fff;" onchange="renderGovernanceSnapshotComparison()"></select>
+                                            <button class="chip-btn" onclick="copyGovernanceSnapshotComparison()">复制对比摘要</button>
+                                        </div>
+                                        <div class="risk-strip" id="governanceSnapshotComparison"></div>
+                                    </div>
                                     <div class="timeline-list" id="governanceReportSnapshots"></div>
                                 </div>
                                 <div class="timeline-list" id="governanceHistoryTimeline"></div>
@@ -1176,6 +1186,59 @@
                 <div class="summary-pill"><div class="k">常用汇报语气</div><div class="v">${topStyle[0]}</div><div class="s">已保存快照中最常用版本</div></div>
             `;
         }
+        function renderGovernanceSnapshotCompareSelectors() {
+            const items = getGovernanceReportSnapshots();
+            const selectA = document.getElementById('governanceSnapshotCompareA');
+            const selectB = document.getElementById('governanceSnapshotCompareB');
+            if (!selectA || !selectB) return;
+            const options = items.map(item => `<option value="${item.id}">${item.savedAt} ｜ ${item.title} ｜ ${item.styleLabel}</option>`).join('');
+            selectA.innerHTML = `<option value="">选择快照 A</option>${options}`;
+            selectB.innerHTML = `<option value="">选择快照 B</option>${options}`;
+            if (items[0] && !selectA.value) selectA.value = items[0].id;
+            if (items[1] && !selectB.value) selectB.value = items[1].id;
+            else if (items[0] && !selectB.value) selectB.value = items[0].id;
+        }
+        function buildGovernanceSnapshotComparisonText(a, b) {
+            if (!a || !b) return '请先选择两份快照再对比。';
+            const tagA = (a.tags || []).join(' / ') || '--';
+            const tagB = (b.tags || []).join(' / ') || '--';
+            const linesA = (a.text || '').split('\n');
+            const linesB = (b.text || '').split('\n');
+            const onlyA = linesA.filter(line => line && !linesB.includes(line)).slice(0, 3);
+            const onlyB = linesB.filter(line => line && !linesA.includes(line)).slice(0, 3);
+            return [
+                `A：${a.title} ｜ ${a.styleLabel} ｜ ${a.savedAt}`,
+                `B：${b.title} ｜ ${b.styleLabel} ｜ ${b.savedAt}`,
+                `标签对比：A[${tagA}] vs B[${tagB}]`,
+                `仅A重点：${onlyA.join(' ｜ ') || '无明显独有内容'}`,
+                `仅B重点：${onlyB.join(' ｜ ') || '无明显独有内容'}`
+            ].join('\n');
+        }
+        function renderGovernanceSnapshotComparison() {
+            const host = document.getElementById('governanceSnapshotComparison');
+            const selectA = document.getElementById('governanceSnapshotCompareA');
+            const selectB = document.getElementById('governanceSnapshotCompareB');
+            if (!host || !selectA || !selectB) return;
+            const items = getGovernanceReportSnapshots();
+            const a = items.find(x => x.id === selectA.value);
+            const b = items.find(x => x.id === selectB.value);
+            const text = buildGovernanceSnapshotComparisonText(a, b);
+            host.innerHTML = `<div class="risk-alert info"><pre>${text}</pre></div>`;
+        }
+        async function copyGovernanceSnapshotComparison() {
+            const items = getGovernanceReportSnapshots();
+            const aId = document.getElementById('governanceSnapshotCompareA')?.value;
+            const bId = document.getElementById('governanceSnapshotCompareB')?.value;
+            const a = items.find(x => x.id === aId);
+            const b = items.find(x => x.id === bId);
+            const text = buildGovernanceSnapshotComparisonText(a, b);
+            try {
+                await navigator.clipboard.writeText(text);
+                toast('快照对比摘要已复制', 'ok');
+            } catch (e) {
+                toast('复制快照对比失败，请手动复制', 'bad');
+            }
+        }
         function renderGovernanceReportSnapshots() {
             const host = document.getElementById('governanceReportSnapshots');
             if (!host) return;
@@ -1207,6 +1270,8 @@
             setGovernanceReportSnapshots(items);
             renderGovernanceSnapshotAnalytics();
             renderGovernanceReportSnapshots();
+            renderGovernanceSnapshotCompareSelectors();
+            renderGovernanceSnapshotComparison();
             updateGovernanceSnapshotToolbar();
             toast(`${report.title}快照已保存到本地`, 'ok');
         }
@@ -1215,12 +1280,16 @@
             setGovernanceReportSnapshots(items);
             renderGovernanceSnapshotAnalytics();
             renderGovernanceReportSnapshots();
+            renderGovernanceSnapshotCompareSelectors();
+            renderGovernanceSnapshotComparison();
             toast('快照已删除', 'info');
         }
         function clearGovernanceSnapshots() {
             localStorage.removeItem('governance_report_snapshots');
             renderGovernanceSnapshotAnalytics();
             renderGovernanceReportSnapshots();
+            renderGovernanceSnapshotCompareSelectors();
+            renderGovernanceSnapshotComparison();
             updateGovernanceSnapshotToolbar();
             toast('治理汇报快照已清空', 'info');
         }
@@ -1230,6 +1299,8 @@
             setGovernanceReportSnapshots(items);
             renderGovernanceSnapshotAnalytics();
             renderGovernanceReportSnapshots();
+            renderGovernanceSnapshotCompareSelectors();
+            renderGovernanceSnapshotComparison();
             toast('快照置顶状态已更新', 'ok');
         }
         async function copyGovernanceSnapshotById(id) {
@@ -1812,6 +1883,8 @@
             document.getElementById('governanceArchivePreview').innerHTML = renderGovernanceArchivePreview(history, rules, currentIndex);
             renderGovernanceSnapshotAnalytics();
             renderGovernanceReportSnapshots();
+            renderGovernanceSnapshotCompareSelectors();
+            renderGovernanceSnapshotComparison();
             updateGovernanceSnapshotToolbar();
             document.getElementById('governanceHistoryTimeline').innerHTML = renderGovernanceHistoryTimeline(history);
             document.getElementById('configGovernanceSummary').innerHTML = `

@@ -764,6 +764,7 @@
                                 <div class="section-note">卡片化显示参数版本、变更字段、当前生效状态与回滚入口。</div>
                                 <div class="summary-strip" id="governanceHistorySummary"></div>
                                 <div class="summary-strip" id="governancePresetStats"></div>
+                                <div class="summary-strip" id="governanceStabilityScore"></div>
                                 <div class="risk-strip" id="governanceStyleTrend"></div>
                                 <div class="risk-strip" id="governanceHistoryRisks"></div>
                                 <div class="timeline-list" id="governanceHistoryTimeline"></div>
@@ -959,6 +960,40 @@
             ];
             if (trend3.swing || trend5.swing) alerts.push({cls: 'bad', text: '近期风格来回摇摆，建议先冻结调参一段时间，再观察审批表现。'});
             return alerts.map(a => `<div class="risk-alert ${a.cls}">${a.text}</div>`).join('');
+        }
+        function computeGovernanceStability(history = [], currentRules = {}, currentIndex = -1) {
+            const trend3 = summarizePresetTrend(history, 3);
+            const trend5 = summarizePresetTrend(history, 5);
+            const now = Date.now();
+            const last24h = history.filter(row => {
+                const t = new Date(String(row.created_at || '').replace(' ', 'T')).getTime();
+                return !Number.isNaN(t) && (now - t) <= 24 * 3600000;
+            });
+            const rollback24h = last24h.filter(row => governanceNoteKind(row.details?.note || '').type === 'rollback').length;
+            const currentPreset = getClosestGovernancePreset(currentRules || {});
+            let stability = 100;
+            let volatility = 0;
+            if (last24h.length >= 4) { stability -= 25; volatility += 30; }
+            if (rollback24h >= 2) { stability -= 20; volatility += 25; }
+            if (trend3.swing) { stability -= 20; volatility += 25; }
+            if (trend5.swing) { stability -= 15; volatility += 20; }
+            if (currentPreset.key === 'aggressive') { stability -= 10; volatility += 15; }
+            stability = Math.max(0, Math.min(100, stability));
+            volatility = Math.max(0, Math.min(100, volatility));
+            let label = '平衡稳态';
+            if (trend3.swing || trend5.swing || volatility >= 60) label = '风格摇摆';
+            else if (currentPreset.key === 'conservative' && stability >= 70) label = '稳定保守';
+            else if (currentPreset.key === 'aggressive') label = '激进试探';
+            return {stability, volatility, label};
+        }
+        function renderGovernanceStabilityScore(history = [], currentRules = {}, currentIndex = -1) {
+            const score = computeGovernanceStability(history, currentRules, currentIndex);
+            return `
+                <div class="summary-pill"><div class="k">治理稳定度分</div><div class="v">${score.stability}</div><div class="s">越高代表调参节奏越稳</div></div>
+                <div class="summary-pill"><div class="k">风格波动分</div><div class="v">${score.volatility}</div><div class="s">越高代表风格波动越明显</div></div>
+                <div class="summary-pill"><div class="k">一句话判断</div><div class="v">${score.label}</div><div class="s">综合当前模板、回滚频率与趋势</div></div>
+                <div class="summary-pill"><div class="k">当前建议</div><div class="v">${score.stability >= 70 ? '可继续观察' : '建议先收敛'}</div><div class="s">${score.label === '风格摇摆' ? '先减少调参频率' : '保持现配置观察表现'}</div></div>
+            `;
         }
         function renderGovernanceBaselineSummary(currentRules = {}, baseline = {}) {
             const holdDiff = Number(currentRules.min_hold_hours ?? 0) - Number(baseline.min_hold_hours ?? 0);
@@ -1522,6 +1557,7 @@
             document.getElementById('governancePresetPreview').innerHTML = renderGovernancePresetPreview(rules);
             document.getElementById('governanceHistorySummary').innerHTML = renderGovernanceHistorySummary(history, rules, currentIndex);
             document.getElementById('governancePresetStats').innerHTML = renderGovernancePresetStats(history, rules);
+            document.getElementById('governanceStabilityScore').innerHTML = renderGovernanceStabilityScore(history, rules, currentIndex);
             document.getElementById('governanceStyleTrend').innerHTML = renderGovernanceStyleTrend(history);
             document.getElementById('governanceHistoryRisks').innerHTML = renderGovernanceHistoryRisks(history, currentIndex);
             document.getElementById('governanceHistoryTimeline').innerHTML = renderGovernanceHistoryTimeline(history);

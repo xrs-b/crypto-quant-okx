@@ -764,6 +764,7 @@
                                 <div class="section-note">卡片化显示参数版本、变更字段、当前生效状态与回滚入口。</div>
                                 <div class="summary-strip" id="governanceHistorySummary"></div>
                                 <div class="summary-strip" id="governancePresetStats"></div>
+                                <div class="risk-strip" id="governanceStyleTrend"></div>
                                 <div class="risk-strip" id="governanceHistoryRisks"></div>
                                 <div class="timeline-list" id="governanceHistoryTimeline"></div>
                                 <div class="toolbar-inline" id="governanceHistoryToolbar">
@@ -933,6 +934,31 @@
                 <div class="summary-pill"><div class="k">历史主风格</div><div class="v">${governanceQuickPresets[dominant[0]]?.label || '平衡型'}</div><div class="s">最近历史最常命中既模板</div></div>
                 <div class="summary-pill"><div class="k">当前运行倾向</div><div class="v">${currentPreset.key === 'conservative' ? '偏保守' : currentPreset.key === 'aggressive' ? '偏激进' : '偏平衡'}</div><div class="s">可配合模板按钮快速微调</div></div>
             `;
+        }
+        function summarizePresetTrend(history = [], count = 3) {
+            const recent = (history || []).slice(0, count).map(row => getClosestGovernancePreset(row.after_value || {}).key);
+            if (!recent.length) return {text: '暂无趋势样本', swing: false};
+            const labels = recent.map(key => governanceQuickPresets[key]?.label || key).join(' → ');
+            const unique = [...new Set(recent)];
+            const swing = recent.length >= 3 && unique.length >= 3;
+            const first = recent[recent.length - 1];
+            const latest = recent[0];
+            let drift = '风格基本稳定';
+            if (first === 'conservative' && latest === 'aggressive') drift = '由保守明显转向激进';
+            else if (first === 'aggressive' && latest === 'conservative') drift = '由激进明显转向保守';
+            else if (unique.length === 1) drift = `持续维持${governanceQuickPresets[latest]?.label || latest}`;
+            else if (unique.length === 2) drift = '存在轻微风格漂移';
+            return {text: `${labels} ｜ ${drift}`, swing};
+        }
+        function renderGovernanceStyleTrend(history = []) {
+            const trend3 = summarizePresetTrend(history, 3);
+            const trend5 = summarizePresetTrend(history, 5);
+            const alerts = [
+                {cls: trend3.swing ? 'warn' : 'ok', text: `最近 3 次：${trend3.text}`},
+                {cls: trend5.swing ? 'warn' : 'ok', text: `最近 5 次：${trend5.text}`}
+            ];
+            if (trend3.swing || trend5.swing) alerts.push({cls: 'bad', text: '近期风格来回摇摆，建议先冻结调参一段时间，再观察审批表现。'});
+            return alerts.map(a => `<div class="risk-alert ${a.cls}">${a.text}</div>`).join('');
         }
         function renderGovernanceBaselineSummary(currentRules = {}, baseline = {}) {
             const holdDiff = Number(currentRules.min_hold_hours ?? 0) - Number(baseline.min_hold_hours ?? 0);
@@ -1496,6 +1522,7 @@
             document.getElementById('governancePresetPreview').innerHTML = renderGovernancePresetPreview(rules);
             document.getElementById('governanceHistorySummary').innerHTML = renderGovernanceHistorySummary(history, rules, currentIndex);
             document.getElementById('governancePresetStats').innerHTML = renderGovernancePresetStats(history, rules);
+            document.getElementById('governanceStyleTrend').innerHTML = renderGovernanceStyleTrend(history);
             document.getElementById('governanceHistoryRisks').innerHTML = renderGovernanceHistoryRisks(history, currentIndex);
             document.getElementById('governanceHistoryTimeline').innerHTML = renderGovernanceHistoryTimeline(history);
             document.getElementById('configGovernanceSummary').innerHTML = `

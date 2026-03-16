@@ -131,6 +131,11 @@ class Config:
     def leverage(self) -> int:
         """获取杠杆倍数"""
         return self.get('trading.leverage', 10)
+
+    @property
+    def position_mode(self) -> str:
+        """获取持仓模式"""
+        return self.get('exchange.position_mode', 'oneway')
     
     @property
     def position_size(self) -> float:

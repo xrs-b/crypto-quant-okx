@@ -20,6 +20,7 @@ exchange:
   default_leverage: 10
   mode: testnet
   name: okx
+  position_mode: oneway      # oneway=单向持仓 / hedge=双向持仓；需与 OKX 账户设置一致
 logging:
   backup_count: 5
   file: logs/trading.log

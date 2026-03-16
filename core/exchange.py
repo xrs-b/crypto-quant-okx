@@ -98,7 +98,7 @@ class Exchange:
             pass
 
     def _is_oneway_mode(self) -> bool:
-        mode = str(self.config.get('exchange', {}).get('position_mode', 'hedge')).lower()
+        mode = str(self.config.get('exchange', {}).get('position_mode', 'oneway')).lower()
         return mode in {'oneway', 'one-way', 'net', 'single'}
 
     def _build_order_params(self, posSide: str = None, reduce_only: bool = False, include_pos_side: bool = True) -> Dict:

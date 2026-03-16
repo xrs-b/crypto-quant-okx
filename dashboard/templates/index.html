@@ -794,6 +794,7 @@
                                         <input id="governanceSnapshotSearch" type="text" placeholder="搜索关键字，例如 回滚 / 激进 / 周报" style="min-width:260px; padding:10px 12px; border-radius:12px; border:1px solid rgba(255,255,255,.08); background:rgba(255,255,255,.04); color:#fff;" oninput="renderGovernanceReportSnapshots()">
                                     </div>
                                     <div class="risk-strip" id="governanceReportSummary"></div>
+                                    <div class="summary-strip" id="governanceSnapshotAnalytics"></div>
                                     <div class="risk-strip" id="governanceArchivePreview"></div>
                                     <div class="timeline-list" id="governanceReportSnapshots"></div>
                                 </div>
@@ -1152,6 +1153,29 @@
             renderGovernanceReportSnapshots();
             updateGovernanceSnapshotToolbar();
         }
+        function renderGovernanceSnapshotAnalytics() {
+            const host = document.getElementById('governanceSnapshotAnalytics');
+            if (!host) return;
+            const items = getGovernanceReportSnapshots();
+            const dailyCount = items.filter(x => x.mode === 'daily').length;
+            const weeklyCount = items.filter(x => x.mode === 'weekly').length;
+            const rollbackCount = items.filter(x => (x.tags || []).includes('rollback')).length;
+            const conservativeCount = items.filter(x => (x.tags || []).includes('conservative')).length;
+            const aggressiveCount = items.filter(x => (x.tags || []).includes('aggressive')).length;
+            const styleCounts = items.reduce((acc, item) => {
+                const key = item.styleLabel || '标准版';
+                acc[key] = (acc[key] || 0) + 1;
+                return acc;
+            }, {});
+            const topStyle = Object.entries(styleCounts).sort((a, b) => b[1] - a[1])[0] || ['标准版', 0];
+            const rollbackRate = items.length ? `${((rollbackCount / items.length) * 100).toFixed(0)}%` : '--';
+            host.innerHTML = `
+                <div class="summary-pill"><div class="k">日报 / 周报</div><div class="v">日 ${dailyCount} / 周 ${weeklyCount}</div><div class="s">本地快照存量</div></div>
+                <div class="summary-pill"><div class="k">回滚主题占比</div><div class="v">${rollbackRate}</div><div class="s">带 rollback 标签既快照占比</div></div>
+                <div class="summary-pill"><div class="k">风格分布</div><div class="v">保 ${conservativeCount} / 激 ${aggressiveCount}</div><div class="s">按标签统计保守 / 激进</div></div>
+                <div class="summary-pill"><div class="k">常用汇报语气</div><div class="v">${topStyle[0]}</div><div class="s">已保存快照中最常用版本</div></div>
+            `;
+        }
         function renderGovernanceReportSnapshots() {
             const host = document.getElementById('governanceReportSnapshots');
             if (!host) return;
@@ -1181,6 +1205,7 @@
             });
             items.sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)));
             setGovernanceReportSnapshots(items);
+            renderGovernanceSnapshotAnalytics();
             renderGovernanceReportSnapshots();
             updateGovernanceSnapshotToolbar();
             toast(`${report.title}快照已保存到本地`, 'ok');
@@ -1188,11 +1213,13 @@
         function deleteGovernanceSnapshot(id) {
             const items = getGovernanceReportSnapshots().filter(item => item.id !== id);
             setGovernanceReportSnapshots(items);
+            renderGovernanceSnapshotAnalytics();
             renderGovernanceReportSnapshots();
             toast('快照已删除', 'info');
         }
         function clearGovernanceSnapshots() {
             localStorage.removeItem('governance_report_snapshots');
+            renderGovernanceSnapshotAnalytics();
             renderGovernanceReportSnapshots();
             updateGovernanceSnapshotToolbar();
             toast('治理汇报快照已清空', 'info');
@@ -1201,6 +1228,7 @@
             const items = getGovernanceReportSnapshots().map(item => item.id === id ? {...item, pinned: !item.pinned} : item);
             items.sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)));
             setGovernanceReportSnapshots(items);
+            renderGovernanceSnapshotAnalytics();
             renderGovernanceReportSnapshots();
             toast('快照置顶状态已更新', 'ok');
         }
@@ -1782,6 +1810,7 @@
             document.getElementById('governanceHistoryRisks').innerHTML = renderGovernanceHistoryRisks(history, currentIndex);
             document.getElementById('governanceReportSummary').innerHTML = renderGovernanceReportSummary(history, rules, currentIndex);
             document.getElementById('governanceArchivePreview').innerHTML = renderGovernanceArchivePreview(history, rules, currentIndex);
+            renderGovernanceSnapshotAnalytics();
             renderGovernanceReportSnapshots();
             updateGovernanceSnapshotToolbar();
             document.getElementById('governanceHistoryTimeline').innerHTML = renderGovernanceHistoryTimeline(history);

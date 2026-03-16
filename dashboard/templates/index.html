@@ -824,11 +824,20 @@
                                         <div class="toolbar-inline">
                                             <input id="governanceCompareRecordSearch" type="text" placeholder="搜索对比记录，例如 风险控制 / 激进 / 回滚" style="min-width:260px; padding:10px 12px; border-radius:12px; border:1px solid rgba(255,255,255,.08); background:rgba(255,255,255,.04); color:#fff;" oninput="renderGovernanceSnapshotCompareHistory()">
                                         </div>
+                                        <div class="toolbar-inline" style="margin-top:8px">
+                                            <span style="color:#888;font-size:12px;margin-right:8px">快速导航:</span>
+                                            <button class="chip-btn" onclick="setGovernanceCompareRecordFilter('risk');document.getElementById('governanceSnapshotCompareHistory')?.scrollIntoView({behavior:'smooth'})">查看风险控制记录</button>
+                                            <button class="chip-btn" onclick="setGovernanceCompareRecordFilter('probe');document.getElementById('governanceSnapshotCompareHistory')?.scrollIntoView({behavior:'smooth'})">查看试探记录</button>
+                                            <button class="chip-btn" onclick="setGovernanceCompareRecordFilter('rollback');document.getElementById('governanceSnapshotCompareHistory')?.scrollIntoView({behavior:'smooth'})">查看回滚记录</button>
+                                            <button class="chip-btn" onclick="setGovernanceCompareRecordFilter('conservative');document.getElementById('governanceSnapshotCompareHistory')?.scrollIntoView({behavior:'smooth'})">查看保守记录</button>
+                                        </div>
                                         <div class="risk-strip" id="governanceCompareRecordPreview"></div>
                                         <div class="toolbar-inline">
                                             <button class="chip-btn" onclick="copyLatestGovernanceCompareRecord()">复制最新记录</button>
-                                            <button class="chip-btn" onclick="copyLatestGovernanceCompareByTag('risk')">复制最新风险控制</button>
-                                            <button class="chip-btn" onclick="copyLatestGovernanceCompareByTag('probe')">复制最新试探</button>
+                                            <button class="chip-btn" onclick="copyLatestGovernanceCompareByTag('risk')">最新风险控制</button>
+                                            <button class="chip-btn" onclick="copyLatestGovernanceCompareByTag('probe')">最新试探</button>
+                                            <button class="chip-btn" onclick="copyLatestGovernanceCompareByTag('rollback')">最新回滚</button>
+                                            <button class="chip-btn" onclick="copyLatestGovernanceCompareByTag('conservative')">最新保守</button>
                                             <button class="chip-btn" onclick="copyGovernanceCompareDigest()">复制对比摘要汇总</button>
                                             <button class="chip-btn" onclick="copyGovernanceCompareDigestByTag('risk')">复制风险控制汇总</button>
                                             <button class="chip-btn" onclick="copyGovernanceCompareDigestByTag('probe')">复制试探汇总</button>

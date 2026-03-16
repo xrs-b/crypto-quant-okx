@@ -755,6 +755,7 @@
                                 <div class="section-note">这里集中展示当前生效既 pool switch 治理规则，方便你核对配置。</div>
                                 <div class="summary-strip" id="governanceBaselineSummary"></div>
                                 <div class="risk-strip" id="governanceGuidance"></div>
+                                <div class="toolbar-inline" id="governancePresetBar"></div>
                                 <div class="list" id="configGovernanceSummary"></div>
                             </div>
                             <div class="card mini">
@@ -820,6 +821,26 @@
             return `已持有 ${h.toFixed(1)}h，建议至少观察 ${minHours}h`; 
         };
         const governanceDefaultBaseline = { min_hold_hours: 6, score_margin: 1.0 };
+        const governanceQuickPresets = {
+            conservative: {
+                label: '保守型',
+                values: { min_hold_hours: 12, score_margin: 1.5 },
+                note: '快捷模板：保守型',
+                desc: '放慢切池节奏，优先稳定，适合刚经历频繁回滚后使用。'
+            },
+            balanced: {
+                label: '平衡型',
+                values: { min_hold_hours: 6, score_margin: 1.0 },
+                note: '快捷模板：平衡型',
+                desc: '接近默认基线，兼顾稳定同切换效率。'
+            },
+            aggressive: {
+                label: '激进型',
+                values: { min_hold_hours: 3, score_margin: 0.5 },
+                note: '快捷模板：激进型',
+                desc: '更快响应 challenger 变化，但更易出现抖动。'
+            }
+        };
         let latestGovernanceConfigHistory = [];
         let governanceHistoryFilter = 'all';
         let governanceHistoryExpanded = false;
@@ -908,6 +929,25 @@
             if (!tips.length) tips.push({cls: 'ok', text: '当前参数接近默认基线，整体属于平衡型治理配置。'});
             tips.push({cls: 'warn', text: `如果执行历史回滚，主要影响审批观察窗（${hold}h）同 challenger 领先门槛（${score}）。`});
             return tips.map(t => `<div class="risk-alert ${t.cls}">${t.text}</div>`).join('');
+        }
+        function renderGovernancePresetBar(currentRules = {}) {
+            return Object.entries(governanceQuickPresets).map(([key, preset]) => {
+                const active = isSameGovernanceConfig(currentRules, preset.values);
+                return `<button class="chip-btn ${active ? 'active' : ''}" onclick="applyGovernancePreset('${key}')">${preset.label}</button>`;
+            }).join('');
+        }
+        function applyGovernancePreset(key) {
+            const preset = governanceQuickPresets[key];
+            if (!preset) return;
+            activateTab('governance');
+            const holdInput = document.getElementById('govMinHoldHoursInput');
+            const scoreInput = document.getElementById('govScoreMarginInput');
+            const noteInput = document.getElementById('govConfigNoteInput');
+            if (holdInput) holdInput.value = preset.values.min_hold_hours;
+            if (scoreInput) scoreInput.value = preset.values.score_margin;
+            if (noteInput) noteInput.value = preset.note;
+            syncGovernanceDraftState();
+            toast(`${preset.label} 已回填：观察期 ${preset.values.min_hold_hours}h ｜ 分差 ${preset.values.score_margin} ｜ ${preset.desc}`, 'info');
         }
         function renderGovernanceHistoryRisks(history = [], currentIndex = -1) {
             const now = Date.now();
@@ -1405,6 +1445,7 @@
             updateGovernanceHistoryToolbar();
             document.getElementById('governanceBaselineSummary').innerHTML = renderGovernanceBaselineSummary(rules, baseline);
             document.getElementById('governanceGuidance').innerHTML = renderGovernanceGuidance(rules, baseline);
+            document.getElementById('governancePresetBar').innerHTML = renderGovernancePresetBar(rules);
             document.getElementById('governanceHistorySummary').innerHTML = renderGovernanceHistorySummary(history, rules, currentIndex);
             document.getElementById('governanceHistoryRisks').innerHTML = renderGovernanceHistoryRisks(history, currentIndex);
             document.getElementById('governanceHistoryTimeline').innerHTML = renderGovernanceHistoryTimeline(history);
@@ -1412,6 +1453,7 @@
                 <div class="item"><strong>min_hold_hours</strong><div class="muted">${safe(rules.min_hold_hours)} 小时</div></div>
                 <div class="item"><strong>score_margin</strong><div class="muted">${safe(rules.score_margin)} 分</div></div>
                 <div class="item"><strong>当前用途</strong><div class="muted">用于主池切换审批既观察窗与防抖门槛。</div></div>
+                <div class="item"><strong>快捷模板</strong><div class="muted">保守型 / 平衡型 / 激进型会先回填到治理表单，确认后先至保存生效。</div></div>
                 <div class="item"><strong>当前版本状态</strong><div class="muted">唯一当前版本会高亮；其余历史可按类型筛选，并支持只看最近 3 条。</div></div>`;
             document.getElementById('governanceConfigHistoryCards').innerHTML = visibleHistory.length ? visibleHistory.map(h => renderGovernanceHistoryCard(h, history.indexOf(h), rules, currentIndex)).join('') : '<div class="empty-state"><div class="icon">🧭</div><div>当前筛选下暂无治理参数版本历史</div></div>';
             document.getElementById('governanceConfigHistoryTable').innerHTML = visibleHistory.length ? visibleHistory.map(h => {

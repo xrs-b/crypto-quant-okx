@@ -706,6 +706,14 @@
             if (s.includes('keep') || s.includes('pending') || s.includes('观察') || s.includes('挑战中')) return 'warn';
             return 'bad';
         };
+        function summarizeGovernanceDiff(beforeValue, afterValue) {
+            const before = beforeValue || {};
+            const after = afterValue || {};
+            const changes = [];
+            if (before.min_hold_hours !== after.min_hold_hours) changes.push(`观察期 ${before.min_hold_hours ?? '--'} → ${after.min_hold_hours ?? '--'}h`);
+            if (before.score_margin !== after.score_margin) changes.push(`分差 ${before.score_margin ?? '--'} → ${after.score_margin ?? '--'}`);
+            return changes.join(' ｜ ') || '--';
+        }
         function validateGovernanceInputs(minHoldHours, scoreMargin) {
             if (!Number.isFinite(minHoldHours) || minHoldHours < 0) return '观察期必须系 >= 0 既数字';
             if (!Number.isFinite(scoreMargin) || scoreMargin < 0) return '分差阈值必须系 >= 0 既数字';
@@ -985,7 +993,7 @@
                 <div class="item"><strong>最小观察期</strong><div class="muted">当前 ${safe(govRules.min_hold_hours)}h ｜ ${holdHint}</div></div>
                 <div class="item"><strong>分差防抖</strong><div class="muted">score margin = ${safe(govRules.score_margin)} ｜ challenger 需明显领先主池先可发起切池</div></div>
                 <div class="item"><strong>下次可评估时间</strong><div class="muted">${safe(path.next_recheck_at) || '--'}</div></div>
-                <div class="item"><strong>页内调整</strong><div class="muted">观察期(h): <input id="govMinHoldHoursInput" type="number" min="0" step="1" value="${safe(govRules.min_hold_hours)}" style="width:90px; margin-left:6px;" oninput="syncGovernanceDraftState()"> ｜ 分差阈值: <input id="govScoreMarginInput" type="number" min="0" step="0.1" value="${safe(govRules.score_margin)}" style="width:90px; margin-left:6px;" oninput="syncGovernanceDraftState()"></div><div style="margin-top:10px"><button onclick="saveGovernanceConfig()">保存治理参数</button></div><div class="muted" id="govConfigHint" style="margin-top:8px">当前值已生效</div></div>`;
+                <div class="item"><strong>页内调整</strong><div class="muted">观察期(h): <input id="govMinHoldHoursInput" type="number" min="0" step="1" value="${safe(govRules.min_hold_hours)}" style="width:90px; margin-left:6px;" oninput="syncGovernanceDraftState()"> ｜ 分差阈值: <input id="govScoreMarginInput" type="number" min="0" step="0.1" value="${safe(govRules.score_margin)}" style="width:90px; margin-left:6px;" oninput="syncGovernanceDraftState()"></div><div class="muted" style="margin-top:8px">修改说明: <input id="govConfigNoteInput" type="text" placeholder="例如：调高防抖避免来回切池" style="width:320px; margin-left:6px;" oninput="syncGovernanceDraftState()"></div><div style="margin-top:10px"><button onclick="saveGovernanceConfig()">保存治理参数</button></div><div class="muted" id="govConfigHint" style="margin-top:8px">当前值已生效</div></div>`;
             document.getElementById('dailySummaryBlock').textContent = JSON.stringify(summary, null, 2);
             document.getElementById('runtimeCleanupBlock').textContent = JSON.stringify(cleanupPreview, null, 2);
             document.getElementById('approvalHistoryTable').innerHTML = history.length ? history.map(h => {
@@ -1064,13 +1072,14 @@
                 <div class="item"><strong>score_margin</strong><div class="muted">${safe(rules.score_margin)} 分</div></div>
                 <div class="item"><strong>当前用途</strong><div class="muted">用于主池切换审批既观察窗与防抖门槛。</div></div>
                 <div class="item"><strong>修改入口</strong><div class="muted">可直接喺治理页「治理规则」卡片内调整并保存。</div></div>`;
-            document.getElementById('governanceConfigHistoryTable').innerHTML = history.length ? history.map(h => `<tr><td>${h.created_at}</td><td>${h.config_key}</td><td>${JSON.stringify(h.before_value || {})}</td><td>${JSON.stringify(h.after_value || {})}</td></tr>`).join('') : '<tr><td colspan="4" class="muted">暂无治理参数变更</td></tr>';
+            document.getElementById('governanceConfigHistoryTable').innerHTML = history.length ? history.map(h => `<tr><td>${h.created_at}</td><td>${h.config_key}<div class="muted">${safe(h.details?.note) || '--'}</div></td><td>${summarizeGovernanceDiff({}, h.before_value || {})}</td><td>${summarizeGovernanceDiff(h.before_value || {}, h.after_value || {})}</td></tr>`).join('') : '<tr><td colspan="4" class="muted">暂无治理参数变更</td></tr>';
             document.getElementById('configBlock').textContent = JSON.stringify(cfg, null, 2);
         }
 
         function syncGovernanceDraftState() {
             const minHoldHours = Number(document.getElementById('govMinHoldHoursInput')?.value);
             const scoreMargin = Number(document.getElementById('govScoreMarginInput')?.value);
+            const note = document.getElementById('govConfigNoteInput')?.value || '';
             const hint = document.getElementById('govConfigHint');
             if (!hint) return;
             const err = validateGovernanceInputs(minHoldHours, scoreMargin);
@@ -1079,13 +1088,14 @@
                 hint.className = 'muted neg';
                 return;
             }
-            hint.textContent = '已修改，未保存';
+            hint.textContent = note.trim() ? '已修改，未保存（含说明）' : '已修改，未保存';
             hint.className = 'muted';
         }
 
         async function saveGovernanceConfig() {
             const minHoldHours = Number(document.getElementById('govMinHoldHoursInput')?.value || 0);
             const scoreMargin = Number(document.getElementById('govScoreMarginInput')?.value || 0);
+            const note = document.getElementById('govConfigNoteInput')?.value || '';
             const err = validateGovernanceInputs(minHoldHours, scoreMargin);
             if (err) {
                 toast(err, 'bad');
@@ -1099,7 +1109,7 @@
             const r = await fetch('/api/config/governance', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({pool_switch: {min_hold_hours: minHoldHours, score_margin: scoreMargin}})
+                body: JSON.stringify({pool_switch: {min_hold_hours: minHoldHours, score_margin: scoreMargin}, note})
             });
             const j = await r.json();
             if (!j.success) {

@@ -584,6 +584,7 @@ def update_governance_config():
     global risk_manager, ml_engine, backtester, signal_quality_analyzer, optimizer, governance, preset_manager
     payload = request.get_json(silent=True) or {}
     pool_switch = payload.get('pool_switch') or {}
+    note = (payload.get('note') or '').strip()
 
     before = {
         'min_hold_hours': int(config.get('governance.pool_switch.min_hold_hours', 6) or 6),
@@ -612,7 +613,7 @@ def update_governance_config():
             config_key='governance.pool_switch',
             before_value=before,
             after_value=after,
-            details={'payload': payload}
+            details={'payload': payload, 'note': note or None}
         )
 
     risk_manager = RiskManager(config, db)

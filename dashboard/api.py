@@ -585,18 +585,35 @@ def update_governance_config():
     payload = request.get_json(silent=True) or {}
     pool_switch = payload.get('pool_switch') or {}
 
-    min_hold_hours = int(pool_switch.get('min_hold_hours', config.get('governance.pool_switch.min_hold_hours', 6) or 6))
-    score_margin = float(pool_switch.get('score_margin', config.get('governance.pool_switch.score_margin', 1.0) or 1.0))
+    before = {
+        'min_hold_hours': int(config.get('governance.pool_switch.min_hold_hours', 6) or 6),
+        'score_margin': float(config.get('governance.pool_switch.score_margin', 1.0) or 1.0),
+    }
+    min_hold_hours = int(pool_switch.get('min_hold_hours', before['min_hold_hours']))
+    score_margin = float(pool_switch.get('score_margin', before['score_margin']))
 
     if min_hold_hours < 0:
         return jsonify({'success': False, 'error': 'min_hold_hours must be >= 0'}), 400
     if score_margin < 0:
         return jsonify({'success': False, 'error': 'score_margin must be >= 0'}), 400
 
+    after = {
+        'min_hold_hours': min_hold_hours,
+        'score_margin': score_margin,
+    }
+
     config.set('governance.pool_switch.min_hold_hours', min_hold_hours)
     config.set('governance.pool_switch.score_margin', score_margin)
     config.save()
     config.reload()
+
+    if before != after:
+        db.record_governance_config_change(
+            config_key='governance.pool_switch',
+            before_value=before,
+            after_value=after,
+            details={'payload': payload}
+        )
 
     risk_manager = RiskManager(config, db)
     ml_engine = MLEngine(config.all)
@@ -610,9 +627,18 @@ def update_governance_config():
         'success': True,
         'data': {
             'governance': config.get('governance', {}),
+            'before': before,
+            'after': after,
             'message': '治理参数已保存并重新加载。'
         }
     })
+
+
+@app.route('/api/config/governance/history')
+def get_governance_config_history():
+    """获取治理参数变更历史"""
+    limit = int(request.args.get('limit', 20))
+    return jsonify({'success': True, 'data': db.get_governance_config_history(limit=limit)})
 
 
 # ============================================================================

@@ -192,6 +192,18 @@ class Database:
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+
+        # 治理参数变更历史
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS governance_config_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                config_key TEXT NOT NULL,
+                before_value TEXT,
+                after_value TEXT,
+                details TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
         
         # 创建索引
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_signals_symbol ON signals(symbol)")
@@ -574,6 +586,37 @@ class Database:
         conn.close()
         if not df.empty:
             df['details'] = df['details'].apply(lambda x: json.loads(x) if x else {})
+        return df.to_dict('records')
+
+    def record_governance_config_change(self, config_key: str, before_value: Any = None, after_value: Any = None, details: Dict = None):
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO governance_config_history (config_key, before_value, after_value, details)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                config_key,
+                json.dumps(before_value, ensure_ascii=False) if before_value is not None else None,
+                json.dumps(after_value, ensure_ascii=False) if after_value is not None else None,
+                json.dumps(details, ensure_ascii=False) if details else None,
+            )
+        )
+        conn.commit()
+        conn.close()
+
+    def get_governance_config_history(self, limit: int = 50) -> List[Dict]:
+        conn = self._get_connection()
+        df = pd.read_sql_query(
+            "SELECT * FROM governance_config_history ORDER BY created_at DESC, id DESC LIMIT ?",
+            conn,
+            params=(limit,)
+        )
+        conn.close()
+        if not df.empty:
+            for col in ['before_value', 'after_value', 'details']:
+                df[col] = df[col].apply(lambda x: json.loads(x) if x else None)
         return df.to_dict('records')
 
     def record_daily_report(self, report_date: str, summary: Dict):

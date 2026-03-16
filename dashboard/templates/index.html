@@ -781,6 +781,12 @@
                                         <button class="chip-btn" onclick="saveGovernanceReportSnapshot('daily', 'markdown')">存日报快照</button>
                                         <button class="chip-btn" onclick="saveGovernanceReportSnapshot('weekly', 'formal')">存周报快照</button>
                                     </div>
+                                    <div class="toolbar-inline" id="governanceSnapshotToolbar">
+                                        <button class="chip-btn active" onclick="setGovernanceSnapshotFilter('all')">全部快照</button>
+                                        <button class="chip-btn" onclick="setGovernanceSnapshotFilter('daily')">日报</button>
+                                        <button class="chip-btn" onclick="setGovernanceSnapshotFilter('weekly')">周报</button>
+                                        <button class="chip-btn" onclick="clearGovernanceSnapshots()">清空快照</button>
+                                    </div>
                                     <div class="risk-strip" id="governanceReportSummary"></div>
                                     <div class="risk-strip" id="governanceArchivePreview"></div>
                                     <div class="timeline-list" id="governanceReportSnapshots"></div>
@@ -867,6 +873,7 @@
         let governanceHistoryFilter = 'all';
         let governanceHistoryExpanded = false;
         let governanceSelectedPreset = 'balanced';
+        let governanceSnapshotFilter = 'all';
         const stateClass = text => {
             const s = String(text || '').toLowerCase();
             if (s.includes('promote') || s.includes('approved') || s.includes('通过') || s.includes('守擂')) return 'ok';
@@ -1116,11 +1123,25 @@
         function setGovernanceReportSnapshots(items) {
             localStorage.setItem('governance_report_snapshots', JSON.stringify(items.slice(0, 12)));
         }
+        function updateGovernanceSnapshotToolbar() {
+            const toolbar = document.getElementById('governanceSnapshotToolbar');
+            if (!toolbar) return;
+            toolbar.querySelectorAll('.chip-btn').forEach(btn => btn.classList.remove('active'));
+            const buttons = toolbar.querySelectorAll('.chip-btn');
+            const map = { all: 0, daily: 1, weekly: 2 };
+            if (buttons[map[governanceSnapshotFilter]]) buttons[map[governanceSnapshotFilter]].classList.add('active');
+        }
+        function setGovernanceSnapshotFilter(type = 'all') {
+            governanceSnapshotFilter = type;
+            renderGovernanceReportSnapshots();
+            updateGovernanceSnapshotToolbar();
+        }
         function renderGovernanceReportSnapshots() {
             const host = document.getElementById('governanceReportSnapshots');
             if (!host) return;
-            const items = getGovernanceReportSnapshots();
-            host.innerHTML = items.length ? items.map((item, index) => `<div class="timeline-item"><div class="timeline-time">${item.savedAt}</div><div class="timeline-body"><strong>${item.title} ｜ ${item.styleLabel}</strong><div class="muted">${item.preview}</div><div style="margin-top:8px"><button class="secondary" onclick="copyGovernanceSnapshot(${index})">复制快照</button></div></div></div>`).join('') : '<div class="empty-state"><div class="icon">🗂️</div><div>暂无治理汇报快照</div></div>';
+            let items = getGovernanceReportSnapshots();
+            if (governanceSnapshotFilter !== 'all') items = items.filter(item => item.mode === governanceSnapshotFilter);
+            host.innerHTML = items.length ? items.map((item, index) => `<div class="timeline-item"><div class="timeline-time">${item.savedAt}</div><div class="timeline-body"><strong>${item.pinned ? '📌 ' : ''}${item.title} ｜ ${item.styleLabel}</strong><div class="muted">${item.preview}</div><div style="margin-top:8px"><button class="secondary" onclick="copyGovernanceSnapshotById('${item.id}')">复制快照</button><button class="secondary" style="margin-left:8px" onclick="togglePinGovernanceSnapshot('${item.id}')">${item.pinned ? '取消置顶' : '置顶'}</button><button style="margin-left:8px" onclick="deleteGovernanceSnapshot('${item.id}')">删除</button></div></div></div>`).join('') : '<div class="empty-state"><div class="icon">🗂️</div><div>暂无治理汇报快照</div></div>';
         }
         async function saveGovernanceReportSnapshot(mode = 'daily', style = 'markdown') {
             const rules = window.__lastGovernanceRules || {};
@@ -1130,18 +1151,42 @@
             const styleLabel = style === 'brief' ? '短版' : style === 'formal' ? '正式版' : style === 'casual' ? '口语版' : style === 'markdown' ? 'Markdown版' : '标准版';
             const items = getGovernanceReportSnapshots();
             items.unshift({
+                id: `snapshot_${Date.now()}`,
                 savedAt: new Date().toLocaleString('zh-CN', { hour12: false }),
                 title: report.title,
+                mode,
+                pinned: false,
                 styleLabel,
                 text: report.text,
                 preview: report.text.split('\n').slice(0, 3).join(' ｜ ')
             });
+            items.sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)));
             setGovernanceReportSnapshots(items);
             renderGovernanceReportSnapshots();
+            updateGovernanceSnapshotToolbar();
             toast(`${report.title}快照已保存到本地`, 'ok');
         }
-        async function copyGovernanceSnapshot(index) {
-            const item = getGovernanceReportSnapshots()[index];
+        function deleteGovernanceSnapshot(id) {
+            const items = getGovernanceReportSnapshots().filter(item => item.id !== id);
+            setGovernanceReportSnapshots(items);
+            renderGovernanceReportSnapshots();
+            toast('快照已删除', 'info');
+        }
+        function clearGovernanceSnapshots() {
+            localStorage.removeItem('governance_report_snapshots');
+            renderGovernanceReportSnapshots();
+            updateGovernanceSnapshotToolbar();
+            toast('治理汇报快照已清空', 'info');
+        }
+        function togglePinGovernanceSnapshot(id) {
+            const items = getGovernanceReportSnapshots().map(item => item.id === id ? {...item, pinned: !item.pinned} : item);
+            items.sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)));
+            setGovernanceReportSnapshots(items);
+            renderGovernanceReportSnapshots();
+            toast('快照置顶状态已更新', 'ok');
+        }
+        async function copyGovernanceSnapshotById(id) {
+            const item = getGovernanceReportSnapshots().find(x => x.id === id);
             if (!item) return;
             try {
                 await navigator.clipboard.writeText(item.text);
@@ -1719,6 +1764,7 @@
             document.getElementById('governanceReportSummary').innerHTML = renderGovernanceReportSummary(history, rules, currentIndex);
             document.getElementById('governanceArchivePreview').innerHTML = renderGovernanceArchivePreview(history, rules, currentIndex);
             renderGovernanceReportSnapshots();
+            updateGovernanceSnapshotToolbar();
             document.getElementById('governanceHistoryTimeline').innerHTML = renderGovernanceHistoryTimeline(history);
             document.getElementById('configGovernanceSummary').innerHTML = `
                 <div class="item"><strong>min_hold_hours</strong><div class="muted">${safe(rules.min_hold_hours)} 小时</div></div>

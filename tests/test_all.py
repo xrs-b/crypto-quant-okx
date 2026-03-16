@@ -12,6 +12,7 @@ from datetime import datetime
 
 from core.config import Config
 from core.database import Database
+from core.exchange import Exchange
 from signals import SignalDetector, SignalValidator, SignalRecorder
 from trading import TradingExecutor, RiskManager
 from strategies.strategy_library import StrategyManager
@@ -33,6 +34,43 @@ class FakeExchange:
             'posSide': posSide,
         })
         return {'id': 'fake-close'}
+
+
+class FakeExecutorExchange:
+    def __init__(self):
+        self.order_amounts = []
+
+    def fetch_balance(self):
+        return {'free': {'USDT': 1000}}
+
+    def is_futures_symbol(self, symbol):
+        return True
+
+    def normalize_contract_amount(self, symbol, desired_notional, price):
+        return 10.0
+
+    def create_order(self, symbol, side, amount, posSide=None):
+        self.order_amounts.append(amount)
+        if len(self.order_amounts) == 1:
+            raise Exception('okx 51202 Market order amount exceeds the maximum amount.')
+        return {'id': 'fake-open'}
+
+
+class RawOrderExchangeStub:
+    def __init__(self):
+        self.calls = []
+
+    def create_market_buy_order(self, symbol, amount, params):
+        self.calls.append({'side': 'buy', 'symbol': symbol, 'amount': amount, 'params': dict(params)})
+        if len(self.calls) == 1 and params.get('posSide') == 'long':
+            raise Exception('okx 51000 Parameter posSide error')
+        return {'id': 'buy-ok'}
+
+    def create_market_sell_order(self, symbol, amount, params):
+        self.calls.append({'side': 'sell', 'symbol': symbol, 'amount': amount, 'params': dict(params)})
+        if len(self.calls) == 1 and params.get('posSide') == 'long':
+            raise Exception('okx 51169 Order failed because you don\'t have any positions in this direction for this contract to reduce or close.')
+        return {'id': 'sell-ok'}
 
 
 class TestConfig(unittest.TestCase):
@@ -279,6 +317,35 @@ class TestStrategies(unittest.TestCase):
             self.assertIn(name, names)
 
 
+class TestExchange(unittest.TestCase):
+    """交易所适配容错测试"""
+
+    def test_create_order_fallback_without_posside(self):
+        ex = Exchange.__new__(Exchange)
+        ex.config = {'exchange': {'position_mode': 'hedge'}}
+        ex.exchange = RawOrderExchangeStub()
+        ex.get_order_symbol = lambda symbol: 'BTC/USDT:USDT'
+
+        result = ex.create_order('BTC/USDT', 'buy', 1.5, posSide='long')
+        self.assertEqual(result['id'], 'buy-ok')
+        self.assertEqual(len(ex.exchange.calls), 2)
+        self.assertIn('posSide', ex.exchange.calls[0]['params'])
+        self.assertNotIn('posSide', ex.exchange.calls[1]['params'])
+
+    def test_close_order_fallback_without_posside_keeps_reduce_only(self):
+        ex = Exchange.__new__(Exchange)
+        ex.config = {'exchange': {'position_mode': 'hedge'}}
+        ex.exchange = RawOrderExchangeStub()
+        ex.get_order_symbol = lambda symbol: 'BTC/USDT:USDT'
+
+        result = ex.close_order('BTC/USDT', 'sell', 1.5, posSide='long')
+        self.assertEqual(result['id'], 'sell-ok')
+        self.assertEqual(len(ex.exchange.calls), 2)
+        self.assertTrue(ex.exchange.calls[0]['params'].get('reduceOnly'))
+        self.assertTrue(ex.exchange.calls[1]['params'].get('reduceOnly'))
+        self.assertNotIn('posSide', ex.exchange.calls[1]['params'])
+
+
 class TestTradingExecutor(unittest.TestCase):
     """交易执行器测试"""
     
@@ -336,6 +403,14 @@ class TestTradingExecutor(unittest.TestCase):
         self.assertEqual(earlier['status'], 'open')
         self.assertEqual(len(self.db.get_positions()), 0)
         self.assertEqual(self.executor.exchange.closed_orders[-1]['posSide'], 'long')
+
+    def test_open_position_reduces_amount_after_max_order_error(self):
+        """测试遇到 51202 时会自动缩量再试"""
+        self.executor.exchange = FakeExecutorExchange()
+        trade_id = self.executor.open_position('BTC/USDT', 'long', 50000, signal_id=1)
+        self.assertIsNotNone(trade_id)
+        self.assertEqual(self.executor.exchange.order_amounts[0], 10.0)
+        self.assertEqual(self.executor.exchange.order_amounts[1], 5.0)
 
 
 class TestRiskManager(unittest.TestCase):

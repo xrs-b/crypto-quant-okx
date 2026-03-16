@@ -100,6 +100,11 @@ class TradingExecutor:
                 
             except Exception as e:
                 trade_logger.error(f"开仓失败 (尝试 {attempt + 1}/{max_retries}): {e}")
+                if '51202' in str(e):
+                    amount = round(amount * 0.5, 8)
+                    trade_logger.warning(f"{symbol}: 市价单数量超过上限，自动缩量后重试 -> {amount}")
+                    if amount <= 0:
+                        return None
                 if attempt < max_retries - 1:
                     time.sleep(retry_delay)
                 else:

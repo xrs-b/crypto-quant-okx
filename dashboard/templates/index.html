@@ -654,7 +654,7 @@
                             <div class="card mini">
                                 <div class="section-title">最近治理参数变更</div>
                                 <div class="section-note">记录改前 / 改后值，方便之后追查治理节奏变更。</div>
-                                <table><thead><tr><th>时间</th><th>键</th><th>改前</th><th>改后</th></tr></thead><tbody id="governanceConfigHistoryTable"></tbody></table>
+                                <table><thead><tr><th>时间</th><th>键</th><th>改前</th><th>改后</th><th>操作</th></tr></thead><tbody id="governanceConfigHistoryTable"></tbody></table>
                             </div>
                         </div>
                         <div class="card mini">
@@ -700,6 +700,7 @@
             if (h >= minHours) return `已持有 ${h.toFixed(1)}h，可重新评估回切`; 
             return `已持有 ${h.toFixed(1)}h，建议至少观察 ${minHours}h`; 
         };
+        let latestGovernanceConfigHistory = [];
         const stateClass = text => {
             const s = String(text || '').toLowerCase();
             if (s.includes('promote') || s.includes('approved') || s.includes('通过') || s.includes('守擂')) return 'ok';
@@ -752,16 +753,33 @@
             document.getElementById('currentSectionTitle').textContent = title;
             document.getElementById('currentSectionDesc').textContent = desc;
         }
+        function activateTab(tab) {
+            document.querySelectorAll('.nav-btn').forEach(x => x.classList.remove('active'));
+            document.querySelectorAll('.panel').forEach(x => x.classList.remove('active'));
+            const btn = document.querySelector(`.nav-btn[data-tab="${tab}"]`);
+            if (btn) btn.classList.add('active');
+            const panel = document.getElementById(`tab-${tab}`);
+            if (panel) panel.classList.add('active');
+            updateSectionHeader(tab);
+        }
         function mountTabs() {
             document.querySelectorAll('.nav-btn').forEach(btn => {
-                btn.addEventListener('click', () => {
-                    document.querySelectorAll('.nav-btn').forEach(x => x.classList.remove('active'));
-                    document.querySelectorAll('.panel').forEach(x => x.classList.remove('active'));
-                    btn.classList.add('active');
-                    document.getElementById(`tab-${btn.dataset.tab}`).classList.add('active');
-                    updateSectionHeader(btn.dataset.tab);
-                });
+                btn.addEventListener('click', () => activateTab(btn.dataset.tab));
             });
+        }
+        function loadGovernanceDraftFromHistory(index) {
+            const row = latestGovernanceConfigHistory[index] || {};
+            const afterValue = row.after_value || {};
+            const note = row.details?.note || '';
+            activateTab('governance');
+            const holdInput = document.getElementById('govMinHoldHoursInput');
+            const scoreInput = document.getElementById('govScoreMarginInput');
+            const noteInput = document.getElementById('govConfigNoteInput');
+            if (holdInput && afterValue.min_hold_hours != null) holdInput.value = afterValue.min_hold_hours;
+            if (scoreInput && afterValue.score_margin != null) scoreInput.value = afterValue.score_margin;
+            if (noteInput) noteInput.value = note || '';
+            syncGovernanceDraftState();
+            toast('已回填到治理参数表单，可再检查后保存', 'info');
         }
         async function loadOverview() {
             const [status, changes, alerts] = await Promise.all([
@@ -917,12 +935,13 @@
             document.getElementById('optimizerPresets').innerHTML = presets.length ? presets.map(p => `<tr><td>${p.name}</td><td>${p.path}</td><td><button onclick="applyPreset('${p.name}')">应用</button></td></tr>`).join('') : '<tr><td colspan="3" class="muted">暂无预设</td></tr>';
         }
         async function loadGovernance() {
-            const [pending, summary, history, cleanupPreview, gov] = await Promise.all([
+            const [pending, summary, history, cleanupPreview, gov, configHistory] = await Promise.all([
                 api('/api/approvals/pending'),
                 api('/api/daily-summary'),
                 fetch('/api/approvals/history?limit=20').then(r => r.json()).then(j => j.data || []),
                 fetch('/api/runtime/cleanup').then(r => r.json()).then(j => j.data || {}),
-                api('/api/governance/status')
+                api('/api/governance/status'),
+                api('/api/config/governance/history?limit=1')
             ]);
             document.getElementById('pendingApprovals').innerHTML = pending.length ? pending.map(p => `
                 <div class="item">
@@ -989,10 +1008,12 @@
                 <div class="item"><strong>挑战结论</strong><div class="muted">${shortReason(safe(path.promotion_reason) || '--')}</div></div>
                 <div class="item"><strong>切池距离</strong><div class="muted">${safe(path.blocking_label) || '已可发起审批'} ｜ ${shortReason(safe(path.summary) || '--')}</div></div>
                 <div class="item"><strong>建议等待条件</strong><div class="muted">${governanceWait}</div></div>`;
+            const latestGovChange = (configHistory || [])[0] || {};
             document.getElementById('governanceRuleCards').innerHTML = `
                 <div class="item"><strong>最小观察期</strong><div class="muted">当前 ${safe(govRules.min_hold_hours)}h ｜ ${holdHint}</div></div>
                 <div class="item"><strong>分差防抖</strong><div class="muted">score margin = ${safe(govRules.score_margin)} ｜ challenger 需明显领先主池先可发起切池</div></div>
                 <div class="item"><strong>下次可评估时间</strong><div class="muted">${safe(path.next_recheck_at) || '--'}</div></div>
+                <div class="item"><strong>最近参数调整</strong><div class="muted">${latestGovChange.created_at || '--'} ｜ ${safe(latestGovChange.details?.note) || summarizeGovernanceDiff(latestGovChange.before_value || {}, latestGovChange.after_value || {}) || '--'}</div></div>
                 <div class="item"><strong>页内调整</strong><div class="muted">观察期(h): <input id="govMinHoldHoursInput" type="number" min="0" step="1" value="${safe(govRules.min_hold_hours)}" style="width:90px; margin-left:6px;" oninput="syncGovernanceDraftState()"> ｜ 分差阈值: <input id="govScoreMarginInput" type="number" min="0" step="0.1" value="${safe(govRules.score_margin)}" style="width:90px; margin-left:6px;" oninput="syncGovernanceDraftState()"></div><div class="muted" style="margin-top:8px">修改说明: <input id="govConfigNoteInput" type="text" placeholder="例如：调高防抖避免来回切池" style="width:320px; margin-left:6px;" oninput="syncGovernanceDraftState()"></div><div style="margin-top:10px"><button onclick="saveGovernanceConfig()">保存治理参数</button></div><div class="muted" id="govConfigHint" style="margin-top:8px">当前值已生效</div></div>`;
             document.getElementById('dailySummaryBlock').textContent = JSON.stringify(summary, null, 2);
             document.getElementById('runtimeCleanupBlock').textContent = JSON.stringify(cleanupPreview, null, 2);
@@ -1066,13 +1087,14 @@
                 api('/api/config'),
                 api('/api/config/governance/history?limit=10')
             ]);
+            latestGovernanceConfigHistory = history || [];
             const rules = cfg.governance?.pool_switch || {};
             document.getElementById('configGovernanceSummary').innerHTML = `
                 <div class="item"><strong>min_hold_hours</strong><div class="muted">${safe(rules.min_hold_hours)} 小时</div></div>
                 <div class="item"><strong>score_margin</strong><div class="muted">${safe(rules.score_margin)} 分</div></div>
                 <div class="item"><strong>当前用途</strong><div class="muted">用于主池切换审批既观察窗与防抖门槛。</div></div>
                 <div class="item"><strong>修改入口</strong><div class="muted">可直接喺治理页「治理规则」卡片内调整并保存。</div></div>`;
-            document.getElementById('governanceConfigHistoryTable').innerHTML = history.length ? history.map(h => `<tr><td>${h.created_at}</td><td>${h.config_key}<div class="muted">${safe(h.details?.note) || '--'}</div></td><td>${summarizeGovernanceDiff({}, h.before_value || {})}</td><td>${summarizeGovernanceDiff(h.before_value || {}, h.after_value || {})}</td></tr>`).join('') : '<tr><td colspan="4" class="muted">暂无治理参数变更</td></tr>';
+            document.getElementById('governanceConfigHistoryTable').innerHTML = history.length ? history.map(h => `<tr><td>${h.created_at}</td><td>${h.config_key}<div class="muted">${safe(h.details?.note) || '--'}</div></td><td>${summarizeGovernanceDiff({}, h.before_value || {})}</td><td>${summarizeGovernanceDiff(h.before_value || {}, h.after_value || {})}</td><td><button class="secondary" onclick='loadGovernanceDraftFromHistory(${JSON.stringify(h.after_value || {})}, ${JSON.stringify(h.details?.note || '')})'>回填</button></td></tr>`).join('') : '<tr><td colspan="5" class="muted">暂无治理参数变更</td></tr>';
             document.getElementById('configBlock').textContent = JSON.stringify(cfg, null, 2);
         }
 

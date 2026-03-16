@@ -364,6 +364,21 @@ class Database:
         df = pd.read_sql_query(query, conn, params=params)
         conn.close()
         return df.to_dict('records')
+
+    def get_latest_open_trade(self, symbol: str, side: str = None) -> Optional[Dict]:
+        """获取某币种最新未平仓交易"""
+        conn = self._get_connection()
+        query = "SELECT * FROM trades WHERE symbol = ? AND status = 'open'"
+        params = [symbol]
+        if side:
+            query += " AND side = ?"
+            params.append(side)
+        query += " ORDER BY open_time DESC, id DESC LIMIT 1"
+        df = pd.read_sql_query(query, conn, params=params)
+        conn.close()
+        if df.empty:
+            return None
+        return df.iloc[0].to_dict()
     
     def get_trade_stats(self, days: int = 30) -> Dict:
         """获取交易统计"""

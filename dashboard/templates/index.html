@@ -771,8 +771,11 @@
                                     <div class="section-title">治理日报 / 周报</div>
                                     <div class="section-note">自动汇总最近治理动作、风格变化与稳定度，方便复制发汇报。</div>
                                     <div class="toolbar-inline">
-                                        <button class="chip-btn" onclick="copyGovernanceReport('daily')">复制日报</button>
-                                        <button class="chip-btn" onclick="copyGovernanceReport('weekly')">复制周报</button>
+                                        <button class="chip-btn" onclick="copyGovernanceReport('daily', 'default')">复制日报</button>
+                                        <button class="chip-btn" onclick="copyGovernanceReport('weekly', 'default')">复制周报</button>
+                                        <button class="chip-btn" onclick="copyGovernanceReport('daily', 'brief')">短版</button>
+                                        <button class="chip-btn" onclick="copyGovernanceReport('daily', 'formal')">正式版</button>
+                                        <button class="chip-btn" onclick="copyGovernanceReport('daily', 'casual')">口语版</button>
                                     </div>
                                     <div class="risk-strip" id="governanceReportSummary"></div>
                                 </div>
@@ -1004,7 +1007,7 @@
                 <div class="summary-pill"><div class="k">当前建议</div><div class="v">${score.stability >= 70 ? '可继续观察' : '建议先收敛'}</div><div class="s">${score.label === '风格摇摆' ? '先减少调参频率' : '保持现配置观察表现'}</div></div>
             `;
         }
-        function generateGovernanceReport(history = [], currentRules = {}, currentIndex = -1, mode = 'daily') {
+        function generateGovernanceReport(history = [], currentRules = {}, currentIndex = -1, mode = 'daily', style = 'default') {
             const days = mode === 'weekly' ? 7 : 1;
             const now = Date.now();
             const scoped = history.filter(row => {
@@ -1018,36 +1021,63 @@
             const rollback = scoped.filter(row => governanceNoteKind(row.details?.note || '').type === 'rollback').length;
             const trend = summarizePresetTrend(scoped.length ? scoped : history, Math.min(mode === 'weekly' ? 5 : 3, scoped.length || history.length || 1));
             const title = mode === 'weekly' ? '治理周报' : '治理日报';
-            const text = [
-                `${title}`,
-                `- 当前风格：${currentPreset.label}`,
-                `- 当前参数：观察期 ${currentRules.min_hold_hours ?? '--'}h / 分差 ${currentRules.score_margin ?? '--'}`,
-                `- 周期内动作：人工 ${manual} / 测试 ${test} / 回滚 ${rollback}`,
-                `- 风格趋势：${trend.text}`,
-                `- 稳定度：${score.stability} ｜ 波动分：${score.volatility}`,
-                `- 当前判断：${score.label}`,
-                `- 建议：${score.stability >= 70 ? '继续观察当前配置表现' : '先减少调参频率，观察审批表现再决定下一步'}`
-            ].join('\n');
-            return {title, text, scopedCount: scoped.length};
+            let text = '';
+            if (style === 'brief') {
+                text = `${title}｜风格 ${currentPreset.label}｜参数 ${currentRules.min_hold_hours ?? '--'}h / ${currentRules.score_margin ?? '--'}｜动作 人${manual}/测${test}/回${rollback}｜判断 ${score.label}｜建议 ${score.stability >= 70 ? '继续观察' : '先收敛'}`;
+            } else if (style === 'formal') {
+                text = [
+                    `${title}`,
+                    `一、当前治理风格：${currentPreset.label}`,
+                    `二、当前参数：观察期 ${currentRules.min_hold_hours ?? '--'} 小时；分差阈值 ${currentRules.score_margin ?? '--'}`,
+                    `三、统计周期内动作：人工调参 ${manual} 次，测试改动 ${test} 次，历史回滚 ${rollback} 次。`,
+                    `四、风格趋势：${trend.text}`,
+                    `五、稳定性评估：稳定度 ${score.stability} 分，波动分 ${score.volatility} 分，当前判断为「${score.label}」。`,
+                    `六、建议：${score.stability >= 70 ? '建议继续观察当前配置表现。' : '建议先降低调参频率，观察审批表现后再决定下一步。'}`
+                ].join('\n');
+            } else if (style === 'casual') {
+                text = [
+                    `${title}`,
+                    `而家整体偏 ${currentPreset.label}，当前参数系观察期 ${currentRules.min_hold_hours ?? '--'}h、分差 ${currentRules.score_margin ?? '--'}。`,
+                    `今个周期总共有人手调参 ${manual} 次、测试 ${test} 次、回滚 ${rollback} 次。`,
+                    `最近风格走势：${trend.text}。`,
+                    `目前评分系稳定度 ${score.stability}、波动分 ${score.volatility}，一句话就系：${score.label}。`,
+                    `${score.stability >= 70 ? '建议先继续观察，唔使太快再郁。' : '建议先收一收手，睇清楚审批表现先再调。'}`
+                ].join('\n');
+            } else {
+                text = [
+                    `${title}`,
+                    `- 当前风格：${currentPreset.label}`,
+                    `- 当前参数：观察期 ${currentRules.min_hold_hours ?? '--'}h / 分差 ${currentRules.score_margin ?? '--'}`,
+                    `- 周期内动作：人工 ${manual} / 测试 ${test} / 回滚 ${rollback}`,
+                    `- 风格趋势：${trend.text}`,
+                    `- 稳定度：${score.stability} ｜ 波动分：${score.volatility}`,
+                    `- 当前判断：${score.label}`,
+                    `- 建议：${score.stability >= 70 ? '继续观察当前配置表现' : '先减少调参频率，观察审批表现再决定下一步'}`
+                ].join('\n');
+            }
+            return {title, text, scopedCount: scoped.length, style};
         }
         function renderGovernanceReportSummary(history = [], currentRules = {}, currentIndex = -1) {
-            const daily = generateGovernanceReport(history, currentRules, currentIndex, 'daily');
-            const weekly = generateGovernanceReport(history, currentRules, currentIndex, 'weekly');
+            const daily = generateGovernanceReport(history, currentRules, currentIndex, 'daily', 'default');
+            const weekly = generateGovernanceReport(history, currentRules, currentIndex, 'weekly', 'default');
+            const brief = generateGovernanceReport(history, currentRules, currentIndex, 'daily', 'brief');
             return `
                 <div class="risk-alert info"><strong>日报摘要</strong><br>${daily.text.replaceAll('\n', '<br>')}</div>
                 <div class="risk-alert ok"><strong>周报摘要</strong><br>${weekly.text.replaceAll('\n', '<br>')}</div>
+                <div class="risk-alert warn"><strong>短版预览</strong><br>${brief.text.replaceAll('\n', '<br>')}</div>
             `;
         }
-        async function copyGovernanceReport(mode = 'daily') {
+        async function copyGovernanceReport(mode = 'daily', style = 'default') {
             const rules = window.__lastGovernanceRules || {};
             const history = latestGovernanceConfigHistory || [];
             const currentIndex = getCurrentGovernanceHistoryIndex(history, rules);
-            const report = generateGovernanceReport(history, rules, currentIndex, mode);
+            const report = generateGovernanceReport(history, rules, currentIndex, mode, style);
+            const styleLabel = style === 'brief' ? '短版' : style === 'formal' ? '正式版' : style === 'casual' ? '口语版' : '标准版';
             try {
                 await navigator.clipboard.writeText(report.text);
-                toast(`${report.title} 已复制，可直接发汇报`, 'ok');
+                toast(`${report.title}（${styleLabel}）已复制，可直接发汇报`, 'ok');
             } catch (e) {
-                toast(`${report.title} 复制失败，请手动复制`, 'bad');
+                toast(`${report.title}（${styleLabel}）复制失败，请手动复制`, 'bad');
             }
         }
         function renderGovernanceBaselineSummary(currentRules = {}, baseline = {}) {

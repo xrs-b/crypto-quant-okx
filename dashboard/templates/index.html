@@ -464,6 +464,7 @@
                         <div class="card" style="padding:18px;">
                             <div class="section-title">总览中心</div>
                             <div class="section-note">默认首页，先看组合状态、系统提醒、最近变化，再往下看持仓细节。</div>
+                            <div class="summary-strip" id="overviewSmokeKpi"></div>
                             <div class="compact-grid">
                                 <div class="item">
                                     <strong>组合状态</strong>
@@ -2167,6 +2168,19 @@
             overviewSmokeSymbols = (mode.watch_list || []).slice();
             overviewSmokeState = smokeState || null;
             overviewSmokeLastImpact = smokeImpactLatest || getOverviewSmokeLastImpact();
+            const kpiHost = document.getElementById('overviewSmokeKpi');
+            if (kpiHost) {
+                if (overviewSmokeLastImpact) {
+                    kpiHost.innerHTML = `
+                        <div class="summary-pill"><div class="k">最近 Smoke</div><div class="v">${overviewSmokeLastImpact.symbol || '--'}</div><div class="s">${overviewSmokeLastImpact.side === 'short' ? '开空验收' : '开多验收'}</div></div>
+                        <div class="summary-pill"><div class="k">Trade 影响</div><div class="v">${overviewSmokeLastImpact.tradeDelta > 0 ? '+' + overviewSmokeLastImpact.tradeDelta : overviewSmokeLastImpact.tradeDelta ?? '--'}</div><div class="s">最近一次 smoke 对 trade 数量影响</div></div>
+                        <div class="summary-pill"><div class="k">Position 影响</div><div class="v">${overviewSmokeLastImpact.positionDelta > 0 ? '+' + overviewSmokeLastImpact.positionDelta : overviewSmokeLastImpact.positionDelta ?? '--'}</div><div class="s">最近一次 smoke 对持仓数量影响</div></div>
+                        <div class="summary-pill"><div class="k">执行结论</div><div class="v">${overviewSmokeLastImpact.error ? '需复核' : (overviewSmokeLastImpact.tradeDelta || overviewSmokeLastImpact.positionDelta ? '有链路变化' : '无明显变化')}</div><div class="s">${overviewSmokeLastImpact.error || `smoke_run #${overviewSmokeLastImpact.smokeRunId || '--'}`}</div></div>
+                    `;
+                } else {
+                    kpiHost.innerHTML = `<div class="summary-pill"><div class="k">最近 Smoke</div><div class="v">--</div><div class="s">暂无最近 smoke impact</div></div>`;
+                }
+            }
             renderOverviewSmokeControls();
             const alertHtml = (alerts || []).map(a => `${a.level.toUpperCase()}: ${a.message}`).join('<br>') || '--';
             const changesHtml = (changes || []).slice(0,3).map(c => `${c.time}｜${c.type}｜${c.title}｜${c.detail}`).join('<br>') || '--';

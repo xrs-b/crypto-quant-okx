@@ -126,6 +126,32 @@ def build_exchange_smoke_plan(cfg: Config, exchange: Exchange, symbol: str = Non
     return plan
 
 
+def execute_exchange_smoke(cfg: Config, exchange: Exchange, symbol: str = None, side: str = 'long') -> dict:
+    """执行最小 testnet 开平仓验收。只允许 testnet。"""
+    plan = build_exchange_smoke_plan(cfg, exchange, symbol=symbol, side=side)
+    result = {'plan': plan, 'opened': False, 'closed': False}
+    if plan.get('error'):
+        result['error'] = plan['error']
+        return result
+    if str(cfg.exchange_mode).lower() != 'testnet':
+        result['error'] = '只允许在 testnet 模式执行 smoke 验收'
+        return result
+
+    try:
+        open_side = 'buy' if side == 'long' else 'sell'
+        close_side = 'sell' if side == 'long' else 'buy'
+        amount = plan['sample_amount']
+        open_order = exchange.create_order(plan['symbol'], open_side, amount, posSide=side)
+        result['opened'] = True
+        result['open_order'] = open_order
+        close_order = exchange.close_order(plan['symbol'], close_side, amount, posSide=side)
+        result['closed'] = True
+        result['close_order'] = close_order
+    except Exception as e:
+        result['error'] = str(e)
+    return result
+
+
 class TradingBot:
     """交易机器人主类"""
     
@@ -504,7 +530,16 @@ def main():
             if plan.get('close_preview'):
                 print(f"平仓预览: {plan['close_preview']}")
         if args.execute:
-            print("\n⚠️ 当前版本只开放 smoke plan 预演；真实 testnet 开平仓执行将放到下一轮 A-6。")
+            print("\n🚨 已显式允许执行 testnet 最小开平仓验收\n")
+            result = execute_exchange_smoke(cfg, exchange, symbol=args.symbol, side=args.side)
+            if result.get('error'):
+                print(f"执行结果: 失败 | {result['error']}")
+            else:
+                print(f"执行结果: 开仓 {'成功' if result.get('opened') else '失败'} / 平仓 {'成功' if result.get('closed') else '失败'}")
+                if result.get('open_order'):
+                    print(f"open_order: {result['open_order']}")
+                if result.get('close_order'):
+                    print(f"close_order: {result['close_order']}")
 
     else:
         # 运行交易

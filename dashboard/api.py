@@ -264,6 +264,14 @@ def get_smoke_state():
     return jsonify({'success': True, 'data': smoke_execution_state})
 
 
+@app.route('/api/system/smoke-impact-latest')
+def get_latest_smoke_impact():
+    """获取最近一次 smoke 影响摘要"""
+    row = db.get_latest_smoke_run()
+    impact = (row or {}).get('details', {}).get('impact') if row else None
+    return jsonify({'success': True, 'data': impact, 'run': row})
+
+
 @app.route('/api/system/smoke-execute', methods=['POST'])
 def execute_smoke_run():
     """从 dashboard 触发 testnet smoke 验收"""
@@ -283,7 +291,25 @@ def execute_smoke_run():
     try:
         cfg = Config()
         exchange = Exchange(cfg.all)
+        before_trades = len(db.get_trades(limit=50))
+        before_positions = len(db.get_positions())
         result = execute_exchange_smoke(cfg, exchange, symbol=symbol, side=side, db=Database(cfg.db_path))
+        after_trades = len(db.get_trades(limit=50))
+        after_positions = len(db.get_positions())
+        impact = {
+            'smokeRunId': result.get('smoke_run_id'),
+            'symbol': symbol,
+            'side': side,
+            'tradeDelta': after_trades - before_trades,
+            'positionDelta': after_positions - before_positions,
+            'error': result.get('error'),
+        }
+        if result.get('smoke_run_id'):
+            latest = db.get_latest_smoke_run() or {}
+            details = latest.get('details', {}) if latest.get('id') == result.get('smoke_run_id') else {}
+            details['impact'] = impact
+            db.update_smoke_run_details(result['smoke_run_id'], details)
+        result['impact'] = impact
         smoke_execution_state['last_result'] = {
             'success': not bool(result.get('error')),
             'symbol': symbol,
@@ -291,6 +317,7 @@ def execute_smoke_run():
             'finished_at': datetime.now().isoformat(),
             'error': result.get('error'),
             'smoke_run_id': result.get('smoke_run_id'),
+            'impact': impact,
         }
         if result.get('error'):
             return jsonify({'success': False, 'error': result['error'], 'data': result}), 400

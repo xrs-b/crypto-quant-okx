@@ -2141,12 +2141,13 @@
             `).join('') : '<div class="empty-state"><div class="icon">🧪</div><div>当前筛选下暂无 smoke 验收记录</div></div>';
         }
         async function loadOverview() {
-            const [status, changes, alerts, smokeRuns, smokeState] = await Promise.all([
+            const [status, changes, alerts, smokeRuns, smokeState, smokeImpactLatest] = await Promise.all([
                 api('/api/system/status'),
                 api('/api/changes/recent'),
                 api('/api/alerts'),
                 api('/api/system/smoke-runs?limit=20'),
-                api('/api/system/smoke-state')
+                api('/api/system/smoke-state'),
+                api('/api/system/smoke-impact-latest')
             ]);
             document.getElementById('systemStatus').textContent = `● ${status.system.status}`;
             document.getElementById('totalValue').textContent = money(status.portfolio.total_value);
@@ -2165,7 +2166,7 @@
             const mode = await api('/api/mode/status');
             overviewSmokeSymbols = (mode.watch_list || []).slice();
             overviewSmokeState = smokeState || null;
-            if (!overviewSmokeLastImpact) overviewSmokeLastImpact = getOverviewSmokeLastImpact();
+            overviewSmokeLastImpact = smokeImpactLatest || getOverviewSmokeLastImpact();
             renderOverviewSmokeControls();
             const alertHtml = (alerts || []).map(a => `${a.level.toUpperCase()}: ${a.message}`).join('<br>') || '--';
             const changesHtml = (changes || []).slice(0,3).map(c => `${c.time}｜${c.type}｜${c.title}｜${c.detail}`).join('<br>') || '--';

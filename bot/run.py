@@ -131,6 +131,7 @@ class TradingBot:
                         )
                         
                         if trade_id:
+                            self.recorder.mark_executed(signal_id, trade_id)
                             print(f"   ✅ 开{'多' if side == 'long' else '空'}成功! Trade ID: {trade_id}")
                         else:
                             print(f"   ❌ 开仓失败")

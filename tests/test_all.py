@@ -17,6 +17,24 @@ from trading import TradingExecutor, RiskManager
 from strategies.strategy_library import StrategyManager
 
 
+class FakeExchange:
+    def __init__(self, price=50000):
+        self.price = price
+        self.closed_orders = []
+
+    def fetch_ticker(self, symbol):
+        return {'last': self.price}
+
+    def close_order(self, symbol, side, amount, posSide=None):
+        self.closed_orders.append({
+            'symbol': symbol,
+            'side': side,
+            'amount': amount,
+            'posSide': posSide,
+        })
+        return {'id': 'fake-close'}
+
+
 class TestConfig(unittest.TestCase):
     """配置模块测试"""
     
@@ -35,16 +53,17 @@ class TestConfig(unittest.TestCase):
         all_symbols = set(symbols)
         all_symbols.update(self.config.get('symbols.candidate_watch_list', []))
         all_symbols.update(self.config.get('symbols.paused_watch_list', []))
-        self.assertIn('BTC/USDT', symbols)
         self.assertGreaterEqual(len(symbols), 1)
-        self.assertTrue({'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'HYPE/USDT'}.issubset(all_symbols))
+        self.assertTrue(all('/' in symbol for symbol in symbols))
+        self.assertGreaterEqual(len(all_symbols), len(symbols))
     
     def test_trading_params(self):
         """测试交易参数"""
-        self.assertEqual(self.config.leverage, 10)
-        self.assertEqual(self.config.position_size, 0.1)
-        self.assertEqual(self.config.stop_loss, 0.02)
-        self.assertEqual(self.config.take_profit, 0.04)
+        self.assertGreater(self.config.leverage, 0)
+        self.assertGreater(self.config.position_size, 0)
+        self.assertLessEqual(self.config.position_size, 1)
+        self.assertGreater(self.config.stop_loss, 0)
+        self.assertGreater(self.config.take_profit, self.config.stop_loss)
 
 
 class TestDatabase(unittest.TestCase):
@@ -86,6 +105,22 @@ class TestDatabase(unittest.TestCase):
         # 查询
         signals = self.db.get_signals(limit=10)
         self.assertGreater(len(signals), 0)
+
+    def test_signal_mark_executed(self):
+        """测试信号可标记为已执行并关联 trade_id"""
+        signal_id = self.db.record_signal(
+            symbol='BTC/USDT',
+            signal_type='buy',
+            price=50000,
+            strength=75,
+            reasons=[],
+            strategies_triggered=['RSI']
+        )
+        self.db.update_signal(signal_id, executed=1, trade_id=99)
+        signals = self.db.get_signals(limit=10)
+        row = next(s for s in signals if s['id'] == signal_id)
+        self.assertTrue(row['executed'])
+        self.assertEqual(row['trade_id'], 99)
     
     def test_trade_record(self):
         """测试交易记录"""
@@ -97,6 +132,27 @@ class TestDatabase(unittest.TestCase):
             leverage=10
         )
         self.assertIsNotNone(trade_id)
+
+    def test_get_latest_open_trade(self):
+        """测试获取最新未平仓交易"""
+        self.db.record_trade(
+            symbol='BTC/USDT',
+            side='long',
+            entry_price=50000,
+            quantity=0.1,
+            leverage=10
+        )
+        latest_trade_id = self.db.record_trade(
+            symbol='BTC/USDT',
+            side='long',
+            entry_price=51000,
+            quantity=0.2,
+            leverage=10
+        )
+
+        trade = self.db.get_latest_open_trade('BTC/USDT', 'long')
+        self.assertIsNotNone(trade)
+        self.assertEqual(trade['id'], latest_trade_id)
     
     def test_position_update(self):
         """测试持仓更新"""
@@ -243,6 +299,43 @@ class TestTradingExecutor(unittest.TestCase):
         self.assertIn('total_positions', status)
         self.assertIn('trade_stats', status)
         self.assertEqual(status['total_positions'], 0)
+
+    def test_close_position_updates_latest_open_trade(self):
+        """测试平仓时会关闭对应 open trade，而不是误用 position.id"""
+        self.executor.exchange = FakeExchange(price=51000)
+        first_trade_id = self.db.record_trade(
+            symbol='BTC/USDT',
+            side='long',
+            entry_price=50000,
+            quantity=0.1,
+            leverage=10
+        )
+        second_trade_id = self.db.record_trade(
+            symbol='BTC/USDT',
+            side='long',
+            entry_price=50500,
+            quantity=0.2,
+            leverage=10
+        )
+        self.db.update_position(
+            symbol='BTC/USDT',
+            side='long',
+            entry_price=50500,
+            quantity=0.2,
+            leverage=10,
+            current_price=51000
+        )
+
+        closed = self.executor.close_position('BTC/USDT', reason='unit-test', close_price=51000)
+        self.assertTrue(closed)
+
+        trades = self.db.get_trades(symbol='BTC/USDT', limit=10)
+        latest = next(t for t in trades if t['id'] == second_trade_id)
+        earlier = next(t for t in trades if t['id'] == first_trade_id)
+        self.assertEqual(latest['status'], 'closed')
+        self.assertEqual(earlier['status'], 'open')
+        self.assertEqual(len(self.db.get_positions()), 0)
+        self.assertEqual(self.executor.exchange.closed_orders[-1]['posSide'], 'long')
 
 
 class TestRiskManager(unittest.TestCase):

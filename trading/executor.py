@@ -161,8 +161,9 @@ class TradingExecutor:
                 leverage = position.get('leverage', 1)
                 leveraged_pnl_percent = pnl_percent * leverage
                 
-                # 更新交易记录
-                trade_id = position.get('id')
+                # 更新交易记录（positions.id ≠ trades.id，需回查最新 open trade）
+                trade = self.db.get_latest_open_trade(symbol, side)
+                trade_id = trade.get('id') if trade else None
                 if trade_id:
                     self.db.close_trade(
                         trade_id=trade_id,
@@ -171,6 +172,8 @@ class TradingExecutor:
                         pnl_percent=leveraged_pnl_percent,
                         notes=f"平仓原因: {reason}"
                     )
+                else:
+                    trade_logger.warning(f"{symbol}: 未找到可关闭的 open trade 记录，持仓会先从本地移除")
                 
                 # 删除持仓
                 self.db.close_position(symbol)

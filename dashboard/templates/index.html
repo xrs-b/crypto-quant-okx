@@ -811,6 +811,7 @@
                                         <div class="risk-strip" id="governanceSnapshotConclusion"></div>
                                         <div class="risk-strip" id="governanceSnapshotAdvice"></div>
                                         <div class="risk-strip" id="governanceSnapshotComparison"></div>
+                                        <div class="summary-strip" id="governanceCompareRecordAnalytics"></div>
                                         <div class="toolbar-inline" id="governanceCompareRecordToolbar">
                                             <button class="chip-btn active" onclick="setGovernanceCompareRecordFilter('all')">全部记录</button>
                                             <button class="chip-btn" onclick="setGovernanceCompareRecordFilter('risk')">风险控制</button>
@@ -1376,6 +1377,21 @@
         function setGovernanceSnapshotCompareRecords(items) {
             localStorage.setItem('governance_snapshot_compare_records', JSON.stringify(items.slice(0, 10)));
         }
+        function renderGovernanceCompareRecordAnalytics() {
+            const host = document.getElementById('governanceCompareRecordAnalytics');
+            if (!host) return;
+            const items = getGovernanceSnapshotCompareRecords();
+            const risk = items.filter(x => (x.tags || []).includes('risk')).length;
+            const probe = items.filter(x => (x.tags || []).includes('probe')).length;
+            const rollback = items.filter(x => (x.tags || []).includes('rollback')).length;
+            const conservative = items.filter(x => (x.tags || []).includes('conservative')).length;
+            host.innerHTML = `
+                <div class="summary-pill"><div class="k">对比记录总数</div><div class="v">${items.length}</div><div class="s">本地已保存对比档案</div></div>
+                <div class="summary-pill"><div class="k">风险控制结论</div><div class="v">${risk}</div><div class="s">带 risk 标签既记录</div></div>
+                <div class="summary-pill"><div class="k">试探倾向结论</div><div class="v">${probe}</div><div class="s">带 probe / 激进标签既记录</div></div>
+                <div class="summary-pill"><div class="k">保守 / 回滚</div><div class="v">保 ${conservative} / 回 ${rollback}</div><div class="s">保守迁移同回滚相关记录</div></div>
+            `;
+        }
         function updateGovernanceCompareRecordToolbar() {
             const toolbar = document.getElementById('governanceCompareRecordToolbar');
             if (!toolbar) return;
@@ -1431,6 +1447,7 @@
                 text
             });
             setGovernanceSnapshotCompareRecords(records);
+            renderGovernanceCompareRecordAnalytics();
             renderGovernanceSnapshotCompareHistory();
             updateGovernanceCompareRecordToolbar();
             toast('快照对比记录已保存到本地', 'ok');
@@ -1448,6 +1465,7 @@
         function deleteGovernanceSnapshotCompareRecord(id) {
             const items = getGovernanceSnapshotCompareRecords().filter(x => x.id !== id);
             setGovernanceSnapshotCompareRecords(items);
+            renderGovernanceCompareRecordAnalytics();
             renderGovernanceSnapshotCompareHistory();
             updateGovernanceCompareRecordToolbar();
             toast('快照对比记录已删除', 'info');
@@ -2098,6 +2116,7 @@
             renderGovernanceReportSnapshots();
             renderGovernanceSnapshotCompareSelectors();
             renderGovernanceSnapshotComparison();
+            renderGovernanceCompareRecordAnalytics();
             renderGovernanceSnapshotCompareHistory();
             updateGovernanceCompareRecordToolbar();
             updateGovernanceSnapshotToolbar();

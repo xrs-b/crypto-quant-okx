@@ -704,11 +704,6 @@
             if (!Number.isFinite(scoreMargin) || scoreMargin < 0) return '分差阈值必须系 >= 0 既数字';
             return null;
         }
-        function validateGovernanceInputs(minHoldHours, scoreMargin) {
-            if (!Number.isFinite(minHoldHours) || minHoldHours < 0) return '观察期必须系 >= 0 既数字';
-            if (!Number.isFinite(scoreMargin) || scoreMargin < 0) return '分差阈值必须系 >= 0 既数字';
-            return null;
-        }
 
         function toast(message, level='info') {
             const host = document.getElementById('toastHost');

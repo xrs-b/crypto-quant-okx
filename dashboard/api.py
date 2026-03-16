@@ -239,6 +239,14 @@ def get_daily_summary():
 # 系统状态API
 # ============================================================================
 
+@app.route('/api/system/smoke-runs')
+def get_smoke_runs():
+    """获取 smoke 验收执行记录"""
+    limit = int(request.args.get('limit', 20))
+    data = db.get_smoke_runs(limit=limit)
+    return jsonify({'success': True, 'data': data, 'count': len(data)})
+
+
 @app.route('/api/system/status')
 def get_system_status():
     """获取系统状态"""

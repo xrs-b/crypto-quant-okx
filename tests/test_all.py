@@ -438,13 +438,22 @@ class TestDiagnostics(unittest.TestCase):
         cfg._config.setdefault('trading', {})['position_size'] = 0.1
         cfg._config['trading']['leverage'] = 10
         ex = ExecutableExchangeStub()
-        result = execute_exchange_smoke(cfg, ex, symbol='BTC/USDT', side='long')
-
-        self.assertTrue(result['opened'])
-        self.assertTrue(result['closed'])
-        self.assertEqual(ex.open_calls[0]['side'], 'buy')
-        self.assertEqual(ex.close_calls[0]['side'], 'sell')
-        self.assertEqual(ex.open_calls[0]['posSide'], 'long')
+        db = Database('data/test_smoke.db')
+        try:
+            result = execute_exchange_smoke(cfg, ex, symbol='BTC/USDT', side='long', db=db)
+            self.assertTrue(result['opened'])
+            self.assertTrue(result['closed'])
+            self.assertEqual(ex.open_calls[0]['side'], 'buy')
+            self.assertEqual(ex.close_calls[0]['side'], 'sell')
+            self.assertEqual(ex.open_calls[0]['posSide'], 'long')
+            self.assertIsNotNone(result.get('smoke_run_id'))
+            rows = db.get_smoke_runs(limit=5)
+            self.assertEqual(len(rows), 1)
+            self.assertTrue(rows[0]['success'])
+            self.assertEqual(rows[0]['symbol'], 'BTC/USDT')
+        finally:
+            if os.path.exists('data/test_smoke.db'):
+                os.remove('data/test_smoke.db')
 
     def test_execute_exchange_smoke_rejects_real_mode(self):
         cfg = Config()

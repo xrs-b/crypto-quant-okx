@@ -126,29 +126,47 @@ def build_exchange_smoke_plan(cfg: Config, exchange: Exchange, symbol: str = Non
     return plan
 
 
-def execute_exchange_smoke(cfg: Config, exchange: Exchange, symbol: str = None, side: str = 'long') -> dict:
+def execute_exchange_smoke(cfg: Config, exchange: Exchange, symbol: str = None, side: str = 'long', db: Database = None) -> dict:
     """执行最小 testnet 开平仓验收。只允许 testnet。"""
     plan = build_exchange_smoke_plan(cfg, exchange, symbol=symbol, side=side)
     result = {'plan': plan, 'opened': False, 'closed': False}
     if plan.get('error'):
         result['error'] = plan['error']
-        return result
-    if str(cfg.exchange_mode).lower() != 'testnet':
+    elif str(cfg.exchange_mode).lower() != 'testnet':
         result['error'] = '只允许在 testnet 模式执行 smoke 验收'
-        return result
+    else:
+        try:
+            open_side = 'buy' if side == 'long' else 'sell'
+            close_side = 'sell' if side == 'long' else 'buy'
+            amount = plan['sample_amount']
+            open_order = exchange.create_order(plan['symbol'], open_side, amount, posSide=side)
+            result['opened'] = True
+            result['open_order'] = open_order
+            close_order = exchange.close_order(plan['symbol'], close_side, amount, posSide=side)
+            result['closed'] = True
+            result['close_order'] = close_order
+        except Exception as e:
+            result['error'] = str(e)
 
-    try:
-        open_side = 'buy' if side == 'long' else 'sell'
-        close_side = 'sell' if side == 'long' else 'buy'
-        amount = plan['sample_amount']
-        open_order = exchange.create_order(plan['symbol'], open_side, amount, posSide=side)
-        result['opened'] = True
-        result['open_order'] = open_order
-        close_order = exchange.close_order(plan['symbol'], close_side, amount, posSide=side)
-        result['closed'] = True
-        result['close_order'] = close_order
-    except Exception as e:
-        result['error'] = str(e)
+    if db is not None:
+        details = {
+            'plan': plan,
+            'opened': result.get('opened', False),
+            'closed': result.get('closed', False),
+            'open_order': result.get('open_order'),
+            'close_order': result.get('close_order'),
+        }
+        smoke_run_id = db.record_smoke_run(
+            exchange_mode=cfg.exchange_mode,
+            position_mode=cfg.position_mode,
+            symbol=plan.get('symbol') or symbol or '--',
+            side=side,
+            amount=plan.get('sample_amount'),
+            success=bool(result.get('opened') and result.get('closed') and not result.get('error')),
+            error=result.get('error'),
+            details=details,
+        )
+        result['smoke_run_id'] = smoke_run_id
     return result
 
 
@@ -531,7 +549,8 @@ def main():
                 print(f"平仓预览: {plan['close_preview']}")
         if args.execute:
             print("\n🚨 已显式允许执行 testnet 最小开平仓验收\n")
-            result = execute_exchange_smoke(cfg, exchange, symbol=args.symbol, side=args.side)
+            db = Database(cfg.db_path)
+            result = execute_exchange_smoke(cfg, exchange, symbol=args.symbol, side=args.side, db=db)
             if result.get('error'):
                 print(f"执行结果: 失败 | {result['error']}")
             else:
@@ -540,6 +559,8 @@ def main():
                     print(f"open_order: {result['open_order']}")
                 if result.get('close_order'):
                     print(f"close_order: {result['close_order']}")
+            if result.get('smoke_run_id'):
+                print(f"smoke_run_id: {result['smoke_run_id']}")
 
     else:
         # 运行交易

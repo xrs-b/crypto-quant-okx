@@ -833,6 +833,7 @@
                                             <button class="chip-btn" onclick="copyGovernanceCompareDigestByTag('probe')">复制试探汇总</button>
                                         </div>
                                         <div class="risk-strip" id="governanceCompareDigestPreview"></div>
+                                        <div class="summary-strip" id="governanceCompareTagHighlights"></div>
                                         <div class="timeline-list" id="governanceSnapshotCompareHistory"></div>
                                     </div>
                                     <div class="timeline-list" id="governanceReportSnapshots"></div>
@@ -1451,6 +1452,20 @@
             const text = buildGovernanceCompareDigest();
             host.innerHTML = `<div class="risk-alert ok"><strong>对比摘要汇总预览</strong><br><pre>${text}</pre></div>`;
         }
+        function renderGovernanceCompareTagHighlights() {
+            const host = document.getElementById('governanceCompareTagHighlights');
+            if (!host) return;
+            const items = getGovernanceSnapshotCompareRecords();
+            const latestRisk = items.find(x => (x.tags || []).includes('risk'));
+            const latestProbe = items.find(x => (x.tags || []).includes('probe'));
+            const latestRollback = items.find(x => (x.tags || []).includes('rollback'));
+            host.innerHTML = `
+                <div class="summary-pill"><div class="k">最新风险控制</div><div class="v">${latestRisk ? latestRisk.savedAt : '--'}</div><div class="s">${latestRisk ? latestRisk.preview : '暂无 risk 记录'}</div></div>
+                <div class="summary-pill"><div class="k">最新试探记录</div><div class="v">${latestProbe ? latestProbe.savedAt : '--'}</div><div class="s">${latestProbe ? latestProbe.preview : '暂无 probe 记录'}</div></div>
+                <div class="summary-pill"><div class="k">最新回滚记录</div><div class="v">${latestRollback ? latestRollback.savedAt : '--'}</div><div class="s">${latestRollback ? latestRollback.preview : '暂无 rollback 记录'}</div></div>
+                <div class="summary-pill"><div class="k">最新对比方向</div><div class="v">${latestRisk ? '风险控制优先' : latestProbe ? '试探优先' : latestRollback ? '回滚优先' : '暂无'}</div><div class="s">帮助快速回顾最近重点</div></div>
+            `;
+        }
         function renderGovernanceSnapshotCompareHistory() {
             const host = document.getElementById('governanceSnapshotCompareHistory');
             if (!host) return;
@@ -1486,6 +1501,7 @@
             renderGovernanceCompareRecordAnalytics();
             renderGovernanceCompareRecordPreview();
             renderGovernanceCompareDigestPreview();
+            renderGovernanceCompareTagHighlights();
             renderGovernanceSnapshotCompareHistory();
             updateGovernanceCompareRecordToolbar();
             toast('快照对比记录已保存到本地', 'ok');
@@ -1556,6 +1572,7 @@
             renderGovernanceCompareRecordAnalytics();
             renderGovernanceCompareRecordPreview();
             renderGovernanceCompareDigestPreview();
+            renderGovernanceCompareTagHighlights();
             renderGovernanceSnapshotCompareHistory();
             updateGovernanceCompareRecordToolbar();
             toast('快照对比记录已删除', 'info');
@@ -1565,6 +1582,7 @@
             renderGovernanceCompareRecordAnalytics();
             renderGovernanceCompareRecordPreview();
             renderGovernanceCompareDigestPreview();
+            renderGovernanceCompareTagHighlights();
             renderGovernanceSnapshotCompareHistory();
             updateGovernanceCompareRecordToolbar();
             toast('快照对比记录已清空', 'info');
@@ -1576,6 +1594,7 @@
             renderGovernanceCompareRecordAnalytics();
             renderGovernanceCompareRecordPreview();
             renderGovernanceCompareDigestPreview();
+            renderGovernanceCompareTagHighlights();
             renderGovernanceSnapshotCompareHistory();
             updateGovernanceCompareRecordToolbar();
             toast('对比记录置顶状态已更新', 'ok');
@@ -2229,6 +2248,7 @@
             renderGovernanceCompareRecordAnalytics();
             renderGovernanceCompareRecordPreview();
             renderGovernanceCompareDigestPreview();
+            renderGovernanceCompareTagHighlights();
             renderGovernanceSnapshotCompareHistory();
             updateGovernanceCompareRecordToolbar();
             updateGovernanceSnapshotToolbar();

@@ -494,6 +494,7 @@
                                 <button class="chip-btn" id="overviewSmokeShortBtn" onclick="executeOverviewSmoke('short')">验收开空</button>
                             </div>
                             <div class="summary-strip" id="overviewSmokeGlobalState"></div>
+                            <div class="summary-strip" id="overviewSmokeImpactSummary"></div>
                             <div class="risk-strip" id="overviewSmokeExecutionStatus"></div>
                             <div class="toolbar-inline" id="overviewSmokeToolbar">
                                 <button class="chip-btn active" onclick="setOverviewSmokeFilter('all')">全部</button>
@@ -959,6 +960,7 @@
         let overviewSmokeSymbols = [];
         let overviewSmokeExecuting = false;
         let overviewSmokeState = null;
+        let overviewSmokeLastImpact = null;
         const stateClass = text => {
             const s = String(text || '').toLowerCase();
             if (s.includes('promote') || s.includes('approved') || s.includes('通过') || s.includes('守擂')) return 'ok';
@@ -2009,6 +2011,7 @@
             const select = document.getElementById('overviewSmokeSymbol');
             const status = document.getElementById('overviewSmokeExecutionStatus');
             const stateHost = document.getElementById('overviewSmokeGlobalState');
+            const impactHost = document.getElementById('overviewSmokeImpactSummary');
             const longBtn = document.getElementById('overviewSmokeLongBtn');
             const shortBtn = document.getElementById('overviewSmokeShortBtn');
             if (select) {
@@ -2027,6 +2030,18 @@
                     stateHost.innerHTML = `<div class="summary-pill"><div class="k">执行状态</div><div class="v">空闲</div><div class="s">当前无进行中的 smoke 验收</div></div>`;
                 }
             }
+            if (impactHost) {
+                if (overviewSmokeLastImpact) {
+                    impactHost.innerHTML = `
+                        <div class="summary-pill"><div class="k">最近 smoke_run</div><div class="v">#${overviewSmokeLastImpact.smokeRunId || '--'}</div><div class="s">${overviewSmokeLastImpact.symbol || '--'} ｜ ${overviewSmokeLastImpact.side === 'short' ? '开空' : '开多'}</div></div>
+                        <div class="summary-pill"><div class="k">交易记录变化</div><div class="v">${overviewSmokeLastImpact.tradeDelta > 0 ? '+' + overviewSmokeLastImpact.tradeDelta : overviewSmokeLastImpact.tradeDelta}</div><div class="s">本次刷新前后 trade 条数变化</div></div>
+                        <div class="summary-pill"><div class="k">持仓变化</div><div class="v">${overviewSmokeLastImpact.positionDelta > 0 ? '+' + overviewSmokeLastImpact.positionDelta : overviewSmokeLastImpact.positionDelta}</div><div class="s">本次刷新前后 position 条数变化</div></div>
+                        <div class="summary-pill"><div class="k">影响判断</div><div class="v">${overviewSmokeLastImpact.tradeDelta || overviewSmokeLastImpact.positionDelta ? '有变化' : '无明显变化'}</div><div class="s">${overviewSmokeLastImpact.error || '已完成 smoke 影响采样'}</div></div>
+                    `;
+                } else {
+                    impactHost.innerHTML = `<div class="summary-pill"><div class="k">最近 smoke 影响</div><div class="v">--</div><div class="s">尚未执行 dashboard smoke 验收</div></div>`;
+                }
+            }
             const locked = overviewSmokeExecuting || Boolean(overviewSmokeState?.running);
             if (longBtn) longBtn.disabled = locked || !overviewSmokeSymbols.length;
             if (shortBtn) shortBtn.disabled = locked || !overviewSmokeSymbols.length;
@@ -2038,6 +2053,8 @@
                 toast('当前无可用 smoke 验收币种', 'bad');
                 return;
             }
+            const beforeTrades = (await api('/api/trades?limit=50')).length;
+            const beforePositions = (await api('/api/positions')).length;
             overviewSmokeExecuting = true;
             renderOverviewSmokeControls();
             const status = document.getElementById('overviewSmokeExecutionStatus');
@@ -2060,6 +2077,17 @@
                     loadPositions(),
                     loadTrades()
                 ]);
+                const afterTrades = (await api('/api/trades?limit=50')).length;
+                const afterPositions = (await api('/api/positions')).length;
+                overviewSmokeLastImpact = {
+                    smokeRunId: j.data?.smoke_run_id,
+                    symbol,
+                    side,
+                    tradeDelta: afterTrades - beforeTrades,
+                    positionDelta: afterPositions - beforePositions,
+                    error: j.data?.error || null,
+                };
+                renderOverviewSmokeControls();
             } catch (e) {
                 if (status) status.innerHTML = `<div class="risk-alert bad">Smoke 验收失败：${e.message || e}</div>`;
                 toast('Smoke 验收失败', 'bad');

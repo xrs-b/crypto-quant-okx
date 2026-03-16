@@ -147,3 +147,7 @@ trading:
   stop_loss: 0.02
   take_profit: 0.04
   trailing_stop: 0.015
+governance:
+  pool_switch:
+    min_hold_hours: 6        # 主池切换后最少观察期（小时）
+    score_margin: 1.0        # challenger 至少要领先主池既分差，避免来回抖动

@@ -769,6 +769,17 @@ class Database:
             df['details'] = df['details'].apply(lambda x: json.loads(x) if x else {})
         return df.to_dict('records')
 
+    def update_smoke_run_details(self, smoke_run_id: int, details: Dict):
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("UPDATE smoke_runs SET details = ? WHERE id = ?", (json.dumps(details, ensure_ascii=False), smoke_run_id))
+        conn.commit()
+        conn.close()
+
+    def get_latest_smoke_run(self) -> Optional[Dict]:
+        rows = self.get_smoke_runs(limit=1)
+        return rows[0] if rows else None
+
     # =========================================================================
     # 清理操作
     # =========================================================================

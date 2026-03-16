@@ -14,8 +14,10 @@ CORS(app)
 
 from core.config import Config
 from core.database import Database
+from core.exchange import Exchange
 from core.presets import PresetManager
 from trading.executor import RiskManager
+from bot.run import execute_exchange_smoke
 from ml.engine import MLEngine
 from analytics import StrategyBacktester, SignalQualityAnalyzer, ParameterOptimizer, GovernanceEngine
 
@@ -245,6 +247,25 @@ def get_smoke_runs():
     limit = int(request.args.get('limit', 20))
     data = db.get_smoke_runs(limit=limit)
     return jsonify({'success': True, 'data': data, 'count': len(data)})
+
+
+@app.route('/api/system/smoke-execute', methods=['POST'])
+def execute_smoke_run():
+    """从 dashboard 触发 testnet smoke 验收"""
+    payload = request.get_json(silent=True) or {}
+    symbol = payload.get('symbol')
+    side = str(payload.get('side') or 'long').lower()
+    if side not in {'long', 'short'}:
+        return jsonify({'success': False, 'error': 'side must be long or short'}), 400
+    try:
+        cfg = Config()
+        exchange = Exchange(cfg.all)
+        result = execute_exchange_smoke(cfg, exchange, symbol=symbol, side=side, db=Database(cfg.db_path))
+        if result.get('error'):
+            return jsonify({'success': False, 'error': result['error'], 'data': result}), 400
+        return jsonify({'success': True, 'data': result})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 
 @app.route('/api/system/status')

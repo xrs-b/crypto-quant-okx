@@ -16,6 +16,7 @@ from core.exchange import Exchange
 from signals import SignalDetector, SignalValidator, SignalRecorder
 from trading import TradingExecutor, RiskManager
 from strategies.strategy_library import StrategyManager
+from bot.run import build_exchange_diagnostics
 
 
 class FakeExchange:
@@ -71,6 +72,23 @@ class RawOrderExchangeStub:
         if len(self.calls) == 1 and params.get('posSide') == 'long':
             raise Exception('okx 51169 Order failed because you don\'t have any positions in this direction for this contract to reduce or close.')
         return {'id': 'sell-ok'}
+
+
+class DiagnosticExchangeStub:
+    def fetch_balance(self):
+        return {'free': {'USDT': 321.5}}
+
+    def is_futures_symbol(self, symbol):
+        return symbol == 'BTC/USDT'
+
+    def get_order_symbol(self, symbol):
+        return f'{symbol}:USDT'
+
+    def fetch_ticker(self, symbol):
+        return {'last': 50000}
+
+    def normalize_contract_amount(self, symbol, desired_notional, price):
+        return round(desired_notional / price, 6)
 
 
 class TestConfig(unittest.TestCase):
@@ -359,6 +377,29 @@ class TestExchange(unittest.TestCase):
         self.assertEqual(result['id'], 'buy-ok')
         self.assertEqual(len(ex.exchange.calls), 1)
         self.assertNotIn('posSide', ex.exchange.calls[0]['params'])
+
+
+class TestDiagnostics(unittest.TestCase):
+    """只读诊断输出测试"""
+
+    def test_build_exchange_diagnostics(self):
+        cfg = Config()
+        cfg._config['symbols'] = {'watch_list': ['BTC/USDT', 'DOGE/USDT']}
+        cfg._config.setdefault('exchange', {})['position_mode'] = 'oneway'
+        cfg._config.setdefault('trading', {})['position_size'] = 0.1
+        cfg._config['trading']['leverage'] = 10
+        report = build_exchange_diagnostics(cfg, DiagnosticExchangeStub())
+
+        self.assertEqual(report['position_mode'], 'oneway')
+        self.assertEqual(report['available_usdt'], 321.5)
+        self.assertEqual(len(report['symbols']), 2)
+        btc = next(x for x in report['symbols'] if x['symbol'] == 'BTC/USDT')
+        doge = next(x for x in report['symbols'] if x['symbol'] == 'DOGE/USDT')
+        self.assertTrue(btc['is_futures_symbol'])
+        self.assertEqual(btc['order_symbol'], 'BTC/USDT:USDT')
+        self.assertNotIn('posSide', btc['order_params_preview'])
+        self.assertFalse(doge['is_futures_symbol'])
+        self.assertEqual(doge['reason'], 'not-swap-market')
 
 
 class TestTradingExecutor(unittest.TestCase):

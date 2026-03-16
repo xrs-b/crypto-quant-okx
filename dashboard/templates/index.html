@@ -785,7 +785,13 @@
                                         <button class="chip-btn active" onclick="setGovernanceSnapshotFilter('all')">全部快照</button>
                                         <button class="chip-btn" onclick="setGovernanceSnapshotFilter('daily')">日报</button>
                                         <button class="chip-btn" onclick="setGovernanceSnapshotFilter('weekly')">周报</button>
+                                        <button class="chip-btn" onclick="setGovernanceSnapshotFilter('rollback')">回滚</button>
+                                        <button class="chip-btn" onclick="setGovernanceSnapshotFilter('aggressive')">激进</button>
+                                        <button class="chip-btn" onclick="setGovernanceSnapshotFilter('conservative')">保守</button>
                                         <button class="chip-btn" onclick="clearGovernanceSnapshots()">清空快照</button>
+                                    </div>
+                                    <div class="toolbar-inline">
+                                        <input id="governanceSnapshotSearch" type="text" placeholder="搜索关键字，例如 回滚 / 激进 / 周报" style="min-width:260px; padding:10px 12px; border-radius:12px; border:1px solid rgba(255,255,255,.08); background:rgba(255,255,255,.04); color:#fff;" oninput="renderGovernanceReportSnapshots()">
                                     </div>
                                     <div class="risk-strip" id="governanceReportSummary"></div>
                                     <div class="risk-strip" id="governanceArchivePreview"></div>
@@ -1120,6 +1126,16 @@
                 return [];
             }
         }
+        function deriveGovernanceSnapshotTags(reportText = '', mode = 'daily') {
+            const text = String(reportText || '');
+            const tags = [mode];
+            if (text.includes('回滚')) tags.push('rollback');
+            if (text.includes('激进')) tags.push('aggressive');
+            if (text.includes('保守')) tags.push('conservative');
+            if (text.includes('平衡')) tags.push('balanced');
+            if (text.includes('Markdown')) tags.push('markdown');
+            return [...new Set(tags)];
+        }
         function setGovernanceReportSnapshots(items) {
             localStorage.setItem('governance_report_snapshots', JSON.stringify(items.slice(0, 12)));
         }
@@ -1128,7 +1144,7 @@
             if (!toolbar) return;
             toolbar.querySelectorAll('.chip-btn').forEach(btn => btn.classList.remove('active'));
             const buttons = toolbar.querySelectorAll('.chip-btn');
-            const map = { all: 0, daily: 1, weekly: 2 };
+            const map = { all: 0, daily: 1, weekly: 2, rollback: 3, aggressive: 4, conservative: 5 };
             if (buttons[map[governanceSnapshotFilter]]) buttons[map[governanceSnapshotFilter]].classList.add('active');
         }
         function setGovernanceSnapshotFilter(type = 'all') {
@@ -1140,8 +1156,10 @@
             const host = document.getElementById('governanceReportSnapshots');
             if (!host) return;
             let items = getGovernanceReportSnapshots();
-            if (governanceSnapshotFilter !== 'all') items = items.filter(item => item.mode === governanceSnapshotFilter);
-            host.innerHTML = items.length ? items.map((item, index) => `<div class="timeline-item"><div class="timeline-time">${item.savedAt}</div><div class="timeline-body"><strong>${item.pinned ? '📌 ' : ''}${item.title} ｜ ${item.styleLabel}</strong><div class="muted">${item.preview}</div><div style="margin-top:8px"><button class="secondary" onclick="copyGovernanceSnapshotById('${item.id}')">复制快照</button><button class="secondary" style="margin-left:8px" onclick="togglePinGovernanceSnapshot('${item.id}')">${item.pinned ? '取消置顶' : '置顶'}</button><button style="margin-left:8px" onclick="deleteGovernanceSnapshot('${item.id}')">删除</button></div></div></div>`).join('') : '<div class="empty-state"><div class="icon">🗂️</div><div>暂无治理汇报快照</div></div>';
+            const query = (document.getElementById('governanceSnapshotSearch')?.value || '').trim().toLowerCase();
+            if (governanceSnapshotFilter !== 'all') items = items.filter(item => item.mode === governanceSnapshotFilter || (item.tags || []).includes(governanceSnapshotFilter));
+            if (query) items = items.filter(item => [item.title, item.styleLabel, item.preview, item.text, ...(item.tags || [])].join(' ').toLowerCase().includes(query));
+            host.innerHTML = items.length ? items.map((item, index) => `<div class="timeline-item"><div class="timeline-time">${item.savedAt}</div><div class="timeline-body"><strong>${item.pinned ? '📌 ' : ''}${item.title} ｜ ${item.styleLabel}</strong><div class="muted">${item.preview}</div><div class="muted" style="margin-top:6px">标签：${(item.tags || []).join(' / ') || '--'}</div><div style="margin-top:8px"><button class="secondary" onclick="copyGovernanceSnapshotById('${item.id}')">复制快照</button><button class="secondary" style="margin-left:8px" onclick="togglePinGovernanceSnapshot('${item.id}')">${item.pinned ? '取消置顶' : '置顶'}</button><button style="margin-left:8px" onclick="deleteGovernanceSnapshot('${item.id}')">删除</button></div></div></div>`).join('') : '<div class="empty-state"><div class="icon">🗂️</div><div>当前筛选下暂无治理汇报快照</div></div>';
         }
         async function saveGovernanceReportSnapshot(mode = 'daily', style = 'markdown') {
             const rules = window.__lastGovernanceRules || {};
@@ -1157,6 +1175,7 @@
                 mode,
                 pinned: false,
                 styleLabel,
+                tags: deriveGovernanceSnapshotTags(report.text, mode),
                 text: report.text,
                 preview: report.text.split('\n').slice(0, 3).join(' ｜ ')
             });

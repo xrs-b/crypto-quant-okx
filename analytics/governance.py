@@ -103,7 +103,7 @@ class GovernanceEngine:
 
         current_score = float(current_focus.get('score', -999) or -999)
         candidate_score = float(candidate_focus.get('score', -999) or -999)
-        score_margin = 1.0
+        score_margin = float(self.config.get('governance.pool_switch.score_margin', 1.0) or 1.0)
         promote_passed = bool(candidate_promotion and candidate_promotion.get('decision') == 'promote')
         score_passed = candidate_score > current_score + score_margin
         candidate_in_pool = candidate_symbol in candidate_watch
@@ -168,7 +168,8 @@ class GovernanceEngine:
     def _find_focused_set_for_symbol(self, focused_sets: Dict, symbol: str) -> Optional[Dict]:
         return next((row for row in focused_sets.values() if row.get('symbols') == [symbol]), None)
 
-    def _check_pool_switch_hold_window(self, mode: Dict, min_hold_hours: int = 6):
+    def _check_pool_switch_hold_window(self, mode: Dict, min_hold_hours: int = None):
+        min_hold_hours = int(min_hold_hours or self.config.get('governance.pool_switch.min_hold_hours', 6) or 6)
         last_applied_at = mode.get('last_applied_at')
         if not last_applied_at:
             return True, '缺少 last_applied_at，暂按可评估处理', None
@@ -235,6 +236,7 @@ class GovernanceEngine:
             'promotion_decision': candidate_decision,
             'promotion_reason': promotion_reason,
             'hold_window_passed': hold_passed,
+            'hold_window_hours': int(self.config.get('governance.pool_switch.min_hold_hours', 6) or 6),
             'hold_window_detail': hold_detail,
             'next_recheck_at': next_recheck_at,
             'summary': summary,

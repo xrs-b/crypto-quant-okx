@@ -840,7 +840,7 @@
             const switchReview = gov.pool_switch_review || {};
             const championState = switchReview.approval_required ? '挑战中' : '守擂中';
             const challengerState = challengerReview.decision || (switchReview.approval_required ? 'pending' : 'reject');
-            const holdHint = holdWindowHint(mode.last_applied_at, 6);
+            const holdHint = holdWindowHint(mode.last_applied_at, Number(gov.pool_switch_review?.decision_path?.hold_window_hours || 6));
             const championAction = switchReview.approval_required ? '建议先处理挑战审批，再决定是否守擂' : `建议继续观察 challenger，${holdHint}`;
             const challengerAction = switchReview.approval_required ? `建议审批 ${switchReview.recommended_preset || candidatePool}` : (challengerReview.decision === 'keep_candidate' ? `建议保留候选位继续观察｜${holdHint}` : `建议继续观察，暂不发起回切｜${holdHint}`);
             document.getElementById('optimizerChampion').innerHTML = `
@@ -930,13 +930,14 @@
             const switchReview = gov.pool_switch_review || {};
             const path = switchReview.decision_path || {};
             const gates = path.gates || [];
-            const holdHint = holdWindowHint(gov.mode?.last_applied_at, 6);
+            const holdHint = holdWindowHint(gov.mode?.last_applied_at, Number(path.hold_window_hours || 6));
             const governanceAction = switchReview.approval_required ? `建议审批 ${switchReview.recommended_preset || '--'}` : (path.blocking_gate ? `建议继续观察，优先解决：${path.blocking_label}` : '当前无额外动作');
             const governanceWait = path.blocking_gate === 'candidate_promotion' ? `等 challenger 回测 / 胜率 / 质量进一步改善｜${holdHint}` : path.blocking_gate === 'score_compare' ? `等 challenger 分数至少领先 ${safe(path.score_margin)} ｜ ${holdHint}` : holdHint;
             document.getElementById('poolSwitchSnapshot').innerHTML = `
                 <div class="item"><strong>当前主池</strong><div class="muted">${(path.current_pool || gov.mode?.watch_list || []).join(', ') || '--'}</div></div>
                 <div class="item"><strong>当前候选池</strong><div class="muted">${(path.candidate_pool || gov.mode?.candidate_watch_list || []).join(', ') || '--'}</div></div>
                 <div class="item"><strong>切池比分</strong><div class="muted">${safe(path.candidate_symbol || '候选')} ${safe(path.candidate_score)} vs ${safe(path.current_symbol || '主池')} ${safe(path.current_score)} ｜ 需领先 ${safe(path.score_margin)}</div></div>
+                <div class="item"><strong>治理规则</strong><div class="muted">最小观察期 ${safe(path.hold_window_hours)}h ｜ score margin ${safe(path.score_margin)}</div></div>
                 <div class="item"><strong>下次可评估时间</strong><div class="muted">${safe(path.next_recheck_at) || '--'}</div></div>
                 <div class="item"><strong>最后变化原因</strong><div class="muted">${safe(path.summary) || safe(switchReview.last_change_reason) || '--'}</div></div>
                 <div class="item"><strong>当前卡点</strong><div class="muted">${safe(path.blocking_label) || '无，已可进入审批'}</div></div>`;

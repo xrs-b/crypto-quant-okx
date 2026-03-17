@@ -256,6 +256,7 @@ class TradingBot:
             
             try:
                 if not self.exchange.is_futures_symbol(symbol):
+                    self.notifier.notify_runtime('skip', [f'币种：{symbol}', '原因：暂无 U 本位永续合约'], {'symbol': symbol, 'reason': 'not-futures'})
                     print(f"   ⏭️ 跳过: {symbol} 暂无U本位永续合约")
                     print()
                     continue
@@ -423,6 +424,7 @@ def main():
     parser.add_argument('--daily-summary', action='store_true', help='生成日报摘要')
     parser.add_argument('--cleanup-runtime-records', action='store_true', help='清理重复的治理/日报运行记录')
     parser.add_argument('--exchange-diagnose', action='store_true', help='只读诊断交易所/合约参数，不执行下单')
+    parser.add_argument('--notify-test', action='store_true', help='测试 Discord/webhook 通知链路')
     parser.add_argument('--exchange-smoke', action='store_true', help='生成最小 testnet 验收计划；默认只预演')
     parser.add_argument('--execute', action='store_true', help='配合 smoke 验收命令，显式允许执行 testnet 开平仓')
     parser.add_argument('--symbol', type=str, help='指定 smoke/diagnose 目标币种')
@@ -583,6 +585,14 @@ def main():
         db = Database(cfg.db_path)
         print("\n🧹 清理运行期重复记录:\n")
         print(db.cleanup_duplicate_runtime_records(dry_run=args.dry_run))
+
+    elif args.notify_test:
+        cfg = Config()
+        notifier = NotificationManager(cfg, Database(cfg.db_path), logger)
+        result = notifier.test_discord()
+        print("\n🔔 通知链路测试:\n")
+        print(result['message'])
+        print(f"delivered: {result['delivered']} | enabled: {result['enabled']}")
 
     elif args.exchange_diagnose:
         cfg = Config()

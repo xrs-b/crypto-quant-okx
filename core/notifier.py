@@ -42,7 +42,10 @@ class NotificationManager:
         webhook_url = self.discord_cfg.get('webhook_url')
         if not webhook_url:
             return False
-        payload = json.dumps({'content': content}).encode('utf-8')
+        payload_dict = {'content': content}
+        if self.discord_cfg.get('webhook_username'):
+            payload_dict['username'] = self.discord_cfg.get('webhook_username')
+        payload = json.dumps(payload_dict).encode('utf-8')
         req = request.Request(webhook_url, data=payload, headers={'Content-Type': 'application/json'})
         try:
             with request.urlopen(req, timeout=10) as resp:
@@ -54,9 +57,10 @@ class NotificationManager:
         body = '\n'.join([f'**{title}**', *[f'- {line}' for line in lines if line]])
         self._store_event(level, event_type, body, details)
         delivered = False
-        if self._is_enabled(event_type):
+        enabled = self._is_enabled(event_type)
+        if enabled:
             delivered = self._send_discord(body)
-        return {'delivered': delivered, 'message': body}
+        return {'delivered': delivered, 'enabled': enabled, 'message': body}
 
     def notify_signal(self, signal, passed: bool, reason: str = None, details: Dict = None) -> Dict:
         title = '📡 可靠信号' if passed else '🧪 信号已生成'
@@ -120,3 +124,7 @@ class NotificationManager:
         }
         level_map = {'start': 'info', 'end': 'info', 'skip': 'warning', 'daemon': 'info'}
         return self.send('decision', title_map.get(phase, '🤖 机器人运行状态'), lines, level_map.get(phase, 'info'), details or {})
+
+    def test_discord(self) -> Dict:
+        now = datetime.now().isoformat()
+        return self.send('decision', '🔔 Discord 通知测试', [f'时间：{now}', '如果你见到呢条消息，代表 webhook 推送链路正常'], 'info', {'time': now, 'kind': 'notify-test'})

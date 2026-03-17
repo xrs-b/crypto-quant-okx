@@ -491,6 +491,7 @@
                             <div class="summary-strip" id="overviewTopSummary"></div>
                             <div class="summary-strip" id="overviewDecisionTimestamp"></div>
                             <div class="summary-strip" id="overviewDecisionStability"></div>
+                            <div class="summary-strip" id="overviewDecisionDrift"></div>
                             <div class="list" id="overviewActionQueue"></div>
                             <div class="toolbar-inline" id="overviewRuntimeToolbar">
                                 <button class="chip-btn active" onclick="setOverviewRuntimeFilter('all')">全部</button>
@@ -2277,6 +2278,7 @@
             const topSummaryHost = document.getElementById('overviewTopSummary');
             const decisionTimestampHost = document.getElementById('overviewDecisionTimestamp');
             const decisionStabilityHost = document.getElementById('overviewDecisionStability');
+            const decisionDriftHost = document.getElementById('overviewDecisionDrift');
             const actionQueueHost = document.getElementById('overviewActionQueue');
             const notificationSummaryHost = document.getElementById('overviewNotificationSummary');
             const forwardFunnelHost = document.getElementById('overviewForwardFunnel');
@@ -2705,6 +2707,22 @@
                 decisionStabilityHost.innerHTML = `
                     <div class="summary-pill"><div class="k">结论稳定度</div><div class="v">${stabilityLevel}</div><div class="s">基于 success/error/pending 变化密度判断</div></div>
                     <div class="summary-pill"><div class="k">稳定度提示</div><div class="v">${stabilityHint}</div><div class="s">帮助判断要唔要等更多样本再行动</div></div>
+                `;
+            }
+            if (decisionDriftHost) {
+                const driftLevel = err24 > 0 || notificationPending > 0
+                    ? '较上一轮转弱'
+                    : successStreak >= 2 && end48 >= 5
+                        ? '较上一轮转稳'
+                        : '与上一轮大致持平';
+                const driftHint = driftLevel === '较上一轮转弱'
+                    ? '异常或 pending 风险上升，首页结论需要保守处理'
+                    : driftLevel === '较上一轮转稳'
+                        ? '连续运行与样本状态更完整，可提高结论参考权重'
+                        : '目前未见明显偏强或偏弱变化';
+                decisionDriftHost.innerHTML = `
+                    <div class="summary-pill"><div class="k">判断变化</div><div class="v">${driftLevel}</div><div class="s">相对上一轮首页判断的方向感</div></div>
+                    <div class="summary-pill"><div class="k">变化提示</div><div class="v">${driftHint}</div><div class="s">帮助判断而家需唔需要主动调整预期</div></div>
                 `;
             }
             if (actionQueueHost) {

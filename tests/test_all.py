@@ -434,6 +434,18 @@ class TestNotifications(unittest.TestCase):
         self.assertTrue(duplicate_runtime['suppressed'])
         self.assertFalse(probe['delivered'])
 
+    def test_discord_bot_fallback_channel(self):
+        cfg = Config()
+        cfg._config.setdefault('notification', {}).setdefault('discord', {})
+        cfg._config['notification']['discord'].update({'enabled': True, 'webhook_url': '', 'bot_token': 'x', 'channel_id': '123'})
+        db = FakeLogDB()
+        notifier = NotificationManager(cfg, db, None)
+        notifier._send_discord_bot = lambda content: True
+        notifier._send_discord_webhook = lambda content: False
+        result = notifier.send('decision', '测试', ['bot fallback'])
+        self.assertTrue(result['enabled'])
+        self.assertTrue(result['delivered'])
+
 
 class TestReconcilePositions(unittest.TestCase):
     def test_reconcile_exchange_positions(self):

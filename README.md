@@ -105,7 +105,7 @@ python3 bot/run.py
 # 只读诊断交易所/合约参数（不会下单）
 python3 bot/run.py --exchange-diagnose
 
-# Discord 通知链路自检（需要已配置 webhook_url）
+# Discord 通知链路自检（支持 webhook_url，或 bot_token + channel_id）
 python3 bot/run.py --notify-test
 
 # 生成最小 testnet 验收计划（默认只预演，不会下单）

@@ -60,8 +60,9 @@ market_filters:
 notification:
   discord:
     channel_id: '1468585288770125876'
-    webhook_url: ''            # 推荐使用 Discord webhook；留空则只落本地日志/DB
+    webhook_url: ''            # 推荐使用 Discord webhook；如被拦，可改用 bot_token + channel_id
     webhook_username: 'OKX量化机器人'
+    bot_token: ''              # Discord Bot Token（A-31 fallback 通道）
     enabled: true
     notify_errors: true
     notify_signals: true

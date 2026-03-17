@@ -2375,20 +2375,22 @@
                 }
             }
             if (runtimeHost) {
+                const relay = runtimeState?.relay || {};
                 runtimeHost.innerHTML = `
                     <div class="summary-pill"><div class="k">守护状态</div><div class="v">${runtimeState?.running ? '运行中' : (runtimeState?.mode === 'daemon' ? '待命' : '未启动')}</div><div class="s">mode ${runtimeState?.mode || '--'} ｜ interval ${runtimeState?.interval_seconds || '--'}s</div></div>
                     <div class="summary-pill"><div class="k">上次运行</div><div class="v">${runtimeState?.last_started_at || '--'}</div><div class="s">完成：${runtimeState?.last_finished_at || '--'}</div></div>
-                    <div class="summary-pill"><div class="k">下次运行</div><div class="v">${runtimeState?.next_run_at || '--'}</div><div class="s">跳过：${runtimeState?.last_skip_at || '--'}</div></div>
+                    <div class="summary-pill"><div class="k">Relay 状态</div><div class="v">${relay.running ? '运行中' : (relay.last_checked_at ? '已检查' : '未启动')}</div><div class="s">interval ${relay.interval_seconds || '--'}s ｜ last check ${relay.last_checked_at || '--'}</div></div>
                     <div class="summary-pill"><div class="k">最近错误</div><div class="v">${runtimeState?.last_error ? '有' : '无'}</div><div class="s">${runtimeState?.last_error || '最近未记录守护异常'}</div></div>
                 `;
             }
             if (runtimeSummaryHost) {
                 const s = runtimeState?.last_summary || {};
+                const relayResult = runtimeState?.relay?.last_result || {};
                 runtimeSummaryHost.innerHTML = runtimeState?.last_summary ? `
                     <div class="summary-pill"><div class="k">最近一轮信号</div><div class="v">${s.signals ?? '--'}</div><div class="s">通过 ${s.passed ?? '--'} ｜ 币种 ${s.symbols ?? '--'}</div></div>
                     <div class="summary-pill"><div class="k">最近一轮开仓</div><div class="v">${s.opened ?? '--'}</div><div class="s">平仓 ${s.closed ?? '--'} ｜ 错误 ${s.errors ?? '--'}</div></div>
-                    <div class="summary-pill"><div class="k">最近一轮开始</div><div class="v">${s.started_at || '--'}</div><div class="s">结束 ${s.finished_at || '--'}</div></div>
-                ` : `<div class="summary-pill"><div class="k">最近一轮摘要</div><div class="v">--</div><div class="s">守护模式尚未产出 last_summary</div></div>`;
+                    <div class="summary-pill"><div class="k">Relay 最近结果</div><div class="v">delivered ${relayResult.delivered ?? '--'}</div><div class="s">pending fail ${relayResult.failed ?? '--'} ｜ scanned ${relayResult.scanned ?? '--'}</div></div>
+                ` : `<div class="summary-pill"><div class="k">最近一轮摘要</div><div class="v">--</div><div class="s">守护模式尚未产出 last_summary</div></div><div class="summary-pill"><div class="k">Relay 最近结果</div><div class="v">delivered ${relayResult.delivered ?? '--'}</div><div class="s">pending fail ${relayResult.failed ?? '--'} ｜ scanned ${relayResult.scanned ?? '--'}</div></div>`;
             }
             const notificationRows = notificationOutbox || [];
             const notificationCounts = {

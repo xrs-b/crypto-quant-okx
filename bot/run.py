@@ -34,9 +34,27 @@ def run_notification_relay(interval: int = 30, once: bool = False, limit: int = 
     db = Database(cfg.db_path)
     notifier = NotificationManager(cfg, db, logger)
     print(f"\n📮 Outbox relay 启动 | interval={interval}s | limit={limit} | once={'yes' if once else 'no'}\n")
+    state = load_runtime_state()
+    state['relay'] = {
+        'running': True,
+        'interval_seconds': interval,
+        'last_started_at': datetime.now().isoformat(),
+        'last_result': state.get('relay', {}).get('last_result'),
+    }
+    save_runtime_state(state)
     while True:
+        now = datetime.now().isoformat()
         result = notifier.relay_pending_outbox(limit=limit)
-        print(json.dumps({'time': datetime.now().isoformat(), **result}, ensure_ascii=False))
+        relay_state = load_runtime_state()
+        relay_state['relay'] = {
+            'running': not once,
+            'interval_seconds': interval,
+            'last_started_at': relay_state.get('relay', {}).get('last_started_at') or now,
+            'last_checked_at': now,
+            'last_result': {'time': now, **result},
+        }
+        save_runtime_state(relay_state)
+        print(json.dumps({'time': now, **result}, ensure_ascii=False))
         if once:
             break
         time.sleep(interval)

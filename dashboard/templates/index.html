@@ -465,6 +465,7 @@
                             <div class="section-title">总览中心</div>
                             <div class="section-note">默认首页，先看组合状态、系统提醒、最近变化，再往下看持仓细节。</div>
                             <div class="summary-strip" id="overviewSmokeKpi"></div>
+                            <div class="summary-strip" id="overviewSmokeTrend"></div>
                             <div class="compact-grid">
                                 <div class="item">
                                     <strong>组合状态</strong>
@@ -2169,6 +2170,7 @@
             overviewSmokeState = smokeState || null;
             overviewSmokeLastImpact = smokeImpactLatest || getOverviewSmokeLastImpact();
             const kpiHost = document.getElementById('overviewSmokeKpi');
+            const trendHost = document.getElementById('overviewSmokeTrend');
             if (kpiHost) {
                 if (overviewSmokeLastImpact) {
                     kpiHost.innerHTML = `
@@ -2180,6 +2182,24 @@
                 } else {
                     kpiHost.innerHTML = `<div class="summary-pill"><div class="k">最近 Smoke</div><div class="v">--</div><div class="s">暂无最近 smoke impact</div></div>`;
                 }
+            }
+            if (trendHost) {
+                const impacts = (smokeRuns || []).map(run => (run.details || {}).impact).filter(Boolean);
+                const summarizeImpacts = (count = 3) => {
+                    const rows = impacts.slice(0, count);
+                    if (!rows.length) return {tradeAvg: '--', posAvg: '--', failRate: '--', sample: 0};
+                    const tradeAvg = (rows.reduce((s, x) => s + Number(x.tradeDelta || 0), 0) / rows.length).toFixed(2);
+                    const posAvg = (rows.reduce((s, x) => s + Number(x.positionDelta || 0), 0) / rows.length).toFixed(2);
+                    const failRate = Math.round(rows.filter(x => x.error).length / rows.length * 100);
+                    return {tradeAvg, posAvg, failRate, sample: rows.length};
+                };
+                const t3 = summarizeImpacts(3);
+                const t5 = summarizeImpacts(5);
+                trendHost.innerHTML = impacts.length ? `
+                    <div class="summary-pill"><div class="k">近 3 次 Trade 均值</div><div class="v">${t3.tradeAvg}</div><div class="s">Position 均值 ${t3.posAvg} ｜ 失败率 ${t3.failRate}%</div></div>
+                    <div class="summary-pill"><div class="k">近 5 次 Trade 均值</div><div class="v">${t5.tradeAvg}</div><div class="s">Position 均值 ${t5.posAvg} ｜ 失败率 ${t5.failRate}%</div></div>
+                    <div class="summary-pill"><div class="k">趋势判断</div><div class="v">${Number(t3.failRate) > 30 || Number(t5.failRate) > 30 ? '偏不稳定' : '基本稳定'}</div><div class="s">结合最近 smoke 失败率与 impact 均值</div></div>
+                ` : `<div class="summary-pill"><div class="k">Smoke 趋势</div><div class="v">--</div><div class="s">暂无可统计的 impact 样本</div></div>`;
             }
             renderOverviewSmokeControls();
             const alertHtml = (alerts || []).map(a => `${a.level.toUpperCase()}: ${a.message}`).join('<br>') || '--';

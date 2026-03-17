@@ -466,6 +466,7 @@
                             <div class="section-note">默认首页，先看组合状态、系统提醒、最近变化，再往下看持仓细节。</div>
                             <div class="summary-strip" id="overviewSmokeKpi"></div>
                             <div class="summary-strip" id="overviewSmokeTrend"></div>
+                            <div class="summary-strip" id="overviewSmokeCompare"></div>
                             <div class="compact-grid">
                                 <div class="item">
                                     <strong>组合状态</strong>
@@ -2171,6 +2172,7 @@
             overviewSmokeLastImpact = smokeImpactLatest || getOverviewSmokeLastImpact();
             const kpiHost = document.getElementById('overviewSmokeKpi');
             const trendHost = document.getElementById('overviewSmokeTrend');
+            const compareHost = document.getElementById('overviewSmokeCompare');
             if (kpiHost) {
                 if (overviewSmokeLastImpact) {
                     kpiHost.innerHTML = `
@@ -2183,8 +2185,9 @@
                     kpiHost.innerHTML = `<div class="summary-pill"><div class="k">最近 Smoke</div><div class="v">--</div><div class="s">暂无最近 smoke impact</div></div>`;
                 }
             }
-            if (trendHost) {
-                const impacts = (smokeRuns || []).map(run => (run.details || {}).impact).filter(Boolean);
+            if (trendHost || compareHost) {
+                const smokeRows = smokeRuns || [];
+                const impacts = smokeRows.map(run => (run.details || {}).impact).filter(Boolean);
                 const summarizeImpacts = (count = 3) => {
                     const rows = impacts.slice(0, count);
                     if (!rows.length) return {tradeAvg: '--', posAvg: '--', failRate: '--', sample: 0};
@@ -2195,11 +2198,18 @@
                 };
                 const t3 = summarizeImpacts(3);
                 const t5 = summarizeImpacts(5);
-                trendHost.innerHTML = impacts.length ? `
+                if (trendHost) trendHost.innerHTML = impacts.length ? `
                     <div class="summary-pill"><div class="k">近 3 次 Trade 均值</div><div class="v">${t3.tradeAvg}</div><div class="s">Position 均值 ${t3.posAvg} ｜ 失败率 ${t3.failRate}%</div></div>
                     <div class="summary-pill"><div class="k">近 5 次 Trade 均值</div><div class="v">${t5.tradeAvg}</div><div class="s">Position 均值 ${t5.posAvg} ｜ 失败率 ${t5.failRate}%</div></div>
                     <div class="summary-pill"><div class="k">趋势判断</div><div class="v">${Number(t3.failRate) > 30 || Number(t5.failRate) > 30 ? '偏不稳定' : '基本稳定'}</div><div class="s">结合最近 smoke 失败率与 impact 均值</div></div>
                 ` : `<div class="summary-pill"><div class="k">Smoke 趋势</div><div class="v">--</div><div class="s">暂无可统计的 impact 样本</div></div>`;
+                const latestSuccess = smokeRows.find(run => run.success);
+                const latestFailed = smokeRows.find(run => !run.success);
+                if (compareHost) compareHost.innerHTML = (latestSuccess || latestFailed) ? `
+                    <div class="summary-pill"><div class="k">最近成功</div><div class="v">${latestSuccess ? latestSuccess.symbol : '--'}</div><div class="s">${latestSuccess ? `${latestSuccess.side === 'short' ? '开空' : '开多'} ｜ trade ${latestSuccess.details?.impact?.tradeDelta ?? '--'} ｜ pos ${latestSuccess.details?.impact?.positionDelta ?? '--'}` : '暂无成功样本'}</div></div>
+                    <div class="summary-pill"><div class="k">最近失败</div><div class="v">${latestFailed ? latestFailed.symbol : '--'}</div><div class="s">${latestFailed ? `${latestFailed.side === 'short' ? '开空' : '开多'} ｜ ${latestFailed.error || latestFailed.details?.impact?.error || '未知错误'}` : '暂无失败样本'}</div></div>
+                    <div class="summary-pill"><div class="k">对比结论</div><div class="v">${latestSuccess && latestFailed ? '成功/失败都有样本' : latestFailed ? '当前失败样本更多' : '当前以成功样本为主'}</div><div class="s">对比最近成功与失败的 impact / error</div></div>
+                ` : `<div class="summary-pill"><div class="k">成功/失败对比</div><div class="v">--</div><div class="s">暂无可对比的 smoke 样本</div></div>`;
             }
             renderOverviewSmokeControls();
             const alertHtml = (alerts || []).map(a => `${a.level.toUpperCase()}: ${a.message}`).join('<br>') || '--';

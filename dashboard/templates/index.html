@@ -499,6 +499,7 @@
                             <div class="summary-strip" id="overviewAdvanceGaps"></div>
                             <div class="summary-strip" id="overviewAdvancePath"></div>
                             <div class="summary-strip" id="overviewAdvanceProgress"></div>
+                            <div class="summary-strip" id="overviewAdvanceBlockers"></div>
                             <div class="list" id="overviewActionQueue"></div>
                             <div class="toolbar-inline" id="overviewRuntimeToolbar">
                                 <button class="chip-btn active" onclick="setOverviewRuntimeFilter('all')">全部</button>
@@ -2293,6 +2294,7 @@
             const advanceGapsHost = document.getElementById('overviewAdvanceGaps');
             const advancePathHost = document.getElementById('overviewAdvancePath');
             const advanceProgressHost = document.getElementById('overviewAdvanceProgress');
+            const advanceBlockersHost = document.getElementById('overviewAdvanceBlockers');
             const actionQueueHost = document.getElementById('overviewActionQueue');
             const notificationSummaryHost = document.getElementById('overviewNotificationSummary');
             const forwardFunnelHost = document.getElementById('overviewForwardFunnel');
@@ -2812,6 +2814,14 @@
                     const progressHint = progress >= 100 ? '推进条件已基本满足' : `当前已完成 ${completed}/${total} 项推进条件`;
                     advanceProgressHost.innerHTML = `
                         <div class="summary-pill"><div class="k">推进进度</div><div class="v">${progress}%</div><div class="s">${progressHint}</div></div>
+                    `;
+                }
+                if (advanceBlockersHost) {
+                    const blockers = criteriaItems.filter(item => !item.ok).map(item => item.todo.replace('⏳ ', ''));
+                    const blockerTitle = blockers.length ? `阻塞 ${blockers.length} 项` : '当前无明显阻塞';
+                    const blockerMain = blockers[0] || '已接近推进线';
+                    advanceBlockersHost.innerHTML = `
+                        <div class="summary-pill"><div class="k">推进阻塞</div><div class="v">${blockerTitle}</div><div class="s">${blockerMain}</div></div>
                     `;
                 }
             }

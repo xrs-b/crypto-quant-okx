@@ -453,7 +453,9 @@ class TestNotifications(unittest.TestCase):
         self.assertEqual(duplicate_runtime['outbox_status'], 'disabled')
         self.assertIn('notify:signal', db.logs[0]['message'])
         self.assertIn('【信号概览】', db.logs[0]['details']['message'])
+        self.assertIn('通知等级：⚠️ 重要', db.logs[0]['details']['message'])
         self.assertIn('【风控拦截】', db.logs[1]['details']['message'])
+        self.assertIn('通知等级：🚨 紧急', db.logs[1]['details']['message'])
         self.assertIn('风险拒绝', db.logs[1]['details']['message'])
         self.assertFalse(runtime['enabled'])
         self.assertTrue(duplicate_runtime['suppressed'])
@@ -472,6 +474,7 @@ class TestNotifications(unittest.TestCase):
         self.assertTrue(result['enabled'])
         self.assertTrue(result['delivered'])
         self.assertEqual(result['outbox_status'], 'delivered')
+        self.assertEqual(result['priority'], 'normal')
         self.assertEqual(db.outbox[-1]['status'], 'delivered')
         self.assertEqual(db.outbox[-1]['details']['delivery']['path'], 'direct')
 

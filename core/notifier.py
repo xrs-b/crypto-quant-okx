@@ -191,7 +191,25 @@ class NotificationManager:
         except Exception:
             return str(quantity)
 
-    def send(self, event_type: str, title: str, lines: List[str], level: str = 'info', details: Dict = None) -> Dict:
+    def _priority_meta(self, priority: str = 'normal') -> Dict:
+        mapping = {
+            'normal': {'label': '普通', 'emoji': 'ℹ️'},
+            'high': {'label': '重要', 'emoji': '⚠️'},
+            'urgent': {'label': '紧急', 'emoji': '🚨'},
+        }
+        return mapping.get(priority, mapping['normal'])
+
+    def _context_preview(self, details: Dict = None, limit: int = 3) -> str:
+        if not details:
+            return '--'
+        pairs = []
+        for key, value in list(details.items())[:limit]:
+            if isinstance(value, dict):
+                continue
+            pairs.append(f'{key}={value}')
+        return ' | '.join(pairs) if pairs else '--'
+
+    def send(self, event_type: str, title: str, lines: List[str], level: str = 'info', details: Dict = None, priority: str = 'normal') -> Dict:
         body = self._render_message(title, lines)
         suppressed = self._should_suppress(event_type, body)
         outbox_id = self._store_event(level, event_type, body, details, title)
@@ -210,6 +228,7 @@ class NotificationManager:
             'event_type': event_type,
             'level': level,
             'title': title,
+            'priority': priority,
             'delivery': {
                 'enabled': enabled,
                 'suppressed': suppressed,
@@ -217,13 +236,16 @@ class NotificationManager:
                 'path': 'direct' if delivered else 'bridge_pending',
             }
         })
-        return {'delivered': delivered, 'enabled': enabled, 'suppressed': suppressed, 'message': body, 'outbox_id': outbox_id, 'outbox_status': outbox_status}
+        return {'delivered': delivered, 'enabled': enabled, 'suppressed': suppressed, 'message': body, 'outbox_id': outbox_id, 'outbox_status': outbox_status, 'priority': priority}
 
     def notify_signal(self, signal, passed: bool, reason: str = None, details: Dict = None) -> Dict:
         title = '📡 可靠信号' if passed else '🧪 信号已生成'
         direction = '🟢 做多' if signal.signal_type == 'buy' else '🔴 做空' if signal.signal_type == 'sell' else '⚪ 观望'
+        priority = 'high' if passed else 'normal'
+        pmeta = self._priority_meta(priority)
         lines = [
             '【信号概览】',
+            f'通知等级：{pmeta["emoji"]} {pmeta["label"]}',
             f'币种：{signal.symbol}',
             f'方向：{direction}',
             f'当前价格：{self._format_price(signal.price)}',
@@ -237,14 +259,17 @@ class NotificationManager:
             '【时间信息】',
             f'触发时间：{getattr(signal, "timestamp", datetime.now().isoformat())}',
         ]
-        return self.send('signal', title, lines, 'info', {'signal': signal.to_dict() if hasattr(signal, 'to_dict') else {}, 'details': details or {}})
+        return self.send('signal', title, lines, 'info', {'signal': signal.to_dict() if hasattr(signal, 'to_dict') else {}, 'details': details or {}}, priority=priority)
 
     def notify_decision(self, signal, allowed: bool, reason: str = None, details: Dict = None) -> Dict:
         title = '🤖 机器人决策：通过' if allowed else '🛑 机器人决策：拒绝'
         direction = '🟢 做多' if signal.signal_type == 'buy' else '🔴 做空' if signal.signal_type == 'sell' else '⚪ 观望'
         details = details or {}
+        priority = 'high' if allowed else 'urgent'
+        pmeta = self._priority_meta(priority)
         lines = [
             '【决策概览】',
+            f'通知等级：{pmeta["emoji"]} {pmeta["label"]}',
             f'币种：{signal.symbol}',
             f'方向：{direction}',
             f'当前价格：{self._format_price(signal.price)}',
@@ -258,11 +283,14 @@ class NotificationManager:
         failed_checks = [f"{k}: {v.get('reason', '未通过')}" for k, v in details.items() if isinstance(v, dict) and not v.get('passed', True)]
         if failed_checks:
             lines.extend(['---', '【风控拦截】', f'拒绝明细：{" | ".join(failed_checks[:3])}'])
-        return self.send('decision', title, lines, 'info' if allowed else 'warning', {'signal': signal.to_dict() if hasattr(signal, 'to_dict') else {}, 'details': details})
+        return self.send('decision', title, lines, 'info' if allowed else 'warning', {'signal': signal.to_dict() if hasattr(signal, 'to_dict') else {}, 'details': details}, priority=priority)
 
     def notify_trade_open(self, symbol: str, side: str, price: float, quantity: float, trade_id: int = None, signal=None) -> Dict:
+        priority = 'high'
+        pmeta = self._priority_meta(priority)
         lines = [
             '【成交概览】',
+            f'通知等级：{pmeta["emoji"]} {pmeta["label"]}',
             f'币种：{symbol}',
             f'方向：{"🟢 做多" if side == "long" else "🔴 做空"}',
             f'成交价格：{self._format_price(price)}',
@@ -272,12 +300,16 @@ class NotificationManager:
             f'Trade ID：{trade_id or "--"}',
             f'信号强度：{getattr(signal, "strength", "--")}',
             f'触发策略：{self._format_strategies(getattr(signal, "strategies_triggered", []) or [])}',
+            f'建议动作：观察止盈止损是否按预期挂单/触发',
         ]
-        return self.send('trade', '✅ 开仓执行成功', lines, 'info', {'trade_id': trade_id, 'symbol': symbol, 'side': side})
+        return self.send('trade', '✅ 开仓执行成功', lines, 'info', {'trade_id': trade_id, 'symbol': symbol, 'side': side}, priority=priority)
 
     def notify_trade_open_failed(self, symbol: str, side: str, price: float, reason: str, signal=None, details: Dict = None) -> Dict:
+        priority = 'urgent'
+        pmeta = self._priority_meta(priority)
         lines = [
             '【失败概览】',
+            f'通知等级：{pmeta["emoji"]} {pmeta["label"]}',
             f'币种：{symbol}',
             f'方向：{"🟢 做多" if side == "long" else "🔴 做空"}',
             f'尝试价格：{self._format_price(price)}',
@@ -286,13 +318,21 @@ class NotificationManager:
             '【关联信息】',
             f'信号强度：{getattr(signal, "strength", "--")}',
             f'触发策略：{self._format_strategies(getattr(signal, "strategies_triggered", []) or [])}',
+            '---',
+            '【建议动作】',
+            '优先检查交易所返回码、仓位模式、下单参数与余额',
         ]
-        return self.send('trade', '❌ 开仓执行失败', lines, 'error', details or {})
+        return self.send('trade', '❌ 开仓执行失败', lines, 'error', details or {}, priority=priority)
 
     def notify_trade_close(self, symbol: str, side: str, close_price: float, reason: str, pnl: float = None) -> Dict:
-        pnl_text = '--' if pnl is None else f"{float(pnl):+.4f}"
+        priority = 'high'
+        pmeta = self._priority_meta(priority)
+        pnl_value = None if pnl is None else float(pnl)
+        pnl_icon = '🟢' if pnl_value is not None and pnl_value >= 0 else '🔴'
+        pnl_text = '--' if pnl is None else f"{pnl_icon} {pnl_value:+.4f}"
         lines = [
             '【平仓概览】',
+            f'通知等级：{pmeta["emoji"]} {pmeta["label"]}',
             f'币种：{symbol}',
             f'方向：{"🟢 做多" if side == "long" else "🔴 做空"}',
             f'平仓价格：{self._format_price(close_price)}',
@@ -300,17 +340,24 @@ class NotificationManager:
             '---',
             '【执行原因】',
             f'触发原因：{reason}',
+            f'建议动作：复盘本次退出是否符合 TP / SL / 风控预期',
         ]
-        return self.send('close', '📦 平仓执行', lines, 'info', {'symbol': symbol, 'side': side, 'reason': reason, 'pnl': pnl})
+        return self.send('close', '📦 平仓执行', lines, 'info', {'symbol': symbol, 'side': side, 'reason': reason, 'pnl': pnl}, priority=priority)
 
     def notify_trade_close_failed(self, symbol: str, side: str, reason: str, details: Dict = None) -> Dict:
+        priority = 'urgent'
+        pmeta = self._priority_meta(priority)
         lines = [
             '【失败概览】',
+            f'通知等级：{pmeta["emoji"]} {pmeta["label"]}',
             f'币种：{symbol}',
             f'方向：{"🟢 做多" if side == "long" else "🔴 做空"}',
             f'失败原因：{reason or "--"}',
+            '---',
+            '【建议动作】',
+            '立即检查是否存在未平仓风险，并核对交易所真实持仓',
         ]
-        return self.send('close', '❌ 平仓执行失败', lines, 'error', details or {})
+        return self.send('close', '❌ 平仓执行失败', lines, 'error', details or {}, priority=priority)
 
     def notify_reconcile_issue(self, report: Dict) -> Dict:
         summary = report.get('summary', {}) if isinstance(report, dict) else {}
@@ -329,12 +376,15 @@ class NotificationManager:
         return self.send('error', '⚠️ 持仓对账异常', lines, 'warning', report)
 
     def notify_error(self, title: str, message: str, details: Dict = None) -> Dict:
-        lines = ['【异常说明】', message]
+        priority = 'urgent'
+        pmeta = self._priority_meta(priority)
+        lines = ['【异常说明】', f'通知等级：{pmeta["emoji"]} {pmeta["label"]}', message]
         if details:
-            preview = ' | '.join([f'{k}={v}' for k, v in list(details.items())[:3]])
-            if preview:
+            preview = self._context_preview(details)
+            if preview and preview != '--':
                 lines.extend(['---', '【上下文】', preview])
-        return self.send('error', f'❌ {title}', lines, 'error', details or {})
+        lines.extend(['---', '【建议动作】', '先看最近错误日志、通知失败记录与运行状态'])
+        return self.send('error', f'❌ {title}', lines, 'error', details or {}, priority=priority)
 
     def notify_runtime(self, phase: str, lines: List[str], details: Dict = None) -> Dict:
         title_map = {

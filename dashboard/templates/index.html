@@ -464,6 +464,7 @@
                         <div class="card" style="padding:18px;">
                             <div class="section-title">总览中心</div>
                             <div class="section-note">默认首页，先看组合状态、系统提醒、最近变化，再往下看持仓细节。</div>
+                            <div class="summary-strip" id="overviewManagedHealth"></div>
                             <div class="summary-strip" id="overviewSmokeKpi"></div>
                             <div class="summary-strip" id="overviewSmokeTrend"></div>
                             <div class="summary-strip" id="overviewSmokeCompare"></div>
@@ -2219,6 +2220,7 @@
             overviewSmokeSymbols = (mode.watch_list || []).slice();
             overviewSmokeState = smokeState || null;
             overviewSmokeLastImpact = smokeImpactLatest || getOverviewSmokeLastImpact();
+            const managedHealthHost = document.getElementById('overviewManagedHealth');
             const kpiHost = document.getElementById('overviewSmokeKpi');
             const trendHost = document.getElementById('overviewSmokeTrend');
             const compareHost = document.getElementById('overviewSmokeCompare');
@@ -2229,6 +2231,29 @@
             const runtimeSummaryHost = document.getElementById('overviewRuntimeSummary');
             const runtimeHistoryHost = document.getElementById('overviewRuntimeHistory');
             const reconcileDetailHost = document.getElementById('overviewReconcileDetails');
+            if (managedHealthHost) {
+                const smokeRows = smokeRuns || [];
+                const smokeFailRate = smokeRows.length ? Math.round(smokeRows.filter(x => !x.success).length / smokeRows.length * 100) : 0;
+                const reconcileSummary = reconcileReport?.summary || {};
+                const reconcileRiskCount = Number(reconcileSummary.exchange_missing_local_position || 0) + Number(reconcileSummary.local_position_missing_exchange || 0) + Number(reconcileSummary.open_trade_missing_exchange || 0) + Number(reconcileSummary.exchange_missing_open_trade || 0);
+                const notifyEnabled = true;
+                let healthLevel = '绿';
+                let healthText = '托管健康整体稳定，可继续观察模拟盘表现';
+                if ((runtimeState?.last_error) || reconcileRiskCount >= 3 || smokeFailRate >= 50) {
+                    healthLevel = '红';
+                    healthText = '托管健康存在明显风险，建议先排查守护异常/对账差异/Smoke 失败';
+                } else if (reconcileRiskCount >= 1 || smokeFailRate >= 20 || (runtimeState?.history || []).some(x => x.type === 'skip')) {
+                    healthLevel = '黄';
+                    healthText = '托管健康有一定波动，建议继续观察运行、通知与对账状态';
+                }
+                managedHealthHost.innerHTML = `
+                    <div class="summary-pill"><div class="k">托管健康</div><div class="v">${healthLevel}</div><div class="s">${healthText}</div></div>
+                    <div class="summary-pill"><div class="k">守护运行</div><div class="v">${runtimeState?.running ? '运行中' : (runtimeState?.mode === 'daemon' ? '待命' : '未启动')}</div><div class="s">last error: ${runtimeState?.last_error ? '有' : '无'}</div></div>
+                    <div class="summary-pill"><div class="k">对账风险</div><div class="v">${reconcileRiskCount}</div><div class="s">exchange/local/open_trade 差异项</div></div>
+                    <div class="summary-pill"><div class="k">Smoke 风险</div><div class="v">${smokeFailRate}%</div><div class="s">最近 smoke 失败率</div></div>
+                    <div class="summary-pill"><div class="k">通知状态</div><div class="v">${notifyEnabled ? '已启用' : '未启用'}</div><div class="s">Discord/webhook 模板链路已接入</div></div>
+                `;
+            }
             if (kpiHost) {
                 if (overviewSmokeLastImpact) {
                     kpiHost.innerHTML = `

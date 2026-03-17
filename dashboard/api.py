@@ -218,18 +218,20 @@ def get_daily_summary():
     # 按日期分组
     daily_data = {}
     for trade in trades:
-        date = trade.get('open_time', '')[:10]
+        date = (trade.get('close_time') or trade.get('open_time') or '')[:10]
+        if not date:
+            continue
         if date not in daily_data:
             daily_data[date] = {
                 'date': date,
                 'trades': 0,
                 'wins': 0,
                 'losses': 0,
-                'pnl': 0
+                'pnl': 0.0
             }
         
         daily_data[date]['trades'] += 1
-        pnl = trade.get('pnl', 0)
+        pnl = float(trade.get('pnl', 0) or 0)
         daily_data[date]['pnl'] += pnl
         
         if pnl > 0:

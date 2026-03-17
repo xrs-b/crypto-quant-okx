@@ -486,6 +486,7 @@
                             <div class="summary-strip" id="overviewPhaseSwitch"></div>
                             <div class="summary-strip" id="overviewFinalDecision"></div>
                             <div class="summary-strip" id="overviewPriorityNow"></div>
+                            <div class="summary-strip" id="overviewWrapUpStatus"></div>
                             <div class="toolbar-inline" id="overviewRuntimeToolbar">
                                 <button class="chip-btn active" onclick="setOverviewRuntimeFilter('all')">全部</button>
                                 <button class="chip-btn" onclick="setOverviewRuntimeFilter('error')">异常</button>
@@ -2266,6 +2267,7 @@
             const phaseSwitchHost = document.getElementById('overviewPhaseSwitch');
             const finalDecisionHost = document.getElementById('overviewFinalDecision');
             const priorityNowHost = document.getElementById('overviewPriorityNow');
+            const wrapUpStatusHost = document.getElementById('overviewWrapUpStatus');
             const notificationSummaryHost = document.getElementById('overviewNotificationSummary');
             const forwardFunnelHost = document.getElementById('overviewForwardFunnel');
             const forwardRiskHost = document.getElementById('overviewForwardRisk');
@@ -2631,6 +2633,22 @@
                 priorityNowHost.innerHTML = `
                     <div class="summary-pill"><div class="k">当前优先事项</div><div class="v">${priorityNow}</div><div class="s">将首页判断直接翻译成当前最该做既动作</div></div>
                     <div class="summary-pill"><div class="k">下一眼重点</div><div class="v">${priorityNext}</div><div class="s">减少来回翻页面确认成本</div></div>
+                `;
+            }
+            if (wrapUpStatusHost) {
+                const wrapStatus = finalDecision === '先修问题再说'
+                    ? '仍在修复阶段'
+                    : finalDecision === '继续观察积累'
+                        ? '仍在稳定观察阶段'
+                        : '已接近下一阶段入口';
+                const wrapHint = wrapStatus === '仍在修复阶段'
+                    ? '先解决链路问题，暂时唔好太早下阶段结论'
+                    : wrapStatus === '仍在稳定观察阶段'
+                        ? '继续累积真实样本，等长跑窗口再厚一点'
+                        : '可以开始考虑更细的收益验证或进入下一阶段';
+                wrapUpStatusHost.innerHTML = `
+                    <div class="summary-pill"><div class="k">当前收尾状态</div><div class="v">${wrapStatus}</div><div class="s">帮助判断而家整体更接近边个阶段</div></div>
+                    <div class="summary-pill"><div class="k">收尾提示</div><div class="v">${wrapHint}</div><div class="s">俾首页最后多一层落点</div></div>
                 `;
             }
             const notificationRows = notificationOutbox || [];

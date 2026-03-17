@@ -470,6 +470,7 @@
                             <div class="summary-strip" id="overviewSmokeErrorTags"></div>
                             <div class="summary-strip" id="overviewSmokeRisk"></div>
                             <div class="summary-strip" id="overviewReconcileRisk"></div>
+                            <div class="list" id="overviewReconcileDetails"></div>
                             <div class="compact-grid">
                                 <div class="item">
                                     <strong>组合状态</strong>
@@ -2180,6 +2181,7 @@
             const errorTagHost = document.getElementById('overviewSmokeErrorTags');
             const riskHost = document.getElementById('overviewSmokeRisk');
             const reconcileHost = document.getElementById('overviewReconcileRisk');
+            const reconcileDetailHost = document.getElementById('overviewReconcileDetails');
             if (kpiHost) {
                 if (overviewSmokeLastImpact) {
                     kpiHost.innerHTML = `
@@ -2251,17 +2253,32 @@
                     `;
                 }
             }
-            if (reconcileHost) {
+            if (reconcileHost || reconcileDetailHost) {
                 const summary = reconcileReport?.summary || {};
+                const diff = reconcileReport?.diff || {};
                 const riskCount = Number(summary.exchange_missing_local_position || 0) + Number(summary.local_position_missing_exchange || 0) + Number(summary.open_trade_missing_exchange || 0) + Number(summary.exchange_missing_open_trade || 0);
                 const level = riskCount >= 3 ? '红' : riskCount >= 1 ? '黄' : '绿';
                 const text = riskCount >= 3 ? '三方对账差异较多，建议优先检查本地状态与交易所一致性' : riskCount >= 1 ? '存在少量对账差异，建议关注 open trade / position 是否同步' : '三方对账基本一致';
-                reconcileHost.innerHTML = `
+                if (reconcileHost) reconcileHost.innerHTML = `
                     <div class="summary-pill"><div class="k">对账风险等级</div><div class="v">${level}</div><div class="s">exchange/local/open_trade 差异共 ${riskCount} 项</div></div>
                     <div class="summary-pill"><div class="k">交易所缺本地持仓</div><div class="v">${summary.exchange_missing_local_position ?? 0}</div><div class="s">交易所有仓，本地 position 未对齐</div></div>
                     <div class="summary-pill"><div class="k">本地持仓缺交易所</div><div class="v">${summary.local_position_missing_exchange ?? 0}</div><div class="s">本地 position 可能为脏数据</div></div>
                     <div class="summary-pill"><div class="k">一句话判断</div><div class="v">${text}</div><div class="s">open trades 差异 ${summary.open_trade_missing_exchange ?? 0}/${summary.exchange_missing_open_trade ?? 0}</div></div>
                 `;
+                if (reconcileDetailHost) {
+                    const sections = [
+                        ['交易所有仓，本地 position 缺失', diff.exchange_missing_local_position || []],
+                        ['本地 position 有，但交易所无', diff.local_position_missing_exchange || []],
+                        ['本地 open trade 有，但交易所无', diff.open_trade_missing_exchange || []],
+                        ['交易所有仓，但本地 open trade 缺失', diff.exchange_missing_open_trade || []],
+                    ].filter(([, rows]) => rows.length);
+                    reconcileDetailHost.innerHTML = sections.length ? sections.map(([title, rows]) => `
+                        <details class="item">
+                            <summary style="cursor:pointer; list-style:none;"><strong>${title}</strong><div class="muted" style="margin-top:6px;">共 ${rows.length} 项</div></summary>
+                            <pre style="margin-top:10px">${JSON.stringify(rows, null, 2)}</pre>
+                        </details>
+                    `).join('') : '<div class="empty-state"><div class="icon">🧭</div><div>当前未发现三方对账差异</div></div>';
+                }
             }
             renderOverviewSmokeControls();
             const alertHtml = (alerts || []).map(a => `${a.level.toUpperCase()}: ${a.message}`).join('<br>') || '--';

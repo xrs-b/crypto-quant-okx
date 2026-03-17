@@ -376,6 +376,60 @@ def execute_smoke_run():
         smoke_execution_lock.release()
 
 
+@app.route('/api/system/account-diagnostic')
+def get_account_diagnostic():
+    """获取当前交易所账户/持仓绑定诊断"""
+    cfg = Config()
+    exchange = Exchange(cfg.all)
+    result = {
+        'exchange_mode': cfg.exchange_mode,
+        'position_mode': cfg.position_mode,
+        'watch_list': cfg.symbols,
+        'balance_free_usdt': None,
+        'balance_total_usdt': None,
+        'raw_positions_count': 0,
+        'filtered_positions_count': 0,
+        'raw_positions_preview': [],
+        'market_checks': [],
+    }
+    try:
+        balance = exchange.fetch_balance()
+        result['balance_free_usdt'] = float((balance.get('free') or {}).get('USDT', 0) or 0)
+        result['balance_total_usdt'] = float((balance.get('total') or {}).get('USDT', result['balance_free_usdt']) or result['balance_free_usdt'] or 0)
+        result['balance_info'] = balance.get('info', {})
+    except Exception as e:
+        result['balance_error'] = str(e)
+    try:
+        raw_positions = exchange.exchange.fetch_positions()
+        result['raw_positions_count'] = len(raw_positions or [])
+        result['raw_positions_preview'] = raw_positions[:5]
+    except Exception as e:
+        result['raw_positions_error'] = str(e)
+        raw_positions = []
+    try:
+        filtered_positions = exchange.fetch_positions()
+        result['filtered_positions_count'] = len(filtered_positions or [])
+        result['filtered_positions_preview'] = filtered_positions[:5]
+    except Exception as e:
+        result['filtered_positions_error'] = str(e)
+    for symbol in cfg.symbols:
+        market = exchange.get_market(symbol)
+        result['market_checks'].append({
+            'symbol': symbol,
+            'market_found': bool(market),
+            'order_symbol': market.get('symbol') if market else None,
+            'swap': bool(market and market.get('swap')),
+            'linear': bool(market and market.get('linear')),
+        })
+    if result['raw_positions_count'] == 0:
+        result['conclusion'] = '交易所原始持仓返回为 0，当前更像账户本身无模拟仓，而不是前端没显示。'
+    elif result['raw_positions_count'] > 0 and result['filtered_positions_count'] == 0:
+        result['conclusion'] = '交易所有原始持仓，但项目过滤后为 0，需重点检查持仓字段映射/过滤条件。'
+    else:
+        result['conclusion'] = '交易所持仓读取正常，可继续检查 dashboard 渲染或统计逻辑。'
+    return jsonify({'success': True, 'data': result})
+
+
 @app.route('/api/system/status')
 def get_system_status():
     """获取系统状态"""

@@ -492,6 +492,7 @@
                             <div class="summary-strip" id="overviewDecisionTimestamp"></div>
                             <div class="summary-strip" id="overviewDecisionStability"></div>
                             <div class="summary-strip" id="overviewDecisionDrift"></div>
+                            <div class="summary-strip" id="overviewDecisionWhy"></div>
                             <div class="list" id="overviewActionQueue"></div>
                             <div class="toolbar-inline" id="overviewRuntimeToolbar">
                                 <button class="chip-btn active" onclick="setOverviewRuntimeFilter('all')">全部</button>
@@ -2279,6 +2280,7 @@
             const decisionTimestampHost = document.getElementById('overviewDecisionTimestamp');
             const decisionStabilityHost = document.getElementById('overviewDecisionStability');
             const decisionDriftHost = document.getElementById('overviewDecisionDrift');
+            const decisionWhyHost = document.getElementById('overviewDecisionWhy');
             const actionQueueHost = document.getElementById('overviewActionQueue');
             const notificationSummaryHost = document.getElementById('overviewNotificationSummary');
             const forwardFunnelHost = document.getElementById('overviewForwardFunnel');
@@ -2723,6 +2725,16 @@
                 decisionDriftHost.innerHTML = `
                     <div class="summary-pill"><div class="k">判断变化</div><div class="v">${driftLevel}</div><div class="s">相对上一轮首页判断的方向感</div></div>
                     <div class="summary-pill"><div class="k">变化提示</div><div class="v">${driftHint}</div><div class="s">帮助判断而家需唔需要主动调整预期</div></div>
+                `;
+            }
+            if (decisionWhyHost) {
+                const whyText = finalDecision === '先修问题再说'
+                    ? `因为 err24=${err24}、pending=${notificationPending}，当前更偏向先排异常。`
+                    : finalDecision === '继续观察积累'
+                        ? `因为 24h/48h 样本仍未够厚（end24=${end24} / end48=${end48}），所以建议继续观察。`
+                        : `因为 successStreak=${successStreak}、end48=${end48}、closed=${closedTrades}，当前已有较完整观察基础。`;
+                decisionWhyHost.innerHTML = `
+                    <div class="summary-pill"><div class="k">为何这样判断</div><div class="v">${whyText}</div><div class="s">将首页建议同关键指标直接对应起来</div></div>
                 `;
             }
             if (actionQueueHost) {

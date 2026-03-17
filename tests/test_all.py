@@ -320,6 +320,13 @@ class TestDatabase(unittest.TestCase):
         self.assertEqual(trade['status'], 'closed')
         self.assertEqual(trade['exit_price'], 49999)
         self.assertIn('自动收口', trade.get('notes') or '')
+
+    def test_get_latest_trade_time(self):
+        self.assertIsNone(self.db.get_latest_trade_time('BTC/USDT'))
+        self.db.record_trade(symbol='BTC/USDT', side='long', entry_price=50000, quantity=0.1, leverage=10)
+        latest = self.db.get_latest_trade_time('BTC/USDT')
+        self.assertIsNotNone(latest)
+        self.assertLess((datetime.utcnow() - latest).total_seconds(), 120)
     
     def test_position_update(self):
         """测试持仓更新"""
@@ -755,6 +762,12 @@ class TestTradingExecutor(unittest.TestCase):
         self.assertIsNotNone(trade_id)
         self.assertEqual(self.executor.exchange.order_amounts[0], 10.0)
         self.assertEqual(self.executor.exchange.order_amounts[1], 5.0)
+
+    def test_symbol_cooldown_survives_executor_restart_via_db(self):
+        self.db.record_trade(symbol='BTC/USDT', side='long', entry_price=50000, quantity=0.1, leverage=10)
+        fresh_executor = TradingExecutor(self.config, FakeExecutorExchange(), self.db)
+        fresh_executor.trading_config['cooldown_minutes'] = 15
+        self.assertFalse(fresh_executor._check_cooldown('BTC/USDT'))
 
     def test_trailing_stop_tracks_high_for_long(self):
         self.executor.trading_config['take_profit'] = 0.5

@@ -384,16 +384,15 @@ class TradingExecutor:
         }
     
     def _check_cooldown(self, symbol: str) -> bool:
-        """检查交易冷却"""
+        """检查交易冷却（优先数据库，避免守护跨周期失效）"""
         cooldown_minutes = self.trading_config.get('cooldown_minutes', 15)
-        
-        if symbol in self._trade_cache:
+        last_trade = self.db.get_latest_trade_time(symbol)
+        if not last_trade and symbol in self._trade_cache:
             last_trade = self._trade_cache[symbol].get('last_trade')
-            if last_trade:
-                diff_minutes = (datetime.now() - last_trade).total_seconds() / 60
-                if diff_minutes < cooldown_minutes:
-                    return False
-        
+        if last_trade:
+            diff_minutes = (datetime.utcnow() - last_trade).total_seconds() / 60
+            if diff_minutes < cooldown_minutes:
+                return False
         return True
     
     def _update_cooldown(self, symbol: str):
@@ -437,7 +436,7 @@ class RiskManager:
         min_interval = int(self.trading_config.get('min_trade_interval', 300))
         last_trade = self._get_last_trade_time()
         if last_trade:
-            diff_seconds = (datetime.now() - last_trade).total_seconds()
+            diff_seconds = (datetime.utcnow() - last_trade).total_seconds()
             if diff_seconds < min_interval:
                 details['global_cooldown'] = {'passed': False, 'remaining': int(min_interval - diff_seconds)}
                 return False, f"全局冷却中({int(diff_seconds)}s)", details

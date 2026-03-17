@@ -497,6 +497,7 @@
                             <div class="summary-strip" id="overviewDecisionRecheck"></div>
                             <div class="summary-strip" id="overviewAdvanceCriteria"></div>
                             <div class="summary-strip" id="overviewAdvanceGaps"></div>
+                            <div class="summary-strip" id="overviewAdvancePath"></div>
                             <div class="list" id="overviewActionQueue"></div>
                             <div class="toolbar-inline" id="overviewRuntimeToolbar">
                                 <button class="chip-btn active" onclick="setOverviewRuntimeFilter('all')">全部</button>
@@ -2289,6 +2290,7 @@
             const decisionRecheckHost = document.getElementById('overviewDecisionRecheck');
             const advanceCriteriaHost = document.getElementById('overviewAdvanceCriteria');
             const advanceGapsHost = document.getElementById('overviewAdvanceGaps');
+            const advancePathHost = document.getElementById('overviewAdvancePath');
             const actionQueueHost = document.getElementById('overviewActionQueue');
             const notificationSummaryHost = document.getElementById('overviewNotificationSummary');
             const forwardFunnelHost = document.getElementById('overviewForwardFunnel');
@@ -2784,10 +2786,21 @@
                         <div class="summary-pill"><div class="k">条件说明</div><div class="v">${criteriaHint}</div><div class="s">避免只凭感觉就切下一阶段</div></div>
                     `;
                 }
+                const gaps = criteriaItems.filter(item => !item.ok).map(item => item.todo.replace('⏳ ', ''));
                 if (advanceGapsHost) {
-                    const gaps = criteriaItems.filter(item => !item.ok).map(item => item.todo.replace('⏳ ', ''));
                     advanceGapsHost.innerHTML = `
                         <div class="summary-pill"><div class="k">当前未满足项</div><div class="v">${gaps.length ? gaps.join(' ｜ ') : '当前已无明显缺口'}</div><div class="s">直接告诉你仲差边几项先到推进线</div></div>
+                    `;
+                }
+                if (advancePathHost) {
+                    const pathText = gaps.length
+                        ? `先补：${gaps.slice(0, 2).join(' → ')}${gaps.length > 2 ? ' → ...' : ''}`
+                        : '当前已接近推进线，可开始准备下一阶段';
+                    const pathHint = gaps.length
+                        ? '将未满足项转成最短推进路径，减少你自己再拆顺序'
+                        : '下一步可以从“观察”转向“更细验证”';
+                    advancePathHost.innerHTML = `
+                        <div class="summary-pill"><div class="k">最短推进路径</div><div class="v">${pathText}</div><div class="s">${pathHint}</div></div>
                     `;
                 }
             }

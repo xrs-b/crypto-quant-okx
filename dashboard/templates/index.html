@@ -465,6 +465,7 @@
                             <div class="section-title">总览中心</div>
                             <div class="section-note">默认首页，先看组合状态、系统提醒、最近变化，再往下看持仓细节。</div>
                             <div class="summary-strip" id="overviewManagedHealth"></div>
+                            <div class="summary-strip" id="overviewAccountDiagnostic"></div>
                             <div class="summary-strip" id="overviewManagedRadar"></div>
                             <div class="list" id="overviewManagedChecklist"></div>
                             <div class="summary-strip" id="overviewSmokeKpi"></div>
@@ -2228,7 +2229,7 @@
             `).join('') : '<div class="empty-state"><div class="icon">🧪</div><div>当前筛选下暂无 smoke 验收记录</div></div>';
         }
         async function loadOverview() {
-            const [status, changes, alerts, smokeRuns, smokeState, smokeImpactLatest, reconcileReport, runtimeState, notificationOutbox, notificationStats] = await Promise.all([
+            const [status, changes, alerts, smokeRuns, smokeState, smokeImpactLatest, reconcileReport, runtimeState, notificationOutbox, notificationStats, accountDiagnostic] = await Promise.all([
                 api('/api/system/status'),
                 api('/api/changes/recent'),
                 api('/api/alerts'),
@@ -2238,7 +2239,8 @@
                 api('/api/system/reconcile-report'),
                 api('/api/system/runtime-state'),
                 api('/api/system/notification-outbox?status=all&limit=12'),
-                api('/api/system/notification-outbox-stats')
+                api('/api/system/notification-outbox-stats'),
+                api('/api/system/account-diagnostic')
             ]);
             document.getElementById('systemStatus').textContent = `● ${status.system.status}`;
             document.getElementById('totalValue').textContent = money(status.portfolio.total_value);
@@ -2260,6 +2262,7 @@
             overviewSmokeState = smokeState || null;
             overviewSmokeLastImpact = smokeImpactLatest || getOverviewSmokeLastImpact();
             const managedHealthHost = document.getElementById('overviewManagedHealth');
+            const accountDiagnosticHost = document.getElementById('overviewAccountDiagnostic');
             const managedRadarHost = document.getElementById('overviewManagedRadar');
             const managedChecklistHost = document.getElementById('overviewManagedChecklist');
             const kpiHost = document.getElementById('overviewSmokeKpi');
@@ -2384,6 +2387,14 @@
                     <div class="summary-pill"><div class="k">通知状态</div><div class="v">${notifyEnabled ? '已启用' : '未启用'}</div><div class="s">pending ${notificationPending} ｜ failure ${notificationFailureCount} ｜ relay fail ${relayFailed}</div></div>
                     <div class="summary-pill"><div class="k">操作建议</div><div class="v">${actionAdvice}</div><div class="s">基于当前托管健康级别自动生成</div></div>
                     <div class="summary-pill"><div class="k">下一步动作</div><div class="v">${nextAction}</div><div class="s">建议先处理最高优先级问题</div></div>
+                `;
+            }
+            if (accountDiagnosticHost) {
+                accountDiagnosticHost.innerHTML = `
+                    <div class="summary-pill"><div class="k">模拟盘余额</div><div class="v">${money(accountDiagnostic?.balance_total_usdt || 0)}</div><div class="s">free ${money(accountDiagnostic?.balance_free_usdt || 0)} ｜ mode ${accountDiagnostic?.exchange_mode || '--'}</div></div>
+                    <div class="summary-pill"><div class="k">原始持仓数</div><div class="v">${accountDiagnostic?.raw_positions_count ?? '--'}</div><div class="s">交易所直接返回的 positions 数量</div></div>
+                    <div class="summary-pill"><div class="k">项目识别持仓</div><div class="v">${accountDiagnostic?.filtered_positions_count ?? '--'}</div><div class="s">经过项目过滤后的持仓数</div></div>
+                    <div class="summary-pill"><div class="k">账户诊断</div><div class="v">${accountDiagnostic?.conclusion || '--'}</div><div class="s">帮助判断系账户本身无仓，定项目映射异常</div></div>
                 `;
             }
             if (managedRadarHost) {

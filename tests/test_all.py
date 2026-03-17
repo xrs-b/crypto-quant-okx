@@ -13,6 +13,7 @@ from datetime import datetime
 from core.config import Config
 from core.database import Database
 from core.exchange import Exchange
+from core.notifier import NotificationManager
 from signals import SignalDetector, SignalValidator, SignalRecorder
 from trading import TradingExecutor, RiskManager
 from strategies.strategy_library import StrategyManager
@@ -103,6 +104,14 @@ class ExecutableExchangeStub(DiagnosticExchangeStub):
     def close_order(self, symbol, side, amount, posSide=None):
         self.close_calls.append({'symbol': symbol, 'side': side, 'amount': amount, 'posSide': posSide})
         return {'id': 'close-ok', 'symbol': symbol, 'side': side}
+
+
+class FakeLogDB:
+    def __init__(self):
+        self.logs = []
+
+    def log(self, level, message, details=None):
+        self.logs.append({'level': level, 'message': message, 'details': details or {}})
 
 
 class TestConfig(unittest.TestCase):
@@ -391,6 +400,22 @@ class TestExchange(unittest.TestCase):
         self.assertEqual(result['id'], 'buy-ok')
         self.assertEqual(len(ex.exchange.calls), 1)
         self.assertNotIn('posSide', ex.exchange.calls[0]['params'])
+
+
+class TestNotifications(unittest.TestCase):
+    def test_notify_signal_and_decision_store_logs(self):
+        cfg = Config()
+        cfg._config.setdefault('notification', {}).setdefault('discord', {})
+        cfg._config['notification']['discord'].update({'enabled': False})
+        db = FakeLogDB()
+        notifier = NotificationManager(cfg, db, None)
+        from signals.detector import Signal
+        signal = Signal(symbol='BTC/USDT', signal_type='buy', price=50000, strength=88, strategies_triggered=['RSI', 'MACD'])
+        notifier.notify_signal(signal, True, None, {'passed': True})
+        notifier.notify_decision(signal, False, '风险拒绝', {'risk': 'blocked'})
+        self.assertEqual(len(db.logs), 2)
+        self.assertIn('notify:signal', db.logs[0]['message'])
+        self.assertIn('notify:decision', db.logs[1]['message'])
 
 
 class TestDiagnostics(unittest.TestCase):

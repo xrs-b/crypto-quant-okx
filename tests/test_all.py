@@ -58,6 +58,17 @@ class FakeExecutorExchange:
         return {'id': 'fake-open'}
 
 
+class CloseMismatchExchangeStub:
+    def fetch_ticker(self, symbol):
+        return {'last': 50000}
+
+    def close_order(self, symbol, side, amount, posSide=None):
+        raise Exception('okx 51169 Order failed because you don\'t have any positions in this direction for this contract to reduce or close.')
+
+    def fetch_positions(self):
+        return []
+
+
 class RawOrderExchangeStub:
     def __init__(self):
         self.calls = []
@@ -294,6 +305,21 @@ class TestDatabase(unittest.TestCase):
         trade = self.db.get_latest_open_trade('BTC/USDT', 'long')
         self.assertIsNotNone(trade)
         self.assertEqual(trade['id'], latest_trade_id)
+
+    def test_mark_trade_stale_closed(self):
+        trade_id = self.db.record_trade(
+            symbol='BTC/USDT',
+            side='long',
+            entry_price=50000,
+            quantity=0.1,
+            leverage=10
+        )
+        changed = self.db.mark_trade_stale_closed(trade_id, '交易所无仓', close_price=49999)
+        self.assertTrue(changed)
+        trade = self.db.get_trades(symbol='BTC/USDT', limit=5)[0]
+        self.assertEqual(trade['status'], 'closed')
+        self.assertEqual(trade['exit_price'], 49999)
+        self.assertIn('自动收口', trade.get('notes') or '')
     
     def test_position_update(self):
         """测试持仓更新"""
@@ -729,6 +755,23 @@ class TestTradingExecutor(unittest.TestCase):
         self.assertIsNotNone(trade_id)
         self.assertEqual(self.executor.exchange.order_amounts[0], 10.0)
         self.assertEqual(self.executor.exchange.order_amounts[1], 5.0)
+
+    def test_close_position_auto_reconciles_51169_when_exchange_has_no_position(self):
+        db = Database('data/test_close_mismatch.db')
+        try:
+            db.record_trade(symbol='BTC/USDT', side='long', entry_price=50000, quantity=1, leverage=10)
+            db.update_position(symbol='BTC/USDT', side='long', entry_price=50000, quantity=1, leverage=10, current_price=50010)
+            ex = CloseMismatchExchangeStub()
+            executor = TradingExecutor(self.config, ex, db)
+            closed = executor.close_position('BTC/USDT', reason='止盈', close_price=50010)
+            self.assertTrue(closed)
+            self.assertEqual(db.get_positions(), [])
+            trade = db.get_trades(symbol='BTC/USDT', limit=5)[0]
+            self.assertEqual(trade['status'], 'closed')
+            self.assertIn('自动收口', trade.get('notes') or '')
+        finally:
+            if os.path.exists('data/test_close_mismatch.db'):
+                os.remove('data/test_close_mismatch.db')
 
 
 class TestRiskManager(unittest.TestCase):

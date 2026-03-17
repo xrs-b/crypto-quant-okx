@@ -863,9 +863,26 @@ class Database:
         oldest_pending = cursor.fetchone()[0]
         cursor.execute("SELECT event_type, COUNT(*) AS count FROM notification_outbox WHERE status = 'pending' GROUP BY event_type ORDER BY count DESC LIMIT 3")
         top_pending = [{'event_type': row[0], 'count': row[1]} for row in cursor.fetchall()]
+        cursor.execute("SELECT status, COUNT(*) AS count FROM notification_outbox WHERE status IN ('pending','suppressed','disabled') GROUP BY status ORDER BY count DESC")
+        failure_breakdown = [{'status': row[0], 'count': row[1]} for row in cursor.fetchall()]
+        rows = self.get_notification_outbox(status='all', limit=50)
+        recent_failure_rows = [row for row in rows if row.get('status') in {'pending', 'suppressed', 'disabled'}]
+        reason_counts = {}
+        event_counts = {}
+        for row in recent_failure_rows:
+            event_type = row.get('event_type') or '--'
+            event_counts[event_type] = event_counts.get(event_type, 0) + 1
+            details = row.get('details') or {}
+            reason = details.get('aggregate_summary') or details.get('reason') or details.get('delivery', {}).get('path') or row.get('status') or '--'
+            reason_counts[reason] = reason_counts.get(reason, 0) + 1
+        top_failure_events = sorted([{'event_type': k, 'count': v} for k, v in event_counts.items()], key=lambda x: x['count'], reverse=True)[:3]
+        top_failure_reasons = sorted([{'reason': k, 'count': v} for k, v in reason_counts.items()], key=lambda x: x['count'], reverse=True)[:3]
         conn.close()
         stats['oldest_pending_at'] = oldest_pending
         stats['top_pending_types'] = top_pending
+        stats['failure_breakdown'] = failure_breakdown
+        stats['top_failure_events'] = top_failure_events
+        stats['top_failure_reasons'] = top_failure_reasons
         return stats
 
     def mark_notification_delivered(self, notification_id: int, status: str = 'delivered'):

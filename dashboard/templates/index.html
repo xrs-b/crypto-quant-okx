@@ -2405,13 +2405,16 @@
             };
             const notificationRiskLevel = Number(notificationCounts.pending || 0) >= 5 ? '红' : Number(notificationCounts.pending || 0) >= 1 ? '黄' : '绿';
             const pendingTypeText = (notificationCounts.top_pending_types || []).map(x => `${x.event_type}:${x.count}`).join(' ｜ ') || '暂无堆积';
+            const failureBreakdownText = (notificationCounts.failure_breakdown || []).map(x => `${x.status}:${x.count}`).join(' ｜ ') || '暂无失败';
+            const failureReasonText = (notificationCounts.top_failure_reasons || []).map(x => `${x.reason}:${x.count}`).join(' ｜ ') || '暂无失败原因';
             if (notificationSummaryHost) {
                 notificationSummaryHost.innerHTML = notificationRows.length || notificationCounts.total ? `
                     <div class="summary-pill"><div class="k">通知总量</div><div class="v">${notificationCounts.total ?? notificationRows.length}</div><div class="s">累计通知链路记录</div></div>
                     <div class="summary-pill"><div class="k">已送达</div><div class="v">${notificationCounts.delivered}</div><div class="s">直连/relay 已完成</div></div>
                     <div class="summary-pill"><div class="k">待补发</div><div class="v">${notificationCounts.pending}</div><div class="s">最早积压 ${notificationCounts.oldest_pending_at || '--'}</div></div>
                     <div class="summary-pill"><div class="k">堆积风险</div><div class="v">${notificationRiskLevel}</div><div class="s">${pendingTypeText}</div></div>
-                    <div class="summary-pill"><div class="k">被抑制</div><div class="v">${notificationCounts.suppressed}</div><div class="s">重复消息已做降噪聚合</div></div>
+                    <div class="summary-pill"><div class="k">失败分布</div><div class="v">${(notificationCounts.failure_breakdown || []).length ? '已统计' : '--'}</div><div class="s">${failureBreakdownText}</div></div>
+                    <div class="summary-pill"><div class="k">失败原因</div><div class="v">Top</div><div class="s">${failureReasonText}</div></div>
                 ` : `<div class="summary-pill"><div class="k">最近通知</div><div class="v">--</div><div class="s">暂无通知队列记录</div></div>`;
             }
             if (notificationListHost) {

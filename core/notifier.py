@@ -2,6 +2,7 @@
 通知总线 - 第一版
 统一收口 signal / decision / trade / close / error 通知
 """
+import hashlib
 import json
 from datetime import datetime
 from typing import Dict, List, Optional
@@ -14,6 +15,7 @@ class NotificationManager:
         self.db = database
         self.logger = logger
         self.discord_cfg = config.get('notification.discord', {}) if hasattr(config, 'get') else (config.get('notification', {}).get('discord', {}) if isinstance(config, dict) else {})
+        self._recent_messages = {}
 
     def _is_enabled(self, kind: str) -> bool:
         if not self.discord_cfg.get('enabled', False):
@@ -53,14 +55,36 @@ class NotificationManager:
         except error.URLError:
             return False
 
+    def _dedupe_window(self, event_type: str) -> int:
+        windows = {
+            'signal': 120,
+            'decision': 90,
+            'trade': 30,
+            'close': 30,
+            'error': 180,
+        }
+        return int(windows.get(event_type, 60))
+
+    def _should_suppress(self, event_type: str, body: str) -> bool:
+        now = datetime.now().timestamp()
+        key = f"{event_type}:{hashlib.md5(body.encode('utf-8')).hexdigest()}"
+        window = self._dedupe_window(event_type)
+        last = self._recent_messages.get(key)
+        self._recent_messages = {k: v for k, v in self._recent_messages.items() if now - v < 3600}
+        if last and now - last < window:
+            return True
+        self._recent_messages[key] = now
+        return False
+
     def send(self, event_type: str, title: str, lines: List[str], level: str = 'info', details: Dict = None) -> Dict:
         body = '\n'.join([f'**{title}**', *[f'- {line}' for line in lines if line]])
+        suppressed = self._should_suppress(event_type, body)
         self._store_event(level, event_type, body, details)
         delivered = False
         enabled = self._is_enabled(event_type)
-        if enabled:
+        if enabled and not suppressed:
             delivered = self._send_discord(body)
-        return {'delivered': delivered, 'enabled': enabled, 'message': body}
+        return {'delivered': delivered, 'enabled': enabled, 'suppressed': suppressed, 'message': body}
 
     def notify_signal(self, signal, passed: bool, reason: str = None, details: Dict = None) -> Dict:
         title = '📡 可靠信号' if passed else '🧪 信号已生成'

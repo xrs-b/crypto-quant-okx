@@ -425,11 +425,13 @@ class TestNotifications(unittest.TestCase):
         notifier.notify_trade_close_failed('BTC/USDT', 'long', '平仓失败', {'code': 'mock'})
         notifier.notify_reconcile_issue({'summary': {'exchange_positions': 2, 'local_positions': 1, 'open_trades': 1, 'exchange_missing_local_position': 1, 'local_position_missing_exchange': 0, 'open_trade_missing_exchange': 0, 'exchange_missing_open_trade': 1}})
         runtime = notifier.notify_runtime('skip', ['币种：BTC/USDT', '原因：测试跳过'])
+        duplicate_runtime = notifier.notify_runtime('skip', ['币种：BTC/USDT', '原因：测试跳过'])
         probe = notifier.test_discord()
-        self.assertEqual(len(db.logs), 7)
+        self.assertEqual(len(db.logs), 8)
         self.assertIn('notify:signal', db.logs[0]['message'])
         self.assertIn('风险拒绝', db.logs[1]['details']['message'])
         self.assertFalse(runtime['enabled'])
+        self.assertTrue(duplicate_runtime['suppressed'])
         self.assertFalse(probe['delivered'])
 
 

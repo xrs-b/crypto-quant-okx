@@ -2196,7 +2196,7 @@
             `).join('') : '<div class="empty-state"><div class="icon">🧪</div><div>当前筛选下暂无 smoke 验收记录</div></div>';
         }
         async function loadOverview() {
-            const [status, changes, alerts, smokeRuns, smokeState, smokeImpactLatest, reconcileReport, runtimeState, notificationOutbox] = await Promise.all([
+            const [status, changes, alerts, smokeRuns, smokeState, smokeImpactLatest, reconcileReport, runtimeState, notificationOutbox, notificationStats] = await Promise.all([
                 api('/api/system/status'),
                 api('/api/changes/recent'),
                 api('/api/alerts'),
@@ -2205,7 +2205,8 @@
                 api('/api/system/smoke-impact-latest'),
                 api('/api/system/reconcile-report'),
                 api('/api/system/runtime-state'),
-                api('/api/system/notification-outbox?status=all&limit=12')
+                api('/api/system/notification-outbox?status=all&limit=12'),
+                api('/api/system/notification-outbox-stats')
             ]);
             document.getElementById('systemStatus').textContent = `● ${status.system.status}`;
             document.getElementById('totalValue').textContent = money(status.portfolio.total_value);
@@ -2393,20 +2394,24 @@
                 ` : `<div class="summary-pill"><div class="k">最近一轮摘要</div><div class="v">--</div><div class="s">守护模式尚未产出 last_summary</div></div><div class="summary-pill"><div class="k">Relay 最近结果</div><div class="v">delivered ${relayResult.delivered ?? '--'}</div><div class="s">pending fail ${relayResult.failed ?? '--'} ｜ scanned ${relayResult.scanned ?? '--'}</div></div>`;
             }
             const notificationRows = notificationOutbox || [];
-            const notificationCounts = {
+            const notificationCounts = notificationStats || {
                 delivered: notificationRows.filter(x => x.status === 'delivered').length,
                 pending: notificationRows.filter(x => x.status === 'pending').length,
                 suppressed: notificationRows.filter(x => x.status === 'suppressed').length,
                 disabled: notificationRows.filter(x => x.status === 'disabled').length,
-                error: notificationRows.filter(x => x.event_type === 'error').length,
+                total: notificationRows.length,
+                oldest_pending_at: null,
+                top_pending_types: [],
             };
+            const notificationRiskLevel = Number(notificationCounts.pending || 0) >= 5 ? '红' : Number(notificationCounts.pending || 0) >= 1 ? '黄' : '绿';
+            const pendingTypeText = (notificationCounts.top_pending_types || []).map(x => `${x.event_type}:${x.count}`).join(' ｜ ') || '暂无堆积';
             if (notificationSummaryHost) {
-                notificationSummaryHost.innerHTML = notificationRows.length ? `
-                    <div class="summary-pill"><div class="k">最近通知</div><div class="v">${notificationRows.length}</div><div class="s">最近 12 条通知链路记录</div></div>
+                notificationSummaryHost.innerHTML = notificationRows.length || notificationCounts.total ? `
+                    <div class="summary-pill"><div class="k">通知总量</div><div class="v">${notificationCounts.total ?? notificationRows.length}</div><div class="s">累计通知链路记录</div></div>
                     <div class="summary-pill"><div class="k">已送达</div><div class="v">${notificationCounts.delivered}</div><div class="s">直连/relay 已完成</div></div>
-                    <div class="summary-pill"><div class="k">待补发</div><div class="v">${notificationCounts.pending}</div><div class="s">pending outbox 待 relay</div></div>
+                    <div class="summary-pill"><div class="k">待补发</div><div class="v">${notificationCounts.pending}</div><div class="s">最早积压 ${notificationCounts.oldest_pending_at || '--'}</div></div>
+                    <div class="summary-pill"><div class="k">堆积风险</div><div class="v">${notificationRiskLevel}</div><div class="s">${pendingTypeText}</div></div>
                     <div class="summary-pill"><div class="k">被抑制</div><div class="v">${notificationCounts.suppressed}</div><div class="s">重复消息已做降噪聚合</div></div>
-                    <div class="summary-pill"><div class="k">异常通知</div><div class="v">${notificationCounts.error}</div><div class="s">最近错误/告警类通知条数</div></div>
                 ` : `<div class="summary-pill"><div class="k">最近通知</div><div class="v">--</div><div class="s">暂无通知队列记录</div></div>`;
             }
             if (notificationListHost) {

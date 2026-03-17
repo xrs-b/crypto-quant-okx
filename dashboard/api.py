@@ -282,6 +282,12 @@ def get_notification_outbox():
     return jsonify({'success': True, 'data': rows, 'count': len(rows)})
 
 
+@app.route('/api/system/notification-outbox-stats')
+def get_notification_outbox_stats():
+    """获取通知队列统计，用于堆积监控"""
+    return jsonify({'success': True, 'data': db.get_notification_outbox_stats()})
+
+
 @app.route('/api/system/notification-outbox/<int:notification_id>/deliver', methods=['POST'])
 def mark_notification_outbox_delivered(notification_id: int):
     payload = request.get_json(silent=True) or {}

@@ -413,9 +413,13 @@ class TestNotifications(unittest.TestCase):
         signal = Signal(symbol='BTC/USDT', signal_type='buy', price=50000, strength=88, strategies_triggered=['RSI', 'MACD'])
         notifier.notify_signal(signal, True, None, {'passed': True})
         notifier.notify_decision(signal, False, '风险拒绝', {'risk': 'blocked'})
-        self.assertEqual(len(db.logs), 2)
+        runtime = notifier.notify_runtime('skip', ['币种：BTC/USDT', '原因：测试跳过'])
+        probe = notifier.test_discord()
+        self.assertEqual(len(db.logs), 4)
         self.assertIn('notify:signal', db.logs[0]['message'])
         self.assertIn('notify:decision', db.logs[1]['message'])
+        self.assertFalse(runtime['enabled'])
+        self.assertFalse(probe['delivered'])
 
 
 class TestDiagnostics(unittest.TestCase):

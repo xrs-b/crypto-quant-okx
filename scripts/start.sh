@@ -114,6 +114,29 @@ logs() {
     fi
 }
 
+# 启动通知 relay
+start_relay() {
+    check_python
+
+    cd $PROJECT_DIR
+
+    mkdir -p logs
+
+    nohup $PYTHON_BIN bot/run.py --relay-outbox >> $LOG_FILE 2>&1 &
+    echo $! > $PROJECT_DIR/relay.pid
+
+    echo -e "${GREEN}✅ 通知 relay 已启动 (PID: $(cat $PROJECT_DIR/relay.pid))${NC}"
+}
+
+# 停止通知 relay
+stop_relay() {
+    if [ -f $PROJECT_DIR/relay.pid ]; then
+        kill $(cat $PROJECT_DIR/relay.pid) 2>/dev/null
+        rm -f $PROJECT_DIR/relay.pid
+        echo -e "${GREEN}✅ 通知 relay 已停止${NC}"
+    fi
+}
+
 # 启动仪表盘
 start_dashboard() {
     check_python
@@ -164,8 +187,14 @@ case "$1" in
     stop-dashboard)
         stop_dashboard
         ;;
+    relay)
+        start_relay
+        ;;
+    stop-relay)
+        stop_relay
+        ;;
     *)
-        echo "用法: $0 {start|stop|restart|status|logs|dashboard|stop-dashboard}"
+        echo "用法: $0 {start|stop|restart|status|logs|dashboard|stop-dashboard|relay|stop-relay}"
         exit 1
         ;;
 esac

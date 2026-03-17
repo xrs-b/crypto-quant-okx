@@ -28,6 +28,19 @@ from trading import TradingExecutor, RiskManager
 from ml.engine import MLEngine, ModelTrainer, DataCollector
 from analytics import StrategyBacktester, SignalQualityAnalyzer, ParameterOptimizer, GovernanceEngine
 
+
+def run_notification_relay(interval: int = 30, once: bool = False, limit: int = 20):
+    cfg = Config()
+    db = Database(cfg.db_path)
+    notifier = NotificationManager(cfg, db, logger)
+    print(f"\n📮 Outbox relay 启动 | interval={interval}s | limit={limit} | once={'yes' if once else 'no'}\n")
+    while True:
+        result = notifier.relay_pending_outbox(limit=limit)
+        print(json.dumps({'time': datetime.now().isoformat(), **result}, ensure_ascii=False))
+        if once:
+            break
+        time.sleep(interval)
+
 RUNTIME_STATE_PATH = Path('/Volumes/MacHD/Projects/crypto-quant-okx/data/runtime_state.json')
 
 
@@ -530,6 +543,9 @@ def main():
     parser.add_argument('--cleanup-runtime-records', action='store_true', help='清理重复的治理/日报运行记录')
     parser.add_argument('--exchange-diagnose', action='store_true', help='只读诊断交易所/合约参数，不执行下单')
     parser.add_argument('--notify-test', action='store_true', help='测试 Discord/webhook 通知链路')
+    parser.add_argument('--relay-outbox', action='store_true', help='补发 pending notification_outbox 到 Discord')
+    parser.add_argument('--once', action='store_true', help='配合 relay-outbox，仅执行一轮后退出')
+    parser.add_argument('--relay-limit', type=int, default=20, help='配合 relay-outbox，单轮最多处理几条 pending outbox')
     parser.add_argument('--reconcile-positions', action='store_true', help='只读/同步交易所持仓到本地 DB')
     parser.add_argument('--exchange-smoke', action='store_true', help='生成最小 testnet 验收计划；默认只预演')
     parser.add_argument('--execute', action='store_true', help='配合 smoke 验收命令，显式允许执行 testnet 开平仓')
@@ -713,6 +729,11 @@ def main():
         print("\n🔔 通知链路测试:\n")
         print(result['message'])
         print(f"delivered: {result['delivered']} | enabled: {result['enabled']}")
+
+    elif args.relay_outbox:
+        cfg = Config()
+        interval = args.interval_seconds or int(cfg.get('runtime.notification_relay_interval_seconds', 30))
+        run_notification_relay(interval=interval, once=args.once, limit=args.relay_limit)
 
     elif args.reconcile_positions:
         cfg = Config()

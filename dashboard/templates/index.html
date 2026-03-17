@@ -465,6 +465,8 @@
                             <div class="section-title">总览中心</div>
                             <div class="section-note">默认首页，先看组合状态、系统提醒、最近变化，再往下看持仓细节。</div>
                             <div class="summary-strip" id="overviewManagedHealth"></div>
+                            <div class="summary-strip" id="overviewManagedRadar"></div>
+                            <div class="list" id="overviewManagedChecklist"></div>
                             <div class="summary-strip" id="overviewSmokeKpi"></div>
                             <div class="summary-strip" id="overviewSmokeTrend"></div>
                             <div class="summary-strip" id="overviewSmokeCompare"></div>
@@ -2221,6 +2223,8 @@
             overviewSmokeState = smokeState || null;
             overviewSmokeLastImpact = smokeImpactLatest || getOverviewSmokeLastImpact();
             const managedHealthHost = document.getElementById('overviewManagedHealth');
+            const managedRadarHost = document.getElementById('overviewManagedRadar');
+            const managedChecklistHost = document.getElementById('overviewManagedChecklist');
             const kpiHost = document.getElementById('overviewSmokeKpi');
             const trendHost = document.getElementById('overviewSmokeTrend');
             const compareHost = document.getElementById('overviewSmokeCompare');
@@ -2231,31 +2235,45 @@
             const runtimeSummaryHost = document.getElementById('overviewRuntimeSummary');
             const runtimeHistoryHost = document.getElementById('overviewRuntimeHistory');
             const reconcileDetailHost = document.getElementById('overviewReconcileDetails');
+            const smokeRows = smokeRuns || [];
+            const smokeFailRate = smokeRows.length ? Math.round(smokeRows.filter(x => !x.success).length / smokeRows.length * 100) : 0;
+            const reconcileSummary = reconcileReport?.summary || {};
+            const reconcileRiskCount = Number(reconcileSummary.exchange_missing_local_position || 0) + Number(reconcileSummary.local_position_missing_exchange || 0) + Number(reconcileSummary.open_trade_missing_exchange || 0) + Number(reconcileSummary.exchange_missing_open_trade || 0);
+            const notifyEnabled = true;
+            let healthLevel = '绿';
+            let healthText = '托管健康整体稳定，可继续观察模拟盘表现';
+            if ((runtimeState?.last_error) || reconcileRiskCount >= 3 || smokeFailRate >= 50) {
+                healthLevel = '红';
+                healthText = '托管健康存在明显风险，建议先排查守护异常、对账差异、Smoke 失败';
+            } else if (reconcileRiskCount >= 1 || smokeFailRate >= 20 || (runtimeState?.history || []).some(x => x.type === 'skip')) {
+                healthLevel = '黄';
+                healthText = '托管健康有一定波动，建议继续观察运行、通知与对账状态';
+            }
+            const actionAdvice = healthLevel === '红'
+                ? '先停自动执行，优先检查守护异常、对账差异、Smoke 失败原因。'
+                : healthLevel === '黄'
+                    ? '继续跑模拟盘，但要重点观察对账差异、最近错误与通知是否完整。'
+                    : '可继续维持 testnet 托管试跑，并逐步验证信号质量与收益表现。';
+            const nextAction = healthLevel === '红'
+                ? '建议动作：先做持仓对账 + 查看最近失败 smoke + 检查 Discord 错误通知。'
+                : healthLevel === '黄'
+                    ? '建议动作：优先查看守护历史筛选、对账详情与 smoke 错误标签。'
+                    : '建议动作：开始更长时间 forward test，并观察 Discord 单次推送质量。';
+            const capabilityScores = {
+                execution: Math.max(0, 100 - (runtimeState?.last_error ? 35 : 0) - (((runtimeState?.history || []).filter(x => x.type === 'skip').length || 0) * 5)),
+                notify: notifyEnabled ? 70 : 20,
+                reconcile: Math.max(0, 100 - reconcileRiskCount * 20),
+                risk: Math.max(0, 100 - smokeFailRate),
+                review: smokeRows.length >= 5 ? 75 : smokeRows.length >= 1 ? 55 : 30,
+            };
+            const checklist = [
+                {label: '执行稳定性', score: capabilityScores.execution, advice: runtimeState?.last_error ? '优先查守护异常与最近错误' : '继续观察守护运行历史'},
+                {label: '通知完整性', score: capabilityScores.notify, advice: notifyEnabled ? '通知链路已接入，建议继续做真实推送验证' : '需要先完成通知通道接入'},
+                {label: '对账可信度', score: capabilityScores.reconcile, advice: reconcileRiskCount ? '优先处理三方对账差异' : '当前三方对账基本一致'},
+                {label: '风控可靠性', score: capabilityScores.risk, advice: smokeFailRate >= 20 ? '先降低 Smoke 风险，再放大自动执行' : '继续提升 stop-loss / take-profit 前向验证'},
+                {label: '复盘完善度', score: capabilityScores.review, advice: smokeRows.length ? 'dashboard 复盘已成型，可继续补资产/收益维度' : '需要先积累更多样本'},
+            ].sort((a, b) => a.score - b.score);
             if (managedHealthHost) {
-                const smokeRows = smokeRuns || [];
-                const smokeFailRate = smokeRows.length ? Math.round(smokeRows.filter(x => !x.success).length / smokeRows.length * 100) : 0;
-                const reconcileSummary = reconcileReport?.summary || {};
-                const reconcileRiskCount = Number(reconcileSummary.exchange_missing_local_position || 0) + Number(reconcileSummary.local_position_missing_exchange || 0) + Number(reconcileSummary.open_trade_missing_exchange || 0) + Number(reconcileSummary.exchange_missing_open_trade || 0);
-                const notifyEnabled = true;
-                let healthLevel = '绿';
-                let healthText = '托管健康整体稳定，可继续观察模拟盘表现';
-                if ((runtimeState?.last_error) || reconcileRiskCount >= 3 || smokeFailRate >= 50) {
-                    healthLevel = '红';
-                    healthText = '托管健康存在明显风险，建议先排查守护异常/对账差异/Smoke 失败';
-                } else if (reconcileRiskCount >= 1 || smokeFailRate >= 20 || (runtimeState?.history || []).some(x => x.type === 'skip')) {
-                    healthLevel = '黄';
-                    healthText = '托管健康有一定波动，建议继续观察运行、通知与对账状态';
-                }
-                const actionAdvice = healthLevel === '红'
-                    ? '先停自动执行，优先检查守护异常、对账差异、Smoke 失败原因。'
-                    : healthLevel === '黄'
-                        ? '继续跑模拟盘，但要重点观察对账差异、最近错误与通知是否完整。'
-                        : '可继续维持 testnet 托管试跑，并逐步验证信号质量与收益表现。';
-                const nextAction = healthLevel === '红'
-                    ? '建议动作：先做持仓对账 + 查看最近失败 smoke + 检查 Discord 错误通知。'
-                    : healthLevel === '黄'
-                        ? '建议动作：优先查看守护历史筛选、对账详情与 smoke 错误标签。'
-                        : '建议动作：开始更长时间 forward test，并观察 Discord 单次推送质量。';
                 managedHealthHost.innerHTML = `
                     <div class="summary-pill"><div class="k">托管健康</div><div class="v">${healthLevel}</div><div class="s">${healthText}</div></div>
                     <div class="summary-pill"><div class="k">守护运行</div><div class="v">${runtimeState?.running ? '运行中' : (runtimeState?.mode === 'daemon' ? '待命' : '未启动')}</div><div class="s">last error: ${runtimeState?.last_error ? '有' : '无'}</div></div>
@@ -2265,6 +2283,20 @@
                     <div class="summary-pill"><div class="k">操作建议</div><div class="v">${actionAdvice}</div><div class="s">基于当前托管健康级别自动生成</div></div>
                     <div class="summary-pill"><div class="k">下一步动作</div><div class="v">${nextAction}</div><div class="s">建议先处理最高优先级问题</div></div>
                 `;
+            }
+            if (managedRadarHost) {
+                managedRadarHost.innerHTML = `
+                    <div class="summary-pill"><div class="k">执行稳定性</div><div class="v">${capabilityScores.execution}</div><div class="s">守护异常/跳过越多，分数越低</div></div>
+                    <div class="summary-pill"><div class="k">通知完整性</div><div class="v">${capabilityScores.notify}</div><div class="s">当前按已接入通知总线估算</div></div>
+                    <div class="summary-pill"><div class="k">对账可信度</div><div class="v">${capabilityScores.reconcile}</div><div class="s">三方差异越少越高</div></div>
+                    <div class="summary-pill"><div class="k">风控可靠性</div><div class="v">${capabilityScores.risk}</div><div class="s">按 smoke 失败率推估</div></div>
+                    <div class="summary-pill"><div class="k">复盘完善度</div><div class="v">${capabilityScores.review}</div><div class="s">样本与管理台能力综合估算</div></div>
+                `;
+            }
+            if (managedChecklistHost) {
+                managedChecklistHost.innerHTML = checklist.map((item, index) => `
+                    <div class="item"><strong>P${index + 1} · ${item.label}</strong><div class="muted" style="margin-top:6px;">当前评分 ${item.score} / 100</div><div class="muted" style="margin-top:6px;">建议：${item.advice}</div></div>
+                `).join('');
             }
             if (kpiHost) {
                 if (overviewSmokeLastImpact) {

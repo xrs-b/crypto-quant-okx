@@ -2396,6 +2396,7 @@
                     <div class="summary-pill"><div class="k">原始持仓数</div><div class="v">${accountDiagnostic?.raw_positions_count ?? '--'}</div><div class="s">交易所直接返回的 positions 数量</div></div>
                     <div class="summary-pill"><div class="k">项目识别持仓</div><div class="v">${accountDiagnostic?.filtered_positions_count ?? '--'}</div><div class="s">经过项目过滤后的持仓数</div></div>
                     <div class="summary-pill"><div class="k">账户诊断</div><div class="v">${accountDiagnostic?.conclusion || '--'}</div><div class="s">帮助判断系账户本身无仓，定项目映射异常</div></div>
+                    <div class="summary-pill"><div class="k">账户模式匹配</div><div class="v">${accountDiagnostic?.position_mode || '--'} ↔ ${accountDiagnostic?.balance_info?.data?.[0]?.posMode || '--'}</div><div class="s">项目配置 vs OKX 账户实际模式；当前已验证 hedge / long_short_mode 可正常 smoke</div></div>
                 `;
             }
             if (managedRadarHost) {

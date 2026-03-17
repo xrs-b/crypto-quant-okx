@@ -17,6 +17,7 @@ class NotificationManager:
         self.logger = logger
         self.discord_cfg = config.get('notification.discord', {}) if hasattr(config, 'get') else (config.get('notification', {}).get('discord', {}) if isinstance(config, dict) else {})
         self._recent_messages = {}
+        self._aggregate_messages = {}
         self._http_headers = {
             'Content-Type': 'application/json',
             'User-Agent': 'OKXTradingBot/1.0 (+OpenClaw Notification Bridge)',
@@ -141,22 +142,36 @@ class NotificationManager:
         windows = {
             'signal': 120,
             'decision': 90,
+            'runtime': 300,
             'trade': 30,
             'close': 30,
             'error': 180,
         }
         return int(windows.get(event_type, 60))
 
-    def _should_suppress(self, event_type: str, body: str) -> bool:
+    def _message_key(self, event_type: str, body: str) -> str:
+        return f"{event_type}:{hashlib.md5(body.encode('utf-8')).hexdigest()}"
+
+    def _consume_aggregate_summary(self, message_key: str, window: int) -> Optional[str]:
+        bucket = self._aggregate_messages.pop(message_key, None)
+        if not bucket or bucket.get('count', 0) <= 0:
+            return None
+        return f"最近已合并 {bucket['count']} 次同类通知（约 {window}s 内）"
+
+    def _should_suppress(self, event_type: str, body: str) -> tuple[bool, str, Optional[str]]:
         now = datetime.now().timestamp()
-        key = f"{event_type}:{hashlib.md5(body.encode('utf-8')).hexdigest()}"
+        key = self._message_key(event_type, body)
         window = self._dedupe_window(event_type)
         last = self._recent_messages.get(key)
         self._recent_messages = {k: v for k, v in self._recent_messages.items() if now - v < 3600}
         if last and now - last < window:
-            return True
+            bucket = self._aggregate_messages.get(key) or {'count': 0, 'first_at': now}
+            bucket['count'] = int(bucket.get('count', 0)) + 1
+            bucket['last_at'] = now
+            self._aggregate_messages[key] = bucket
+            return True, key, None
         self._recent_messages[key] = now
-        return False
+        return False, key, self._consume_aggregate_summary(key, window)
 
     def _render_message(self, title: str, lines: List[str]) -> str:
         clean_lines = []
@@ -211,7 +226,10 @@ class NotificationManager:
 
     def send(self, event_type: str, title: str, lines: List[str], level: str = 'info', details: Dict = None, priority: str = 'normal') -> Dict:
         body = self._render_message(title, lines)
-        suppressed = self._should_suppress(event_type, body)
+        suppressed, message_key, aggregate_summary = self._should_suppress(event_type, body)
+        if aggregate_summary:
+            lines = [*lines, '---', '【聚合摘要】', aggregate_summary]
+            body = self._render_message(title, lines)
         outbox_id = self._store_event(level, event_type, body, details, title)
         delivered = False
         enabled = self._is_enabled(event_type)
@@ -229,6 +247,8 @@ class NotificationManager:
             'level': level,
             'title': title,
             'priority': priority,
+            'message_key': message_key,
+            'aggregate_summary': aggregate_summary,
             'delivery': {
                 'enabled': enabled,
                 'suppressed': suppressed,
@@ -236,7 +256,7 @@ class NotificationManager:
                 'path': 'direct' if delivered else 'bridge_pending',
             }
         })
-        return {'delivered': delivered, 'enabled': enabled, 'suppressed': suppressed, 'message': body, 'outbox_id': outbox_id, 'outbox_status': outbox_status, 'priority': priority}
+        return {'delivered': delivered, 'enabled': enabled, 'suppressed': suppressed, 'message': body, 'outbox_id': outbox_id, 'outbox_status': outbox_status, 'priority': priority, 'aggregate_summary': aggregate_summary}
 
     def notify_signal(self, signal, passed: bool, reason: str = None, details: Dict = None) -> Dict:
         title = '📡 可靠信号' if passed else '🧪 信号已生成'
@@ -394,7 +414,8 @@ class NotificationManager:
             'daemon': '🔁 守护模式启动',
         }
         level_map = {'start': 'info', 'end': 'info', 'skip': 'warning', 'daemon': 'info'}
-        return self.send('decision', title_map.get(phase, '🤖 机器人运行状态'), lines, level_map.get(phase, 'info'), details or {})
+        priority_map = {'start': 'normal', 'end': 'normal', 'skip': 'high', 'daemon': 'normal'}
+        return self.send('runtime', title_map.get(phase, '🤖 机器人运行状态'), lines, level_map.get(phase, 'info'), details or {}, priority=priority_map.get(phase, 'normal'))
 
     def test_discord(self) -> Dict:
         now = datetime.now().isoformat()

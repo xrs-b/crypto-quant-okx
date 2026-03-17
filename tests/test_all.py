@@ -452,6 +452,7 @@ class TestNotifications(unittest.TestCase):
         self.assertEqual(runtime['outbox_status'], 'disabled')
         self.assertEqual(duplicate_runtime['outbox_status'], 'disabled')
         self.assertIn('notify:signal', db.logs[0]['message'])
+        self.assertIn('notify:runtime', db.logs[5]['message'])
         self.assertIn('【信号概览】', db.logs[0]['details']['message'])
         self.assertIn('通知等级：⚠️ 重要', db.logs[0]['details']['message'])
         self.assertIn('【风控拦截】', db.logs[1]['details']['message'])
@@ -509,6 +510,23 @@ class TestNotifications(unittest.TestCase):
         self.assertEqual(db.outbox[-1]['status'], 'delivered')
         self.assertTrue(db.outbox[-1]['details']['delivery']['relay_attempted'])
         self.assertEqual(db.outbox[-1]['details']['delivery']['path'], 'relay')
+
+    def test_duplicate_notifications_get_aggregate_summary(self):
+        cfg = Config()
+        cfg._config.setdefault('notification', {}).setdefault('discord', {})
+        cfg._config['notification']['discord'].update({'enabled': False})
+        db = FakeLogDB()
+        notifier = NotificationManager(cfg, db, None)
+        first = notifier.send('runtime', '测试聚合', ['同类消息'])
+        second = notifier.send('runtime', '测试聚合', ['同类消息'])
+        key = next(iter(notifier._recent_messages.keys()))
+        notifier._recent_messages[key] = notifier._recent_messages[key] - 301
+        third = notifier.send('runtime', '测试聚合', ['同类消息'])
+        self.assertFalse(first['suppressed'])
+        self.assertTrue(second['suppressed'])
+        self.assertEqual(second['aggregate_summary'], None)
+        self.assertEqual(third['aggregate_summary'], '最近已合并 1 次同类通知（约 300s 内）')
+        self.assertIn('【聚合摘要】', third['message'])
 
 
 class TestReconcilePositions(unittest.TestCase):

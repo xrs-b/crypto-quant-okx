@@ -425,6 +425,19 @@ class Database:
             return None
         return df.iloc[0].to_dict()
 
+    def get_latest_trade_time(self, symbol: str = None) -> Optional[datetime]:
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        if symbol:
+            cursor.execute("SELECT open_time FROM trades WHERE symbol = ? ORDER BY open_time DESC, id DESC LIMIT 1", (symbol,))
+        else:
+            cursor.execute("SELECT open_time FROM trades ORDER BY open_time DESC, id DESC LIMIT 1")
+        row = cursor.fetchone()
+        conn.close()
+        if not row or not row[0]:
+            return None
+        return datetime.fromisoformat(row[0])
+
     def get_open_trades(self, symbol: str = None, side: str = None, limit: int = 200) -> List[Dict]:
         conn = self._get_connection()
         query = "SELECT * FROM trades WHERE status = 'open'"

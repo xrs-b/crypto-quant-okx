@@ -119,6 +119,7 @@ class TradingExecutor:
                 
                 # 更新冷却时间
                 self._update_cooldown(symbol)
+                self._seed_trailing_anchor(symbol, side, current_price)
                 
                 trade_logger.trade(
                     symbol, side, current_price, amount, trade_id
@@ -213,6 +214,7 @@ class TradingExecutor:
                 
                 # 更新冷却时间
                 self._update_cooldown(symbol)
+                self._clear_trade_cache(symbol)
                 
                 trade_logger.close(symbol, close_price, pnl, reason)
                 
@@ -222,6 +224,7 @@ class TradingExecutor:
                 message = str(e)
                 trade_logger.error(f"平仓失败 (尝试 {attempt + 1}/{max_retries}): {e}")
                 if '51169' in message and not self._exchange_has_position(symbol, side):
+                    self._clear_trade_cache(symbol)
                     return self._close_local_position_as_stale(symbol, side, close_price, f'{reason} | 交易所已无对应仓位')
                 if attempt < max_retries - 1:
                     time.sleep(1)
@@ -276,6 +279,7 @@ class TradingExecutor:
                 break
         
         if not position:
+            self._clear_trade_cache(symbol)
             return False
         
         side = position['side']
@@ -284,23 +288,23 @@ class TradingExecutor:
         
         # 追踪止损
         trailing_stop = self.trading_config.get('trailing_stop', 0.015)
-        
-        # 追踪最高价/最低价
-        if highest_price is None:
-            highest_price = current_price
+        cache = self._trade_cache.setdefault(symbol, {})
         
         if side == 'long':
-            # 多仓追踪最高价
-            stop_price = highest_price * (1 - trailing_stop)
-            if current_price <= stop_price:
+            anchor = highest_price if highest_price is not None else cache.get('highest_price', entry_price)
+            anchor = max(float(anchor or entry_price), float(current_price or entry_price))
+            cache['highest_price'] = anchor
+            stop_price = anchor * (1 - trailing_stop)
+            if current_price <= stop_price and current_price > entry_price:
                 pnl_percent = (current_price - entry_price) / entry_price * leverage
                 trade_logger.info(f"触发追踪止损: {symbol} 盈利{pnl_percent*100:.2f}%")
                 return True
         else:
-            # 空仓追踪最低价
-            lowest_price = current_price
-            stop_price = lowest_price * (1 + trailing_stop)
-            if current_price >= stop_price:
+            anchor = cache.get('lowest_price', entry_price)
+            anchor = min(float(anchor or entry_price), float(current_price or entry_price))
+            cache['lowest_price'] = anchor
+            stop_price = anchor * (1 + trailing_stop)
+            if current_price >= stop_price and current_price < entry_price:
                 pnl_percent = (entry_price - current_price) / entry_price * leverage
                 trade_logger.info(f"触发追踪止损: {symbol} 盈利{pnl_percent*100:.2f}%")
                 return True
@@ -395,6 +399,17 @@ class TradingExecutor:
         if symbol not in self._trade_cache:
             self._trade_cache[symbol] = {}
         self._trade_cache[symbol]['last_trade'] = datetime.now()
+
+    def _seed_trailing_anchor(self, symbol: str, side: str, price: float):
+        if symbol not in self._trade_cache:
+            self._trade_cache[symbol] = {}
+        if side == 'long':
+            self._trade_cache[symbol]['highest_price'] = price
+        else:
+            self._trade_cache[symbol]['lowest_price'] = price
+
+    def _clear_trade_cache(self, symbol: str):
+        self._trade_cache.pop(symbol, None)
 
 
 class RiskManager:

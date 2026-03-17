@@ -756,6 +756,24 @@ class TestTradingExecutor(unittest.TestCase):
         self.assertEqual(self.executor.exchange.order_amounts[0], 10.0)
         self.assertEqual(self.executor.exchange.order_amounts[1], 5.0)
 
+    def test_trailing_stop_tracks_high_for_long(self):
+        self.executor.trading_config['take_profit'] = 0.5
+        self.executor.trading_config['trailing_stop'] = 0.05
+        self.db.update_position(symbol='BTC/USDT', side='long', entry_price=100, quantity=1, leverage=1, current_price=100)
+        self.assertFalse(self.executor.check_take_profit('BTC/USDT', 110))
+        self.assertEqual(self.executor._trade_cache['BTC/USDT']['highest_price'], 110)
+        self.assertFalse(self.executor.check_take_profit('BTC/USDT', 108))
+        self.assertTrue(self.executor.check_take_profit('BTC/USDT', 104))
+
+    def test_trailing_stop_tracks_low_for_short(self):
+        self.executor.trading_config['take_profit'] = 0.5
+        self.executor.trading_config['trailing_stop'] = 0.05
+        self.db.update_position(symbol='BTC/USDT', side='short', entry_price=100, quantity=1, leverage=1, current_price=100)
+        self.assertFalse(self.executor.check_take_profit('BTC/USDT', 95))
+        self.assertEqual(self.executor._trade_cache['BTC/USDT']['lowest_price'], 95)
+        self.assertFalse(self.executor.check_take_profit('BTC/USDT', 96))
+        self.assertTrue(self.executor.check_take_profit('BTC/USDT', 99.8))
+
     def test_close_position_auto_reconciles_51169_when_exchange_has_no_position(self):
         db = Database('data/test_close_mismatch.db')
         try:

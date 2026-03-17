@@ -477,6 +477,7 @@
                             <div class="summary-strip" id="overviewRuntimeSummary"></div>
                             <div class="summary-strip" id="overviewRunContinuity"></div>
                             <div class="summary-strip" id="overviewRunTrend"></div>
+                            <div class="summary-strip" id="overviewForwardReady"></div>
                             <div class="toolbar-inline" id="overviewRuntimeToolbar">
                                 <button class="chip-btn active" onclick="setOverviewRuntimeFilter('all')">全部</button>
                                 <button class="chip-btn" onclick="setOverviewRuntimeFilter('error')">异常</button>
@@ -2248,6 +2249,7 @@
             const runtimeSummaryHost = document.getElementById('overviewRuntimeSummary');
             const runtimeContinuityHost = document.getElementById('overviewRunContinuity');
             const runtimeTrendHost = document.getElementById('overviewRunTrend');
+            const forwardReadyHost = document.getElementById('overviewForwardReady');
             const notificationSummaryHost = document.getElementById('overviewNotificationSummary');
             const forwardFunnelHost = document.getElementById('overviewForwardFunnel');
             const forwardRiskHost = document.getElementById('overviewForwardRisk');
@@ -2459,6 +2461,22 @@
                     <div class="summary-pill"><div class="k">连续成功</div><div class="v">${successStreak}</div><div class="s">当前连续完成周期数</div></div>
                     <div class="summary-pill"><div class="k">连续异常</div><div class="v">${errorStreak}</div><div class="s">当前连续异常周期数</div></div>
                     <div class="summary-pill"><div class="k">趋势判断</div><div class="v">${trendText}</div><div class="s">帮助判断样本积累是否值得继续放大</div></div>
+                `;
+            }
+            if (forwardReadyHost) {
+                const readyLevel = errorStreak >= 2 || runtimeErrorRows.length >= 3 || notificationPending >= 3
+                    ? '暂停扩样本'
+                    : successStreak >= 2 && openedTrades >= 1
+                        ? '适合继续'
+                        : '继续观察';
+                const readyReason = readyLevel === '暂停扩样本'
+                    ? '异常/通知堆积偏多，建议先稳住链路再继续长跑'
+                    : readyLevel === '适合继续'
+                        ? '连续成功已有样本，且已形成真实开仓，可继续 forward test'
+                        : '链路基本可用，但样本仍未够厚，建议继续观察';
+                forwardReadyHost.innerHTML = `
+                    <div class="summary-pill"><div class="k">Forward test 建议</div><div class="v">${readyLevel}</div><div class="s">${readyReason}</div></div>
+                    <div class="summary-pill"><div class="k">当前依据</div><div class="v">success ${successStreak} ｜ error ${runtimeErrorRows.length}</div><div class="s">opened ${openedTrades} ｜ pending ${notificationPending}</div></div>
                 `;
             }
             const notificationRows = notificationOutbox || [];

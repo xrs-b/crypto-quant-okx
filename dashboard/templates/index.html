@@ -488,6 +488,7 @@
                             <div class="summary-strip" id="overviewPriorityNow"></div>
                             <div class="summary-strip" id="overviewWrapUpStatus"></div>
                             <div class="summary-strip" id="overviewObservationConfidence"></div>
+                            <div class="summary-strip" id="overviewTopSummary"></div>
                             <div class="toolbar-inline" id="overviewRuntimeToolbar">
                                 <button class="chip-btn active" onclick="setOverviewRuntimeFilter('all')">全部</button>
                                 <button class="chip-btn" onclick="setOverviewRuntimeFilter('error')">异常</button>
@@ -2270,6 +2271,7 @@
             const priorityNowHost = document.getElementById('overviewPriorityNow');
             const wrapUpStatusHost = document.getElementById('overviewWrapUpStatus');
             const observationConfidenceHost = document.getElementById('overviewObservationConfidence');
+            const topSummaryHost = document.getElementById('overviewTopSummary');
             const notificationSummaryHost = document.getElementById('overviewNotificationSummary');
             const forwardFunnelHost = document.getElementById('overviewForwardFunnel');
             const forwardRiskHost = document.getElementById('overviewForwardRisk');
@@ -2653,18 +2655,28 @@
                     <div class="summary-pill"><div class="k">收尾提示</div><div class="v">${wrapHint}</div><div class="s">俾首页最后多一层落点</div></div>
                 `;
             }
+            let observationConfidence = Math.max(0, Math.min(100,
+                (end48 * 12) + (successStreak * 8) + (closedTrades * 6) - (err48 * 18) - (notificationPending * 10)
+            ));
+            let confidenceText = observationConfidence >= 75
+                ? '当前观察结论可信度较高'
+                : observationConfidence >= 45
+                    ? '当前观察结论已有参考价值'
+                    : '当前观察结论仍偏初步';
             if (observationConfidenceHost) {
-                const observationConfidence = Math.max(0, Math.min(100,
-                    (end48 * 12) + (successStreak * 8) + (closedTrades * 6) - (err48 * 18) - (notificationPending * 10)
-                ));
-                const confidenceText = observationConfidence >= 75
-                    ? '当前观察结论可信度较高'
-                    : observationConfidence >= 45
-                        ? '当前观察结论已有参考价值'
-                        : '当前观察结论仍偏初步';
                 observationConfidenceHost.innerHTML = `
                     <div class="summary-pill"><div class="k">观察信心</div><div class="v">${observationConfidence}</div><div class="s">样本、连续运行、异常密度综合评分</div></div>
                     <div class="summary-pill"><div class="k">信心说明</div><div class="v">${confidenceText}</div><div class="s">帮助判断首页结论应睇得几重</div></div>
+                `;
+            }
+            if (topSummaryHost) {
+                const summaryLine = finalDecision === '先修问题再说'
+                    ? '当前系统仍以排障稳链路为先，暂未到阶段推进时机。'
+                    : finalDecision === '继续观察积累'
+                        ? '当前系统已可持续观察，但仍需继续补样本，未建议太早下重结论。'
+                        : '当前系统已具备向后推进既基础，可以开始更细既质量验证。';
+                topSummaryHost.innerHTML = `
+                    <div class="summary-pill"><div class="k">首页一句话总结</div><div class="v">${summaryLine}</div><div class="s">最终判断=${finalDecision} ｜ 信心=${observationConfidence}</div></div>
                 `;
             }
             const notificationRows = notificationOutbox || [];

@@ -2246,12 +2246,24 @@
                     healthLevel = '黄';
                     healthText = '托管健康有一定波动，建议继续观察运行、通知与对账状态';
                 }
+                const actionAdvice = healthLevel === '红'
+                    ? '先停自动执行，优先检查守护异常、对账差异、Smoke 失败原因。'
+                    : healthLevel === '黄'
+                        ? '继续跑模拟盘，但要重点观察对账差异、最近错误与通知是否完整。'
+                        : '可继续维持 testnet 托管试跑，并逐步验证信号质量与收益表现。';
+                const nextAction = healthLevel === '红'
+                    ? '建议动作：先做持仓对账 + 查看最近失败 smoke + 检查 Discord 错误通知。'
+                    : healthLevel === '黄'
+                        ? '建议动作：优先查看守护历史筛选、对账详情与 smoke 错误标签。'
+                        : '建议动作：开始更长时间 forward test，并观察 Discord 单次推送质量。';
                 managedHealthHost.innerHTML = `
                     <div class="summary-pill"><div class="k">托管健康</div><div class="v">${healthLevel}</div><div class="s">${healthText}</div></div>
                     <div class="summary-pill"><div class="k">守护运行</div><div class="v">${runtimeState?.running ? '运行中' : (runtimeState?.mode === 'daemon' ? '待命' : '未启动')}</div><div class="s">last error: ${runtimeState?.last_error ? '有' : '无'}</div></div>
                     <div class="summary-pill"><div class="k">对账风险</div><div class="v">${reconcileRiskCount}</div><div class="s">exchange/local/open_trade 差异项</div></div>
                     <div class="summary-pill"><div class="k">Smoke 风险</div><div class="v">${smokeFailRate}%</div><div class="s">最近 smoke 失败率</div></div>
                     <div class="summary-pill"><div class="k">通知状态</div><div class="v">${notifyEnabled ? '已启用' : '未启用'}</div><div class="s">Discord/webhook 模板链路已接入</div></div>
+                    <div class="summary-pill"><div class="k">操作建议</div><div class="v">${actionAdvice}</div><div class="s">基于当前托管健康级别自动生成</div></div>
+                    <div class="summary-pill"><div class="k">下一步动作</div><div class="v">${nextAction}</div><div class="s">建议先处理最高优先级问题</div></div>
                 `;
             }
             if (kpiHost) {

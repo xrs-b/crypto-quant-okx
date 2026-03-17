@@ -482,6 +482,8 @@
                                 <button class="chip-btn" onclick="setOverviewRuntimeFilter('end')">完成</button>
                             </div>
                             <div class="summary-strip" id="overviewRuntimeRisk"></div>
+                            <div class="summary-strip" id="overviewNotificationSummary"></div>
+                            <div class="list" id="overviewNotificationList"></div>
                             <div class="list" id="overviewRuntimeHistory"></div>
                             <div class="list" id="overviewReconcileDetails"></div>
                             <div class="compact-grid">
@@ -2194,7 +2196,7 @@
             `).join('') : '<div class="empty-state"><div class="icon">🧪</div><div>当前筛选下暂无 smoke 验收记录</div></div>';
         }
         async function loadOverview() {
-            const [status, changes, alerts, smokeRuns, smokeState, smokeImpactLatest, reconcileReport, runtimeState] = await Promise.all([
+            const [status, changes, alerts, smokeRuns, smokeState, smokeImpactLatest, reconcileReport, runtimeState, notificationOutbox] = await Promise.all([
                 api('/api/system/status'),
                 api('/api/changes/recent'),
                 api('/api/alerts'),
@@ -2202,7 +2204,8 @@
                 api('/api/system/smoke-state'),
                 api('/api/system/smoke-impact-latest'),
                 api('/api/system/reconcile-report'),
-                api('/api/system/runtime-state')
+                api('/api/system/runtime-state'),
+                api('/api/system/notification-outbox?status=all&limit=12')
             ]);
             document.getElementById('systemStatus').textContent = `● ${status.system.status}`;
             document.getElementById('totalValue').textContent = money(status.portfolio.total_value);
@@ -2233,6 +2236,8 @@
             const reconcileHost = document.getElementById('overviewReconcileRisk');
             const runtimeHost = document.getElementById('overviewRuntimeState');
             const runtimeSummaryHost = document.getElementById('overviewRuntimeSummary');
+            const notificationSummaryHost = document.getElementById('overviewNotificationSummary');
+            const notificationListHost = document.getElementById('overviewNotificationList');
             const runtimeHistoryHost = document.getElementById('overviewRuntimeHistory');
             const reconcileDetailHost = document.getElementById('overviewReconcileDetails');
             const smokeRows = smokeRuns || [];
@@ -2384,6 +2389,32 @@
                     <div class="summary-pill"><div class="k">最近一轮开仓</div><div class="v">${s.opened ?? '--'}</div><div class="s">平仓 ${s.closed ?? '--'} ｜ 错误 ${s.errors ?? '--'}</div></div>
                     <div class="summary-pill"><div class="k">最近一轮开始</div><div class="v">${s.started_at || '--'}</div><div class="s">结束 ${s.finished_at || '--'}</div></div>
                 ` : `<div class="summary-pill"><div class="k">最近一轮摘要</div><div class="v">--</div><div class="s">守护模式尚未产出 last_summary</div></div>`;
+            }
+            const notificationRows = notificationOutbox || [];
+            const notificationCounts = {
+                delivered: notificationRows.filter(x => x.status === 'delivered').length,
+                pending: notificationRows.filter(x => x.status === 'pending').length,
+                suppressed: notificationRows.filter(x => x.status === 'suppressed').length,
+                disabled: notificationRows.filter(x => x.status === 'disabled').length,
+                error: notificationRows.filter(x => x.event_type === 'error').length,
+            };
+            if (notificationSummaryHost) {
+                notificationSummaryHost.innerHTML = notificationRows.length ? `
+                    <div class="summary-pill"><div class="k">最近通知</div><div class="v">${notificationRows.length}</div><div class="s">最近 12 条通知链路记录</div></div>
+                    <div class="summary-pill"><div class="k">已送达</div><div class="v">${notificationCounts.delivered}</div><div class="s">直连/relay 已完成</div></div>
+                    <div class="summary-pill"><div class="k">待补发</div><div class="v">${notificationCounts.pending}</div><div class="s">pending outbox 待 relay</div></div>
+                    <div class="summary-pill"><div class="k">被抑制</div><div class="v">${notificationCounts.suppressed}</div><div class="s">重复消息已做降噪聚合</div></div>
+                    <div class="summary-pill"><div class="k">异常通知</div><div class="v">${notificationCounts.error}</div><div class="s">最近错误/告警类通知条数</div></div>
+                ` : `<div class="summary-pill"><div class="k">最近通知</div><div class="v">--</div><div class="s">暂无通知队列记录</div></div>`;
+            }
+            if (notificationListHost) {
+                notificationListHost.innerHTML = notificationRows.length ? notificationRows.map(row => `
+                    <details class="item">
+                        <summary style="cursor:pointer; list-style:none;"><strong>${row.status === 'delivered' ? '✅' : row.status === 'pending' ? '🕓' : row.status === 'suppressed' ? '🧹' : row.status === 'disabled' ? '⏸️' : '📨'} ${row.title || row.event_type || '通知'}</strong><div class="muted" style="margin-top:6px;">${row.created_at || '--'} ｜ ${row.event_type || '--'} ｜ status=${row.status || '--'} ｜ priority=${row.details?.priority || '--'}</div><div class="muted" style="margin-top:6px;">${(row.message || '').split('\n').slice(0,3).join(' ｜ ')}</div></summary>
+                        <div class="muted" style="margin-top:10px;">delivery path：${row.details?.delivery?.path || '--'} ｜ aggregate：${row.details?.aggregate_summary || '--'}</div>
+                        <pre style="margin-top:10px">${JSON.stringify(row.details || {}, null, 2)}</pre>
+                    </details>
+                `).join('') : '<div class="empty-state"><div class="icon">📨</div><div>暂无最近通知记录</div></div>';
             }
             renderOverviewRuntimePanel(runtimeState || {});
             if (reconcileHost || reconcileDetailHost) {

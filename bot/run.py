@@ -11,8 +11,11 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import argparse
+import json
+import time
 import pandas as pd
 from datetime import datetime
+from pathlib import Path
 
 from core.config import Config
 from core.database import Database
@@ -171,6 +174,37 @@ def execute_exchange_smoke(cfg: Config, exchange: Exchange, symbol: str = None, 
     return result
 
 
+class RuntimeGuard:
+    def __init__(self, lock_path: str = '/tmp/crypto_quant_okx_bot.lock'):
+        self.lock_path = Path(lock_path)
+        self.locked = False
+
+    def acquire(self) -> bool:
+        if self.lock_path.exists():
+            try:
+                pid = int(self.lock_path.read_text().strip() or 0)
+                if pid > 0:
+                    os.kill(pid, 0)
+                    return False
+            except Exception:
+                pass
+            try:
+                self.lock_path.unlink()
+            except Exception:
+                return False
+        self.lock_path.write_text(str(os.getpid()))
+        self.locked = True
+        return True
+
+    def release(self):
+        if self.locked and self.lock_path.exists():
+            try:
+                self.lock_path.unlink()
+            except Exception:
+                pass
+        self.locked = False
+
+
 class TradingBot:
     """交易机器人主类"""
     
@@ -190,11 +224,14 @@ class TradingBot:
     
     def run(self):
         """运行交易循环"""
+        started_at = datetime.now()
+        summary = {'started_at': started_at.isoformat(), 'symbols': len(self.config.symbols), 'signals': 0, 'passed': 0, 'opened': 0, 'closed': 0, 'errors': 0}
         print(f"\n{'='*60}")
         print(f"🤖 OKX量化交易系统 v2.0")
-        print(f"   时间: {datetime.now()}")
+        print(f"   时间: {started_at}")
         print(f"   币种: {', '.join(self.config.symbols)}")
         print(f"{'='*60}\n")
+        self.notifier.notify_runtime('start', [f'时间：{started_at.isoformat()}', f'监控币种：{", ".join(self.config.symbols)}'])
         
         # 获取余额
         try:
@@ -255,6 +292,9 @@ class TradingBot:
                 
                 # 验证信号
                 passed, reason, details = self.validator.validate(signal, current_positions)
+                summary['signals'] += 1
+                if passed:
+                    summary['passed'] += 1
                 signal.filtered = not passed
                 signal.filter_reason = reason
                 
@@ -280,6 +320,7 @@ class TradingBot:
                         )
                         
                         if trade_id:
+                            summary['opened'] += 1
                             self.recorder.mark_executed(signal_id, trade_id)
                             self.notifier.notify_trade_open(symbol, side, current_price, self.db.get_latest_open_trade(symbol, side).get('quantity') if self.db.get_latest_open_trade(symbol, side) else 0, trade_id, signal)
                             print(f"   ✅ 开{'多' if side == 'long' else '空'}成功! Trade ID: {trade_id}")
@@ -292,6 +333,7 @@ class TradingBot:
                 print()
                 
             except Exception as e:
+                summary['errors'] += 1
                 self.notifier.notify_error('处理币种出错', f'{symbol}: {e}', {'symbol': symbol})
                 logger.error(f"处理{symbol}出错: {e}")
                 print(f"   ⚠️ 错误: {e}\n")
@@ -315,21 +357,27 @@ class TradingBot:
                 
                 # 检查止损
                 if self.executor.check_stop_loss(symbol, current_price):
+                    summary['closed'] += 1
                     self.executor.close_position(symbol, '止损')
                     self.notifier.notify_trade_close(symbol, position['side'], current_price, '止损')
                     print(f"   🔴 止损: {symbol}")
                 
                 # 检查止盈
                 elif self.executor.check_take_profit(symbol, current_price):
+                    summary['closed'] += 1
                     self.executor.close_position(symbol, '止盈')
                     self.notifier.notify_trade_close(symbol, position['side'], current_price, '止盈')
                     print(f"   🟢 止盈: {symbol}")
                 
             except Exception as e:
+                summary['errors'] += 1
                 self.notifier.notify_error('检查持仓失败', f'{symbol}: {e}', {'symbol': symbol})
                 logger.error(f"检查持仓{symbol}出错: {e}")
-        
-        print(f"\n✅ 交易循环完成! {datetime.now()}\n")
+        finished_at = datetime.now()
+        summary['finished_at'] = finished_at.isoformat()
+        self.notifier.notify_runtime('end', [f'开始：{summary["started_at"]}', f'结束：{summary["finished_at"]}', f'信号：{summary["signals"]} ｜ 通过：{summary["passed"]} ｜ 开仓：{summary["opened"]} ｜ 平仓：{summary["closed"]} ｜ 错误：{summary["errors"]}'], summary)
+        print(f"\n✅ 交易循环完成! {finished_at}\n")
+        return summary
     
     def _add_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         """添加技术指标"""
@@ -362,6 +410,8 @@ class TradingBot:
 def main():
     parser = argparse.ArgumentParser(description='OKX量化交易机器人')
     parser.add_argument('--dashboard', action='store_true', help='启动仪表盘')
+    parser.add_argument('--daemon', action='store_true', help='守护模式定时运行交易循环')
+    parser.add_argument('--interval-seconds', type=int, help='守护模式执行间隔秒数，默认取 config.runtime.interval_seconds')
     parser.add_argument('--train', action='store_true', help='训练模型')
     parser.add_argument('--collect', action='store_true', help='收集数据')
     parser.add_argument('--backtest', action='store_true', help='运行回测')
@@ -386,6 +436,28 @@ def main():
         # 启动仪表盘
         from dashboard.api import run_dashboard
         run_dashboard(port=args.port)
+
+    elif args.daemon:
+        cfg = Config()
+        interval = args.interval_seconds or int(cfg.get('runtime.interval_seconds', 300))
+        guard = RuntimeGuard()
+        notifier = NotificationManager(cfg, Database(cfg.db_path), logger)
+        notifier.notify_runtime('daemon', [f'守护间隔：{interval} 秒', f'监控币种：{", ".join(cfg.symbols)}'])
+        print(f"\n🔁 守护模式启动，间隔 {interval} 秒\n")
+        while True:
+            if not guard.acquire():
+                notifier.notify_runtime('skip', ['检测到已有交易周期正在运行，本轮跳过'])
+                time.sleep(interval)
+                continue
+            try:
+                bot = TradingBot()
+                bot.run()
+            except Exception as e:
+                notifier.notify_error('守护周期异常', str(e), {'interval': interval})
+                logger.error(f'守护周期异常: {e}')
+            finally:
+                guard.release()
+            time.sleep(interval)
     
     elif args.train:
         # 训练模型

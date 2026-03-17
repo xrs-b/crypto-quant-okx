@@ -110,3 +110,13 @@ class NotificationManager:
 
     def notify_error(self, title: str, message: str, details: Dict = None) -> Dict:
         return self.send('error', f'❌ {title}', [message], 'error', details or {})
+
+    def notify_runtime(self, phase: str, lines: List[str], details: Dict = None) -> Dict:
+        title_map = {
+            'start': '⏱️ 机器人周期开始',
+            'end': '✅ 机器人周期完成',
+            'skip': '⏭️ 机器人周期跳过',
+            'daemon': '🔁 守护模式启动',
+        }
+        level_map = {'start': 'info', 'end': 'info', 'skip': 'warning', 'daemon': 'info'}
+        return self.send('decision', title_map.get(phase, '🤖 机器人运行状态'), lines, level_map.get(phase, 'info'), details or {})

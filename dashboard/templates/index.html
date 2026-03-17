@@ -493,6 +493,7 @@
                             <div class="summary-strip" id="overviewDecisionStability"></div>
                             <div class="summary-strip" id="overviewDecisionDrift"></div>
                             <div class="summary-strip" id="overviewDecisionWhy"></div>
+                            <div class="summary-strip" id="overviewDecisionBoundary"></div>
                             <div class="list" id="overviewActionQueue"></div>
                             <div class="toolbar-inline" id="overviewRuntimeToolbar">
                                 <button class="chip-btn active" onclick="setOverviewRuntimeFilter('all')">全部</button>
@@ -2281,6 +2282,7 @@
             const decisionStabilityHost = document.getElementById('overviewDecisionStability');
             const decisionDriftHost = document.getElementById('overviewDecisionDrift');
             const decisionWhyHost = document.getElementById('overviewDecisionWhy');
+            const decisionBoundaryHost = document.getElementById('overviewDecisionBoundary');
             const actionQueueHost = document.getElementById('overviewActionQueue');
             const notificationSummaryHost = document.getElementById('overviewNotificationSummary');
             const forwardFunnelHost = document.getElementById('overviewForwardFunnel');
@@ -2735,6 +2737,16 @@
                         : `因为 successStreak=${successStreak}、end48=${end48}、closed=${closedTrades}，当前已有较完整观察基础。`;
                 decisionWhyHost.innerHTML = `
                     <div class="summary-pill"><div class="k">为何这样判断</div><div class="v">${whyText}</div><div class="s">将首页建议同关键指标直接对应起来</div></div>
+                `;
+            }
+            if (decisionBoundaryHost) {
+                const applyText = finalDecision === '可转下一阶段'
+                    ? '适用于：首页快速判断是否可以进入更细验证阶段。'
+                    : '适用于：首页快速判断当前应继续观察还是先排障。';
+                const avoidText = '不适用于：直接代替长期收益结论、实盘结论或策略最终优劣判断。';
+                decisionBoundaryHost.innerHTML = `
+                    <div class="summary-pill"><div class="k">判断适用范围</div><div class="v">${applyText}</div><div class="s">帮助避免把首页结论用得过火</div></div>
+                    <div class="summary-pill"><div class="k">当前边界</div><div class="v">${avoidText}</div><div class="s">首页判断仍以观察/验收辅助为主</div></div>
                 `;
             }
             if (actionQueueHost) {

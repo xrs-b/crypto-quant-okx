@@ -441,9 +441,9 @@
 
             <section class="content">
                 <div class="stats">
-                    <div class="card stat"><div class="label">持仓总价值</div><div class="value" id="totalValue">--</div><div class="sub">未实现盈亏 <span id="unrealizedPnl">--</span></div></div>
+                    <div class="card stat"><div class="label">账户总权益</div><div class="value" id="totalValue">--</div><div class="sub">可用余额 <span id="freeBalance">--</span> · 持仓占用 <span id="usedBalance">--</span></div></div>
+                    <div class="card stat"><div class="label">持仓总价值</div><div class="value" id="positionValue">--</div><div class="sub">未实现盈亏 <span id="unrealizedPnl">--</span></div></div>
                     <div class="card stat"><div class="label">30天交易</div><div class="value" id="totalTrades">--</div><div class="sub">胜率 <span id="winRate">--</span> · 总盈亏 <span id="totalPnl">--</span></div></div>
-                    <div class="card stat"><div class="label">今日信号</div><div class="value" id="todaySignals">--</div><div class="sub">执行率 <span id="execRate">--</span></div></div>
                     <div class="card stat"><div class="label">风险占用</div><div class="value" id="riskExposure">--</div><div class="sub">连续亏损 <span id="lossStreak">--</span> · 日内回撤 <span id="dailyDd">--</span></div></div>
                 </div>
 
@@ -2243,14 +2243,15 @@
                 api('/api/system/account-diagnostic')
             ]);
             document.getElementById('systemStatus').textContent = `● ${status.system.status}`;
-            document.getElementById('totalValue').textContent = money(status.portfolio.total_value);
+            document.getElementById('totalValue').textContent = money(status.portfolio.balance_total);
+            document.getElementById('freeBalance').textContent = money(status.portfolio.balance_free);
+            document.getElementById('usedBalance').textContent = money(status.portfolio.balance_used);
+            document.getElementById('positionValue').textContent = money(status.portfolio.total_value);
             document.getElementById('unrealizedPnl').textContent = money(status.portfolio.unrealized_pnl);
             document.getElementById('unrealizedPnl').className = status.portfolio.unrealized_pnl >= 0 ? 'pos' : 'neg';
             document.getElementById('totalTrades').textContent = status.trading.total_trades_30d;
             document.getElementById('winRate').textContent = `${status.trading.win_rate}%`;
             document.getElementById('totalPnl').textContent = money(status.trading.total_pnl);
-            document.getElementById('todaySignals').textContent = status.signals.today_signals;
-            document.getElementById('execRate').textContent = `${status.signals.execution_rate}%`;
             document.getElementById('riskExposure').textContent = pct(status.risk.current_exposure);
             document.getElementById('lossStreak').textContent = `${status.risk.consecutive_losses}/${status.risk.max_consecutive_losses}`;
             document.getElementById('dailyDd').textContent = pct(status.risk.daily_drawdown);

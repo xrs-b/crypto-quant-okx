@@ -441,6 +441,7 @@ def get_system_status():
     total_value = sum(p.get('quantity', 0) * p.get('current_price', 0) for p in positions)
     unrealized_pnl = sum(p.get('unrealized_pnl', 0) for p in positions)
     risk = risk_manager.get_risk_status()
+    balance = risk.get('balance', {}) if isinstance(risk, dict) else {}
 
     return jsonify({
         'success': True,
@@ -453,7 +454,10 @@ def get_system_status():
             'portfolio': {
                 'total_positions': len(positions),
                 'total_value': round(total_value, 2),
-                'unrealized_pnl': round(unrealized_pnl, 2)
+                'unrealized_pnl': round(unrealized_pnl, 2),
+                'balance_total': round(float(balance.get('total', 0) or 0), 2),
+                'balance_free': round(float(balance.get('free', 0) or 0), 2),
+                'balance_used': round(float(balance.get('used', 0) or 0), 2)
             },
             'trading': {
                 'total_trades_30d': trade_stats.get('total_trades', 0),

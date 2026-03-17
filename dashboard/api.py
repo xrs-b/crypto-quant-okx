@@ -273,6 +273,23 @@ def get_runtime_state():
     return jsonify({'success': True, 'data': load_runtime_state()})
 
 
+@app.route('/api/system/notification-outbox')
+def get_notification_outbox():
+    """获取待桥接通知队列"""
+    status = request.args.get('status', 'pending')
+    limit = int(request.args.get('limit', 50))
+    rows = db.get_notification_outbox(status=status, limit=limit)
+    return jsonify({'success': True, 'data': rows, 'count': len(rows)})
+
+
+@app.route('/api/system/notification-outbox/<int:notification_id>/deliver', methods=['POST'])
+def mark_notification_outbox_delivered(notification_id: int):
+    payload = request.get_json(silent=True) or {}
+    status = payload.get('status') or 'delivered'
+    db.mark_notification_delivered(notification_id, status=status)
+    return jsonify({'success': True, 'id': notification_id, 'status': status})
+
+
 @app.route('/api/system/smoke-state')
 def get_smoke_state():
     """获取 smoke 执行状态"""

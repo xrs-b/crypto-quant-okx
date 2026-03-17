@@ -92,6 +92,24 @@ class DiagnosticExchangeStub:
         return round(desired_notional / price, 6)
 
 
+class AmountPrecisionExchangeStub:
+    def amount_to_precision(self, symbol, amount):
+        return f"{float(amount):.4f}"
+
+
+class AmountLimitExchangeWrapper:
+    def __init__(self):
+        self.exchange = AmountPrecisionExchangeStub()
+        self.config = {'exchange': {'name': 'okx'}, 'trading': {'leverage': 10}}
+
+    def get_market(self, symbol):
+        return {
+            'symbol': 'BTC/USDT:USDT',
+            'contractSize': 0.01,
+            'limits': {'amount': {'min': 1, 'max': 5}},
+        }
+
+
 class ExecutableExchangeStub(DiagnosticExchangeStub):
     def __init__(self):
         self.open_calls = []
@@ -174,6 +192,19 @@ class TestConfig(unittest.TestCase):
     def test_position_mode(self):
         """测试持仓模式配置"""
         self.assertIn(self.config.position_mode, ['oneway', 'hedge', 'one-way', 'net', 'single'])
+
+
+class TestExchangeAmountLimits(unittest.TestCase):
+    def test_normalize_contract_amount_respects_max_limit(self):
+        ex = Exchange.__new__(Exchange)
+        ex.exchange = AmountPrecisionExchangeStub()
+        ex.get_market = lambda symbol: {
+            'symbol': 'BTC/USDT:USDT',
+            'contractSize': 0.01,
+            'limits': {'amount': {'min': 1, 'max': 5}},
+        }
+        amount = ex.normalize_contract_amount('BTC/USDT', desired_notional_usdt=10000, price=50000)
+        self.assertEqual(amount, 5.0)
 
 
 class TestDatabase(unittest.TestCase):

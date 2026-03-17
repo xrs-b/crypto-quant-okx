@@ -61,9 +61,13 @@ class Exchange:
         contract_size = float(market.get('contractSize') or 1.0)
         raw_amount = desired_notional_usdt / max(contract_size * price, 1e-10)
         amount = float(self.exchange.amount_to_precision(market['symbol'], raw_amount))
-        min_amount = float((market.get('limits', {}).get('amount', {}) or {}).get('min') or 0.0)
+        amount_limits = (market.get('limits', {}).get('amount', {}) or {})
+        min_amount = float(amount_limits.get('min') or 0.0)
+        max_amount = float(amount_limits.get('max') or 0.0)
         if amount < min_amount:
             amount = min_amount
+        if max_amount and amount > max_amount:
+            amount = float(self.exchange.amount_to_precision(market['symbol'], max_amount))
         return amount
 
     def _set_default_leverage(self):

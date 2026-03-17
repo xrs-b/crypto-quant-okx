@@ -17,7 +17,7 @@ from core.notifier import NotificationManager
 from signals import SignalDetector, SignalValidator, SignalRecorder
 from trading import TradingExecutor, RiskManager
 from strategies.strategy_library import StrategyManager
-from bot.run import build_exchange_diagnostics, build_exchange_smoke_plan, execute_exchange_smoke
+from bot.run import build_exchange_diagnostics, build_exchange_smoke_plan, execute_exchange_smoke, reconcile_exchange_positions
 
 
 class FakeExchange:
@@ -112,6 +112,14 @@ class FakeLogDB:
 
     def log(self, level, message, details=None):
         self.logs.append({'level': level, 'message': message, 'details': details or {}})
+
+
+class PositionSyncExchangeStub:
+    def fetch_positions(self):
+        return [
+            {'symbol': 'BTC/USDT:USDT', 'side': 'long', 'contracts': 2, 'entryPrice': 50000, 'markPrice': 50500, 'leverage': 10},
+            {'symbol': 'XRP/USDT:USDT', 'side': 'short', 'contracts': 100, 'entryPrice': 1.5, 'markPrice': 1.45, 'leverage': 5},
+        ]
 
 
 class TestConfig(unittest.TestCase):
@@ -420,6 +428,24 @@ class TestNotifications(unittest.TestCase):
         self.assertIn('notify:decision', db.logs[1]['message'])
         self.assertFalse(runtime['enabled'])
         self.assertFalse(probe['delivered'])
+
+
+class TestReconcilePositions(unittest.TestCase):
+    def test_reconcile_exchange_positions(self):
+        db = Database('data/test_reconcile.db')
+        try:
+            db.update_position('SOL/USDT', 'long', 100, 1, 5, 100)
+            report = reconcile_exchange_positions(PositionSyncExchangeStub(), db)
+            positions = db.get_positions()
+            symbols = {p['symbol'] for p in positions}
+            self.assertEqual(report['synced'], 2)
+            self.assertEqual(report['removed'], 1)
+            self.assertIn('BTC/USDT', symbols)
+            self.assertIn('XRP/USDT', symbols)
+            self.assertNotIn('SOL/USDT', symbols)
+        finally:
+            if os.path.exists('data/test_reconcile.db'):
+                os.remove('data/test_reconcile.db')
 
 
 class TestDiagnostics(unittest.TestCase):

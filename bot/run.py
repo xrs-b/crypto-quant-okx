@@ -130,6 +130,35 @@ def build_exchange_smoke_plan(cfg: Config, exchange: Exchange, symbol: str = Non
     return plan
 
 
+def reconcile_exchange_positions(exchange: Exchange, db: Database) -> dict:
+    """交易所持仓与本地 DB 对账同步（第一轮）"""
+    report = {'synced': 0, 'removed': 0, 'exchange_positions': [], 'local_before': db.get_positions()}
+    exchange_positions = exchange.fetch_positions()
+    normalized_symbols = []
+    for pos in exchange_positions:
+        symbol = pos.get('symbol') or pos.get('info', {}).get('instId') or pos.get('info', {}).get('instId')
+        if symbol and ':' in symbol:
+            symbol = symbol.split(':')[0]
+        side = str(pos.get('side') or pos.get('info', {}).get('posSide') or 'long').lower()
+        if side in {'buy', 'long'}:
+            side = 'long'
+        elif side in {'sell', 'short'}:
+            side = 'short'
+        contracts = float(pos.get('contracts', 0) or 0)
+        if contracts <= 0:
+            continue
+        entry_price = float(pos.get('entryPrice') or pos.get('entry_price') or pos.get('info', {}).get('avgPx') or 0)
+        current_price = float(pos.get('markPrice') or pos.get('last') or pos.get('info', {}).get('markPx') or entry_price or 0)
+        leverage = int(float(pos.get('leverage') or pos.get('info', {}).get('lever') or 1))
+        db.update_position(symbol, side, entry_price, contracts, leverage, current_price)
+        normalized_symbols.append(symbol)
+        report['exchange_positions'].append({'symbol': symbol, 'side': side, 'quantity': contracts, 'entry_price': entry_price, 'current_price': current_price, 'leverage': leverage})
+        report['synced'] += 1
+    report['removed'] = db.remove_positions_not_in(normalized_symbols)
+    report['local_after'] = db.get_positions()
+    return report
+
+
 def execute_exchange_smoke(cfg: Config, exchange: Exchange, symbol: str = None, side: str = 'long', db: Database = None) -> dict:
     """执行最小 testnet 开平仓验收。只允许 testnet。"""
     plan = build_exchange_smoke_plan(cfg, exchange, symbol=symbol, side=side)
@@ -242,6 +271,12 @@ class TradingBot:
             print(f"⚠️ 获取余额失败: {e}")
             available = 0
         
+        # 先与交易所持仓对账
+        try:
+            reconcile_report = reconcile_exchange_positions(self.exchange, self.db)
+            self.notifier.notify_runtime('start', [f'持仓对账：同步 {reconcile_report["synced"]} 条 ｜ 清理 {reconcile_report["removed"]} 条'], {'reconcile': reconcile_report})
+        except Exception as e:
+            self.notifier.notify_error('持仓对账失败', str(e), {})
         # 获取当前持仓
         positions = self.db.get_positions()
         print(f"📊 当前持仓: {len(positions)}个")
@@ -425,6 +460,7 @@ def main():
     parser.add_argument('--cleanup-runtime-records', action='store_true', help='清理重复的治理/日报运行记录')
     parser.add_argument('--exchange-diagnose', action='store_true', help='只读诊断交易所/合约参数，不执行下单')
     parser.add_argument('--notify-test', action='store_true', help='测试 Discord/webhook 通知链路')
+    parser.add_argument('--reconcile-positions', action='store_true', help='只读/同步交易所持仓到本地 DB')
     parser.add_argument('--exchange-smoke', action='store_true', help='生成最小 testnet 验收计划；默认只预演')
     parser.add_argument('--execute', action='store_true', help='配合 smoke 验收命令，显式允许执行 testnet 开平仓')
     parser.add_argument('--symbol', type=str, help='指定 smoke/diagnose 目标币种')
@@ -593,6 +629,14 @@ def main():
         print("\n🔔 通知链路测试:\n")
         print(result['message'])
         print(f"delivered: {result['delivered']} | enabled: {result['enabled']}")
+
+    elif args.reconcile_positions:
+        cfg = Config()
+        exchange = Exchange(cfg.all)
+        db = Database(cfg.db_path)
+        report = reconcile_exchange_positions(exchange, db)
+        print("\n🧭 持仓对账结果:\n")
+        print(json.dumps(report, ensure_ascii=False, indent=2))
 
     elif args.exchange_diagnose:
         cfg = Config()

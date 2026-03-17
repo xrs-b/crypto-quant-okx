@@ -495,6 +495,7 @@
                             <div class="summary-strip" id="overviewDecisionWhy"></div>
                             <div class="summary-strip" id="overviewDecisionBoundary"></div>
                             <div class="summary-strip" id="overviewDecisionRecheck"></div>
+                            <div class="summary-strip" id="overviewAdvanceCriteria"></div>
                             <div class="list" id="overviewActionQueue"></div>
                             <div class="toolbar-inline" id="overviewRuntimeToolbar">
                                 <button class="chip-btn active" onclick="setOverviewRuntimeFilter('all')">全部</button>
@@ -2285,6 +2286,7 @@
             const decisionWhyHost = document.getElementById('overviewDecisionWhy');
             const decisionBoundaryHost = document.getElementById('overviewDecisionBoundary');
             const decisionRecheckHost = document.getElementById('overviewDecisionRecheck');
+            const advanceCriteriaHost = document.getElementById('overviewAdvanceCriteria');
             const actionQueueHost = document.getElementById('overviewActionQueue');
             const notificationSummaryHost = document.getElementById('overviewNotificationSummary');
             const forwardFunnelHost = document.getElementById('overviewForwardFunnel');
@@ -2761,6 +2763,21 @@
                 decisionRecheckHost.innerHTML = `
                     <div class="summary-pill"><div class="k">何时重新评估</div><div class="v">${recheckText}</div><div class="s">告诉你下一次值得重看结论既时机</div></div>
                     <div class="summary-pill"><div class="k">重评观察点</div><div class="v">${recheckSignal}</div><div class="s">下一次回来看首页时重点对比呢几项</div></div>
+                `;
+            }
+            if (advanceCriteriaHost) {
+                const criteriaText = [
+                    end48 >= 5 ? '✅ 48h 样本达到基础线' : '⏳ 48h 样本未达基础线',
+                    notificationPending === 0 ? '✅ pending 已清空' : '⏳ pending 仍需清理',
+                    err24 === 0 ? '✅ 近24h 无异常' : '⏳ 近24h 仍有异常',
+                    closedTrades >= 1 ? '✅ 已有平仓样本' : '⏳ 平仓样本仍不足',
+                ].join(' ｜ ');
+                const criteriaHint = finalDecision === '可转下一阶段'
+                    ? '当前已接近或满足推进条件，可开始看更细收益质量。'
+                    : '未满足全部推进条件前，首页结论仍应以观察/稳链路为主。';
+                advanceCriteriaHost.innerHTML = `
+                    <div class="summary-pill"><div class="k">推进条件</div><div class="v">${criteriaText}</div><div class="s">将“什么时候值得往后推进”写成可见条件</div></div>
+                    <div class="summary-pill"><div class="k">条件说明</div><div class="v">${criteriaHint}</div><div class="s">避免只凭感觉就切下一阶段</div></div>
                 `;
             }
             if (actionQueueHost) {

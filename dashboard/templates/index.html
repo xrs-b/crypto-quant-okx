@@ -494,6 +494,7 @@
                             <div class="summary-strip" id="overviewDecisionDrift"></div>
                             <div class="summary-strip" id="overviewDecisionWhy"></div>
                             <div class="summary-strip" id="overviewDecisionBoundary"></div>
+                            <div class="summary-strip" id="overviewDecisionRecheck"></div>
                             <div class="list" id="overviewActionQueue"></div>
                             <div class="toolbar-inline" id="overviewRuntimeToolbar">
                                 <button class="chip-btn active" onclick="setOverviewRuntimeFilter('all')">全部</button>
@@ -2283,6 +2284,7 @@
             const decisionDriftHost = document.getElementById('overviewDecisionDrift');
             const decisionWhyHost = document.getElementById('overviewDecisionWhy');
             const decisionBoundaryHost = document.getElementById('overviewDecisionBoundary');
+            const decisionRecheckHost = document.getElementById('overviewDecisionRecheck');
             const actionQueueHost = document.getElementById('overviewActionQueue');
             const notificationSummaryHost = document.getElementById('overviewNotificationSummary');
             const forwardFunnelHost = document.getElementById('overviewForwardFunnel');
@@ -2747,6 +2749,18 @@
                 decisionBoundaryHost.innerHTML = `
                     <div class="summary-pill"><div class="k">判断适用范围</div><div class="v">${applyText}</div><div class="s">帮助避免把首页结论用得过火</div></div>
                     <div class="summary-pill"><div class="k">当前边界</div><div class="v">${avoidText}</div><div class="s">首页判断仍以观察/验收辅助为主</div></div>
+                `;
+            }
+            if (decisionRecheckHost) {
+                const recheckText = finalDecision === '先修问题再说'
+                    ? '当 runtime error / pending 恢复正常后，应立即重看首页判断。'
+                    : finalDecision === '继续观察积累'
+                        ? '当 24h/48h end 样本明显增加，或 closed trade 增多后，应重新评估。'
+                        : '当收益质量、平仓样本、币种表现出现新变化时，应重新确认是否继续推进。';
+                const recheckSignal = `24h end=${end24} ｜ 48h end=${end48} ｜ closed=${closedTrades} ｜ pending=${notificationPending}`;
+                decisionRecheckHost.innerHTML = `
+                    <div class="summary-pill"><div class="k">何时重新评估</div><div class="v">${recheckText}</div><div class="s">告诉你下一次值得重看结论既时机</div></div>
+                    <div class="summary-pill"><div class="k">重评观察点</div><div class="v">${recheckSignal}</div><div class="s">下一次回来看首页时重点对比呢几项</div></div>
                 `;
             }
             if (actionQueueHost) {

@@ -480,6 +480,7 @@
                             <div class="summary-strip" id="overviewForwardReady"></div>
                             <div class="summary-strip" id="overviewLongRunWindow"></div>
                             <div class="summary-strip" id="overviewLongRunRisk"></div>
+                            <div class="summary-strip" id="overviewLongRunSample"></div>
                             <div class="toolbar-inline" id="overviewRuntimeToolbar">
                                 <button class="chip-btn active" onclick="setOverviewRuntimeFilter('all')">全部</button>
                                 <button class="chip-btn" onclick="setOverviewRuntimeFilter('error')">异常</button>
@@ -2254,6 +2255,7 @@
             const forwardReadyHost = document.getElementById('overviewForwardReady');
             const longRunWindowHost = document.getElementById('overviewLongRunWindow');
             const longRunRiskHost = document.getElementById('overviewLongRunRisk');
+            const longRunSampleHost = document.getElementById('overviewLongRunSample');
             const notificationSummaryHost = document.getElementById('overviewNotificationSummary');
             const forwardFunnelHost = document.getElementById('overviewForwardFunnel');
             const forwardRiskHost = document.getElementById('overviewForwardRisk');
@@ -2515,6 +2517,18 @@
                 longRunRiskHost.innerHTML = `
                     <div class="summary-pill"><div class="k">长跑风险等级</div><div class="v">${riskLevel}</div><div class="s">结合 24h/48h error 与 pending 风险</div></div>
                     <div class="summary-pill"><div class="k">建议动作</div><div class="v">${riskAction}</div><div class="s">让首页直接给出长跑阶段判断</div></div>
+                `;
+            }
+            if (longRunSampleHost) {
+                const sampleLevel = end48 >= 5 ? '样本较足' : end24 >= 2 ? '样本一般' : '样本偏少';
+                const sampleAdvice = end48 >= 5
+                    ? '可以开始看阶段性结论，但仍需继续观察收益质量'
+                    : end24 >= 2
+                        ? '已有初步观察价值，暂时只适合做趋势判断'
+                        : '先继续累积真实运行周期，再谈阶段结论';
+                longRunSampleHost.innerHTML = `
+                    <div class="summary-pill"><div class="k">样本充足度</div><div class="v">${sampleLevel}</div><div class="s">24h end ${end24} ｜ 48h end ${end48}</div></div>
+                    <div class="summary-pill"><div class="k">样本建议</div><div class="v">${sampleAdvice}</div><div class="s">帮助判断而家适唔适合开始下阶段结论</div></div>
                 `;
             }
             const notificationRows = notificationOutbox || [];

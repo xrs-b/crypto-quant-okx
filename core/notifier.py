@@ -16,6 +16,11 @@ class NotificationManager:
         self.logger = logger
         self.discord_cfg = config.get('notification.discord', {}) if hasattr(config, 'get') else (config.get('notification', {}).get('discord', {}) if isinstance(config, dict) else {})
         self._recent_messages = {}
+        self._http_headers = {
+            'Content-Type': 'application/json',
+            'User-Agent': 'OKXTradingBot/1.0 (+OpenClaw Notification Bridge)',
+            'Accept': 'application/json',
+        }
 
     def _is_enabled(self, kind: str) -> bool:
         if not self.discord_cfg.get('enabled', False):
@@ -49,7 +54,7 @@ class NotificationManager:
         if self.discord_cfg.get('webhook_username'):
             payload_dict['username'] = self.discord_cfg.get('webhook_username')
         payload = json.dumps(payload_dict).encode('utf-8')
-        req = request.Request(webhook_url, data=payload, headers={'Content-Type': 'application/json'})
+        req = request.Request(webhook_url, data=payload, headers=self._http_headers)
         try:
             with request.urlopen(req, timeout=10) as resp:
                 return 200 <= getattr(resp, 'status', 204) < 300
@@ -65,7 +70,9 @@ class NotificationManager:
             return False
         url = f'https://discord.com/api/v10/channels/{channel_id}/messages'
         payload = json.dumps({'content': content}).encode('utf-8')
-        req = request.Request(url, data=payload, headers={'Content-Type': 'application/json', 'Authorization': f'Bot {bot_token}'})
+        headers = dict(self._http_headers)
+        headers['Authorization'] = f'Bot {bot_token}'
+        req = request.Request(url, data=payload, headers=headers)
         try:
             with request.urlopen(req, timeout=10) as resp:
                 return 200 <= getattr(resp, 'status', 204) < 300

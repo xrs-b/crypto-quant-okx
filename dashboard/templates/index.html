@@ -468,6 +468,7 @@
                             <div class="summary-strip" id="overviewSmokeTrend"></div>
                             <div class="summary-strip" id="overviewSmokeCompare"></div>
                             <div class="summary-strip" id="overviewSmokeErrorTags"></div>
+                            <div class="summary-strip" id="overviewSmokeRisk"></div>
                             <div class="compact-grid">
                                 <div class="item">
                                     <strong>组合状态</strong>
@@ -2175,6 +2176,7 @@
             const trendHost = document.getElementById('overviewSmokeTrend');
             const compareHost = document.getElementById('overviewSmokeCompare');
             const errorTagHost = document.getElementById('overviewSmokeErrorTags');
+            const riskHost = document.getElementById('overviewSmokeRisk');
             if (kpiHost) {
                 if (overviewSmokeLastImpact) {
                     kpiHost.innerHTML = `
@@ -2187,7 +2189,7 @@
                     kpiHost.innerHTML = `<div class="summary-pill"><div class="k">最近 Smoke</div><div class="v">--</div><div class="s">暂无最近 smoke impact</div></div>`;
                 }
             }
-            if (trendHost || compareHost || errorTagHost) {
+            if (trendHost || compareHost || errorTagHost || riskHost) {
                 const smokeRows = smokeRuns || [];
                 const impacts = smokeRows.map(run => (run.details || {}).impact).filter(Boolean);
                 const summarizeImpacts = (count = 3) => {
@@ -2212,9 +2214,10 @@
                     <div class="summary-pill"><div class="k">最近失败</div><div class="v">${latestFailed ? latestFailed.symbol : '--'}</div><div class="s">${latestFailed ? `${latestFailed.side === 'short' ? '开空' : '开多'} ｜ ${latestFailed.error || latestFailed.details?.impact?.error || '未知错误'}` : '暂无失败样本'}</div></div>
                     <div class="summary-pill"><div class="k">对比结论</div><div class="v">${latestSuccess && latestFailed ? '成功/失败都有样本' : latestFailed ? '当前失败样本更多' : '当前以成功样本为主'}</div><div class="s">对比最近成功与失败的 impact / error</div></div>
                 ` : `<div class="summary-pill"><div class="k">成功/失败对比</div><div class="v">--</div><div class="s">暂无可对比的 smoke 样本</div></div>`;
-                if (errorTagHost) {
+                let tags = [];
+                if (errorTagHost || riskHost) {
                     const errors = smokeRows.map(run => String(run.error || run.details?.impact?.error || '')).filter(Boolean);
-                    const tags = [
+                    tags = [
                         {key: 'posSide', label: 'posSide'},
                         {key: 'reduceOnly', label: 'reduceOnly'},
                         {key: '51202', label: '数量超限'},
@@ -2222,7 +2225,27 @@
                         {key: 'connection', label: '连接失败'},
                         {key: 'timeout', label: '超时'},
                     ].map(tag => ({...tag, count: errors.filter(err => err.toLowerCase().includes(tag.key.toLowerCase())).length})).filter(tag => tag.count > 0);
-                    errorTagHost.innerHTML = tags.length ? tags.map(tag => `<div class="summary-pill"><div class="k">异常标签</div><div class="v">${tag.label}</div><div class="s">最近样本命中 ${tag.count} 次</div></div>`).join('') : `<div class="summary-pill"><div class="k">异常标签</div><div class="v">--</div><div class="s">最近 smoke 样本未见常见异常标签</div></div>`;
+                    if (errorTagHost) errorTagHost.innerHTML = tags.length ? tags.map(tag => `<div class="summary-pill"><div class="k">异常标签</div><div class="v">${tag.label}</div><div class="s">最近样本命中 ${tag.count} 次</div></div>`).join('') : `<div class="summary-pill"><div class="k">异常标签</div><div class="v">--</div><div class="s">最近 smoke 样本未见常见异常标签</div></div>`;
+                }
+                if (riskHost) {
+                    const latestError = latestFailed?.error || latestFailed?.details?.impact?.error || '';
+                    let riskLevel = '绿';
+                    let riskText = '当前 smoke 链路基本稳定';
+                    if (Number(t3.failRate) > 50 || Number(t5.failRate) > 50 || tags.some(t => ['posSide','reduceOnly','平仓方向'].includes(t.label))) {
+                        riskLevel = '红';
+                        riskText = '近期 smoke 风险较高，建议暂停自动执行并先检查账户模式/平仓参数';
+                    } else if (Number(t3.failRate) > 20 || Number(t5.failRate) > 20 || tags.length) {
+                        riskLevel = '黄';
+                        riskText = '近期 smoke 有一定波动，建议继续观察错误标签与失败率';
+                    }
+                    if (latestSuccess && !latestFailed && Number(t3.failRate || 0) === 0) {
+                        riskLevel = '绿';
+                        riskText = '最近样本以成功为主，可继续做 testnet 验证';
+                    }
+                    riskHost.innerHTML = `
+                        <div class="summary-pill"><div class="k">Smoke 风险等级</div><div class="v">${riskLevel}</div><div class="s">近 3 次失败率 ${t3.failRate}% ｜ 近 5 次失败率 ${t5.failRate}%</div></div>
+                        <div class="summary-pill"><div class="k">一句话结论</div><div class="v">${riskText}</div><div class="s">${latestError || '最近未见明确错误'}</div></div>
+                    `;
                 }
             }
             renderOverviewSmokeControls();

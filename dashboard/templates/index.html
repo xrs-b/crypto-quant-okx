@@ -476,6 +476,7 @@
                             <div class="summary-strip" id="overviewRuntimeState"></div>
                             <div class="summary-strip" id="overviewRuntimeSummary"></div>
                             <div class="summary-strip" id="overviewRunContinuity"></div>
+                            <div class="summary-strip" id="overviewRunTrend"></div>
                             <div class="toolbar-inline" id="overviewRuntimeToolbar">
                                 <button class="chip-btn active" onclick="setOverviewRuntimeFilter('all')">全部</button>
                                 <button class="chip-btn" onclick="setOverviewRuntimeFilter('error')">异常</button>
@@ -2246,6 +2247,7 @@
             const runtimeHost = document.getElementById('overviewRuntimeState');
             const runtimeSummaryHost = document.getElementById('overviewRuntimeSummary');
             const runtimeContinuityHost = document.getElementById('overviewRunContinuity');
+            const runtimeTrendHost = document.getElementById('overviewRunTrend');
             const notificationSummaryHost = document.getElementById('overviewNotificationSummary');
             const forwardFunnelHost = document.getElementById('overviewForwardFunnel');
             const forwardRiskHost = document.getElementById('overviewForwardRisk');
@@ -2263,6 +2265,18 @@
             const runtimeErrorRows = runtimeHistory.filter(x => x.type === 'error');
             const runtimeSkipRows = runtimeHistory.filter(x => x.type === 'skip');
             const lastSuccessAt = runtimeEndRows[0]?.time || runtimeState?.last_finished_at || null;
+            const latestRunTypes = runtimeHistory.slice(0, 8).map(x => x.type || '--');
+            const latestRunTrend = latestRunTypes.length ? latestRunTypes.join(' → ') : '--';
+            let successStreak = 0;
+            for (const item of runtimeHistory) {
+                if (item.type === 'end') successStreak += 1;
+                else break;
+            }
+            let errorStreak = 0;
+            for (const item of runtimeHistory) {
+                if (item.type === 'error') errorStreak += 1;
+                else break;
+            }
             const reconcileSummary = reconcileReport?.summary || {};
             const reconcileRiskCount = Number(reconcileSummary.exchange_missing_local_position || 0) + Number(reconcileSummary.local_position_missing_exchange || 0) + Number(reconcileSummary.open_trade_missing_exchange || 0) + Number(reconcileSummary.exchange_missing_open_trade || 0);
             const notifyEnabled = true;
@@ -2432,6 +2446,19 @@
                     <div class="summary-pill"><div class="k">最近成功时间</div><div class="v">${lastSuccessAt || '--'}</div><div class="s">用于判断是否连续稳定产出有效周期</div></div>
                     <div class="summary-pill"><div class="k">连续运行评分</div><div class="v">${continuityScore}</div><div class="s">异常越少、完成越多，评分越高</div></div>
                     <div class="summary-pill"><div class="k">连续运行判断</div><div class="v">${continuityText}</div><div class="s">第74批重点：验证长跑稳定性</div></div>
+                `;
+            }
+            if (runtimeTrendHost) {
+                const trendText = errorStreak >= 2
+                    ? '最近异常连续出现，建议优先暂停扩样本并排查'
+                    : successStreak >= 2
+                        ? '最近成功连续出现，适合继续累积 forward test 样本'
+                        : '最近运行结果仍有波动，建议继续观察趋势变化';
+                runtimeTrendHost.innerHTML = `
+                    <div class="summary-pill"><div class="k">最近运行趋势</div><div class="v">${latestRunTrend}</div><div class="s">展示最近 8 次 start/end/error/skip 轨迹</div></div>
+                    <div class="summary-pill"><div class="k">连续成功</div><div class="v">${successStreak}</div><div class="s">当前连续完成周期数</div></div>
+                    <div class="summary-pill"><div class="k">连续异常</div><div class="v">${errorStreak}</div><div class="s">当前连续异常周期数</div></div>
+                    <div class="summary-pill"><div class="k">趋势判断</div><div class="v">${trendText}</div><div class="s">帮助判断样本积累是否值得继续放大</div></div>
                 `;
             }
             const notificationRows = notificationOutbox || [];

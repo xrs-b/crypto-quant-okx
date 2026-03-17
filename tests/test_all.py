@@ -18,6 +18,7 @@ from signals import SignalDetector, SignalValidator, SignalRecorder
 from trading import TradingExecutor, RiskManager
 from strategies.strategy_library import StrategyManager
 from bot.run import build_exchange_diagnostics, build_exchange_smoke_plan, execute_exchange_smoke, reconcile_exchange_positions
+from dashboard.api import app
 
 
 class FakeExchange:
@@ -620,6 +621,15 @@ class TestReconcilePositions(unittest.TestCase):
         finally:
             if os.path.exists('data/test_reconcile.db'):
                 os.remove('data/test_reconcile.db')
+
+
+class TestDashboardApi(unittest.TestCase):
+    def test_daily_summary_handles_null_pnl(self):
+        client = app.test_client()
+        resp = client.get('/api/daily/summary')
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.json.get('success'))
+        self.assertIsInstance(resp.json.get('data'), list)
 
 
 class TestDiagnostics(unittest.TestCase):

@@ -850,6 +850,24 @@ class Database:
             df['details'] = df['details'].apply(lambda x: json.loads(x) if x else {})
         return df.to_dict('records')
 
+    def get_notification_outbox_stats(self) -> Dict:
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        stats = {}
+        for status in ['delivered', 'pending', 'suppressed', 'disabled']:
+            cursor.execute("SELECT COUNT(*) FROM notification_outbox WHERE status = ?", (status,))
+            stats[status] = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM notification_outbox")
+        stats['total'] = cursor.fetchone()[0]
+        cursor.execute("SELECT MIN(created_at) FROM notification_outbox WHERE status = 'pending'")
+        oldest_pending = cursor.fetchone()[0]
+        cursor.execute("SELECT event_type, COUNT(*) AS count FROM notification_outbox WHERE status = 'pending' GROUP BY event_type ORDER BY count DESC LIMIT 3")
+        top_pending = [{'event_type': row[0], 'count': row[1]} for row in cursor.fetchall()]
+        conn.close()
+        stats['oldest_pending_at'] = oldest_pending
+        stats['top_pending_types'] = top_pending
+        return stats
+
     def mark_notification_delivered(self, notification_id: int, status: str = 'delivered'):
         self.update_notification_outbox(notification_id, status=status)
 

@@ -484,6 +484,7 @@
                             <div class="summary-strip" id="overviewLongRunVerdict"></div>
                             <div class="summary-strip" id="overviewStageAcceptance"></div>
                             <div class="summary-strip" id="overviewPhaseSwitch"></div>
+                            <div class="summary-strip" id="overviewFinalDecision"></div>
                             <div class="toolbar-inline" id="overviewRuntimeToolbar">
                                 <button class="chip-btn active" onclick="setOverviewRuntimeFilter('all')">全部</button>
                                 <button class="chip-btn" onclick="setOverviewRuntimeFilter('error')">异常</button>
@@ -2262,6 +2263,7 @@
             const longRunVerdictHost = document.getElementById('overviewLongRunVerdict');
             const stageAcceptanceHost = document.getElementById('overviewStageAcceptance');
             const phaseSwitchHost = document.getElementById('overviewPhaseSwitch');
+            const finalDecisionHost = document.getElementById('overviewFinalDecision');
             const notificationSummaryHost = document.getElementById('overviewNotificationSummary');
             const forwardFunnelHost = document.getElementById('overviewForwardFunnel');
             const forwardRiskHost = document.getElementById('overviewForwardRisk');
@@ -2579,20 +2581,35 @@
                     <div class="summary-pill"><div class="k">验收参考</div><div class="v">48h end ${end48}</div><div class="s">success streak ${successStreak} ｜ pending ${notificationPending}</div></div>
                 `;
             }
-            if (phaseSwitchHost) {
-                const switchLevel = acceptanceLevel === '可阶段验收'
+            let switchLevel = '继续当前阶段';
+            let switchAdvice = '保持 daemon 继续跑，优先补厚样本再决定';
+            if (phaseSwitchHost || finalDecisionHost) {
+                switchLevel = acceptanceLevel === '可阶段验收'
                     ? '可转下一阶段'
                     : acceptanceLevel === '观察中'
                         ? '继续当前阶段'
                         : '先排障再推进';
-                const switchAdvice = switchLevel === '可转下一阶段'
+                switchAdvice = switchLevel === '可转下一阶段'
                     ? '可以开始更细的收益质量验证，或进入下一批优化'
                     : switchLevel === '继续当前阶段'
                         ? '保持 daemon 继续跑，优先补厚样本再决定'
                         : '先处理异常、pending 或连续失败，再谈阶段推进';
+            }
+            if (phaseSwitchHost) {
                 phaseSwitchHost.innerHTML = `
                     <div class="summary-pill"><div class="k">阶段切换判断</div><div class="v">${switchLevel}</div><div class="s">基于长跑结论与验收状态自动生成</div></div>
                     <div class="summary-pill"><div class="k">切换建议</div><div class="v">${switchAdvice}</div><div class="s">俾首页直接判断应否进入下一阶段</div></div>
+                `;
+            }
+            if (finalDecisionHost) {
+                const finalDecision = switchLevel === '可转下一阶段'
+                    ? '可以往后推进'
+                    : switchLevel === '继续当前阶段'
+                        ? '继续观察积累'
+                        : '先修问题再说';
+                finalDecisionHost.innerHTML = `
+                    <div class="summary-pill"><div class="k">首页最终判断</div><div class="v">${finalDecision}</div><div class="s">把长跑、样本、风险、阶段状态收敛成最后一句</div></div>
+                    <div class="summary-pill"><div class="k">执行建议</div><div class="v">${switchAdvice}</div><div class="s">减少你再逐卡自己拼判断的成本</div></div>
                 `;
             }
             const notificationRows = notificationOutbox || [];

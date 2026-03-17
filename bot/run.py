@@ -28,6 +28,20 @@ from trading import TradingExecutor, RiskManager
 from ml.engine import MLEngine, ModelTrainer, DataCollector
 from analytics import StrategyBacktester, SignalQualityAnalyzer, ParameterOptimizer, GovernanceEngine
 
+RUNTIME_STATE_PATH = Path('/Volumes/MacHD/Projects/crypto-quant-okx/data/runtime_state.json')
+
+
+def load_runtime_state() -> dict:
+    try:
+        return json.loads(RUNTIME_STATE_PATH.read_text()) if RUNTIME_STATE_PATH.exists() else {}
+    except Exception:
+        return {}
+
+
+def save_runtime_state(state: dict):
+    RUNTIME_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    RUNTIME_STATE_PATH.write_text(json.dumps(state or {}, ensure_ascii=False, indent=2))
+
 
 def build_exchange_diagnostics(cfg: Config, exchange: Exchange) -> dict:
     """构建交易所诊断信息（只读，不下单）"""
@@ -291,6 +305,9 @@ class TradingBot:
         print(f"   币种: {', '.join(self.config.symbols)}")
         print(f"{'='*60}\n")
         self.notifier.notify_runtime('start', [f'时间：{started_at.isoformat()}', f'监控币种：{", ".join(self.config.symbols)}'])
+        state = load_runtime_state()
+        state.update({'running': True, 'last_started_at': started_at.isoformat(), 'last_error': None})
+        save_runtime_state(state)
         
         # 获取余额
         try:
@@ -451,6 +468,9 @@ class TradingBot:
                 logger.error(f"检查持仓{symbol}出错: {e}")
         finished_at = datetime.now()
         summary['finished_at'] = finished_at.isoformat()
+        state = load_runtime_state()
+        state.update({'running': False, 'last_finished_at': finished_at.isoformat(), 'last_summary': summary})
+        save_runtime_state(state)
         self.notifier.notify_runtime('end', [f'开始：{summary["started_at"]}', f'结束：{summary["finished_at"]}', f'信号：{summary["signals"]} ｜ 通过：{summary["passed"]} ｜ 开仓：{summary["opened"]} ｜ 平仓：{summary["closed"]} ｜ 错误：{summary["errors"]}'], summary)
         print(f"\n✅ 交易循环完成! {finished_at}\n")
         return summary
@@ -520,10 +540,14 @@ def main():
         interval = args.interval_seconds or int(cfg.get('runtime.interval_seconds', 300))
         guard = RuntimeGuard()
         notifier = NotificationManager(cfg, Database(cfg.db_path), logger)
+        save_runtime_state({'mode': 'daemon', 'running': False, 'interval_seconds': interval, 'next_run_at': datetime.now().isoformat()})
         notifier.notify_runtime('daemon', [f'守护间隔：{interval} 秒', f'监控币种：{", ".join(cfg.symbols)}'])
         print(f"\n🔁 守护模式启动，间隔 {interval} 秒\n")
         while True:
             if not guard.acquire():
+                state = load_runtime_state()
+                state.update({'running': False, 'last_skip_at': datetime.now().isoformat(), 'next_run_at': datetime.fromtimestamp(time.time() + interval).isoformat()})
+                save_runtime_state(state)
                 notifier.notify_runtime('skip', ['检测到已有交易周期正在运行，本轮跳过'])
                 time.sleep(interval)
                 continue
@@ -531,10 +555,16 @@ def main():
                 bot = TradingBot()
                 bot.run()
             except Exception as e:
+                state = load_runtime_state()
+                state.update({'running': False, 'last_error': str(e), 'last_error_at': datetime.now().isoformat()})
+                save_runtime_state(state)
                 notifier.notify_error('守护周期异常', str(e), {'interval': interval})
                 logger.error(f'守护周期异常: {e}')
             finally:
                 guard.release()
+            state = load_runtime_state()
+            state.update({'next_run_at': datetime.fromtimestamp(time.time() + interval).isoformat(), 'interval_seconds': interval})
+            save_runtime_state(state)
             time.sleep(interval)
     
     elif args.train:

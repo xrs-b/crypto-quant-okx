@@ -489,6 +489,7 @@
                             <div class="summary-strip" id="overviewWrapUpStatus"></div>
                             <div class="summary-strip" id="overviewObservationConfidence"></div>
                             <div class="summary-strip" id="overviewTopSummary"></div>
+                            <div class="list" id="overviewActionQueue"></div>
                             <div class="toolbar-inline" id="overviewRuntimeToolbar">
                                 <button class="chip-btn active" onclick="setOverviewRuntimeFilter('all')">全部</button>
                                 <button class="chip-btn" onclick="setOverviewRuntimeFilter('error')">异常</button>
@@ -2272,6 +2273,7 @@
             const wrapUpStatusHost = document.getElementById('overviewWrapUpStatus');
             const observationConfidenceHost = document.getElementById('overviewObservationConfidence');
             const topSummaryHost = document.getElementById('overviewTopSummary');
+            const actionQueueHost = document.getElementById('overviewActionQueue');
             const notificationSummaryHost = document.getElementById('overviewNotificationSummary');
             const forwardFunnelHost = document.getElementById('overviewForwardFunnel');
             const forwardRiskHost = document.getElementById('overviewForwardRisk');
@@ -2678,6 +2680,28 @@
                 topSummaryHost.innerHTML = `
                     <div class="summary-pill"><div class="k">首页一句话总结</div><div class="v">${summaryLine}</div><div class="s">最终判断=${finalDecision} ｜ 信心=${observationConfidence}</div></div>
                 `;
+            }
+            if (actionQueueHost) {
+                const actionQueue = finalDecision === '先修问题再说'
+                    ? [
+                        {title: 'P1 · 先排异常', text: '优先检查 runtime error、pending 通知、最近 error context。'},
+                        {title: 'P2 · 再看链路', text: '确认 daemon、relay、对账三条线恢复稳定。'},
+                        {title: 'P3 · 暂缓推进', text: '未稳之前先不要急住转下一阶段。'},
+                    ]
+                    : finalDecision === '继续观察积累'
+                        ? [
+                            {title: 'P1 · 继续跑 daemon', text: '优先补厚 24h / 48h 长跑样本。'},
+                            {title: 'P2 · 看 forward 样本', text: '重点观察开平仓样本与收益质量。'},
+                            {title: 'P3 · 再决定切换', text: '等验收状态抬升后再考虑下一阶段。'},
+                        ]
+                        : [
+                            {title: 'P1 · 看收益质量', text: '开始检查币种表现、平仓样本与收益稳定性。'},
+                            {title: 'P2 · 准备阶段切换', text: '可进入更细的验证或下一批优化。'},
+                            {title: 'P3 · 保持长跑', text: '推进同时继续保留 daemon 长跑观察。'},
+                        ];
+                actionQueueHost.innerHTML = actionQueue.map(item => `
+                    <div class="item"><strong>${item.title}</strong><div class="muted" style="margin-top:6px;">${item.text}</div></div>
+                `).join('');
             }
             const notificationRows = notificationOutbox || [];
             const notificationCounts = notificationStats || {

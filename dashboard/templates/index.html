@@ -2384,14 +2384,17 @@
                     <div class="summary-pill"><div class="k">最近错误</div><div class="v">${runtimeState?.last_error ? '有' : '无'}</div><div class="s">${runtimeState?.last_error || '最近未记录守护异常'}</div></div>
                 `;
             }
+            const runtimeErrorContext = runtimeState?.last_error_context || {};
             if (runtimeSummaryHost) {
                 const s = runtimeState?.last_summary || {};
                 const relayResult = runtimeState?.relay?.last_result || {};
+                const errorContextText = runtimeState?.last_error ? `relay=${runtimeErrorContext.relay_running ? 'on' : 'off'} ｜ pending=${runtimeErrorContext.notification_stats?.pending ?? '--'} ｜ checked=${runtimeErrorContext.relay_last_checked_at || '--'}` : '最近未触发异常上下文';
                 runtimeSummaryHost.innerHTML = runtimeState?.last_summary ? `
                     <div class="summary-pill"><div class="k">最近一轮信号</div><div class="v">${s.signals ?? '--'}</div><div class="s">通过 ${s.passed ?? '--'} ｜ 币种 ${s.symbols ?? '--'}</div></div>
                     <div class="summary-pill"><div class="k">最近一轮开仓</div><div class="v">${s.opened ?? '--'}</div><div class="s">平仓 ${s.closed ?? '--'} ｜ 错误 ${s.errors ?? '--'}</div></div>
                     <div class="summary-pill"><div class="k">Relay 最近结果</div><div class="v">delivered ${relayResult.delivered ?? '--'}</div><div class="s">pending fail ${relayResult.failed ?? '--'} ｜ scanned ${relayResult.scanned ?? '--'}</div></div>
-                ` : `<div class="summary-pill"><div class="k">最近一轮摘要</div><div class="v">--</div><div class="s">守护模式尚未产出 last_summary</div></div><div class="summary-pill"><div class="k">Relay 最近结果</div><div class="v">delivered ${relayResult.delivered ?? '--'}</div><div class="s">pending fail ${relayResult.failed ?? '--'} ｜ scanned ${relayResult.scanned ?? '--'}</div></div>`;
+                    <div class="summary-pill"><div class="k">异常上下文</div><div class="v">${runtimeState?.last_error ? '已记录' : '--'}</div><div class="s">${errorContextText}</div></div>
+                ` : `<div class="summary-pill"><div class="k">最近一轮摘要</div><div class="v">--</div><div class="s">守护模式尚未产出 last_summary</div></div><div class="summary-pill"><div class="k">Relay 最近结果</div><div class="v">delivered ${relayResult.delivered ?? '--'}</div><div class="s">pending fail ${relayResult.failed ?? '--'} ｜ scanned ${relayResult.scanned ?? '--'}</div></div><div class="summary-pill"><div class="k">异常上下文</div><div class="v">${runtimeState?.last_error ? '已记录' : '--'}</div><div class="s">${errorContextText}</div></div>`;
             }
             const notificationRows = notificationOutbox || [];
             const notificationCounts = notificationStats || {

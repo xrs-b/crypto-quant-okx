@@ -603,10 +603,22 @@ def main():
             except Exception as e:
                 error_time = datetime.now().isoformat()
                 state = load_runtime_state()
-                state.update({'running': False, 'last_error': str(e), 'last_error_at': error_time})
+                db = Database(cfg.db_path)
+                notification_stats = db.get_notification_outbox_stats()
+                relay_state = state.get('relay', {}) if isinstance(state.get('relay'), dict) else {}
+                error_context = {
+                    'interval_seconds': interval,
+                    'mode': state.get('mode') or 'daemon',
+                    'next_run_at': state.get('next_run_at'),
+                    'relay_running': relay_state.get('running', False),
+                    'relay_last_checked_at': relay_state.get('last_checked_at'),
+                    'relay_last_result': relay_state.get('last_result', {}),
+                    'notification_stats': notification_stats,
+                }
+                state.update({'running': False, 'last_error': str(e), 'last_error_at': error_time, 'last_error_context': error_context})
                 save_runtime_state(state)
-                append_runtime_history({'type': 'error', 'time': error_time, 'message': str(e)})
-                notifier.notify_error('守护周期异常', str(e), {'interval': interval})
+                append_runtime_history({'type': 'error', 'time': error_time, 'message': str(e), 'context': error_context})
+                notifier.notify_error('守护周期异常', str(e), {'interval': interval, 'context': error_context})
                 logger.error(f'守护周期异常: {e}')
             finally:
                 guard.release()

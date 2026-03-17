@@ -2267,14 +2267,15 @@
                 `;
                 if (reconcileDetailHost) {
                     const sections = [
-                        ['交易所有仓，本地 position 缺失', diff.exchange_missing_local_position || []],
-                        ['本地 position 有，但交易所无', diff.local_position_missing_exchange || []],
-                        ['本地 open trade 有，但交易所无', diff.open_trade_missing_exchange || []],
-                        ['交易所有仓，但本地 open trade 缺失', diff.exchange_missing_open_trade || []],
+                        ['交易所有仓，本地 position 缺失', diff.exchange_missing_local_position || [], '建议优先重新同步本地持仓，确认 symbol/side 映射是否正确。'],
+                        ['本地 position 有，但交易所无', diff.local_position_missing_exchange || [], '建议清理本地脏持仓，并复核最近一次平仓/止损是否已落库。'],
+                        ['本地 open trade 有，但交易所无', diff.open_trade_missing_exchange || [], '建议检查该 open trade 是否应该补平仓，或标记为失效记录。'],
+                        ['交易所有仓，但本地 open trade 缺失', diff.exchange_missing_open_trade || [], '建议补建本地 open trade 映射，避免后续止盈止损缺上下文。'],
                     ].filter(([, rows]) => rows.length);
-                    reconcileDetailHost.innerHTML = sections.length ? sections.map(([title, rows]) => `
+                    reconcileDetailHost.innerHTML = sections.length ? sections.map(([title, rows, advice]) => `
                         <details class="item">
-                            <summary style="cursor:pointer; list-style:none;"><strong>${title}</strong><div class="muted" style="margin-top:6px;">共 ${rows.length} 项</div></summary>
+                            <summary style="cursor:pointer; list-style:none;"><strong>${title}</strong><div class="muted" style="margin-top:6px;">共 ${rows.length} 项 ｜ 建议：${advice}</div></summary>
+                            <div class="muted" style="margin-top:10px;">处理建议：${advice}</div>
                             <pre style="margin-top:10px">${JSON.stringify(rows, null, 2)}</pre>
                         </details>
                     `).join('') : '<div class="empty-state"><div class="icon">🧭</div><div>当前未发现三方对账差异</div></div>';

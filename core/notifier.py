@@ -34,10 +34,16 @@ class NotificationManager:
         return True
 
     def _store_event(self, level: str, event_type: str, message: str, details: Dict = None, title: str = None):
+        outbox_id = None
         if self.db:
             try:
-                self.db.log(level.upper(), f'notify:{event_type}', {'message': message, 'details': details or {}})
-                self.db.enqueue_notification('discord', event_type, title or event_type, message, details or {})
+                payload = {'message': message, 'details': details or {}}
+                self.db.log(level.upper(), f'notify:{event_type}', payload)
+                outbox_id = self.db.enqueue_notification('discord', event_type, title or event_type, message, {
+                    **(details or {}),
+                    'event_type': event_type,
+                    'level': level,
+                })
             except Exception:
                 pass
         if self.logger:
@@ -45,6 +51,15 @@ class NotificationManager:
                 self.logger.info(f'[NOTIFY:{event_type}] {message}')
             except Exception:
                 pass
+        return outbox_id
+
+    def _update_outbox_status(self, outbox_id: int, status: str, extra: Dict = None):
+        if not outbox_id or not self.db:
+            return
+        try:
+            self.db.update_notification_outbox(outbox_id, status=status, details=extra)
+        except Exception:
+            pass
 
     def _send_discord_webhook(self, content: str) -> bool:
         webhook_url = self.discord_cfg.get('webhook_url')
@@ -108,12 +123,30 @@ class NotificationManager:
     def send(self, event_type: str, title: str, lines: List[str], level: str = 'info', details: Dict = None) -> Dict:
         body = '\n'.join([f'**{title}**', *[f'- {line}' for line in lines if line]])
         suppressed = self._should_suppress(event_type, body)
-        self._store_event(level, event_type, body, details, title)
+        outbox_id = self._store_event(level, event_type, body, details, title)
         delivered = False
         enabled = self._is_enabled(event_type)
-        if enabled and not suppressed:
+        outbox_status = 'pending'
+        if not enabled:
+            outbox_status = 'disabled'
+        elif suppressed:
+            outbox_status = 'suppressed'
+        else:
             delivered = self._send_discord(body)
-        return {'delivered': delivered, 'enabled': enabled, 'suppressed': suppressed, 'message': body}
+            outbox_status = 'delivered' if delivered else 'pending'
+        self._update_outbox_status(outbox_id, outbox_status, {
+            **(details or {}),
+            'event_type': event_type,
+            'level': level,
+            'title': title,
+            'delivery': {
+                'enabled': enabled,
+                'suppressed': suppressed,
+                'delivered': delivered,
+                'path': 'direct' if delivered else 'bridge_pending',
+            }
+        })
+        return {'delivered': delivered, 'enabled': enabled, 'suppressed': suppressed, 'message': body, 'outbox_id': outbox_id, 'outbox_status': outbox_status}
 
     def notify_signal(self, signal, passed: bool, reason: str = None, details: Dict = None) -> Dict:
         title = '📡 可靠信号' if passed else '🧪 信号已生成'

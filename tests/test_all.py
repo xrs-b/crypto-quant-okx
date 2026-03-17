@@ -115,8 +115,16 @@ class FakeLogDB:
         self.logs.append({'level': level, 'message': message, 'details': details or {}})
 
     def enqueue_notification(self, channel, event_type, title, message, details=None):
-        self.outbox.append({'channel': channel, 'event_type': event_type, 'title': title, 'message': message, 'details': details or {}})
+        self.outbox.append({'id': len(self.outbox) + 1, 'channel': channel, 'event_type': event_type, 'title': title, 'message': message, 'details': details or {}, 'status': 'pending'})
         return len(self.outbox)
+
+    def update_notification_outbox(self, notification_id, status, details=None):
+        for item in self.outbox:
+            if item['id'] == notification_id:
+                item['status'] = status
+                if details is not None:
+                    item['details'] = details
+                return
 
 
 class PositionSyncExchangeStub:
@@ -435,11 +443,14 @@ class TestNotifications(unittest.TestCase):
         self.assertEqual(len(db.logs), 8)
         self.assertGreaterEqual(len(db.outbox), 8)
         self.assertEqual(db.outbox[0]['channel'], 'discord')
+        self.assertEqual(runtime['outbox_status'], 'disabled')
+        self.assertEqual(duplicate_runtime['outbox_status'], 'disabled')
         self.assertIn('notify:signal', db.logs[0]['message'])
         self.assertIn('风险拒绝', db.logs[1]['details']['message'])
         self.assertFalse(runtime['enabled'])
         self.assertTrue(duplicate_runtime['suppressed'])
         self.assertFalse(probe['delivered'])
+        self.assertEqual(probe['outbox_status'], 'disabled')
 
     def test_discord_bot_fallback_channel(self):
         cfg = Config()
@@ -452,6 +463,24 @@ class TestNotifications(unittest.TestCase):
         result = notifier.send('decision', '测试', ['bot fallback'])
         self.assertTrue(result['enabled'])
         self.assertTrue(result['delivered'])
+        self.assertEqual(result['outbox_status'], 'delivered')
+        self.assertEqual(db.outbox[-1]['status'], 'delivered')
+        self.assertEqual(db.outbox[-1]['details']['delivery']['path'], 'direct')
+
+    def test_notification_keeps_pending_when_direct_send_fails(self):
+        cfg = Config()
+        cfg._config.setdefault('notification', {}).setdefault('discord', {})
+        cfg._config['notification']['discord'].update({'enabled': True, 'webhook_url': '', 'bot_token': 'x', 'channel_id': '123'})
+        db = FakeLogDB()
+        notifier = NotificationManager(cfg, db, None)
+        notifier._send_discord_bot = lambda content: False
+        notifier._send_discord_webhook = lambda content: False
+        result = notifier.send('error', '失败测试', ['等待 bridge 兜底'])
+        self.assertTrue(result['enabled'])
+        self.assertFalse(result['delivered'])
+        self.assertEqual(result['outbox_status'], 'pending')
+        self.assertEqual(db.outbox[-1]['status'], 'pending')
+        self.assertEqual(db.outbox[-1]['details']['delivery']['path'], 'bridge_pending')
 
 
 class TestReconcilePositions(unittest.TestCase):

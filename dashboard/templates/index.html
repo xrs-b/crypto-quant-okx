@@ -472,6 +472,13 @@
                             <div class="summary-strip" id="overviewReconcileRisk"></div>
                             <div class="summary-strip" id="overviewRuntimeState"></div>
                             <div class="summary-strip" id="overviewRuntimeSummary"></div>
+                            <div class="toolbar-inline" id="overviewRuntimeToolbar">
+                                <button class="chip-btn active" onclick="setOverviewRuntimeFilter('all')">全部</button>
+                                <button class="chip-btn" onclick="setOverviewRuntimeFilter('error')">异常</button>
+                                <button class="chip-btn" onclick="setOverviewRuntimeFilter('skip')">跳过</button>
+                                <button class="chip-btn" onclick="setOverviewRuntimeFilter('end')">完成</button>
+                            </div>
+                            <div class="summary-strip" id="overviewRuntimeRisk"></div>
                             <div class="list" id="overviewRuntimeHistory"></div>
                             <div class="list" id="overviewReconcileDetails"></div>
                             <div class="compact-grid">
@@ -971,6 +978,7 @@
         let overviewSmokeExecuting = false;
         let overviewSmokeState = null;
         let overviewSmokeLastImpact = null;
+        let overviewRuntimeFilter = 'all';
         function getOverviewSmokeLastImpact() {
             try {
                 return JSON.parse(localStorage.getItem('overview_smoke_last_impact') || 'null');
@@ -2031,6 +2039,38 @@
             });
             renderOverviewSmokePanel();
         }
+        function setOverviewRuntimeFilter(filter = 'all') {
+            overviewRuntimeFilter = filter;
+            document.querySelectorAll('#overviewRuntimeToolbar .chip-btn').forEach(btn => {
+                btn.classList.toggle('active', btn.textContent.includes(filter === 'all' ? '全部' : filter === 'error' ? '异常' : filter === 'skip' ? '跳过' : '完成'));
+            });
+            renderOverviewRuntimePanel(window.__overviewRuntimeState || {});
+        }
+        function renderOverviewRuntimePanel(runtimeState = {}) {
+            window.__overviewRuntimeState = runtimeState || {};
+            const host = document.getElementById('overviewRuntimeHistory');
+            const riskHost = document.getElementById('overviewRuntimeRisk');
+            if (!host || !riskHost) return;
+            let rows = (runtimeState.history || []).slice();
+            if (overviewRuntimeFilter !== 'all') rows = rows.filter(row => row.type === overviewRuntimeFilter);
+            let failStreak = 0;
+            for (const row of (runtimeState.history || [])) {
+                if (row.type === 'error' || row.type === 'skip') failStreak += 1;
+                else break;
+            }
+            const latestError = (runtimeState.history || []).find(row => row.type === 'error');
+            riskHost.innerHTML = `
+                <div class="summary-pill"><div class="k">连续异常/跳过</div><div class="v">${failStreak}</div><div class="s">最近连续 error + skip 次数</div></div>
+                <div class="summary-pill"><div class="k">最近异常</div><div class="v">${latestError ? '有' : '无'}</div><div class="s">${latestError?.message || '最近未见守护异常'}</div></div>
+                <div class="summary-pill"><div class="k">当前筛选</div><div class="v">${overviewRuntimeFilter === 'all' ? '全部' : overviewRuntimeFilter}</div><div class="s">历史条数 ${rows.length}</div></div>
+            `;
+            host.innerHTML = rows.length ? rows.slice(0, 8).map(row => `
+                <details class="item" ${row.type === 'error' ? 'open' : ''}>
+                    <summary style="cursor:pointer; list-style:none;"><strong>${row.type === 'error' ? '❌' : row.type === 'skip' ? '⏭️' : row.type === 'end' ? '✅' : '⏱️'} ${row.type}</strong><div class="muted" style="margin-top:6px;">${row.time || '--'}</div><div class="muted" style="margin-top:6px;">${row.message || '--'}</div></summary>
+                    <pre style="margin-top:10px">${JSON.stringify(row, null, 2)}</pre>
+                </details>
+            `).join('') : '<div class="empty-state"><div class="icon">🕒</div><div>当前筛选下暂无守护运行历史</div></div>';
+        }
         function renderOverviewSmokeControls() {
             const select = document.getElementById('overviewSmokeSymbol');
             const status = document.getElementById('overviewSmokeExecutionStatus');
@@ -2276,12 +2316,7 @@
                     <div class="summary-pill"><div class="k">最近一轮开始</div><div class="v">${s.started_at || '--'}</div><div class="s">结束 ${s.finished_at || '--'}</div></div>
                 ` : `<div class="summary-pill"><div class="k">最近一轮摘要</div><div class="v">--</div><div class="s">守护模式尚未产出 last_summary</div></div>`;
             }
-            if (runtimeHistoryHost) {
-                const rows = runtimeState?.history || [];
-                runtimeHistoryHost.innerHTML = rows.length ? rows.slice(0, 6).map(row => `
-                    <div class="item"><strong>${row.type === 'error' ? '❌' : row.type === 'skip' ? '⏭️' : row.type === 'end' ? '✅' : '⏱️'} ${row.type}</strong><div class="muted" style="margin-top:6px;">${row.time || '--'}</div><div class="muted" style="margin-top:6px;">${row.message || '--'}</div></div>
-                `).join('') : '<div class="empty-state"><div class="icon">🕒</div><div>暂无守护运行历史</div></div>';
-            }
+            renderOverviewRuntimePanel(runtimeState || {});
             if (reconcileHost || reconcileDetailHost) {
                 const summary = reconcileReport?.summary || {};
                 const diff = reconcileReport?.diff || {};

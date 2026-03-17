@@ -19,6 +19,34 @@ class TradingExecutor:
         self.db = db
         self.trading_config = config.get('trading', {})
         self._trade_cache = {}  # 交易缓存
+
+    def _exchange_has_position(self, symbol: str, side: str) -> bool:
+        try:
+            positions = self.exchange.fetch_positions()
+        except Exception:
+            return True
+        for pos in positions or []:
+            pos_symbol = pos.get('symbol') or pos.get('info', {}).get('instId') or ''
+            if pos_symbol and ':' in pos_symbol:
+                pos_symbol = pos_symbol.split(':')[0]
+            pos_side = str(pos.get('side') or pos.get('info', {}).get('posSide') or '').lower()
+            if pos_side in {'buy', 'long'}:
+                pos_side = 'long'
+            elif pos_side in {'sell', 'short'}:
+                pos_side = 'short'
+            contracts = float(pos.get('contracts', 0) or 0)
+            if pos_symbol == symbol and pos_side == side and contracts > 0:
+                return True
+        return False
+
+    def _close_local_position_as_stale(self, symbol: str, side: str, close_price: float, reason: str) -> bool:
+        trade = self.db.get_latest_open_trade(symbol, side)
+        trade_id = trade.get('id') if trade else None
+        if trade_id:
+            self.db.mark_trade_stale_closed(trade_id, reason, close_price=close_price)
+        self.db.close_position(symbol)
+        trade_logger.warning(f"{symbol}: 检测到交易所已无对应仓位，自动收口本地持仓/交易")
+        return True
     
     def open_position(self, symbol: str, side: str, 
                     current_price: float, signal_id: int = None) -> Optional[int]:
@@ -191,7 +219,10 @@ class TradingExecutor:
                 return True
                 
             except Exception as e:
+                message = str(e)
                 trade_logger.error(f"平仓失败 (尝试 {attempt + 1}/{max_retries}): {e}")
+                if '51169' in message and not self._exchange_has_position(symbol, side):
+                    return self._close_local_position_as_stale(symbol, side, close_price, f'{reason} | 交易所已无对应仓位')
                 if attempt < max_retries - 1:
                     time.sleep(1)
                 else:

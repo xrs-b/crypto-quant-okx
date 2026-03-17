@@ -43,6 +43,14 @@ def save_runtime_state(state: dict):
     RUNTIME_STATE_PATH.write_text(json.dumps(state or {}, ensure_ascii=False, indent=2))
 
 
+def append_runtime_history(event: dict, limit: int = 20):
+    state = load_runtime_state()
+    history = state.get('history', [])
+    history.insert(0, event)
+    state['history'] = history[:limit]
+    save_runtime_state(state)
+
+
 def build_exchange_diagnostics(cfg: Config, exchange: Exchange) -> dict:
     """构建交易所诊断信息（只读，不下单）"""
     report = {
@@ -308,6 +316,7 @@ class TradingBot:
         state = load_runtime_state()
         state.update({'running': True, 'last_started_at': started_at.isoformat(), 'last_error': None})
         save_runtime_state(state)
+        append_runtime_history({'type': 'start', 'time': started_at.isoformat(), 'message': '机器人周期开始'})
         
         # 获取余额
         try:
@@ -471,6 +480,7 @@ class TradingBot:
         state = load_runtime_state()
         state.update({'running': False, 'last_finished_at': finished_at.isoformat(), 'last_summary': summary})
         save_runtime_state(state)
+        append_runtime_history({'type': 'end', 'time': finished_at.isoformat(), 'message': f'周期完成：信号 {summary["signals"]} / 开仓 {summary["opened"]} / 平仓 {summary["closed"]} / 错误 {summary["errors"]}'})
         self.notifier.notify_runtime('end', [f'开始：{summary["started_at"]}', f'结束：{summary["finished_at"]}', f'信号：{summary["signals"]} ｜ 通过：{summary["passed"]} ｜ 开仓：{summary["opened"]} ｜ 平仓：{summary["closed"]} ｜ 错误：{summary["errors"]}'], summary)
         print(f"\n✅ 交易循环完成! {finished_at}\n")
         return summary
@@ -545,9 +555,11 @@ def main():
         print(f"\n🔁 守护模式启动，间隔 {interval} 秒\n")
         while True:
             if not guard.acquire():
+                now = datetime.now().isoformat()
                 state = load_runtime_state()
-                state.update({'running': False, 'last_skip_at': datetime.now().isoformat(), 'next_run_at': datetime.fromtimestamp(time.time() + interval).isoformat()})
+                state.update({'running': False, 'last_skip_at': now, 'next_run_at': datetime.fromtimestamp(time.time() + interval).isoformat()})
                 save_runtime_state(state)
+                append_runtime_history({'type': 'skip', 'time': now, 'message': '检测到已有交易周期正在运行，本轮跳过'})
                 notifier.notify_runtime('skip', ['检测到已有交易周期正在运行，本轮跳过'])
                 time.sleep(interval)
                 continue
@@ -555,9 +567,11 @@ def main():
                 bot = TradingBot()
                 bot.run()
             except Exception as e:
+                error_time = datetime.now().isoformat()
                 state = load_runtime_state()
-                state.update({'running': False, 'last_error': str(e), 'last_error_at': datetime.now().isoformat()})
+                state.update({'running': False, 'last_error': str(e), 'last_error_at': error_time})
                 save_runtime_state(state)
+                append_runtime_history({'type': 'error', 'time': error_time, 'message': str(e)})
                 notifier.notify_error('守护周期异常', str(e), {'interval': interval})
                 logger.error(f'守护周期异常: {e}')
             finally:

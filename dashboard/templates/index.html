@@ -472,6 +472,7 @@
                             <div class="summary-strip" id="overviewReconcileRisk"></div>
                             <div class="summary-strip" id="overviewRuntimeState"></div>
                             <div class="summary-strip" id="overviewRuntimeSummary"></div>
+                            <div class="list" id="overviewRuntimeHistory"></div>
                             <div class="list" id="overviewReconcileDetails"></div>
                             <div class="compact-grid">
                                 <div class="item">
@@ -2186,6 +2187,7 @@
             const reconcileHost = document.getElementById('overviewReconcileRisk');
             const runtimeHost = document.getElementById('overviewRuntimeState');
             const runtimeSummaryHost = document.getElementById('overviewRuntimeSummary');
+            const runtimeHistoryHost = document.getElementById('overviewRuntimeHistory');
             const reconcileDetailHost = document.getElementById('overviewReconcileDetails');
             if (kpiHost) {
                 if (overviewSmokeLastImpact) {
@@ -2273,6 +2275,12 @@
                     <div class="summary-pill"><div class="k">最近一轮开仓</div><div class="v">${s.opened ?? '--'}</div><div class="s">平仓 ${s.closed ?? '--'} ｜ 错误 ${s.errors ?? '--'}</div></div>
                     <div class="summary-pill"><div class="k">最近一轮开始</div><div class="v">${s.started_at || '--'}</div><div class="s">结束 ${s.finished_at || '--'}</div></div>
                 ` : `<div class="summary-pill"><div class="k">最近一轮摘要</div><div class="v">--</div><div class="s">守护模式尚未产出 last_summary</div></div>`;
+            }
+            if (runtimeHistoryHost) {
+                const rows = runtimeState?.history || [];
+                runtimeHistoryHost.innerHTML = rows.length ? rows.slice(0, 6).map(row => `
+                    <div class="item"><strong>${row.type === 'error' ? '❌' : row.type === 'skip' ? '⏭️' : row.type === 'end' ? '✅' : '⏱️'} ${row.type}</strong><div class="muted" style="margin-top:6px;">${row.time || '--'}</div><div class="muted" style="margin-top:6px;">${row.message || '--'}</div></div>
+                `).join('') : '<div class="empty-state"><div class="icon">🕒</div><div>暂无守护运行历史</div></div>';
             }
             if (reconcileHost || reconcileDetailHost) {
                 const summary = reconcileReport?.summary || {};

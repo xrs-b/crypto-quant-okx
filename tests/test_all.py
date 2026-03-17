@@ -452,6 +452,8 @@ class TestNotifications(unittest.TestCase):
         self.assertEqual(runtime['outbox_status'], 'disabled')
         self.assertEqual(duplicate_runtime['outbox_status'], 'disabled')
         self.assertIn('notify:signal', db.logs[0]['message'])
+        self.assertIn('【信号概览】', db.logs[0]['details']['message'])
+        self.assertIn('【风控拦截】', db.logs[1]['details']['message'])
         self.assertIn('风险拒绝', db.logs[1]['details']['message'])
         self.assertFalse(runtime['enabled'])
         self.assertTrue(duplicate_runtime['suppressed'])

@@ -472,6 +472,21 @@ class Database:
         cursor.execute("DELETE FROM positions WHERE symbol = ?", (symbol,))
         conn.commit()
         conn.close()
+
+    def remove_positions_not_in(self, symbols: List[str]) -> int:
+        """删除不在指定 symbol 集合内的本地持仓"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        symbols = symbols or []
+        if symbols:
+            placeholders = ','.join(['?'] * len(symbols))
+            cursor.execute(f"DELETE FROM positions WHERE symbol NOT IN ({placeholders})", symbols)
+        else:
+            cursor.execute("DELETE FROM positions")
+        deleted = cursor.rowcount
+        conn.commit()
+        conn.close()
+        return deleted
     
     # =========================================================================
     # 策略分析操作

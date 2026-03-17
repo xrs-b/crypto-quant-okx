@@ -485,6 +485,7 @@
                             <div class="summary-strip" id="overviewStageAcceptance"></div>
                             <div class="summary-strip" id="overviewPhaseSwitch"></div>
                             <div class="summary-strip" id="overviewFinalDecision"></div>
+                            <div class="summary-strip" id="overviewPriorityNow"></div>
                             <div class="toolbar-inline" id="overviewRuntimeToolbar">
                                 <button class="chip-btn active" onclick="setOverviewRuntimeFilter('all')">全部</button>
                                 <button class="chip-btn" onclick="setOverviewRuntimeFilter('error')">异常</button>
@@ -2264,6 +2265,7 @@
             const stageAcceptanceHost = document.getElementById('overviewStageAcceptance');
             const phaseSwitchHost = document.getElementById('overviewPhaseSwitch');
             const finalDecisionHost = document.getElementById('overviewFinalDecision');
+            const priorityNowHost = document.getElementById('overviewPriorityNow');
             const notificationSummaryHost = document.getElementById('overviewNotificationSummary');
             const forwardFunnelHost = document.getElementById('overviewForwardFunnel');
             const forwardRiskHost = document.getElementById('overviewForwardRisk');
@@ -2601,15 +2603,34 @@
                     <div class="summary-pill"><div class="k">切换建议</div><div class="v">${switchAdvice}</div><div class="s">俾首页直接判断应否进入下一阶段</div></div>
                 `;
             }
-            if (finalDecisionHost) {
-                const finalDecision = switchLevel === '可转下一阶段'
+            let finalDecision = '继续观察积累';
+            if (finalDecisionHost || priorityNowHost) {
+                finalDecision = switchLevel === '可转下一阶段'
                     ? '可以往后推进'
                     : switchLevel === '继续当前阶段'
                         ? '继续观察积累'
                         : '先修问题再说';
+            }
+            if (finalDecisionHost) {
                 finalDecisionHost.innerHTML = `
                     <div class="summary-pill"><div class="k">首页最终判断</div><div class="v">${finalDecision}</div><div class="s">把长跑、样本、风险、阶段状态收敛成最后一句</div></div>
                     <div class="summary-pill"><div class="k">执行建议</div><div class="v">${switchAdvice}</div><div class="s">减少你再逐卡自己拼判断的成本</div></div>
+                `;
+            }
+            if (priorityNowHost) {
+                const priorityNow = finalDecision === '先修问题再说'
+                    ? '先排异常 / pending / 连续失败'
+                    : finalDecision === '继续观察积累'
+                        ? '继续跑 daemon，优先补厚长跑样本'
+                        : '可以准备切去下一阶段更细验证';
+                const priorityNext = finalDecision === '先修问题再说'
+                    ? '优先看 runtime error、通知堆积、recent error context'
+                    : finalDecision === '继续观察积累'
+                        ? '优先看 24h/48h 长跑窗口与 forward test 样本充足度'
+                        : '优先看收益质量、币种表现与阶段验收结论';
+                priorityNowHost.innerHTML = `
+                    <div class="summary-pill"><div class="k">当前优先事项</div><div class="v">${priorityNow}</div><div class="s">将首页判断直接翻译成当前最该做既动作</div></div>
+                    <div class="summary-pill"><div class="k">下一眼重点</div><div class="v">${priorityNext}</div><div class="s">减少来回翻页面确认成本</div></div>
                 `;
             }
             const notificationRows = notificationOutbox || [];

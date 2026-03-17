@@ -478,6 +478,7 @@
                             <div class="summary-strip" id="overviewRunContinuity"></div>
                             <div class="summary-strip" id="overviewRunTrend"></div>
                             <div class="summary-strip" id="overviewForwardReady"></div>
+                            <div class="summary-strip" id="overviewLongRunWindow"></div>
                             <div class="toolbar-inline" id="overviewRuntimeToolbar">
                                 <button class="chip-btn active" onclick="setOverviewRuntimeFilter('all')">全部</button>
                                 <button class="chip-btn" onclick="setOverviewRuntimeFilter('error')">异常</button>
@@ -2250,6 +2251,7 @@
             const runtimeContinuityHost = document.getElementById('overviewRunContinuity');
             const runtimeTrendHost = document.getElementById('overviewRunTrend');
             const forwardReadyHost = document.getElementById('overviewForwardReady');
+            const longRunWindowHost = document.getElementById('overviewLongRunWindow');
             const notificationSummaryHost = document.getElementById('overviewNotificationSummary');
             const forwardFunnelHost = document.getElementById('overviewForwardFunnel');
             const forwardRiskHost = document.getElementById('overviewForwardRisk');
@@ -2269,6 +2271,16 @@
             const lastSuccessAt = runtimeEndRows[0]?.time || runtimeState?.last_finished_at || null;
             const latestRunTypes = runtimeHistory.slice(0, 8).map(x => x.type || '--');
             const latestRunTrend = latestRunTypes.length ? latestRunTypes.join(' → ') : '--';
+            const withinHours = (rows, hours) => rows.filter(item => {
+                const t = item?.time ? new Date(item.time).getTime() : NaN;
+                return !Number.isNaN(t) && (Date.now() - t) <= hours * 3600 * 1000;
+            });
+            const run24 = withinHours(runtimeHistory, 24);
+            const run48 = withinHours(runtimeHistory, 48);
+            const end24 = run24.filter(x => x.type === 'end').length;
+            const err24 = run24.filter(x => x.type === 'error').length;
+            const end48 = run48.filter(x => x.type === 'end').length;
+            const err48 = run48.filter(x => x.type === 'error').length;
             let successStreak = 0;
             for (const item of runtimeHistory) {
                 if (item.type === 'end') successStreak += 1;
@@ -2477,6 +2489,18 @@
                 forwardReadyHost.innerHTML = `
                     <div class="summary-pill"><div class="k">Forward test 建议</div><div class="v">${readyLevel}</div><div class="s">${readyReason}</div></div>
                     <div class="summary-pill"><div class="k">当前依据</div><div class="v">success ${successStreak} ｜ error ${runtimeErrorRows.length}</div><div class="s">opened ${openedTrades} ｜ pending ${notificationPending}</div></div>
+                `;
+            }
+            if (longRunWindowHost) {
+                const longRunText = end48 >= 3 && err48 === 0
+                    ? '48h 窗口表现偏稳，可继续长跑观察'
+                    : end24 >= 1
+                        ? '已有近24h有效样本，但48h窗口仍未够厚'
+                        : '长跑样本仍不足，建议继续挂 daemon 累积';
+                longRunWindowHost.innerHTML = `
+                    <div class="summary-pill"><div class="k">24h 长跑</div><div class="v">end ${end24}</div><div class="s">error ${err24} ｜ 样本 ${run24.length}</div></div>
+                    <div class="summary-pill"><div class="k">48h 长跑</div><div class="v">end ${end48}</div><div class="s">error ${err48} ｜ 样本 ${run48.length}</div></div>
+                    <div class="summary-pill"><div class="k">长跑结论</div><div class="v">${longRunText}</div><div class="s">第75批重点：把长跑观察正式纳入首页判断</div></div>
                 `;
             }
             const notificationRows = notificationOutbox || [];

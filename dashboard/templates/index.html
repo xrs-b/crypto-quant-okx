@@ -485,6 +485,7 @@
                             <div class="summary-strip" id="overviewNotificationSummary"></div>
                             <div class="summary-strip" id="overviewForwardFunnel"></div>
                             <div class="summary-strip" id="overviewForwardRisk"></div>
+                            <div class="summary-strip" id="overviewForwardReview"></div>
                             <div class="list" id="overviewForwardObservations"></div>
                             <div class="list" id="overviewNotificationList"></div>
                             <div class="list" id="overviewRuntimeHistory"></div>
@@ -2225,6 +2226,7 @@
             document.getElementById('dailyDd').textContent = pct(status.risk.daily_drawdown);
             const positions = await api('/api/positions');
             document.getElementById('overviewPositions').innerHTML = positions.length ? positions.map(p => `<tr><td>${p.symbol}</td><td>${badge(p.side, p.side === 'long' ? 'long' : 'short')}</td><td>${p.quantity}</td><td>${money(p.entry_price)}</td><td>${money(p.current_price)}</td><td class="${Number(p.unrealized_pnl || 0) >= 0 ? 'pos' : 'neg'}">${money(p.unrealized_pnl)}</td></tr>`).join('') : '<tr><td colspan="6" class="muted">暂无持仓</td></tr>';
+            const recentTrades = await api('/api/trades?limit=8');
             const mode = await api('/api/mode/status');
             overviewSmokeSymbols = (mode.watch_list || []).slice();
             overviewSmokeState = smokeState || null;
@@ -2243,6 +2245,7 @@
             const notificationSummaryHost = document.getElementById('overviewNotificationSummary');
             const forwardFunnelHost = document.getElementById('overviewForwardFunnel');
             const forwardRiskHost = document.getElementById('overviewForwardRisk');
+            const forwardReviewHost = document.getElementById('overviewForwardReview');
             const forwardObservationHost = document.getElementById('overviewForwardObservations');
             const notificationListHost = document.getElementById('overviewNotificationList');
             const runtimeHistoryHost = document.getElementById('overviewRuntimeHistory');
@@ -2481,11 +2484,29 @@
                     <div class="summary-pill"><div class="k">Forward 风险判断</div><div class="v">${forwardRiskText}</div><div class="s">结合盈亏、回撤、连续亏损与链路样本</div></div>
                 `;
             }
+            const closedTradeRows = (recentTrades || []).filter(t => t.status === 'closed');
+            const openTradeRows = (recentTrades || []).filter(t => t.status === 'open');
+            const reviewSample = closedTradeRows.length || openTradeRows.length;
+            const closedPnlSum = closedTradeRows.reduce((sum, t) => sum + Number(t.pnl || 0), 0);
+            const reviewText = !reviewSample
+                ? '最近暂无可复盘成交样本，继续等待真实开平仓数据'
+                : closedTradeRows.length
+                    ? (closedPnlSum >= 0 ? '最近平仓样本整体偏正，可继续观察是否具持续性' : '最近平仓样本整体偏弱，建议继续观察止盈止损与筛选门槛')
+                    : '已有开仓样本但未形成平仓结果，先继续观察持仓后续表现';
+            if (forwardReviewHost) {
+                forwardReviewHost.innerHTML = `
+                    <div class="summary-pill"><div class="k">最近成交样本</div><div class="v">${reviewSample}</div><div class="s">近 8 条 trade 中可用于观察的样本数</div></div>
+                    <div class="summary-pill"><div class="k">最近未平仓</div><div class="v">${openTradeRows.length}</div><div class="s">当前仍在 forward test 观察中的 open trade</div></div>
+                    <div class="summary-pill"><div class="k">最近已平仓</div><div class="v">${closedTradeRows.length}</div><div class="s">累计 PnL ${money(closedPnlSum)}</div></div>
+                    <div class="summary-pill"><div class="k">复盘结论</div><div class="v">${reviewText}</div><div class="s">快速判断最近样本够唔够参考价值</div></div>
+                `;
+            }
             if (forwardObservationHost) {
                 const observations = [
                     {title: 'Forward test 漏斗判断', text: funnelConclusion},
                     {title: '最近一轮链路', text: `signals ${lastSummary.signals ?? '--'} ｜ passed ${passedSignals} ｜ opened ${openedTrades} ｜ closed ${closedTrades} ｜ errors ${lastSummary.errors ?? '--'}`},
                     {title: '收益/风险观察', text: `30日盈亏 ${money(pnl30d)} ｜ 风险占用 ${exposurePct.toFixed(2)}% ｜ 日内回撤 ${ddPct.toFixed(2)}%`},
+                    {title: '成交样本观察', text: `open ${openTradeRows.length} ｜ closed ${closedTradeRows.length} ｜ closed pnl ${money(closedPnlSum)}`},
                     {title: '观察重点', text: openedTrades ? '继续看平仓结果、PnL 与连续样本稳定性' : '继续看信号通过率与风险门槛是否卡得太死'},
                 ];
                 forwardObservationHost.innerHTML = observations.map(item => `

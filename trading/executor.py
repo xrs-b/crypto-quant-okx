@@ -291,18 +291,20 @@ class TradingExecutor:
         cache = self._trade_cache.setdefault(symbol, {})
         
         if side == 'long':
-            anchor = highest_price if highest_price is not None else cache.get('highest_price', entry_price)
-            anchor = max(float(anchor or entry_price), float(current_price or entry_price))
+            anchor = highest_price if highest_price is not None else cache.get('highest_price', position.get('peak_price') or entry_price)
+            anchor = max(float(anchor or entry_price), float(position.get('peak_price') or entry_price), float(current_price or entry_price))
             cache['highest_price'] = anchor
+            self.db.update_position(symbol, side, entry_price, position['quantity'], leverage, current_price, peak_price=anchor, trough_price=position.get('trough_price'))
             stop_price = anchor * (1 - trailing_stop)
             if current_price <= stop_price and current_price > entry_price:
                 pnl_percent = (current_price - entry_price) / entry_price * leverage
                 trade_logger.info(f"触发追踪止损: {symbol} 盈利{pnl_percent*100:.2f}%")
                 return True
         else:
-            anchor = cache.get('lowest_price', entry_price)
-            anchor = min(float(anchor or entry_price), float(current_price or entry_price))
+            anchor = cache.get('lowest_price', position.get('trough_price') or entry_price)
+            anchor = min(float(anchor or entry_price), float(position.get('trough_price') or entry_price), float(current_price or entry_price))
             cache['lowest_price'] = anchor
+            self.db.update_position(symbol, side, entry_price, position['quantity'], leverage, current_price, peak_price=position.get('peak_price'), trough_price=anchor)
             stop_price = anchor * (1 + trailing_stop)
             if current_price >= stop_price and current_price < entry_price:
                 pnl_percent = (entry_price - current_price) / entry_price * leverage

@@ -762,6 +762,9 @@ class TestTradingExecutor(unittest.TestCase):
         self.db.update_position(symbol='BTC/USDT', side='long', entry_price=100, quantity=1, leverage=1, current_price=100)
         self.assertFalse(self.executor.check_take_profit('BTC/USDT', 110))
         self.assertEqual(self.executor._trade_cache['BTC/USDT']['highest_price'], 110)
+        pos = self.db.get_positions()[0]
+        self.assertEqual(pos['peak_price'], 110)
+        self.executor._trade_cache.clear()
         self.assertFalse(self.executor.check_take_profit('BTC/USDT', 108))
         self.assertTrue(self.executor.check_take_profit('BTC/USDT', 104))
 
@@ -771,6 +774,9 @@ class TestTradingExecutor(unittest.TestCase):
         self.db.update_position(symbol='BTC/USDT', side='short', entry_price=100, quantity=1, leverage=1, current_price=100)
         self.assertFalse(self.executor.check_take_profit('BTC/USDT', 95))
         self.assertEqual(self.executor._trade_cache['BTC/USDT']['lowest_price'], 95)
+        pos = self.db.get_positions()[0]
+        self.assertEqual(pos['trough_price'], 95)
+        self.executor._trade_cache.clear()
         self.assertFalse(self.executor.check_take_profit('BTC/USDT', 96))
         self.assertTrue(self.executor.check_take_profit('BTC/USDT', 99.8))
 

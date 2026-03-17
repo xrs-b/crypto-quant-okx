@@ -489,6 +489,7 @@
                             <div class="summary-strip" id="overviewWrapUpStatus"></div>
                             <div class="summary-strip" id="overviewObservationConfidence"></div>
                             <div class="summary-strip" id="overviewTopSummary"></div>
+                            <div class="summary-strip" id="overviewDecisionTimestamp"></div>
                             <div class="list" id="overviewActionQueue"></div>
                             <div class="toolbar-inline" id="overviewRuntimeToolbar">
                                 <button class="chip-btn active" onclick="setOverviewRuntimeFilter('all')">全部</button>
@@ -2273,6 +2274,7 @@
             const wrapUpStatusHost = document.getElementById('overviewWrapUpStatus');
             const observationConfidenceHost = document.getElementById('overviewObservationConfidence');
             const topSummaryHost = document.getElementById('overviewTopSummary');
+            const decisionTimestampHost = document.getElementById('overviewDecisionTimestamp');
             const actionQueueHost = document.getElementById('overviewActionQueue');
             const notificationSummaryHost = document.getElementById('overviewNotificationSummary');
             const forwardFunnelHost = document.getElementById('overviewForwardFunnel');
@@ -2679,6 +2681,12 @@
                         : '当前系统已具备向后推进既基础，可以开始更细既质量验证。';
                 topSummaryHost.innerHTML = `
                     <div class="summary-pill"><div class="k">首页一句话总结</div><div class="v">${summaryLine}</div><div class="s">最终判断=${finalDecision} ｜ 信心=${observationConfidence}</div></div>
+                `;
+            }
+            if (decisionTimestampHost) {
+                decisionTimestampHost.innerHTML = `
+                    <div class="summary-pill"><div class="k">判断刷新时间</div><div class="v">${status?.system?.last_update || '--'}</div><div class="s">首页所有结论都基于这次系统快照生成</div></div>
+                    <div class="summary-pill"><div class="k">当前判断依据</div><div class="v">runtime ${runtimeHistory.length} 条</div><div class="s">trades ${recentTrades.length} ｜ smoke ${smokeRows.length} ｜ notify ${notificationRows.length}</div></div>
                 `;
             }
             if (actionQueueHost) {

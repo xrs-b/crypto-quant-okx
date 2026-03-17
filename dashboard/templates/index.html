@@ -479,6 +479,7 @@
                             <div class="summary-strip" id="overviewRunTrend"></div>
                             <div class="summary-strip" id="overviewForwardReady"></div>
                             <div class="summary-strip" id="overviewLongRunWindow"></div>
+                            <div class="summary-strip" id="overviewLongRunRisk"></div>
                             <div class="toolbar-inline" id="overviewRuntimeToolbar">
                                 <button class="chip-btn active" onclick="setOverviewRuntimeFilter('all')">全部</button>
                                 <button class="chip-btn" onclick="setOverviewRuntimeFilter('error')">异常</button>
@@ -2252,6 +2253,7 @@
             const runtimeTrendHost = document.getElementById('overviewRunTrend');
             const forwardReadyHost = document.getElementById('overviewForwardReady');
             const longRunWindowHost = document.getElementById('overviewLongRunWindow');
+            const longRunRiskHost = document.getElementById('overviewLongRunRisk');
             const notificationSummaryHost = document.getElementById('overviewNotificationSummary');
             const forwardFunnelHost = document.getElementById('overviewForwardFunnel');
             const forwardRiskHost = document.getElementById('overviewForwardRisk');
@@ -2501,6 +2503,18 @@
                     <div class="summary-pill"><div class="k">24h 长跑</div><div class="v">end ${end24}</div><div class="s">error ${err24} ｜ 样本 ${run24.length}</div></div>
                     <div class="summary-pill"><div class="k">48h 长跑</div><div class="v">end ${end48}</div><div class="s">error ${err48} ｜ 样本 ${run48.length}</div></div>
                     <div class="summary-pill"><div class="k">长跑结论</div><div class="v">${longRunText}</div><div class="s">第75批重点：把长跑观察正式纳入首页判断</div></div>
+                `;
+            }
+            if (longRunRiskHost) {
+                const riskLevel = err48 >= 2 || notificationPending >= 3 ? '红' : err24 >= 1 || end48 < 3 ? '黄' : '绿';
+                const riskAction = riskLevel === '红'
+                    ? '先收敛异常与通知堆积，再继续长跑'
+                    : riskLevel === '黄'
+                        ? '继续跑，但暂时只扩样本唔好下强结论'
+                        : '长跑窗口已相对稳定，可继续累积 forward test 结果';
+                longRunRiskHost.innerHTML = `
+                    <div class="summary-pill"><div class="k">长跑风险等级</div><div class="v">${riskLevel}</div><div class="s">结合 24h/48h error 与 pending 风险</div></div>
+                    <div class="summary-pill"><div class="k">建议动作</div><div class="v">${riskAction}</div><div class="s">让首页直接给出长跑阶段判断</div></div>
                 `;
             }
             const notificationRows = notificationOutbox || [];

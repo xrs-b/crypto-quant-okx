@@ -498,6 +498,7 @@
                             <div class="summary-strip" id="overviewAdvanceCriteria"></div>
                             <div class="summary-strip" id="overviewAdvanceGaps"></div>
                             <div class="summary-strip" id="overviewAdvancePath"></div>
+                            <div class="summary-strip" id="overviewAdvanceProgress"></div>
                             <div class="list" id="overviewActionQueue"></div>
                             <div class="toolbar-inline" id="overviewRuntimeToolbar">
                                 <button class="chip-btn active" onclick="setOverviewRuntimeFilter('all')">全部</button>
@@ -2291,6 +2292,7 @@
             const advanceCriteriaHost = document.getElementById('overviewAdvanceCriteria');
             const advanceGapsHost = document.getElementById('overviewAdvanceGaps');
             const advancePathHost = document.getElementById('overviewAdvancePath');
+            const advanceProgressHost = document.getElementById('overviewAdvanceProgress');
             const actionQueueHost = document.getElementById('overviewActionQueue');
             const notificationSummaryHost = document.getElementById('overviewNotificationSummary');
             const forwardFunnelHost = document.getElementById('overviewForwardFunnel');
@@ -2801,6 +2803,15 @@
                         : '下一步可以从“观察”转向“更细验证”';
                     advancePathHost.innerHTML = `
                         <div class="summary-pill"><div class="k">最短推进路径</div><div class="v">${pathText}</div><div class="s">${pathHint}</div></div>
+                    `;
+                }
+                if (advanceProgressHost) {
+                    const completed = criteriaItems.filter(item => item.ok).length;
+                    const total = criteriaItems.length || 1;
+                    const progress = Math.round((completed / total) * 100);
+                    const progressHint = progress >= 100 ? '推进条件已基本满足' : `当前已完成 ${completed}/${total} 项推进条件`;
+                    advanceProgressHost.innerHTML = `
+                        <div class="summary-pill"><div class="k">推进进度</div><div class="v">${progress}%</div><div class="s">${progressHint}</div></div>
                     `;
                 }
             }

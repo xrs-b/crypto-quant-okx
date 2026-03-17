@@ -487,6 +487,7 @@
                             <div class="summary-strip" id="overviewForwardRisk"></div>
                             <div class="summary-strip" id="overviewForwardReview"></div>
                             <div class="summary-strip" id="overviewForwardSymbols"></div>
+                            <div class="summary-strip" id="overviewForwardVerdict"></div>
                             <div class="list" id="overviewForwardObservations"></div>
                             <div class="list" id="overviewNotificationList"></div>
                             <div class="list" id="overviewRuntimeHistory"></div>
@@ -2248,6 +2249,7 @@
             const forwardRiskHost = document.getElementById('overviewForwardRisk');
             const forwardReviewHost = document.getElementById('overviewForwardReview');
             const forwardSymbolsHost = document.getElementById('overviewForwardSymbols');
+            const forwardVerdictHost = document.getElementById('overviewForwardVerdict');
             const forwardObservationHost = document.getElementById('overviewForwardObservations');
             const notificationListHost = document.getElementById('overviewNotificationList');
             const runtimeHistoryHost = document.getElementById('overviewRuntimeHistory');
@@ -2507,6 +2509,16 @@
                 : closedTradeRows.length
                     ? (closedPnlSum >= 0 ? '最近平仓样本整体偏正，可继续观察是否具持续性' : '最近平仓样本整体偏弱，建议继续观察止盈止损与筛选门槛')
                     : '已有开仓样本但未形成平仓结果，先继续观察持仓后续表现';
+            const bestForwardSymbol = forwardSymbolRows[0] || null;
+            const forwardVerdict = !todaySignals
+                ? '今日仍处于起步阶段，先继续累积 forward test 信号样本'
+                : !openedTrades
+                    ? '有信号但未形成开仓，当前更像在验证筛选/风控门槛是否合理'
+                    : !closedTradeRows.length
+                        ? '已形成真实开仓，但未有足够平仓样本，暂时只适合观察链路完整性'
+                        : closedPnlSum >= 0 && ddPct < 70
+                            ? '已有正向平仓样本，forward test 开始具备参考价值'
+                            : '已有平仓样本，但收益/回撤仍需继续观察，暂未到下结论阶段';
             if (forwardReviewHost) {
                 forwardReviewHost.innerHTML = `
                     <div class="summary-pill"><div class="k">最近成交样本</div><div class="v">${reviewSample}</div><div class="s">近 8 条 trade 中可用于观察的样本数</div></div>
@@ -2519,6 +2531,12 @@
                 forwardSymbolsHost.innerHTML = forwardSymbolRows.length ? forwardSymbolRows.map(row => `
                     <div class="summary-pill"><div class="k">${row.symbol}</div><div class="v">样本 ${row.total}</div><div class="s">open ${row.open} ｜ closed ${row.closed} ｜ pnl ${money(row.pnl)}</div></div>
                 `).join('') : `<div class="summary-pill"><div class="k">币种观察</div><div class="v">--</div><div class="s">最近暂无可用于 forward test 的 trade 样本</div></div>`;
+            }
+            if (forwardVerdictHost) {
+                forwardVerdictHost.innerHTML = `
+                    <div class="summary-pill"><div class="k">Forward 总评</div><div class="v">${forwardVerdict}</div><div class="s">综合信号、开平仓、PnL 与回撤作快速判断</div></div>
+                    <div class="summary-pill"><div class="k">当前最活跃币种</div><div class="v">${bestForwardSymbol ? bestForwardSymbol.symbol : '--'}</div><div class="s">${bestForwardSymbol ? `样本 ${bestForwardSymbol.total} ｜ pnl ${money(bestForwardSymbol.pnl)}` : '最近暂无明显活跃币种'}</div></div>
+                `;
             }
             if (forwardObservationHost) {
                 const observations = [

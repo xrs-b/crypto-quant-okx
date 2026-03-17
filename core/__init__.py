@@ -6,6 +6,7 @@ from .config import config, Config
 from .database import db, Database
 from .logger import logger, trade_logger, TradeLogger
 from .exchange import Exchange, Position
+from .notifier import NotificationManager
 
 __all__ = [
     'config',
@@ -16,5 +17,6 @@ __all__ = [
     'trade_logger',
     'TradeLogger',
     'Exchange',
-    'Position'
+    'Position',
+    'NotificationManager'
 ]

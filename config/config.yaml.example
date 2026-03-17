@@ -60,6 +60,7 @@ market_filters:
 notification:
   discord:
     channel_id: '1468585288770125876'
+    webhook_url: ''            # 推荐使用 Discord webhook；留空则只落本地日志/DB
     enabled: true
     notify_errors: true
     notify_signals: true

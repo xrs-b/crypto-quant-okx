@@ -18,6 +18,7 @@ from core.config import Config
 from core.database import Database
 from core.exchange import Exchange
 from core.logger import logger
+from core.notifier import NotificationManager
 from core.presets import PresetManager
 from signals import SignalDetector, SignalValidator, SignalRecorder
 from trading import TradingExecutor, RiskManager
@@ -183,6 +184,7 @@ class TradingBot:
         self.executor = TradingExecutor(self.config, self.exchange, self.db)
         self.risk_mgr = RiskManager(self.config, self.db)
         self.ml = MLEngine(self.config.all)
+        self.notifier = NotificationManager(self.config, self.db, logger)
         
         logger.info("交易机器人初始化完成")
     
@@ -258,6 +260,7 @@ class TradingBot:
                 
                 if not passed:
                     print(f"   ❌ 信号过滤: {reason}")
+                self.notifier.notify_signal(signal, passed, reason, details)
                 
                 # 记录信号
                 signal_id = self.recorder.record(signal, (passed, reason, details))
@@ -265,7 +268,8 @@ class TradingBot:
                 # 如果信号通过且可以开仓
                 if passed and signal.signal_type in ['buy', 'sell']:
                     # 风险检查
-                    can_open, risk_reason, _ = self.risk_mgr.can_open_position(symbol)
+                    can_open, risk_reason, risk_details = self.risk_mgr.can_open_position(symbol)
+                    self.notifier.notify_decision(signal, can_open, risk_reason, risk_details)
                     
                     if can_open:
                         side = 'long' if signal.signal_type == 'buy' else 'short'
@@ -277,8 +281,10 @@ class TradingBot:
                         
                         if trade_id:
                             self.recorder.mark_executed(signal_id, trade_id)
+                            self.notifier.notify_trade_open(symbol, side, current_price, self.db.get_latest_open_trade(symbol, side).get('quantity') if self.db.get_latest_open_trade(symbol, side) else 0, trade_id, signal)
                             print(f"   ✅ 开{'多' if side == 'long' else '空'}成功! Trade ID: {trade_id}")
                         else:
+                            self.notifier.notify_error('开仓失败', f'{symbol} {side} 开仓未成功', {'signal_id': signal_id})
                             print(f"   ❌ 开仓失败")
                     else:
                         print(f"   ⏸️ 风险检查阻止: {risk_reason}")
@@ -286,6 +292,7 @@ class TradingBot:
                 print()
                 
             except Exception as e:
+                self.notifier.notify_error('处理币种出错', f'{symbol}: {e}', {'symbol': symbol})
                 logger.error(f"处理{symbol}出错: {e}")
                 print(f"   ⚠️ 错误: {e}\n")
         
@@ -309,14 +316,17 @@ class TradingBot:
                 # 检查止损
                 if self.executor.check_stop_loss(symbol, current_price):
                     self.executor.close_position(symbol, '止损')
+                    self.notifier.notify_trade_close(symbol, position['side'], current_price, '止损')
                     print(f"   🔴 止损: {symbol}")
                 
                 # 检查止盈
                 elif self.executor.check_take_profit(symbol, current_price):
                     self.executor.close_position(symbol, '止盈')
+                    self.notifier.notify_trade_close(symbol, position['side'], current_price, '止盈')
                     print(f"   🟢 止盈: {symbol}")
                 
             except Exception as e:
+                self.notifier.notify_error('检查持仓失败', f'{symbol}: {e}', {'symbol': symbol})
                 logger.error(f"检查持仓{symbol}出错: {e}")
         
         print(f"\n✅ 交易循环完成! {datetime.now()}\n")

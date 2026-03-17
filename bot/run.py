@@ -230,6 +230,23 @@ def reconcile_exchange_positions(exchange: Exchange, db: Database) -> dict:
         'open_trade_missing_exchange': [row for row in local_open_trades if f"{row.get('symbol')}::{row.get('side')}" not in exchange_key_set],
         'exchange_missing_open_trade': [row for row in report['exchange_positions'] if f"{row['symbol']}::{row['side']}" not in open_trade_keys],
     }
+    stale_closed = []
+    for row in report['diff']['open_trade_missing_exchange']:
+        trade_id = row.get('id')
+        symbol = row.get('symbol')
+        side = row.get('side')
+        current_price = None
+        matched_local = next((p for p in local_after if p.get('symbol') == symbol and p.get('side') == side), None)
+        if matched_local:
+            current_price = matched_local.get('current_price') or matched_local.get('entry_price')
+        if trade_id and db.mark_trade_stale_closed(trade_id, '交易所无对应持仓，对账自动收口', close_price=current_price):
+            stale_closed.append({'trade_id': trade_id, 'symbol': symbol, 'side': side})
+    if stale_closed:
+        report['local_open_trades'] = db.get_trades(status='open', limit=200)
+        local_open_trades = report['local_open_trades']
+        open_trade_keys = {f"{t.get('symbol')}::{t.get('side')}" for t in local_open_trades}
+        report['diff']['open_trade_missing_exchange'] = [row for row in local_open_trades if f"{row.get('symbol')}::{row.get('side')}" not in exchange_key_set]
+        report['diff']['exchange_missing_open_trade'] = [row for row in report['exchange_positions'] if f"{row['symbol']}::{row['side']}" not in open_trade_keys]
     report['summary'] = {
         'exchange_positions': len(report['exchange_positions']),
         'local_positions': len(local_after),
@@ -238,7 +255,9 @@ def reconcile_exchange_positions(exchange: Exchange, db: Database) -> dict:
         'local_position_missing_exchange': len(report['diff']['local_position_missing_exchange']),
         'open_trade_missing_exchange': len(report['diff']['open_trade_missing_exchange']),
         'exchange_missing_open_trade': len(report['diff']['exchange_missing_open_trade']),
+        'stale_open_trades_closed': len(stale_closed),
     }
+    report['stale_closed'] = stale_closed
     return report
 
 

@@ -414,6 +414,35 @@ class Database:
         if df.empty:
             return None
         return df.iloc[0].to_dict()
+
+    def get_open_trades(self, symbol: str = None, side: str = None, limit: int = 200) -> List[Dict]:
+        conn = self._get_connection()
+        query = "SELECT * FROM trades WHERE status = 'open'"
+        params = []
+        if symbol:
+            query += " AND symbol = ?"
+            params.append(symbol)
+        if side:
+            query += " AND side = ?"
+            params.append(side)
+        query += " ORDER BY open_time DESC, id DESC LIMIT ?"
+        params.append(limit)
+        df = pd.read_sql_query(query, conn, params=params)
+        conn.close()
+        return df.to_dict('records')
+
+    def mark_trade_stale_closed(self, trade_id: int, reason: str, close_price: float = None):
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        note = f"自动收口: {reason}"
+        cursor.execute(
+            "UPDATE trades SET status = 'closed', exit_price = COALESCE(?, exit_price), close_time = CURRENT_TIMESTAMP, notes = CASE WHEN notes IS NULL OR notes = '' THEN ? ELSE notes || ' | ' || ? END WHERE id = ? AND status = 'open'",
+            (close_price, note, note, trade_id)
+        )
+        changed = cursor.rowcount
+        conn.commit()
+        conn.close()
+        return changed > 0
     
     def get_trade_stats(self, days: int = 30) -> Dict:
         """获取交易统计"""

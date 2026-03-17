@@ -576,9 +576,12 @@ class TestReconcilePositions(unittest.TestCase):
             self.assertIn('XRP/USDT', symbols)
             self.assertNotIn('SOL/USDT', symbols)
             self.assertEqual(report['summary']['exchange_positions'], 2)
-            self.assertEqual(report['summary']['open_trades'], 2)
-            self.assertEqual(report['summary']['open_trade_missing_exchange'], 1)
-            self.assertEqual(report['diff']['open_trade_missing_exchange'][0]['symbol'], 'ETH/USDT')
+            self.assertEqual(report['summary']['open_trades'], 1)
+            self.assertEqual(report['summary']['stale_open_trades_closed'], 1)
+            self.assertEqual(report['summary']['open_trade_missing_exchange'], 0)
+            closed_eth = db.get_trades(symbol='ETH/USDT', limit=5)[0]
+            self.assertEqual(closed_eth['status'], 'closed')
+            self.assertIn('自动收口', closed_eth.get('notes') or '')
             self.assertEqual(report['summary']['exchange_missing_open_trade'], 1)
             self.assertEqual(report['diff']['exchange_missing_open_trade'][0]['symbol'], 'XRP/USDT')
         finally:

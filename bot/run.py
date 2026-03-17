@@ -131,10 +131,17 @@ def build_exchange_smoke_plan(cfg: Config, exchange: Exchange, symbol: str = Non
 
 
 def reconcile_exchange_positions(exchange: Exchange, db: Database) -> dict:
-    """交易所持仓与本地 DB 对账同步（第一轮）"""
-    report = {'synced': 0, 'removed': 0, 'exchange_positions': [], 'local_before': db.get_positions()}
+    """交易所持仓与本地 DB / open trades 三方对账（第二轮）"""
+    report = {
+        'synced': 0,
+        'removed': 0,
+        'exchange_positions': [],
+        'local_before': db.get_positions(),
+        'local_open_trades': db.get_trades(status='open', limit=200),
+    }
     exchange_positions = exchange.fetch_positions()
     normalized_symbols = []
+    normalized_keys = []
     for pos in exchange_positions:
         symbol = pos.get('symbol') or pos.get('info', {}).get('instId') or pos.get('info', {}).get('instId')
         if symbol and ':' in symbol:
@@ -152,10 +159,33 @@ def reconcile_exchange_positions(exchange: Exchange, db: Database) -> dict:
         leverage = int(float(pos.get('leverage') or pos.get('info', {}).get('lever') or 1))
         db.update_position(symbol, side, entry_price, contracts, leverage, current_price)
         normalized_symbols.append(symbol)
+        normalized_keys.append(f'{symbol}::{side}')
         report['exchange_positions'].append({'symbol': symbol, 'side': side, 'quantity': contracts, 'entry_price': entry_price, 'current_price': current_price, 'leverage': leverage})
         report['synced'] += 1
     report['removed'] = db.remove_positions_not_in(normalized_symbols)
     report['local_after'] = db.get_positions()
+
+    local_after = report['local_after']
+    local_open_trades = report['local_open_trades']
+    local_position_keys = {f"{p.get('symbol')}::{p.get('side')}" for p in local_after}
+    open_trade_keys = {f"{t.get('symbol')}::{t.get('side')}" for t in local_open_trades}
+    exchange_key_set = set(normalized_keys)
+
+    report['diff'] = {
+        'exchange_missing_local_position': [row for row in report['exchange_positions'] if f"{row['symbol']}::{row['side']}" not in local_position_keys],
+        'local_position_missing_exchange': [row for row in local_after if f"{row.get('symbol')}::{row.get('side')}" not in exchange_key_set],
+        'open_trade_missing_exchange': [row for row in local_open_trades if f"{row.get('symbol')}::{row.get('side')}" not in exchange_key_set],
+        'exchange_missing_open_trade': [row for row in report['exchange_positions'] if f"{row['symbol']}::{row['side']}" not in open_trade_keys],
+    }
+    report['summary'] = {
+        'exchange_positions': len(report['exchange_positions']),
+        'local_positions': len(local_after),
+        'open_trades': len(local_open_trades),
+        'exchange_missing_local_position': len(report['diff']['exchange_missing_local_position']),
+        'local_position_missing_exchange': len(report['diff']['local_position_missing_exchange']),
+        'open_trade_missing_exchange': len(report['diff']['open_trade_missing_exchange']),
+        'exchange_missing_open_trade': len(report['diff']['exchange_missing_open_trade']),
+    }
     return report
 
 
@@ -637,6 +667,8 @@ def main():
         report = reconcile_exchange_positions(exchange, db)
         print("\n🧭 持仓对账结果:\n")
         print(json.dumps(report, ensure_ascii=False, indent=2))
+        print("\n📌 对账摘要:\n")
+        print(json.dumps(report.get('summary', {}), ensure_ascii=False, indent=2))
 
     elif args.exchange_diagnose:
         cfg = Config()

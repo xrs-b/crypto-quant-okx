@@ -435,6 +435,8 @@ class TestReconcilePositions(unittest.TestCase):
         db = Database('data/test_reconcile.db')
         try:
             db.update_position('SOL/USDT', 'long', 100, 1, 5, 100)
+            db.record_trade(symbol='BTC/USDT', side='long', entry_price=50000, quantity=2, leverage=10)
+            db.record_trade(symbol='ETH/USDT', side='long', entry_price=3000, quantity=1, leverage=5)
             report = reconcile_exchange_positions(PositionSyncExchangeStub(), db)
             positions = db.get_positions()
             symbols = {p['symbol'] for p in positions}
@@ -443,6 +445,12 @@ class TestReconcilePositions(unittest.TestCase):
             self.assertIn('BTC/USDT', symbols)
             self.assertIn('XRP/USDT', symbols)
             self.assertNotIn('SOL/USDT', symbols)
+            self.assertEqual(report['summary']['exchange_positions'], 2)
+            self.assertEqual(report['summary']['open_trades'], 2)
+            self.assertEqual(report['summary']['open_trade_missing_exchange'], 1)
+            self.assertEqual(report['diff']['open_trade_missing_exchange'][0]['symbol'], 'ETH/USDT')
+            self.assertEqual(report['summary']['exchange_missing_open_trade'], 1)
+            self.assertEqual(report['diff']['exchange_missing_open_trade'][0]['symbol'], 'XRP/USDT')
         finally:
             if os.path.exists('data/test_reconcile.db'):
                 os.remove('data/test_reconcile.db')

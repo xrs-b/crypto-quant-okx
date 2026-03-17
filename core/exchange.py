@@ -118,6 +118,9 @@ class Exchange:
             return self.exchange.create_market_buy_order(contract_symbol, amount, params)
         return self.exchange.create_market_sell_order(contract_symbol, amount, params)
 
+    def _is_posside_error(self, message: str) -> bool:
+        return 'Parameter posSide error' in message or '51000' in message and 'posSide' in message
+
     def create_order(self, symbol: str, side: str, amount: float, posSide: str = None) -> Dict:
         contract_symbol = self.get_order_symbol(symbol)
         params = self._build_order_params(posSide=posSide)
@@ -125,8 +128,8 @@ class Exchange:
             return self._submit_market_order(contract_symbol, side, amount, params)
         except Exception as e:
             message = str(e)
-            if 'posSide' in params and 'Parameter posSide error' in message:
-                fallback_params = self._build_order_params(posSide=posSide, include_pos_side=False)
+            if self._is_posside_error(message):
+                fallback_params = {'tdMode': 'isolated'}
                 return self._submit_market_order(contract_symbol, side, amount, fallback_params)
             print(f'开仓错误: {e}')
             raise
@@ -138,8 +141,8 @@ class Exchange:
             return self._submit_market_order(contract_symbol, side, amount, params)
         except Exception as e:
             message = str(e)
-            if 'posSide' in params and ('Parameter posSide error' in message or '51169' in message):
-                fallback_params = self._build_order_params(posSide=posSide, reduce_only=True, include_pos_side=False)
+            if self._is_posside_error(message) or '51169' in message:
+                fallback_params = {'tdMode': 'isolated', 'reduceOnly': True}
                 return self._submit_market_order(contract_symbol, side, amount, fallback_params)
             print(f'平仓错误: {e}')
             raise

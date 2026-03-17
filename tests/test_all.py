@@ -87,6 +87,17 @@ class RawOrderExchangeStub:
         return {'id': 'sell-ok'}
 
 
+class OnewayPosSideErrorStub:
+    def __init__(self):
+        self.calls = []
+
+    def create_market_buy_order(self, symbol, amount, params):
+        self.calls.append({'side': 'buy', 'symbol': symbol, 'amount': amount, 'params': dict(params)})
+        if len(self.calls) == 1:
+            raise Exception('okx 51000 Parameter posSide error')
+        return {'id': 'buy-ok'}
+
+
 class DiagnosticExchangeStub:
     def fetch_balance(self):
         return {'free': {'USDT': 321.5}}
@@ -492,6 +503,17 @@ class TestExchange(unittest.TestCase):
         self.assertEqual(result['id'], 'buy-ok')
         self.assertEqual(len(ex.exchange.calls), 1)
         self.assertNotIn('posSide', ex.exchange.calls[0]['params'])
+
+    def test_oneway_mode_retries_with_minimal_params_on_51000(self):
+        ex = Exchange.__new__(Exchange)
+        ex.config = {'exchange': {'position_mode': 'oneway'}}
+        ex.exchange = OnewayPosSideErrorStub()
+        ex.get_order_symbol = lambda symbol: 'BTC/USDT:USDT'
+
+        result = ex.create_order('BTC/USDT', 'buy', 1.5, posSide='long')
+        self.assertEqual(result['id'], 'buy-ok')
+        self.assertEqual(len(ex.exchange.calls), 2)
+        self.assertEqual(ex.exchange.calls[1]['params'], {'tdMode': 'isolated'})
 
 
 class TestNotifications(unittest.TestCase):

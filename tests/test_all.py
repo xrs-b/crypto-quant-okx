@@ -126,6 +126,12 @@ class FakeLogDB:
                     item['details'] = details
                 return
 
+    def get_notification_outbox(self, status='pending', limit=50):
+        rows = self.outbox
+        if status != 'all':
+            rows = [item for item in rows if item['status'] == status]
+        return rows[:limit]
+
 
 class PositionSyncExchangeStub:
     def fetch_positions(self):
@@ -481,6 +487,23 @@ class TestNotifications(unittest.TestCase):
         self.assertEqual(result['outbox_status'], 'pending')
         self.assertEqual(db.outbox[-1]['status'], 'pending')
         self.assertEqual(db.outbox[-1]['details']['delivery']['path'], 'bridge_pending')
+
+    def test_relay_pending_outbox_delivers_messages(self):
+        cfg = Config()
+        cfg._config.setdefault('notification', {}).setdefault('discord', {})
+        cfg._config['notification']['discord'].update({'enabled': True, 'webhook_url': '', 'bot_token': 'x', 'channel_id': '123'})
+        db = FakeLogDB()
+        notifier = NotificationManager(cfg, db, None)
+        notifier._send_discord_bot = lambda content: False
+        notifier._send_discord_webhook = lambda content: False
+        notifier.send('error', '失败测试', ['等待 relay'])
+        notifier._send_discord = lambda content: True
+        relay = notifier.relay_pending_outbox(limit=10)
+        self.assertEqual(relay['scanned'], 1)
+        self.assertEqual(relay['delivered'], 1)
+        self.assertEqual(db.outbox[-1]['status'], 'delivered')
+        self.assertTrue(db.outbox[-1]['details']['delivery']['relay_attempted'])
+        self.assertEqual(db.outbox[-1]['details']['delivery']['path'], 'relay')
 
 
 class TestReconcilePositions(unittest.TestCase):

@@ -7,6 +7,7 @@ import json
 from datetime import datetime
 from typing import Dict, List, Optional
 from urllib import request, error
+import copy
 
 
 class NotificationManager:
@@ -60,6 +61,43 @@ class NotificationManager:
             self.db.update_notification_outbox(outbox_id, status=status, details=extra)
         except Exception:
             pass
+
+    def relay_pending_outbox(self, limit: int = 20) -> Dict:
+        result = {'scanned': 0, 'delivered': 0, 'failed': 0, 'skipped': 0, 'items': []}
+        if not self.db:
+            return result
+        try:
+            rows = self.db.get_notification_outbox(status='pending', limit=limit)
+        except Exception:
+            return result
+        result['scanned'] = len(rows)
+        for row in rows:
+            if row.get('channel') != 'discord':
+                result['skipped'] += 1
+                result['items'].append({'id': row.get('id'), 'status': 'skipped', 'reason': 'unsupported-channel'})
+                continue
+            existing = copy.deepcopy(row.get('details') or {})
+            delivery = existing.get('delivery') or {}
+            delivered = self._send_discord(row.get('message') or '')
+            updated = {
+                **existing,
+                'delivery': {
+                    **delivery,
+                    'relay_attempted': True,
+                    'delivered': delivered,
+                    'path': 'relay' if delivered else 'bridge_pending',
+                    'last_attempt_at': datetime.now().isoformat(),
+                }
+            }
+            if delivered:
+                self._update_outbox_status(row.get('id'), 'delivered', updated)
+                result['delivered'] += 1
+                result['items'].append({'id': row.get('id'), 'status': 'delivered'})
+            else:
+                self._update_outbox_status(row.get('id'), 'pending', updated)
+                result['failed'] += 1
+                result['items'].append({'id': row.get('id'), 'status': 'pending'})
+        return result
 
     def _send_discord_webhook(self, content: str) -> bool:
         webhook_url = self.discord_cfg.get('webhook_url')

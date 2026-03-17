@@ -18,7 +18,7 @@ from core.database import Database
 from core.exchange import Exchange
 from core.presets import PresetManager
 from trading.executor import RiskManager
-from bot.run import execute_exchange_smoke
+from bot.run import execute_exchange_smoke, reconcile_exchange_positions
 from ml.engine import MLEngine
 from analytics import StrategyBacktester, SignalQualityAnalyzer, ParameterOptimizer, GovernanceEngine
 
@@ -256,6 +256,15 @@ def get_smoke_runs():
     limit = int(request.args.get('limit', 20))
     data = db.get_smoke_runs(limit=limit)
     return jsonify({'success': True, 'data': data, 'count': len(data)})
+
+
+@app.route('/api/system/reconcile-report')
+def get_reconcile_report():
+    """获取最新交易所/本地持仓/本地 open trades 对账报告"""
+    cfg = Config()
+    exchange = Exchange(cfg.all)
+    report = reconcile_exchange_positions(exchange, Database(cfg.db_path))
+    return jsonify({'success': True, 'data': report, 'summary': report.get('summary', {})})
 
 
 @app.route('/api/system/smoke-state')

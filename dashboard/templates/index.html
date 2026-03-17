@@ -469,6 +469,7 @@
                             <div class="summary-strip" id="overviewSmokeCompare"></div>
                             <div class="summary-strip" id="overviewSmokeErrorTags"></div>
                             <div class="summary-strip" id="overviewSmokeRisk"></div>
+                            <div class="summary-strip" id="overviewReconcileRisk"></div>
                             <div class="compact-grid">
                                 <div class="item">
                                     <strong>组合状态</strong>
@@ -2146,13 +2147,14 @@
             `).join('') : '<div class="empty-state"><div class="icon">🧪</div><div>当前筛选下暂无 smoke 验收记录</div></div>';
         }
         async function loadOverview() {
-            const [status, changes, alerts, smokeRuns, smokeState, smokeImpactLatest] = await Promise.all([
+            const [status, changes, alerts, smokeRuns, smokeState, smokeImpactLatest, reconcileReport] = await Promise.all([
                 api('/api/system/status'),
                 api('/api/changes/recent'),
                 api('/api/alerts'),
                 api('/api/system/smoke-runs?limit=20'),
                 api('/api/system/smoke-state'),
-                api('/api/system/smoke-impact-latest')
+                api('/api/system/smoke-impact-latest'),
+                api('/api/system/reconcile-report')
             ]);
             document.getElementById('systemStatus').textContent = `● ${status.system.status}`;
             document.getElementById('totalValue').textContent = money(status.portfolio.total_value);
@@ -2177,6 +2179,7 @@
             const compareHost = document.getElementById('overviewSmokeCompare');
             const errorTagHost = document.getElementById('overviewSmokeErrorTags');
             const riskHost = document.getElementById('overviewSmokeRisk');
+            const reconcileHost = document.getElementById('overviewReconcileRisk');
             if (kpiHost) {
                 if (overviewSmokeLastImpact) {
                     kpiHost.innerHTML = `
@@ -2247,6 +2250,18 @@
                         <div class="summary-pill"><div class="k">一句话结论</div><div class="v">${riskText}</div><div class="s">${latestError || '最近未见明确错误'}</div></div>
                     `;
                 }
+            }
+            if (reconcileHost) {
+                const summary = reconcileReport?.summary || {};
+                const riskCount = Number(summary.exchange_missing_local_position || 0) + Number(summary.local_position_missing_exchange || 0) + Number(summary.open_trade_missing_exchange || 0) + Number(summary.exchange_missing_open_trade || 0);
+                const level = riskCount >= 3 ? '红' : riskCount >= 1 ? '黄' : '绿';
+                const text = riskCount >= 3 ? '三方对账差异较多，建议优先检查本地状态与交易所一致性' : riskCount >= 1 ? '存在少量对账差异，建议关注 open trade / position 是否同步' : '三方对账基本一致';
+                reconcileHost.innerHTML = `
+                    <div class="summary-pill"><div class="k">对账风险等级</div><div class="v">${level}</div><div class="s">exchange/local/open_trade 差异共 ${riskCount} 项</div></div>
+                    <div class="summary-pill"><div class="k">交易所缺本地持仓</div><div class="v">${summary.exchange_missing_local_position ?? 0}</div><div class="s">交易所有仓，本地 position 未对齐</div></div>
+                    <div class="summary-pill"><div class="k">本地持仓缺交易所</div><div class="v">${summary.local_position_missing_exchange ?? 0}</div><div class="s">本地 position 可能为脏数据</div></div>
+                    <div class="summary-pill"><div class="k">一句话判断</div><div class="v">${text}</div><div class="s">open trades 差异 ${summary.open_trade_missing_exchange ?? 0}/${summary.exchange_missing_open_trade ?? 0}</div></div>
+                `;
             }
             renderOverviewSmokeControls();
             const alertHtml = (alerts || []).map(a => `${a.level.toUpperCase()}: ${a.message}`).join('<br>') || '--';

@@ -484,6 +484,7 @@
                             <div class="summary-strip" id="overviewRuntimeRisk"></div>
                             <div class="summary-strip" id="overviewNotificationSummary"></div>
                             <div class="summary-strip" id="overviewForwardFunnel"></div>
+                            <div class="summary-strip" id="overviewForwardRisk"></div>
                             <div class="list" id="overviewForwardObservations"></div>
                             <div class="list" id="overviewNotificationList"></div>
                             <div class="list" id="overviewRuntimeHistory"></div>
@@ -2241,6 +2242,7 @@
             const runtimeSummaryHost = document.getElementById('overviewRuntimeSummary');
             const notificationSummaryHost = document.getElementById('overviewNotificationSummary');
             const forwardFunnelHost = document.getElementById('overviewForwardFunnel');
+            const forwardRiskHost = document.getElementById('overviewForwardRisk');
             const forwardObservationHost = document.getElementById('overviewForwardObservations');
             const notificationListHost = document.getElementById('overviewNotificationList');
             const runtimeHistoryHost = document.getElementById('overviewRuntimeHistory');
@@ -2459,10 +2461,31 @@
                     <div class="summary-pill"><div class="k">执行率</div><div class="v">${execRate}%</div><div class="s">信号到执行的当前转化率</div></div>
                 `;
             }
+            const ddPct = Number(status?.risk?.daily_drawdown || 0) * 100;
+            const exposurePct = Number(status?.risk?.current_exposure || 0) * 100;
+            const lossNow = Number(status?.risk?.consecutive_losses || 0);
+            const lossMax = Number(status?.risk?.max_consecutive_losses || 0);
+            const pnl30d = Number(status?.trading?.total_pnl || 0);
+            const forwardRiskText = lossNow >= lossMax && lossMax > 0
+                ? '连续亏损已顶格，建议先收缩观察'
+                : ddPct >= Number(status?.risk?.max_daily_drawdown || 1) * 100 * 0.7
+                    ? '日内回撤接近警戒线，建议保守观察'
+                    : openedTrades > 0 && closedTrades > 0
+                        ? '已有真实开平仓样本，可继续累计 forward test'
+                        : '样本仍少，先继续积累有效开平仓链路';
+            if (forwardRiskHost) {
+                forwardRiskHost.innerHTML = `
+                    <div class="summary-pill"><div class="k">30日累计盈亏</div><div class="v">${money(pnl30d)}</div><div class="s">先用作 forward test 观察，不作实盘结论</div></div>
+                    <div class="summary-pill"><div class="k">当前风险占用</div><div class="v">${exposurePct.toFixed(2)}%</div><div class="s">连续亏损 ${lossNow}/${lossMax || '--'}</div></div>
+                    <div class="summary-pill"><div class="k">日内回撤</div><div class="v">${ddPct.toFixed(2)}%</div><div class="s">用于判断是否接近风控警戒线</div></div>
+                    <div class="summary-pill"><div class="k">Forward 风险判断</div><div class="v">${forwardRiskText}</div><div class="s">结合盈亏、回撤、连续亏损与链路样本</div></div>
+                `;
+            }
             if (forwardObservationHost) {
                 const observations = [
                     {title: 'Forward test 漏斗判断', text: funnelConclusion},
                     {title: '最近一轮链路', text: `signals ${lastSummary.signals ?? '--'} ｜ passed ${passedSignals} ｜ opened ${openedTrades} ｜ closed ${closedTrades} ｜ errors ${lastSummary.errors ?? '--'}`},
+                    {title: '收益/风险观察', text: `30日盈亏 ${money(pnl30d)} ｜ 风险占用 ${exposurePct.toFixed(2)}% ｜ 日内回撤 ${ddPct.toFixed(2)}%`},
                     {title: '观察重点', text: openedTrades ? '继续看平仓结果、PnL 与连续样本稳定性' : '继续看信号通过率与风险门槛是否卡得太死'},
                 ];
                 forwardObservationHost.innerHTML = observations.map(item => `

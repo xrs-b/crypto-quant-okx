@@ -475,6 +475,7 @@
                             <div class="summary-strip" id="overviewReconcileRisk"></div>
                             <div class="summary-strip" id="overviewRuntimeState"></div>
                             <div class="summary-strip" id="overviewRuntimeSummary"></div>
+                            <div class="summary-strip" id="overviewRunContinuity"></div>
                             <div class="toolbar-inline" id="overviewRuntimeToolbar">
                                 <button class="chip-btn active" onclick="setOverviewRuntimeFilter('all')">全部</button>
                                 <button class="chip-btn" onclick="setOverviewRuntimeFilter('error')">异常</button>
@@ -2244,6 +2245,7 @@
             const reconcileHost = document.getElementById('overviewReconcileRisk');
             const runtimeHost = document.getElementById('overviewRuntimeState');
             const runtimeSummaryHost = document.getElementById('overviewRuntimeSummary');
+            const runtimeContinuityHost = document.getElementById('overviewRunContinuity');
             const notificationSummaryHost = document.getElementById('overviewNotificationSummary');
             const forwardFunnelHost = document.getElementById('overviewForwardFunnel');
             const forwardRiskHost = document.getElementById('overviewForwardRisk');
@@ -2256,6 +2258,11 @@
             const reconcileDetailHost = document.getElementById('overviewReconcileDetails');
             const smokeRows = smokeRuns || [];
             const smokeFailRate = smokeRows.length ? Math.round(smokeRows.filter(x => !x.success).length / smokeRows.length * 100) : 0;
+            const runtimeHistory = runtimeState?.history || [];
+            const runtimeEndRows = runtimeHistory.filter(x => x.type === 'end');
+            const runtimeErrorRows = runtimeHistory.filter(x => x.type === 'error');
+            const runtimeSkipRows = runtimeHistory.filter(x => x.type === 'skip');
+            const lastSuccessAt = runtimeEndRows[0]?.time || runtimeState?.last_finished_at || null;
             const reconcileSummary = reconcileReport?.summary || {};
             const reconcileRiskCount = Number(reconcileSummary.exchange_missing_local_position || 0) + Number(reconcileSummary.local_position_missing_exchange || 0) + Number(reconcileSummary.open_trade_missing_exchange || 0) + Number(reconcileSummary.exchange_missing_open_trade || 0);
             const notifyEnabled = true;
@@ -2412,6 +2419,20 @@
                     <div class="summary-pill"><div class="k">Relay 最近结果</div><div class="v">delivered ${relayResult.delivered ?? '--'}</div><div class="s">pending fail ${relayResult.failed ?? '--'} ｜ scanned ${relayResult.scanned ?? '--'}</div></div>
                     <div class="summary-pill"><div class="k">异常上下文</div><div class="v">${runtimeState?.last_error ? '已记录' : '--'}</div><div class="s">${errorContextText}</div></div>
                 ` : `<div class="summary-pill"><div class="k">最近一轮摘要</div><div class="v">--</div><div class="s">守护模式尚未产出 last_summary</div></div><div class="summary-pill"><div class="k">Relay 最近结果</div><div class="v">delivered ${relayResult.delivered ?? '--'}</div><div class="s">pending fail ${relayResult.failed ?? '--'} ｜ scanned ${relayResult.scanned ?? '--'}</div></div><div class="summary-pill"><div class="k">异常上下文</div><div class="v">${runtimeState?.last_error ? '已记录' : '--'}</div><div class="s">${errorContextText}</div></div>`;
+            }
+            if (runtimeContinuityHost) {
+                const continuityScore = Math.max(0, 100 - runtimeErrorRows.length * 25 - runtimeSkipRows.length * 8);
+                const continuityText = runtimeErrorRows.length
+                    ? '最近运行仍有异常，建议继续观察守护稳定性'
+                    : runtimeEndRows.length >= 3
+                        ? '最近连续运行记录较完整，可继续累积长跑样本'
+                        : '连续运行样本仍少，建议继续让 daemon 跑起来观察';
+                runtimeContinuityHost.innerHTML = `
+                    <div class="summary-pill"><div class="k">最近运行样本</div><div class="v">${runtimeHistory.length}</div><div class="s">end ${runtimeEndRows.length} ｜ error ${runtimeErrorRows.length} ｜ skip ${runtimeSkipRows.length}</div></div>
+                    <div class="summary-pill"><div class="k">最近成功时间</div><div class="v">${lastSuccessAt || '--'}</div><div class="s">用于判断是否连续稳定产出有效周期</div></div>
+                    <div class="summary-pill"><div class="k">连续运行评分</div><div class="v">${continuityScore}</div><div class="s">异常越少、完成越多，评分越高</div></div>
+                    <div class="summary-pill"><div class="k">连续运行判断</div><div class="v">${continuityText}</div><div class="s">第74批重点：验证长跑稳定性</div></div>
+                `;
             }
             const notificationRows = notificationOutbox || [];
             const notificationCounts = notificationStats || {

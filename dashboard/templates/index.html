@@ -483,6 +483,7 @@
                             <div class="summary-strip" id="overviewLongRunSample"></div>
                             <div class="summary-strip" id="overviewLongRunVerdict"></div>
                             <div class="summary-strip" id="overviewStageAcceptance"></div>
+                            <div class="summary-strip" id="overviewPhaseSwitch"></div>
                             <div class="toolbar-inline" id="overviewRuntimeToolbar">
                                 <button class="chip-btn active" onclick="setOverviewRuntimeFilter('all')">全部</button>
                                 <button class="chip-btn" onclick="setOverviewRuntimeFilter('error')">异常</button>
@@ -2260,6 +2261,7 @@
             const longRunSampleHost = document.getElementById('overviewLongRunSample');
             const longRunVerdictHost = document.getElementById('overviewLongRunVerdict');
             const stageAcceptanceHost = document.getElementById('overviewStageAcceptance');
+            const phaseSwitchHost = document.getElementById('overviewPhaseSwitch');
             const notificationSummaryHost = document.getElementById('overviewNotificationSummary');
             const forwardFunnelHost = document.getElementById('overviewForwardFunnel');
             const forwardRiskHost = document.getElementById('overviewForwardRisk');
@@ -2557,20 +2559,40 @@
                     <div class="summary-pill"><div class="k">下一步建议</div><div class="v">${longRunNext}</div><div class="s">俾你首页直接判断下一步做咩</div></div>
                 `;
             }
-            if (stageAcceptanceHost) {
-                const acceptanceLevel = longRunVerdict === '长跑阶段基本成型'
+            let acceptanceLevel = '未完成';
+            let acceptanceText = '仍需继续累积长跑样本或先排异常';
+            if (stageAcceptanceHost || phaseSwitchHost) {
+                acceptanceLevel = longRunVerdict === '长跑阶段基本成型'
                     ? '可阶段验收'
                     : longRunVerdict === '长跑阶段可观察'
                         ? '观察中'
                         : '未完成';
-                const acceptanceText = acceptanceLevel === '可阶段验收'
+                acceptanceText = acceptanceLevel === '可阶段验收'
                     ? '运行、样本、风险三层都初步具备阶段验收条件'
                     : acceptanceLevel === '观察中'
                         ? '可以继续观察，但暂时未建议下最终阶段结论'
                         : '仍需继续累积长跑样本或先排异常';
+            }
+            if (stageAcceptanceHost) {
                 stageAcceptanceHost.innerHTML = `
                     <div class="summary-pill"><div class="k">阶段验收状态</div><div class="v">${acceptanceLevel}</div><div class="s">${acceptanceText}</div></div>
                     <div class="summary-pill"><div class="k">验收参考</div><div class="v">48h end ${end48}</div><div class="s">success streak ${successStreak} ｜ pending ${notificationPending}</div></div>
+                `;
+            }
+            if (phaseSwitchHost) {
+                const switchLevel = acceptanceLevel === '可阶段验收'
+                    ? '可转下一阶段'
+                    : acceptanceLevel === '观察中'
+                        ? '继续当前阶段'
+                        : '先排障再推进';
+                const switchAdvice = switchLevel === '可转下一阶段'
+                    ? '可以开始更细的收益质量验证，或进入下一批优化'
+                    : switchLevel === '继续当前阶段'
+                        ? '保持 daemon 继续跑，优先补厚样本再决定'
+                        : '先处理异常、pending 或连续失败，再谈阶段推进';
+                phaseSwitchHost.innerHTML = `
+                    <div class="summary-pill"><div class="k">阶段切换判断</div><div class="v">${switchLevel}</div><div class="s">基于长跑结论与验收状态自动生成</div></div>
+                    <div class="summary-pill"><div class="k">切换建议</div><div class="v">${switchAdvice}</div><div class="s">俾首页直接判断应否进入下一阶段</div></div>
                 `;
             }
             const notificationRows = notificationOutbox || [];

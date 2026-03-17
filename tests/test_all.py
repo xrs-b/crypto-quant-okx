@@ -109,9 +109,14 @@ class ExecutableExchangeStub(DiagnosticExchangeStub):
 class FakeLogDB:
     def __init__(self):
         self.logs = []
+        self.outbox = []
 
     def log(self, level, message, details=None):
         self.logs.append({'level': level, 'message': message, 'details': details or {}})
+
+    def enqueue_notification(self, channel, event_type, title, message, details=None):
+        self.outbox.append({'channel': channel, 'event_type': event_type, 'title': title, 'message': message, 'details': details or {}})
+        return len(self.outbox)
 
 
 class PositionSyncExchangeStub:
@@ -428,6 +433,8 @@ class TestNotifications(unittest.TestCase):
         duplicate_runtime = notifier.notify_runtime('skip', ['币种：BTC/USDT', '原因：测试跳过'])
         probe = notifier.test_discord()
         self.assertEqual(len(db.logs), 8)
+        self.assertGreaterEqual(len(db.outbox), 8)
+        self.assertEqual(db.outbox[0]['channel'], 'discord')
         self.assertIn('notify:signal', db.logs[0]['message'])
         self.assertIn('风险拒绝', db.logs[1]['details']['message'])
         self.assertFalse(runtime['enabled'])

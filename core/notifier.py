@@ -28,10 +28,11 @@ class NotificationManager:
             return bool(self.discord_cfg.get('notify_errors', True))
         return True
 
-    def _store_event(self, level: str, event_type: str, message: str, details: Dict = None):
+    def _store_event(self, level: str, event_type: str, message: str, details: Dict = None, title: str = None):
         if self.db:
             try:
                 self.db.log(level.upper(), f'notify:{event_type}', {'message': message, 'details': details or {}})
+                self.db.enqueue_notification('discord', event_type, title or event_type, message, details or {})
             except Exception:
                 pass
         if self.logger:
@@ -100,7 +101,7 @@ class NotificationManager:
     def send(self, event_type: str, title: str, lines: List[str], level: str = 'info', details: Dict = None) -> Dict:
         body = '\n'.join([f'**{title}**', *[f'- {line}' for line in lines if line]])
         suppressed = self._should_suppress(event_type, body)
-        self._store_event(level, event_type, body, details)
+        self._store_event(level, event_type, body, details, title)
         delivered = False
         enabled = self._is_enabled(event_type)
         if enabled and not suppressed:

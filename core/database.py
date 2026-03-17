@@ -220,6 +220,21 @@ class Database:
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+
+        # 通知 outbox（给 OpenClaw bridge 消费）
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS notification_outbox (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                channel TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                title TEXT,
+                message TEXT NOT NULL,
+                status TEXT DEFAULT 'pending',
+                details TEXT,
+                delivered_at TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
         
         # 创建索引
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_signals_symbol ON signals(symbol)")
@@ -229,6 +244,8 @@ class Database:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_positions_symbol ON positions(symbol)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_smoke_runs_symbol ON smoke_runs(symbol)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_smoke_runs_created ON smoke_runs(created_at)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_notification_outbox_status ON notification_outbox(status)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_notification_outbox_created ON notification_outbox(created_at)")
         
         conn.commit()
         conn.close()
@@ -794,6 +811,36 @@ class Database:
     def get_latest_smoke_run(self) -> Optional[Dict]:
         rows = self.get_smoke_runs(limit=1)
         return rows[0] if rows else None
+
+    def enqueue_notification(self, channel: str, event_type: str, title: str, message: str, details: Dict = None) -> int:
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO notification_outbox (channel, event_type, title, message, details) VALUES (?, ?, ?, ?, ?)",
+            (channel, event_type, title, message, json.dumps(details, ensure_ascii=False) if details else None)
+        )
+        row_id = cursor.lastrowid
+        conn.commit()
+        conn.close()
+        return row_id
+
+    def get_notification_outbox(self, status: str = 'pending', limit: int = 50) -> List[Dict]:
+        conn = self._get_connection()
+        if status == 'all':
+            df = pd.read_sql_query("SELECT * FROM notification_outbox ORDER BY created_at ASC, id ASC LIMIT ?", conn, params=(limit,))
+        else:
+            df = pd.read_sql_query("SELECT * FROM notification_outbox WHERE status = ? ORDER BY created_at ASC, id ASC LIMIT ?", conn, params=(status, limit))
+        conn.close()
+        if not df.empty:
+            df['details'] = df['details'].apply(lambda x: json.loads(x) if x else {})
+        return df.to_dict('records')
+
+    def mark_notification_delivered(self, notification_id: int, status: str = 'delivered'):
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("UPDATE notification_outbox SET status = ?, delivered_at = CURRENT_TIMESTAMP WHERE id = ?", (status, notification_id))
+        conn.commit()
+        conn.close()
 
     # =========================================================================
     # 清理操作

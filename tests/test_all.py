@@ -420,12 +420,15 @@ class TestNotifications(unittest.TestCase):
         from signals.detector import Signal
         signal = Signal(symbol='BTC/USDT', signal_type='buy', price=50000, strength=88, strategies_triggered=['RSI', 'MACD'])
         notifier.notify_signal(signal, True, None, {'passed': True})
-        notifier.notify_decision(signal, False, '风险拒绝', {'risk': 'blocked'})
+        notifier.notify_decision(signal, False, '风险拒绝', {'risk_gate': {'passed': False, 'reason': '风险拒绝'}})
+        notifier.notify_trade_open_failed('BTC/USDT', 'long', 50000, '交易所拒绝', signal, {'code': 'mock'})
+        notifier.notify_trade_close_failed('BTC/USDT', 'long', '平仓失败', {'code': 'mock'})
+        notifier.notify_reconcile_issue({'summary': {'exchange_positions': 2, 'local_positions': 1, 'open_trades': 1, 'exchange_missing_local_position': 1, 'local_position_missing_exchange': 0, 'open_trade_missing_exchange': 0, 'exchange_missing_open_trade': 1}})
         runtime = notifier.notify_runtime('skip', ['币种：BTC/USDT', '原因：测试跳过'])
         probe = notifier.test_discord()
-        self.assertEqual(len(db.logs), 4)
+        self.assertEqual(len(db.logs), 7)
         self.assertIn('notify:signal', db.logs[0]['message'])
-        self.assertIn('notify:decision', db.logs[1]['message'])
+        self.assertIn('风险拒绝', db.logs[1]['details']['message'])
         self.assertFalse(runtime['enabled'])
         self.assertFalse(probe['delivered'])
 

@@ -80,6 +80,7 @@ class NotificationManager:
     def notify_decision(self, signal, allowed: bool, reason: str = None, details: Dict = None) -> Dict:
         title = '🤖 机器人决策：通过' if allowed else '🛑 机器人决策：拒绝'
         direction = '做多' if signal.signal_type == 'buy' else '做空' if signal.signal_type == 'sell' else '观望'
+        details = details or {}
         lines = [
             f'币种：{signal.symbol}',
             f'方向：{direction}',
@@ -89,7 +90,11 @@ class NotificationManager:
             f'决策结果：{"允许执行" if allowed else "拒绝执行"}',
             f'原因：{reason or "--"}',
         ]
-        return self.send('decision', title, lines, 'info' if allowed else 'warning', {'signal': signal.to_dict() if hasattr(signal, 'to_dict') else {}, 'details': details or {}})
+        if not allowed:
+            failed_checks = [f"{k}: {v.get('reason', '未通过')}" for k, v in details.items() if isinstance(v, dict) and not v.get('passed', True)]
+            if failed_checks:
+                lines.append(f'拒绝明细：{" | ".join(failed_checks[:3])}')
+        return self.send('decision', title, lines, 'info' if allowed else 'warning', {'signal': signal.to_dict() if hasattr(signal, 'to_dict') else {}, 'details': details})
 
     def notify_trade_open(self, symbol: str, side: str, price: float, quantity: float, trade_id: int = None, signal=None) -> Dict:
         lines = [
@@ -99,8 +104,20 @@ class NotificationManager:
             f'数量：{quantity}',
             f'Trade ID：{trade_id or "--"}',
             f'信号强度：{getattr(signal, "strength", "--")}',
+            f'触发策略：{", ".join(getattr(signal, "strategies_triggered", []) or []) or "--"}',
         ]
         return self.send('trade', '✅ 开仓执行成功', lines, 'info', {'trade_id': trade_id, 'symbol': symbol, 'side': side})
+
+    def notify_trade_open_failed(self, symbol: str, side: str, price: float, reason: str, signal=None, details: Dict = None) -> Dict:
+        lines = [
+            f'币种：{symbol}',
+            f'方向：{"做多" if side == "long" else "做空"}',
+            f'价格：{price}',
+            f'原因：{reason or "--"}',
+            f'信号强度：{getattr(signal, "strength", "--")}',
+            f'触发策略：{", ".join(getattr(signal, "strategies_triggered", []) or []) or "--"}',
+        ]
+        return self.send('trade', '❌ 开仓执行失败', lines, 'error', details or {})
 
     def notify_trade_close(self, symbol: str, side: str, close_price: float, reason: str, pnl: float = None) -> Dict:
         lines = [
@@ -111,6 +128,24 @@ class NotificationManager:
             f'PnL：{pnl if pnl is not None else "--"}',
         ]
         return self.send('close', '📦 平仓执行', lines, 'info', {'symbol': symbol, 'side': side, 'reason': reason, 'pnl': pnl})
+
+    def notify_trade_close_failed(self, symbol: str, side: str, reason: str, details: Dict = None) -> Dict:
+        lines = [
+            f'币种：{symbol}',
+            f'方向：{"做多" if side == "long" else "做空"}',
+            f'失败原因：{reason or "--"}',
+        ]
+        return self.send('close', '❌ 平仓执行失败', lines, 'error', details or {})
+
+    def notify_reconcile_issue(self, report: Dict) -> Dict:
+        summary = report.get('summary', {}) if isinstance(report, dict) else {}
+        lines = [
+            f'交易所持仓：{summary.get("exchange_positions", 0)}',
+            f'本地持仓：{summary.get("local_positions", 0)}',
+            f'本地 open trades：{summary.get("open_trades", 0)}',
+            f'差异：local缺失 {summary.get("exchange_missing_local_position", 0)} / exchange缺失 {summary.get("local_position_missing_exchange", 0)} / openTrade缺失 {summary.get("exchange_missing_open_trade", 0)} / openTrade脏记录 {summary.get("open_trade_missing_exchange", 0)}',
+        ]
+        return self.send('error', '⚠️ 持仓对账异常', lines, 'warning', report)
 
     def notify_error(self, title: str, message: str, details: Dict = None) -> Dict:
         return self.send('error', f'❌ {title}', [message], 'error', details or {})

@@ -305,6 +305,10 @@ class TradingBot:
         try:
             reconcile_report = reconcile_exchange_positions(self.exchange, self.db)
             self.notifier.notify_runtime('start', [f'持仓对账：同步 {reconcile_report["synced"]} 条 ｜ 清理 {reconcile_report["removed"]} 条'], {'reconcile': reconcile_report})
+            reconcile_summary = reconcile_report.get('summary', {})
+            reconcile_diff_count = sum(int(reconcile_summary.get(k, 0) or 0) for k in ['exchange_missing_local_position', 'local_position_missing_exchange', 'open_trade_missing_exchange', 'exchange_missing_open_trade'])
+            if reconcile_diff_count > 0:
+                self.notifier.notify_reconcile_issue(reconcile_report)
         except Exception as e:
             self.notifier.notify_error('持仓对账失败', str(e), {})
         # 获取当前持仓
@@ -391,7 +395,7 @@ class TradingBot:
                             self.notifier.notify_trade_open(symbol, side, current_price, self.db.get_latest_open_trade(symbol, side).get('quantity') if self.db.get_latest_open_trade(symbol, side) else 0, trade_id, signal)
                             print(f"   ✅ 开{'多' if side == 'long' else '空'}成功! Trade ID: {trade_id}")
                         else:
-                            self.notifier.notify_error('开仓失败', f'{symbol} {side} 开仓未成功', {'signal_id': signal_id})
+                            self.notifier.notify_trade_open_failed(symbol, side, current_price, '交易所拒绝或执行器返回空结果', signal, {'signal_id': signal_id})
                             print(f"   ❌ 开仓失败")
                     else:
                         print(f"   ⏸️ 风险检查阻止: {risk_reason}")
@@ -423,16 +427,22 @@ class TradingBot:
                 
                 # 检查止损
                 if self.executor.check_stop_loss(symbol, current_price):
-                    summary['closed'] += 1
-                    self.executor.close_position(symbol, '止损')
-                    self.notifier.notify_trade_close(symbol, position['side'], current_price, '止损')
+                    closed = self.executor.close_position(symbol, '止损')
+                    if closed:
+                        summary['closed'] += 1
+                        self.notifier.notify_trade_close(symbol, position['side'], current_price, '止损')
+                    else:
+                        self.notifier.notify_trade_close_failed(symbol, position['side'], '止损触发后平仓失败', {'symbol': symbol, 'reason': '止损'})
                     print(f"   🔴 止损: {symbol}")
                 
                 # 检查止盈
                 elif self.executor.check_take_profit(symbol, current_price):
-                    summary['closed'] += 1
-                    self.executor.close_position(symbol, '止盈')
-                    self.notifier.notify_trade_close(symbol, position['side'], current_price, '止盈')
+                    closed = self.executor.close_position(symbol, '止盈')
+                    if closed:
+                        summary['closed'] += 1
+                        self.notifier.notify_trade_close(symbol, position['side'], current_price, '止盈')
+                    else:
+                        self.notifier.notify_trade_close_failed(symbol, position['side'], '止盈触发后平仓失败', {'symbol': symbol, 'reason': '止盈'})
                     print(f"   🟢 止盈: {symbol}")
                 
             except Exception as e:

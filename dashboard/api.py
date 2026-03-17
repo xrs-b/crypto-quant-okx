@@ -18,7 +18,7 @@ from core.database import Database
 from core.exchange import Exchange
 from core.presets import PresetManager
 from trading.executor import RiskManager
-from bot.run import execute_exchange_smoke, reconcile_exchange_positions
+from bot.run import execute_exchange_smoke, reconcile_exchange_positions, load_runtime_state
 from ml.engine import MLEngine
 from analytics import StrategyBacktester, SignalQualityAnalyzer, ParameterOptimizer, GovernanceEngine
 
@@ -265,6 +265,12 @@ def get_reconcile_report():
     exchange = Exchange(cfg.all)
     report = reconcile_exchange_positions(exchange, Database(cfg.db_path))
     return jsonify({'success': True, 'data': report, 'summary': report.get('summary', {})})
+
+
+@app.route('/api/system/runtime-state')
+def get_runtime_state():
+    """获取守护运行状态"""
+    return jsonify({'success': True, 'data': load_runtime_state()})
 
 
 @app.route('/api/system/smoke-state')

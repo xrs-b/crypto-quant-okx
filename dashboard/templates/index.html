@@ -470,6 +470,7 @@
                             <div class="summary-strip" id="overviewSmokeErrorTags"></div>
                             <div class="summary-strip" id="overviewSmokeRisk"></div>
                             <div class="summary-strip" id="overviewReconcileRisk"></div>
+                            <div class="summary-strip" id="overviewRuntimeState"></div>
                             <div class="list" id="overviewReconcileDetails"></div>
                             <div class="compact-grid">
                                 <div class="item">
@@ -2148,14 +2149,15 @@
             `).join('') : '<div class="empty-state"><div class="icon">🧪</div><div>当前筛选下暂无 smoke 验收记录</div></div>';
         }
         async function loadOverview() {
-            const [status, changes, alerts, smokeRuns, smokeState, smokeImpactLatest, reconcileReport] = await Promise.all([
+            const [status, changes, alerts, smokeRuns, smokeState, smokeImpactLatest, reconcileReport, runtimeState] = await Promise.all([
                 api('/api/system/status'),
                 api('/api/changes/recent'),
                 api('/api/alerts'),
                 api('/api/system/smoke-runs?limit=20'),
                 api('/api/system/smoke-state'),
                 api('/api/system/smoke-impact-latest'),
-                api('/api/system/reconcile-report')
+                api('/api/system/reconcile-report'),
+                api('/api/system/runtime-state')
             ]);
             document.getElementById('systemStatus').textContent = `● ${status.system.status}`;
             document.getElementById('totalValue').textContent = money(status.portfolio.total_value);
@@ -2181,6 +2183,7 @@
             const errorTagHost = document.getElementById('overviewSmokeErrorTags');
             const riskHost = document.getElementById('overviewSmokeRisk');
             const reconcileHost = document.getElementById('overviewReconcileRisk');
+            const runtimeHost = document.getElementById('overviewRuntimeState');
             const reconcileDetailHost = document.getElementById('overviewReconcileDetails');
             if (kpiHost) {
                 if (overviewSmokeLastImpact) {
@@ -2252,6 +2255,14 @@
                         <div class="summary-pill"><div class="k">一句话结论</div><div class="v">${riskText}</div><div class="s">${latestError || '最近未见明确错误'}</div></div>
                     `;
                 }
+            }
+            if (runtimeHost) {
+                runtimeHost.innerHTML = `
+                    <div class="summary-pill"><div class="k">守护状态</div><div class="v">${runtimeState?.running ? '运行中' : (runtimeState?.mode === 'daemon' ? '待命' : '未启动')}</div><div class="s">mode ${runtimeState?.mode || '--'} ｜ interval ${runtimeState?.interval_seconds || '--'}s</div></div>
+                    <div class="summary-pill"><div class="k">上次运行</div><div class="v">${runtimeState?.last_started_at || '--'}</div><div class="s">完成：${runtimeState?.last_finished_at || '--'}</div></div>
+                    <div class="summary-pill"><div class="k">下次运行</div><div class="v">${runtimeState?.next_run_at || '--'}</div><div class="s">跳过：${runtimeState?.last_skip_at || '--'}</div></div>
+                    <div class="summary-pill"><div class="k">最近错误</div><div class="v">${runtimeState?.last_error ? '有' : '无'}</div><div class="s">${runtimeState?.last_error || '最近未记录守护异常'}</div></div>
+                `;
             }
             if (reconcileHost || reconcileDetailHost) {
                 const summary = reconcileReport?.summary || {};

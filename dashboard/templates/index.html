@@ -2246,12 +2246,16 @@
             const reconcileSummary = reconcileReport?.summary || {};
             const reconcileRiskCount = Number(reconcileSummary.exchange_missing_local_position || 0) + Number(reconcileSummary.local_position_missing_exchange || 0) + Number(reconcileSummary.open_trade_missing_exchange || 0) + Number(reconcileSummary.exchange_missing_open_trade || 0);
             const notifyEnabled = true;
+            const notificationPending = Number(notificationStats?.pending || 0);
+            const notificationSuppressed = Number(notificationStats?.suppressed || 0);
+            const notificationFailureCount = (notificationStats?.failure_breakdown || []).reduce((sum, row) => sum + Number(row.count || 0), 0);
+            const relayFailed = Number(runtimeState?.relay?.last_result?.failed || 0);
             let healthLevel = '绿';
             let healthText = '托管健康整体稳定，可继续观察模拟盘表现';
-            if ((runtimeState?.last_error) || reconcileRiskCount >= 3 || smokeFailRate >= 50) {
+            if ((runtimeState?.last_error) || reconcileRiskCount >= 3 || smokeFailRate >= 50 || notificationPending >= 5 || relayFailed >= 3) {
                 healthLevel = '红';
-                healthText = '托管健康存在明显风险，建议先排查守护异常、对账差异、Smoke 失败';
-            } else if (reconcileRiskCount >= 1 || smokeFailRate >= 20 || (runtimeState?.history || []).some(x => x.type === 'skip')) {
+                healthText = '托管健康存在明显风险，建议先排查守护异常、对账差异、通知堆积与 Smoke 失败';
+            } else if (reconcileRiskCount >= 1 || smokeFailRate >= 20 || (runtimeState?.history || []).some(x => x.type === 'skip') || notificationPending >= 1 || notificationFailureCount >= 3) {
                 healthLevel = '黄';
                 healthText = '托管健康有一定波动，建议继续观察运行、通知与对账状态';
             }
@@ -2267,14 +2271,14 @@
                     : '建议动作：开始更长时间 forward test，并观察 Discord 单次推送质量。';
             const capabilityScores = {
                 execution: Math.max(0, 100 - (runtimeState?.last_error ? 35 : 0) - (((runtimeState?.history || []).filter(x => x.type === 'skip').length || 0) * 5)),
-                notify: notifyEnabled ? 70 : 20,
+                notify: Math.max(0, (notifyEnabled ? 85 : 20) - notificationPending * 15 - notificationFailureCount * 5 - relayFailed * 10 - notificationSuppressed * 2),
                 reconcile: Math.max(0, 100 - reconcileRiskCount * 20),
                 risk: Math.max(0, 100 - smokeFailRate),
                 review: smokeRows.length >= 5 ? 75 : smokeRows.length >= 1 ? 55 : 30,
             };
             const checklist = [
                 {label: '执行稳定性', score: capabilityScores.execution, advice: runtimeState?.last_error ? '优先查守护异常与最近错误' : '继续观察守护运行历史'},
-                {label: '通知完整性', score: capabilityScores.notify, advice: notifyEnabled ? '通知链路已接入，建议继续做真实推送验证' : '需要先完成通知通道接入'},
+                {label: '通知完整性', score: capabilityScores.notify, advice: !notifyEnabled ? '需要先完成通知通道接入' : notificationPending ? `优先清理 pending(${notificationPending}) 并检查 relay 补发失败 ${relayFailed} 次` : notificationFailureCount ? `最近通知失败 ${notificationFailureCount} 次，建议检查异常分布与原因摘要` : '通知链路已接入，建议继续做真实推送验证'},
                 {label: '对账可信度', score: capabilityScores.reconcile, advice: reconcileRiskCount ? '优先处理三方对账差异' : '当前三方对账基本一致'},
                 {label: '风控可靠性', score: capabilityScores.risk, advice: smokeFailRate >= 20 ? '先降低 Smoke 风险，再放大自动执行' : '继续提升 stop-loss / take-profit 前向验证'},
                 {label: '复盘完善度', score: capabilityScores.review, advice: smokeRows.length ? 'dashboard 复盘已成型，可继续补资产/收益维度' : '需要先积累更多样本'},
@@ -2285,7 +2289,7 @@
                     <div class="summary-pill"><div class="k">守护运行</div><div class="v">${runtimeState?.running ? '运行中' : (runtimeState?.mode === 'daemon' ? '待命' : '未启动')}</div><div class="s">last error: ${runtimeState?.last_error ? '有' : '无'}</div></div>
                     <div class="summary-pill"><div class="k">对账风险</div><div class="v">${reconcileRiskCount}</div><div class="s">exchange/local/open_trade 差异项</div></div>
                     <div class="summary-pill"><div class="k">Smoke 风险</div><div class="v">${smokeFailRate}%</div><div class="s">最近 smoke 失败率</div></div>
-                    <div class="summary-pill"><div class="k">通知状态</div><div class="v">${notifyEnabled ? '已启用' : '未启用'}</div><div class="s">Discord/webhook 模板链路已接入</div></div>
+                    <div class="summary-pill"><div class="k">通知状态</div><div class="v">${notifyEnabled ? '已启用' : '未启用'}</div><div class="s">pending ${notificationPending} ｜ failure ${notificationFailureCount} ｜ relay fail ${relayFailed}</div></div>
                     <div class="summary-pill"><div class="k">操作建议</div><div class="v">${actionAdvice}</div><div class="s">基于当前托管健康级别自动生成</div></div>
                     <div class="summary-pill"><div class="k">下一步动作</div><div class="v">${nextAction}</div><div class="s">建议先处理最高优先级问题</div></div>
                 `;

@@ -831,6 +831,20 @@ class TestRiskManager(unittest.TestCase):
         self.assertTrue(can_open)
         self.assertIsNone(reason)
 
+    def test_today_trade_count_uses_open_time(self):
+        self.db.record_trade(symbol='BTC/USDT', side='long', entry_price=50000, quantity=0.1, leverage=10)
+        self.assertEqual(self.risk_mgr._get_today_trade_count(), 1)
+
+    def test_last_trade_time_reads_from_db(self):
+        self.db.record_trade(symbol='BTC/USDT', side='long', entry_price=50000, quantity=0.1, leverage=10)
+        self.assertIsNotNone(self.risk_mgr._get_last_trade_time())
+
+    def test_daily_drawdown_prefers_close_time(self):
+        trade_id = self.db.record_trade(symbol='BTC/USDT', side='long', entry_price=50000, quantity=0.1, leverage=10)
+        self.db.close_trade(trade_id=trade_id, exit_price=49000, pnl=-100, pnl_percent=-2, notes='unit-test')
+        ratio = self.risk_mgr._get_daily_drawdown_ratio()
+        self.assertGreater(ratio, 0)
+
 
 def run_tests():
     """运行所有测试"""

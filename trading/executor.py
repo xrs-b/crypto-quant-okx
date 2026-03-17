@@ -522,23 +522,23 @@ class RiskManager:
         except Exception:
             return {'total': 0.0, 'free': 0.0, 'used': 0.0}
 
+    def _parse_trade_time(self, value: str) -> Optional[datetime]:
+        if not value:
+            return None
+        return datetime.fromisoformat(value)
+
     def _get_today_trade_count(self) -> int:
         trades = self.db.get_trades(limit=1000)
-        today = datetime.now().date()
+        today = datetime.utcnow().date()
         count = 0
         for trade in trades:
-            open_time = trade.get('open_time', '')
-            if open_time and datetime.fromisoformat(open_time).date() == today:
+            opened_at = self._parse_trade_time(trade.get('open_time', ''))
+            if opened_at and opened_at.date() == today:
                 count += 1
         return count
 
     def _get_last_trade_time(self) -> Optional[datetime]:
-        trades = self.db.get_trades(limit=1)
-        if trades:
-            open_time = trades[0].get('open_time', '')
-            if open_time:
-                return datetime.fromisoformat(open_time)
-        return None
+        return self.db.get_latest_trade_time()
 
     def _get_consecutive_losses(self) -> int:
         trades = self.db.get_trades(status='closed', limit=20)
@@ -553,11 +553,11 @@ class RiskManager:
 
     def _get_daily_drawdown_ratio(self) -> float:
         trades = self.db.get_trades(status='closed', limit=1000)
-        today = datetime.now().date()
+        today = datetime.utcnow().date()
         today_pnl = 0.0
         for trade in trades:
-            close_time = trade.get('close_time') or trade.get('open_time')
-            if close_time and datetime.fromisoformat(close_time).date() == today:
+            realized_at = self._parse_trade_time(trade.get('close_time') or trade.get('open_time') or '')
+            if realized_at and realized_at.date() == today:
                 today_pnl += float(trade.get('pnl', 0) or 0)
         if today_pnl >= 0:
             return 0.0

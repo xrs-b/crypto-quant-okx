@@ -83,6 +83,8 @@ class Database:
                 quantity REAL NOT NULL,
                 leverage INTEGER DEFAULT 1,
                 unrealized_pnl REAL DEFAULT 0,
+                peak_price REAL,
+                trough_price REAL,
                 opened_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
@@ -236,6 +238,14 @@ class Database:
             )
         """)
         
+        # 兼容旧库：补充持仓追踪锚点字段
+        cursor.execute("PRAGMA table_info(positions)")
+        position_columns = {row[1] for row in cursor.fetchall()}
+        if 'peak_price' not in position_columns:
+            cursor.execute("ALTER TABLE positions ADD COLUMN peak_price REAL")
+        if 'trough_price' not in position_columns:
+            cursor.execute("ALTER TABLE positions ADD COLUMN trough_price REAL")
+
         # 创建索引
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_signals_symbol ON signals(symbol)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_signals_created ON signals(created_at)")
@@ -483,7 +493,8 @@ class Database:
     # =========================================================================
     
     def update_position(self, symbol: str, side: str, entry_price: float,
-                       quantity: float, leverage: int, current_price: float):
+                       quantity: float, leverage: int, current_price: float,
+                       peak_price: float = None, trough_price: float = None):
         """更新持仓"""
         conn = self._get_connection()
         cursor = conn.cursor()
@@ -493,13 +504,31 @@ class Database:
             unrealized_pnl = (current_price - entry_price) * quantity
         else:
             unrealized_pnl = (entry_price - current_price) * quantity
+
+        cursor.execute("SELECT opened_at, peak_price, trough_price FROM positions WHERE symbol = ?", (symbol,))
+        existing = cursor.fetchone()
+        opened_at = existing['opened_at'] if existing else None
+        current_peak = existing['peak_price'] if existing else None
+        current_trough = existing['trough_price'] if existing else None
+        final_peak = peak_price if peak_price is not None else current_peak
+        final_trough = trough_price if trough_price is not None else current_trough
+        if side == 'long':
+            anchor = float(current_price or entry_price)
+            final_peak = max(float(final_peak or anchor), anchor)
+            if final_trough is None:
+                final_trough = entry_price
+        else:
+            anchor = float(current_price or entry_price)
+            final_trough = min(float(final_trough or anchor), anchor)
+            if final_peak is None:
+                final_peak = entry_price
         
         cursor.execute("""
             INSERT OR REPLACE INTO positions 
-            (symbol, side, entry_price, current_price, quantity, leverage, 
-             unrealized_pnl, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-        """, (symbol, side, entry_price, current_price, quantity, leverage, unrealized_pnl))
+            (id, symbol, side, entry_price, current_price, quantity, leverage, 
+             unrealized_pnl, peak_price, trough_price, opened_at, updated_at)
+            VALUES ((SELECT id FROM positions WHERE symbol = ?), ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP), CURRENT_TIMESTAMP)
+        """, (symbol, symbol, side, entry_price, current_price, quantity, leverage, unrealized_pnl, final_peak, final_trough, opened_at))
         
         conn.commit()
         conn.close()

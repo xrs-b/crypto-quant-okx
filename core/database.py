@@ -824,6 +824,21 @@ class Database:
         conn.close()
         return row_id
 
+    def update_notification_outbox(self, notification_id: int, status: str, details: Dict = None):
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        fields = ["status = ?"]
+        params = [status]
+        if details is not None:
+            fields.append("details = ?")
+            params.append(json.dumps(details, ensure_ascii=False))
+        if status == 'delivered':
+            fields.append("delivered_at = CURRENT_TIMESTAMP")
+        params.append(notification_id)
+        cursor.execute(f"UPDATE notification_outbox SET {', '.join(fields)} WHERE id = ?", params)
+        conn.commit()
+        conn.close()
+
     def get_notification_outbox(self, status: str = 'pending', limit: int = 50) -> List[Dict]:
         conn = self._get_connection()
         if status == 'all':
@@ -836,11 +851,7 @@ class Database:
         return df.to_dict('records')
 
     def mark_notification_delivered(self, notification_id: int, status: str = 'delivered'):
-        conn = self._get_connection()
-        cursor = conn.cursor()
-        cursor.execute("UPDATE notification_outbox SET status = ?, delivered_at = CURRENT_TIMESTAMP WHERE id = ?", (status, notification_id))
-        conn.commit()
-        conn.close()
+        self.update_notification_outbox(notification_id, status=status)
 
     # =========================================================================
     # 清理操作

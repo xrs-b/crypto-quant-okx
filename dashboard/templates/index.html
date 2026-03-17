@@ -483,6 +483,8 @@
                             </div>
                             <div class="summary-strip" id="overviewRuntimeRisk"></div>
                             <div class="summary-strip" id="overviewNotificationSummary"></div>
+                            <div class="summary-strip" id="overviewForwardFunnel"></div>
+                            <div class="list" id="overviewForwardObservations"></div>
                             <div class="list" id="overviewNotificationList"></div>
                             <div class="list" id="overviewRuntimeHistory"></div>
                             <div class="list" id="overviewReconcileDetails"></div>
@@ -2238,6 +2240,8 @@
             const runtimeHost = document.getElementById('overviewRuntimeState');
             const runtimeSummaryHost = document.getElementById('overviewRuntimeSummary');
             const notificationSummaryHost = document.getElementById('overviewNotificationSummary');
+            const forwardFunnelHost = document.getElementById('overviewForwardFunnel');
+            const forwardObservationHost = document.getElementById('overviewForwardObservations');
             const notificationListHost = document.getElementById('overviewNotificationList');
             const runtimeHistoryHost = document.getElementById('overviewRuntimeHistory');
             const reconcileDetailHost = document.getElementById('overviewReconcileDetails');
@@ -2432,6 +2436,38 @@
                         <pre style="margin-top:10px">${JSON.stringify(row.details || {}, null, 2)}</pre>
                     </details>
                 `).join('') : '<div class="empty-state"><div class="icon">📨</div><div>暂无最近通知记录</div></div>';
+            }
+            const lastSummary = runtimeState?.last_summary || {};
+            const todaySignals = Number(status?.signals?.today_signals || 0);
+            const passedSignals = Number(lastSummary.passed || 0);
+            const openedTrades = Number(lastSummary.opened || 0);
+            const closedTrades = Number(lastSummary.closed || 0);
+            const execRate = Number(status?.signals?.execution_rate || 0);
+            const funnelConclusion = todaySignals === 0
+                ? '今日样本仍少，先继续累积 forward test 数据'
+                : openedTrades === 0
+                    ? '有信号但未形成真实开仓，建议优先观察决策门槛是否过严'
+                    : closedTrades === 0
+                        ? '已有真实开仓，继续观察平仓链路与收益质量'
+                        : '信号、开仓、平仓链路都已开始形成，可继续观察样本稳定性';
+            if (forwardFunnelHost) {
+                forwardFunnelHost.innerHTML = `
+                    <div class="summary-pill"><div class="k">今日信号</div><div class="v">${todaySignals}</div><div class="s">当前 forward test 已产生的信号数</div></div>
+                    <div class="summary-pill"><div class="k">最近通过</div><div class="v">${passedSignals}</div><div class="s">最近一轮初筛通过数</div></div>
+                    <div class="summary-pill"><div class="k">最近开仓</div><div class="v">${openedTrades}</div><div class="s">最近一轮真实开仓数</div></div>
+                    <div class="summary-pill"><div class="k">最近平仓</div><div class="v">${closedTrades}</div><div class="s">最近一轮真实平仓数</div></div>
+                    <div class="summary-pill"><div class="k">执行率</div><div class="v">${execRate}%</div><div class="s">信号到执行的当前转化率</div></div>
+                `;
+            }
+            if (forwardObservationHost) {
+                const observations = [
+                    {title: 'Forward test 漏斗判断', text: funnelConclusion},
+                    {title: '最近一轮链路', text: `signals ${lastSummary.signals ?? '--'} ｜ passed ${passedSignals} ｜ opened ${openedTrades} ｜ closed ${closedTrades} ｜ errors ${lastSummary.errors ?? '--'}`},
+                    {title: '观察重点', text: openedTrades ? '继续看平仓结果、PnL 与连续样本稳定性' : '继续看信号通过率与风险门槛是否卡得太死'},
+                ];
+                forwardObservationHost.innerHTML = observations.map(item => `
+                    <div class="item"><strong>${item.title}</strong><div class="muted" style="margin-top:6px;">${item.text}</div></div>
+                `).join('');
             }
             renderOverviewRuntimePanel(runtimeState || {});
             if (reconcileHost || reconcileDetailHost) {

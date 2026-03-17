@@ -40,7 +40,7 @@ class NotificationManager:
             except Exception:
                 pass
 
-    def _send_discord(self, content: str) -> bool:
+    def _send_discord_webhook(self, content: str) -> bool:
         webhook_url = self.discord_cfg.get('webhook_url')
         if not webhook_url:
             return False
@@ -54,6 +54,27 @@ class NotificationManager:
                 return 200 <= getattr(resp, 'status', 204) < 300
         except error.URLError:
             return False
+        except error.HTTPError:
+            return False
+
+    def _send_discord_bot(self, content: str) -> bool:
+        bot_token = self.discord_cfg.get('bot_token')
+        channel_id = self.discord_cfg.get('channel_id')
+        if not bot_token or not channel_id:
+            return False
+        url = f'https://discord.com/api/v10/channels/{channel_id}/messages'
+        payload = json.dumps({'content': content}).encode('utf-8')
+        req = request.Request(url, data=payload, headers={'Content-Type': 'application/json', 'Authorization': f'Bot {bot_token}'})
+        try:
+            with request.urlopen(req, timeout=10) as resp:
+                return 200 <= getattr(resp, 'status', 204) < 300
+        except error.URLError:
+            return False
+        except error.HTTPError:
+            return False
+
+    def _send_discord(self, content: str) -> bool:
+        return self._send_discord_webhook(content) or self._send_discord_bot(content)
 
     def _dedupe_window(self, event_type: str) -> int:
         windows = {

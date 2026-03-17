@@ -482,6 +482,7 @@
                             <div class="summary-strip" id="overviewLongRunRisk"></div>
                             <div class="summary-strip" id="overviewLongRunSample"></div>
                             <div class="summary-strip" id="overviewLongRunVerdict"></div>
+                            <div class="summary-strip" id="overviewStageAcceptance"></div>
                             <div class="toolbar-inline" id="overviewRuntimeToolbar">
                                 <button class="chip-btn active" onclick="setOverviewRuntimeFilter('all')">全部</button>
                                 <button class="chip-btn" onclick="setOverviewRuntimeFilter('error')">异常</button>
@@ -2258,6 +2259,7 @@
             const longRunRiskHost = document.getElementById('overviewLongRunRisk');
             const longRunSampleHost = document.getElementById('overviewLongRunSample');
             const longRunVerdictHost = document.getElementById('overviewLongRunVerdict');
+            const stageAcceptanceHost = document.getElementById('overviewStageAcceptance');
             const notificationSummaryHost = document.getElementById('overviewNotificationSummary');
             const forwardFunnelHost = document.getElementById('overviewForwardFunnel');
             const forwardRiskHost = document.getElementById('overviewForwardRisk');
@@ -2533,22 +2535,42 @@
                     <div class="summary-pill"><div class="k">样本建议</div><div class="v">${sampleAdvice}</div><div class="s">帮助判断而家适唔适合开始下阶段结论</div></div>
                 `;
             }
-            if (longRunVerdictHost) {
-                const longRunVerdict = (err48 >= 2 || notificationPending >= 3)
+            let longRunVerdict = '长跑阶段仍在积累';
+            let longRunNext = '继续跑 daemon，等样本厚一点再下结论';
+            if (longRunVerdictHost || stageAcceptanceHost) {
+                longRunVerdict = (err48 >= 2 || notificationPending >= 3)
                     ? '长跑阶段未稳，先排异常'
                     : (end48 >= 5 && successStreak >= 2)
                         ? '长跑阶段基本成型'
                         : (end24 >= 2)
                             ? '长跑阶段可观察'
                             : '长跑阶段仍在积累';
-                const longRunNext = longRunVerdict === '长跑阶段未稳，先排异常'
+                longRunNext = longRunVerdict === '长跑阶段未稳，先排异常'
                     ? '先处理 error / pending，再继续扩样本'
                     : longRunVerdict === '长跑阶段基本成型'
                         ? '可以准备进入下一阶段更细的收益质量验证'
                         : '继续跑 daemon，等样本厚一点再下结论';
+            }
+            if (longRunVerdictHost) {
                 longRunVerdictHost.innerHTML = `
                     <div class="summary-pill"><div class="k">长跑阶段总评</div><div class="v">${longRunVerdict}</div><div class="s">综合连续运行、风险、样本三层判断</div></div>
                     <div class="summary-pill"><div class="k">下一步建议</div><div class="v">${longRunNext}</div><div class="s">俾你首页直接判断下一步做咩</div></div>
+                `;
+            }
+            if (stageAcceptanceHost) {
+                const acceptanceLevel = longRunVerdict === '长跑阶段基本成型'
+                    ? '可阶段验收'
+                    : longRunVerdict === '长跑阶段可观察'
+                        ? '观察中'
+                        : '未完成';
+                const acceptanceText = acceptanceLevel === '可阶段验收'
+                    ? '运行、样本、风险三层都初步具备阶段验收条件'
+                    : acceptanceLevel === '观察中'
+                        ? '可以继续观察，但暂时未建议下最终阶段结论'
+                        : '仍需继续累积长跑样本或先排异常';
+                stageAcceptanceHost.innerHTML = `
+                    <div class="summary-pill"><div class="k">阶段验收状态</div><div class="v">${acceptanceLevel}</div><div class="s">${acceptanceText}</div></div>
+                    <div class="summary-pill"><div class="k">验收参考</div><div class="v">48h end ${end48}</div><div class="s">success streak ${successStreak} ｜ pending ${notificationPending}</div></div>
                 `;
             }
             const notificationRows = notificationOutbox || [];

@@ -140,7 +140,7 @@ class NotificationManager:
 
     def _dedupe_window(self, event_type: str) -> int:
         windows = {
-            'signal': 120,
+            'signal': 300,
             'decision': 90,
             'runtime': 300,
             'trade': 30,
@@ -185,7 +185,7 @@ class NotificationManager:
                 clean_lines.append('')
                 continue
             clean_lines.append(f'• {text}')
-        return '\n'.join([f'**{title}**', *clean_lines])
+        return '\n'.join([f'**{title}**', *clean_lines, '=============================='])
 
     def _format_strategies(self, strategies: List[str]) -> str:
         return ' / '.join(strategies or []) or '--'
@@ -205,6 +205,14 @@ class NotificationManager:
             return f'{float(quantity):,.4f}'.rstrip('0').rstrip('.')
         except Exception:
             return str(quantity)
+
+    def _format_time(self, value=None) -> str:
+        if not value:
+            value = datetime.now().isoformat()
+        try:
+            return datetime.fromisoformat(str(value).replace('Z', '+00:00')).strftime('%Y-%m-%d %H:%M:%S')
+        except Exception:
+            return str(value)
 
     def _priority_meta(self, priority: str = 'normal') -> Dict:
         mapping = {
@@ -259,8 +267,11 @@ class NotificationManager:
         return {'delivered': delivered, 'enabled': enabled, 'suppressed': suppressed, 'message': body, 'outbox_id': outbox_id, 'outbox_status': outbox_status, 'priority': priority, 'aggregate_summary': aggregate_summary}
 
     def notify_signal(self, signal, passed: bool, reason: str = None, details: Dict = None) -> Dict:
+        signal_type = getattr(signal, 'signal_type', None)
+        if signal_type not in {'buy', 'sell'}:
+            return {'delivered': False, 'enabled': False, 'suppressed': True, 'message': '', 'outbox_id': None, 'outbox_status': 'suppressed', 'priority': 'normal', 'aggregate_summary': None}
         title = '📡 可靠信号' if passed else '🧪 信号已生成'
-        direction = '🟢 做多' if signal.signal_type == 'buy' else '🔴 做空' if signal.signal_type == 'sell' else '⚪ 观望'
+        direction = '🟢 做多' if signal_type == 'buy' else '🔴 做空'
         priority = 'high' if passed else 'normal'
         pmeta = self._priority_meta(priority)
         lines = [
@@ -277,7 +288,7 @@ class NotificationManager:
             f'原因：{reason or "--"}',
             '---',
             '【时间信息】',
-            f'触发时间：{getattr(signal, "timestamp", datetime.now().isoformat())}',
+            f'触发时间：{self._format_time(getattr(signal, "timestamp", None))}',
         ]
         return self.send('signal', title, lines, 'info', {'signal': signal.to_dict() if hasattr(signal, 'to_dict') else {}, 'details': details or {}}, priority=priority)
 
@@ -419,4 +430,4 @@ class NotificationManager:
 
     def test_discord(self) -> Dict:
         now = datetime.now().isoformat()
-        return self.send('decision', '🔔 Discord 通知测试', [f'时间：{now}', '如果你见到呢条消息，代表 webhook 推送链路正常'], 'info', {'time': now, 'kind': 'notify-test'})
+        return self.send('decision', '🔔 Discord 通知测试', [f'时间：{self._format_time(now)}', '如果你见到呢条消息，代表 webhook 推送链路正常'], 'info', {'time': now, 'kind': 'notify-test'})

@@ -735,6 +735,14 @@
                                 <table><thead><tr><th>币种</th><th>参数</th><th>当前</th><th>建议</th><th>动作</th><th>说明</th></tr></thead><tbody id="optimizerParamAdvice"></tbody></table>
                             </div>
                             <div class="card mini">
+                                <div class="section-title">override 草案生成器</div>
+                                <div class="section-note">把可执行建议整理成 `symbol_overrides` YAML 草案，方便你直接 review / copy。</div>
+                                <div class="summary-strip" id="optimizerOverrideDraftSummary"></div>
+                                <div style="height:12px"></div>
+                                <div class="list" id="optimizerOverrideDraftMeta"></div>
+                                <pre id="optimizerOverrideDraftYaml" style="white-space:pre-wrap; overflow:auto; background:#0b0d12; border:1px solid var(--border); border-radius:12px; padding:12px; font-size:12px;"></pre>
+                            </div>
+                            <div class="card mini">
                                 <div class="section-title">专项实验</div>
                                 <div class="list" id="optimizerSymbolSpecific"></div>
                             </div>
@@ -3274,13 +3282,14 @@
             await refreshAll();
         }
         async function loadOptimizer() {
-            const [data, candidateHistory, presetHistory, mode, gov, paramAdviceResp] = await Promise.all([
+            const [data, candidateHistory, presetHistory, mode, gov, paramAdviceResp, paramDraftResp] = await Promise.all([
                 api('/api/optimizer/results'),
                 api('/api/candidates/history?limit=10'),
                 api('/api/presets/history?limit=10'),
                 api('/api/mode/status'),
                 api('/api/governance/status'),
-                fetch('/api/signals/parameter-advice?days=14&window_hours=24&limit=160').then(r => r.json())
+                fetch('/api/signals/parameter-advice?days=14&window_hours=24&limit=160').then(r => r.json()),
+                fetch('/api/signals/parameter-advice/draft?days=14&window_hours=24&limit=160').then(r => r.json())
             ]);
             const best = data.best_experiment || {};
             document.getElementById('optimizerBest').innerHTML = `
@@ -3347,6 +3356,21 @@
                     <td>${row.reason || '--'}<div class="muted" style="margin-top:6px;">missed=${row.missed_profit ?? 0} ｜ avoided=${row.avoided_loss ?? 0} ｜ rate=${row.effectiveness_rate == null ? '--' : row.effectiveness_rate + '%'}</div></td>
                 </tr>`;
             }).join('') : '<tr><td colspan="6" class="muted">暂无按币种参数建议</td></tr>';
+            const paramDraft = paramDraftResp?.data?.draft || {};
+            const paramDraftYaml = paramDraftResp?.data?.yaml || 'symbol_overrides: {}';
+            const paramDraftSummary = paramDraftResp?.summary || {};
+            const paramDraftSkipped = (paramDraft?.skipped || []).map(item => `<div class="item"><strong>${item.symbol}</strong><div class="muted">${item.parameter} ｜ ${item.reason}</div></div>`).join('');
+            const paramDraftSummaryHost = document.getElementById('optimizerOverrideDraftSummary');
+            if (paramDraftSummaryHost) {
+                paramDraftSummaryHost.innerHTML = `
+                    <div class="summary-pill"><div class="k">草案币种</div><div class="v">${paramDraftSummary.draft_symbols ?? 0}</div><div class="s">已生成 override 的币种数</div></div>
+                    <div class="summary-pill"><div class="k">草案参数</div><div class="v">${paramDraftSummary.draft_parameters ?? 0}</div><div class="s">已落入草案的建议参数</div></div>
+                    <div class="summary-pill"><div class="k">跳过项目</div><div class="v">${paramDraftSummary.skipped ?? 0}</div><div class="s">例如需要灰度实验，暂不自动写入</div></div>
+                    <div class="summary-pill"><div class="k">输入建议</div><div class="v">${paramDraftSummary.advice_count ?? 0}</div><div class="s">来自参数建议器的可执行建议</div></div>
+                `;
+            }
+            document.getElementById('optimizerOverrideDraftMeta').innerHTML = paramDraftSkipped || '<div class="item muted">暂无需要跳过的草案项</div>';
+            document.getElementById('optimizerOverrideDraftYaml').textContent = paramDraftYaml;
             const btcGrid = data.btc_grid || [];
             document.getElementById('optimizerBtcGrid').innerHTML = btcGrid.length ? btcGrid.map(r => `<tr><td>ms=${r.params?.min_strength}, rsi=${r.params?.rsi_strength_weight}, ts=${r.params?.trailing_stop}</td><td>${r.score}</td><td class="${Number(r.summary?.total_return_pct || 0) >= 0 ? 'pos' : 'neg'}">${safe(r.summary?.total_return_pct)}%</td><td class="${Number(r.summary?.max_drawdown_pct || 0) >= 0 ? 'pos' : 'neg'}">${safe(r.summary?.max_drawdown_pct)}%</td></tr>`).join('') : '<tr><td colspan="4" class="muted">暂无 BTC 网格</td></tr>';
             const promotions = data.candidate_promotions || [];

@@ -8,6 +8,7 @@ import pandas as pd
 from typing import Dict, List, Any
 import os
 import threading
+import yaml
 
 # 初始化Flask
 app = Flask(__name__, static_folder='templates', static_url_path='')
@@ -350,6 +351,57 @@ def _build_symbol_parameter_advice(symbol_rows: List[Dict[str, Any]], cfg: Confi
     return advice
 
 
+def _set_nested_value(target: Dict[str, Any], key: str, value: Any):
+    cursor = target
+    parts = key.split('.')
+    for part in parts[:-1]:
+        cursor = cursor.setdefault(part, {})
+    cursor[parts[-1]] = value
+
+
+def _build_symbol_override_draft(advice_rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    symbol_overrides: Dict[str, Dict[str, Any]] = {}
+    skipped: List[Dict[str, Any]] = []
+
+    for row in advice_rows:
+        action = row.get('action')
+        if action == 'keep':
+            continue
+        symbol = row.get('symbol') or '--'
+        parameter = row.get('parameter')
+        suggested = row.get('suggested_value')
+        if action == 'review' and parameter == 'market_filters.block_counter_trend':
+            skipped.append({
+                'symbol': symbol,
+                'parameter': parameter,
+                'action': action,
+                'reason': '需要灰度实验，暂不自动写入 override 草案',
+            })
+            continue
+        if not parameter or suggested is None:
+            continue
+        bucket = symbol_overrides.setdefault(symbol, {})
+        _set_nested_value(bucket, parameter, suggested)
+
+    return {
+        'symbol_overrides': symbol_overrides,
+        'skipped': skipped,
+    }
+
+
+def _count_nested_leaf_values(data: Any) -> int:
+    if isinstance(data, dict):
+        return sum(_count_nested_leaf_values(v) for v in data.values())
+    return 1
+
+
+def _render_override_yaml(draft: Dict[str, Any]) -> str:
+    symbol_overrides = draft.get('symbol_overrides', {}) or {}
+    if not symbol_overrides:
+        return 'symbol_overrides: {}\n'
+    return yaml.safe_dump({'symbol_overrides': symbol_overrides}, allow_unicode=True, sort_keys=False)
+
+
 # ============================================================================
 # 根路由
 # ============================================================================
@@ -595,6 +647,51 @@ def get_signal_parameter_advice():
         'high_priority': sum(1 for row in data if row.get('priority') == 'high'),
     }
     return jsonify({'success': True, 'data': data, 'summary': summary, 'count': len(data)})
+
+
+@app.route('/api/signals/parameter-advice/draft')
+def get_signal_parameter_advice_draft():
+    """根据参数建议生成 symbol override 草案"""
+    days = int(request.args.get('days', 14))
+    limit = int(request.args.get('limit', 200))
+    window_hours = int(request.args.get('window_hours', 24))
+    min_move_pct = float(request.args.get('min_move_pct', 1.5))
+    cutoff = datetime.now() - timedelta(days=days)
+    signals = [
+        row for row in db.get_signals(limit=max(limit * 4, 300))
+        if row.get('filtered') and (_parse_created_at(row.get('created_at')) or datetime.min) >= cutoff
+    ]
+    signals = signals[:limit]
+    symbol_rows = _build_symbol_filter_effectiveness(
+        signals,
+        _get_exchange_client(),
+        window_hours=window_hours,
+        min_move_pct=min_move_pct,
+        now=datetime.now(),
+    )
+    advice_rows = _build_symbol_parameter_advice(symbol_rows, config)
+    draft = _build_symbol_override_draft(advice_rows)
+    yaml_text = _render_override_yaml(draft)
+    symbol_overrides = draft.get('symbol_overrides', {}) or {}
+    summary = {
+        'days': days,
+        'window_hours': window_hours,
+        'min_move_pct': min_move_pct,
+        'signals': len(signals),
+        'advice_count': len(advice_rows),
+        'draft_symbols': len(symbol_overrides),
+        'draft_parameters': _count_nested_leaf_values(symbol_overrides) if symbol_overrides else 0,
+        'skipped': len(draft.get('skipped', []) or []),
+    }
+    return jsonify({
+        'success': True,
+        'data': {
+            'draft': draft,
+            'yaml': yaml_text,
+            'advice': advice_rows,
+        },
+        'summary': summary,
+    })
 
 
 @app.route('/api/signals/coin-breakdown')

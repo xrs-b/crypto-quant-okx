@@ -1023,6 +1023,77 @@ class TestDashboardApi(unittest.TestCase):
             if os.path.exists('data/test_dashboard_param_advice.db'):
                 os.remove('data/test_dashboard_param_advice.db')
 
+    def test_parameter_advice_draft_api_returns_yaml_and_skips_review_only_items(self):
+        import dashboard.api as dashboard_api
+
+        test_db = Database('data/test_dashboard_param_draft.db')
+        old_db = dashboard_api.db
+        old_exchange_client = dashboard_api._exchange_client
+        dashboard_api.db = test_db
+        dashboard_api._exchange_client = FakeSignalAnalysisExchange({
+            'XRP/USDT': [[0, 100, 104.5, 99.6, 104.0, 1]],
+            'DOGE/USDT': [[0, 100, 104.2, 99.7, 103.8, 1]],
+        })
+        try:
+            old_time = (datetime.now() - timedelta(days=2)).strftime('%Y-%m-%d %H:%M:%S')
+            xrp_id = test_db.record_signal(
+                symbol='XRP/USDT',
+                signal_type='buy',
+                price=100,
+                strength=22,
+                reasons=[],
+                strategies_triggered=['trend_follow']
+            )
+            test_db.update_signal(
+                xrp_id,
+                filtered=1,
+                filter_reason='信号强度不足',
+                filter_code='WEAK_SIGNAL_STRENGTH',
+                filter_group='signal',
+                action_hint='等更强确认',
+                created_at=old_time
+            )
+            doge_id = test_db.record_signal(
+                symbol='DOGE/USDT',
+                signal_type='buy',
+                price=100,
+                strength=70,
+                reasons=[],
+                strategies_triggered=['trend_follow']
+            )
+            test_db.update_signal(
+                doge_id,
+                filtered=1,
+                filter_reason='信号逆大趋势',
+                filter_code='COUNTER_TREND',
+                filter_group='market',
+                action_hint='继续等趋势一致',
+                created_at=old_time
+            )
+
+            client = app.test_client()
+            resp = client.get('/api/signals/parameter-advice/draft?days=30&window_hours=24&limit=30&min_move_pct=1.5')
+            self.assertEqual(resp.status_code, 200)
+            self.assertTrue(resp.json.get('success'))
+            data = resp.json.get('data') or {}
+            summary = resp.json.get('summary') or {}
+            draft = data.get('draft') or {}
+            yaml_text = data.get('yaml') or ''
+
+            self.assertIn('XRP/USDT', (draft.get('symbol_overrides') or {}))
+            self.assertEqual(draft['symbol_overrides']['XRP/USDT']['strategies']['composite']['min_strength'], 26)
+            self.assertIn('symbol_overrides:', yaml_text)
+            self.assertIn('XRP/USDT:', yaml_text)
+            self.assertEqual(summary['draft_symbols'], 1)
+            self.assertEqual(summary['draft_parameters'], 1)
+            self.assertEqual(summary['skipped'], 1)
+            self.assertEqual((draft.get('skipped') or [])[0]['symbol'], 'DOGE/USDT')
+        finally:
+            dashboard_api.db = old_db
+            dashboard_api._exchange_client = old_exchange_client
+            if os.path.exists('data/test_dashboard_param_draft.db'):
+                os.remove('data/test_dashboard_param_draft.db')
+
     def test_signal_coin_breakdown_groups_watch_filtered_and_executed_by_symbol(self):
         import dashboard.api as dashboard_api
 

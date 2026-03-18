@@ -12,7 +12,7 @@ import unittest
 from unittest.mock import patch
 import pandas as pd
 import numpy as np
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from core.config import Config
 from core.database import Database
@@ -325,6 +325,31 @@ class TestDatabase(unittest.TestCase):
         # 查询
         signals = self.db.get_signals(limit=10)
         self.assertGreater(len(signals), 0)
+
+    def test_signal_query_parses_structured_filter_fields(self):
+        signal_id = self.db.record_signal(
+            symbol='BTC/USDT',
+            signal_type='hold',
+            price=50000,
+            strength=12,
+            reasons=[],
+            strategies_triggered=[]
+        )
+        self.db.update_signal(
+            signal_id,
+            filtered=1,
+            filter_reason='无可执行方向',
+            filter_code='NO_DIRECTION',
+            filter_group='signal',
+            action_hint='继续观察方向分数',
+            filter_details=json.dumps({'filter_meta': {'code': 'NO_DIRECTION'}}, ensure_ascii=False)
+        )
+        signals = self.db.get_signals(limit=10)
+        row = next(s for s in signals if s['id'] == signal_id)
+        self.assertEqual(row['filter_code'], 'NO_DIRECTION')
+        self.assertEqual(row['filter_group'], 'signal')
+        self.assertEqual(row['action_hint'], '继续观察方向分数')
+        self.assertEqual(row['filter_details']['filter_meta']['code'], 'NO_DIRECTION')
 
     def test_signal_mark_executed(self):
         """测试信号可标记为已执行并关联 trade_id"""
@@ -702,6 +727,14 @@ class TestReconcilePositions(unittest.TestCase):
                 os.remove('data/test_reconcile.db')
 
 
+class FakeSignalAnalysisExchange:
+    def __init__(self, candles_by_symbol=None):
+        self.candles_by_symbol = candles_by_symbol or {}
+
+    def fetch_ohlcv(self, symbol, timeframe='1h', since=None, limit=100):
+        return self.candles_by_symbol.get(symbol, [])
+
+
 class TestDashboardApi(unittest.TestCase):
     def test_daily_summary_handles_null_pnl(self):
         client = app.test_client()
@@ -709,6 +742,106 @@ class TestDashboardApi(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertTrue(resp.json.get('success'))
         self.assertIsInstance(resp.json.get('data'), list)
+
+    def test_evaluate_filtered_signal_outcome_classifies_buy_cases(self):
+        import dashboard.api as dashboard_api
+
+        base_signal = {
+            'symbol': 'BTC/USDT',
+            'signal_type': 'buy',
+            'price': 100.0,
+            'created_at': '2026-03-16T00:00:00'
+        }
+        avoided = dashboard_api._evaluate_filtered_signal_outcome(
+            base_signal,
+            [[0, 100, 100.5, 97.0, 98.0, 1]],
+            window_hours=24,
+            min_move_pct=1.5,
+            now=datetime.fromisoformat('2026-03-18T00:00:00')
+        )
+        missed = dashboard_api._evaluate_filtered_signal_outcome(
+            base_signal,
+            [[0, 100, 104.0, 99.4, 103.0, 1]],
+            window_hours=24,
+            min_move_pct=1.5,
+            now=datetime.fromisoformat('2026-03-18T00:00:00')
+        )
+        self.assertEqual(avoided['status'], 'avoided_loss')
+        self.assertEqual(missed['status'], 'missed_profit')
+
+    def test_filter_effectiveness_api_groups_outcomes_by_filter_code(self):
+        import dashboard.api as dashboard_api
+
+        test_db = Database('data/test_dashboard_effectiveness.db')
+        old_db = dashboard_api.db
+        old_exchange_client = dashboard_api._exchange_client
+        dashboard_api.db = test_db
+        dashboard_api._exchange_client = FakeSignalAnalysisExchange({
+            'BTC/USDT': [[0, 100, 100.4, 97.0, 98.0, 1]],
+            'ETH/USDT': [[0, 100, 104.0, 99.5, 103.0, 1]],
+        })
+        try:
+            old_time = (datetime.now() - timedelta(days=2)).strftime('%Y-%m-%d %H:%M:%S')
+
+            btc_id = test_db.record_signal(
+                symbol='BTC/USDT',
+                signal_type='buy',
+                price=100,
+                strength=70,
+                reasons=[],
+                strategies_triggered=['trend_follow']
+            )
+            test_db.update_signal(
+                btc_id,
+                filtered=1,
+                filter_reason='信号逆大趋势',
+                filter_code='COUNTER_TREND',
+                filter_group='market',
+                action_hint='继续等趋势一致',
+                created_at=old_time
+            )
+
+            eth_id = test_db.record_signal(
+                symbol='ETH/USDT',
+                signal_type='buy',
+                price=100,
+                strength=68,
+                reasons=[],
+                strategies_triggered=['breakout']
+            )
+            test_db.update_signal(
+                eth_id,
+                filtered=1,
+                filter_reason='信号强度不足',
+                filter_code='WEAK_SIGNAL_STRENGTH',
+                filter_group='signal',
+                action_hint='等更强确认',
+                created_at=old_time
+            )
+
+            client = app.test_client()
+            resp = client.get('/api/signals/filter-effectiveness?days=30&window_hours=24&limit=20&min_move_pct=1.5')
+            self.assertEqual(resp.status_code, 200)
+            self.assertTrue(resp.json.get('success'))
+            rows = resp.json.get('data') or []
+            summary = resp.json.get('summary') or {}
+
+            counter_trend = next(row for row in rows if row['code'] == 'COUNTER_TREND')
+            weak_strength = next(row for row in rows if row['code'] == 'WEAK_SIGNAL_STRENGTH')
+            self.assertEqual(counter_trend['avoided_loss'], 1)
+            self.assertEqual(counter_trend['missed_profit'], 0)
+            self.assertEqual(counter_trend['effectiveness_rate'], 100.0)
+            self.assertEqual(weak_strength['missed_profit'], 1)
+            self.assertEqual(weak_strength['avoided_loss'], 0)
+            self.assertEqual(weak_strength['effectiveness_rate'], 0.0)
+            self.assertEqual(summary['analyzed'], 2)
+            self.assertEqual(summary['avoided_loss'], 1)
+            self.assertEqual(summary['missed_profit'], 1)
+        finally:
+            dashboard_api.db = old_db
+            dashboard_api._exchange_client = old_exchange_client
+            if os.path.exists('data/test_dashboard_effectiveness.db'):
+                os.remove('data/test_dashboard_effectiveness.db')
 
     def test_signal_coin_breakdown_groups_watch_filtered_and_executed_by_symbol(self):
         import dashboard.api as dashboard_api
@@ -778,6 +911,9 @@ class TestDashboardApi(unittest.TestCase):
             self.assertEqual(btc['executed_signals'], 0)
             self.assertEqual(btc['latest_status'], 'watch')
             self.assertEqual({item['reason'] for item in btc['top_filter_reasons']}, {'信号逆大趋势', '无可执行方向'})
+            self.assertEqual({item['code'] for item in btc['top_filter_codes']}, {'COUNTER_TREND', 'NO_DIRECTION'})
+            self.assertEqual(btc['dominant_filter_group'], 'market')
+            self.assertTrue(btc['diagnostic_action'])
             self.assertEqual(eth['executed_signals'], 1)
             self.assertEqual(eth['latest_status'], 'executed')
             self.assertEqual(summary['symbols'], 2)

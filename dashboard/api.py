@@ -32,6 +32,7 @@ signal_quality_analyzer = SignalQualityAnalyzer(config, db)
 optimizer = ParameterOptimizer(config, db)
 preset_manager = PresetManager(config)
 governance = GovernanceEngine(config, db)
+_exchange_client = None
 smoke_execution_lock = threading.Lock()
 smoke_execution_state = {
     'running': False,
@@ -40,6 +41,156 @@ smoke_execution_state = {
     'started_at': None,
     'last_result': None,
 }
+
+
+# ============================================================================
+# 内部辅助函数
+# ============================================================================
+
+
+def _get_exchange_client():
+    global _exchange_client
+    if _exchange_client is None:
+        _exchange_client = Exchange(config.all)
+    return _exchange_client
+
+
+def _parse_created_at(value: str):
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace('Z', '+00:00'))
+    except Exception:
+        return None
+
+
+def _evaluate_filtered_signal_outcome(signal: Dict[str, Any], ohlcv: List[List[Any]], window_hours: int = 24,
+                                     min_move_pct: float = 1.5, now: datetime = None) -> Dict[str, Any]:
+    now = now or datetime.now()
+    created_at = _parse_created_at(signal.get('created_at'))
+    signal_type = signal.get('signal_type')
+    entry_price = float(signal.get('price') or 0)
+
+    result = {
+        'status': 'insufficient_data',
+        'favorable_move_pct': 0.0,
+        'adverse_move_pct': 0.0,
+        'window_hours': window_hours,
+        'min_move_pct': min_move_pct,
+    }
+
+    if created_at is None or entry_price <= 0:
+        result['status'] = 'insufficient_data'
+        return result
+
+    if now - created_at < timedelta(hours=window_hours):
+        result['status'] = 'pending'
+        return result
+
+    if signal_type not in ('buy', 'sell'):
+        result['status'] = 'insufficient_data'
+        return result
+
+    if not ohlcv:
+        result['status'] = 'insufficient_data'
+        return result
+
+    highs = [float(row[2]) for row in ohlcv if len(row) > 3 and row[2] is not None]
+    lows = [float(row[3]) for row in ohlcv if len(row) > 3 and row[3] is not None]
+    if not highs or not lows:
+        result['status'] = 'insufficient_data'
+        return result
+
+    max_high = max(highs)
+    min_low = min(lows)
+    if signal_type == 'buy':
+        favorable_move_pct = (max_high - entry_price) / entry_price * 100
+        adverse_move_pct = (entry_price - min_low) / entry_price * 100
+    else:
+        favorable_move_pct = (entry_price - min_low) / entry_price * 100
+        adverse_move_pct = (max_high - entry_price) / entry_price * 100
+
+    favorable_move_pct = round(max(favorable_move_pct, 0.0), 2)
+    adverse_move_pct = round(max(adverse_move_pct, 0.0), 2)
+    result['favorable_move_pct'] = favorable_move_pct
+    result['adverse_move_pct'] = adverse_move_pct
+
+    if adverse_move_pct >= min_move_pct and adverse_move_pct > favorable_move_pct:
+        result['status'] = 'avoided_loss'
+    elif favorable_move_pct >= min_move_pct and favorable_move_pct > adverse_move_pct:
+        result['status'] = 'missed_profit'
+    else:
+        result['status'] = 'neutral'
+    return result
+
+
+def _build_filter_effectiveness(signals: List[Dict[str, Any]], exchange_client, window_hours: int = 24,
+                                min_move_pct: float = 1.5, now: datetime = None) -> List[Dict[str, Any]]:
+    now = now or datetime.now()
+    buckets: Dict[str, Dict[str, Any]] = {}
+    candle_limit = max(int(window_hours) + 4, 12)
+
+    for row in signals:
+        if not row.get('filtered'):
+            continue
+        code = row.get('filter_code') or 'UNCLASSIFIED'
+        bucket = buckets.setdefault(code, {
+            'code': code,
+            'group': row.get('filter_group') or 'other',
+            'reason': row.get('filter_reason') or '未注明原因',
+            'action_hint': row.get('action_hint') or '继续观察',
+            'total': 0,
+            'analyzed': 0,
+            'avoided_loss': 0,
+            'missed_profit': 0,
+            'neutral': 0,
+            'pending': 0,
+            'insufficient_data': 0,
+            'symbols': set(),
+            'samples': [],
+        })
+        bucket['total'] += 1
+        if row.get('symbol'):
+            bucket['symbols'].add(row.get('symbol'))
+
+        outcome = None
+        created_at = _parse_created_at(row.get('created_at'))
+        if created_at is None or row.get('signal_type') not in ('buy', 'sell'):
+            outcome = _evaluate_filtered_signal_outcome(row, [], window_hours=window_hours, min_move_pct=min_move_pct, now=now)
+        elif now - created_at < timedelta(hours=window_hours):
+            outcome = _evaluate_filtered_signal_outcome(row, [], window_hours=window_hours, min_move_pct=min_move_pct, now=now)
+        else:
+            since_ms = int(created_at.timestamp() * 1000)
+            try:
+                candles = exchange_client.fetch_ohlcv(row['symbol'], '1h', since=since_ms, limit=candle_limit)
+            except Exception:
+                candles = []
+            outcome = _evaluate_filtered_signal_outcome(row, candles, window_hours=window_hours, min_move_pct=min_move_pct, now=now)
+
+        status = outcome['status']
+        if status in ('avoided_loss', 'missed_profit', 'neutral'):
+            bucket['analyzed'] += 1
+        bucket[status] = bucket.get(status, 0) + 1
+        if len(bucket['samples']) < 3:
+            bucket['samples'].append({
+                'symbol': row.get('symbol'),
+                'signal_type': row.get('signal_type'),
+                'created_at': row.get('created_at'),
+                'status': status,
+                'favorable_move_pct': outcome.get('favorable_move_pct'),
+                'adverse_move_pct': outcome.get('adverse_move_pct'),
+            })
+
+    data = []
+    for bucket in buckets.values():
+        bucket['symbols'] = sorted(bucket['symbols'])
+        bucket['symbol_count'] = len(bucket['symbols'])
+        decisive = bucket['avoided_loss'] + bucket['missed_profit']
+        bucket['effectiveness_rate'] = round(bucket['avoided_loss'] / decisive * 100, 2) if decisive > 0 else None
+        data.append(bucket)
+
+    data.sort(key=lambda x: (-(x['effectiveness_rate'] if x['effectiveness_rate'] is not None else -1), -x['avoided_loss'], -x['total'], x['code']))
+    return data
 
 
 # ============================================================================
@@ -181,6 +332,42 @@ def get_signal_filter_diagnostics():
         data.append(bucket)
     data.sort(key=lambda x: (-x['count'], x['code']))
     return jsonify({'success': True, 'data': data[:limit], 'count': len(data)})
+
+
+@app.route('/api/signals/filter-effectiveness')
+def get_signal_filter_effectiveness():
+    """获取过滤规则后验有效性统计"""
+    days = int(request.args.get('days', 7))
+    limit = int(request.args.get('limit', 100))
+    window_hours = int(request.args.get('window_hours', 24))
+    min_move_pct = float(request.args.get('min_move_pct', 1.5))
+    cutoff = datetime.now() - timedelta(days=days)
+    signals = [
+        row for row in db.get_signals(limit=max(limit * 3, 200))
+        if row.get('filtered') and (_parse_created_at(row.get('created_at')) or datetime.min) >= cutoff
+    ]
+    signals = signals[:limit]
+    data = _build_filter_effectiveness(
+        signals,
+        _get_exchange_client(),
+        window_hours=window_hours,
+        min_move_pct=min_move_pct,
+        now=datetime.now(),
+    )
+    summary = {
+        'days': days,
+        'window_hours': window_hours,
+        'min_move_pct': min_move_pct,
+        'signals': len(signals),
+        'rules': len(data),
+        'analyzed': sum(row.get('analyzed', 0) for row in data),
+        'avoided_loss': sum(row.get('avoided_loss', 0) for row in data),
+        'missed_profit': sum(row.get('missed_profit', 0) for row in data),
+        'neutral': sum(row.get('neutral', 0) for row in data),
+        'pending': sum(row.get('pending', 0) for row in data),
+        'insufficient_data': sum(row.get('insufficient_data', 0) for row in data),
+    }
+    return jsonify({'success': True, 'data': data, 'summary': summary, 'count': len(data)})
 
 
 @app.route('/api/signals/coin-breakdown')

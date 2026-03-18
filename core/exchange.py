@@ -89,8 +89,8 @@ class Exchange:
     def fetch_ticker(self, symbol: str) -> Dict:
         return self.exchange.fetch_ticker(symbol)
 
-    def fetch_ohlcv(self, symbol: str, timeframe: str = '1h', limit: int = 100) -> List:
-        return self.exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+    def fetch_ohlcv(self, symbol: str, timeframe: str = '1h', since: int = None, limit: int = 100) -> List:
+        return self.exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=limit)
 
     def set_leverage(self, symbol: str, leverage: int = 10):
         market = self.get_market(symbol)

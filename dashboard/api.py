@@ -8,6 +8,8 @@ import pandas as pd
 from typing import Dict, List, Any
 import os
 import threading
+import shutil
+from pathlib import Path
 import yaml
 
 # 初始化Flask
@@ -54,6 +56,19 @@ def _get_exchange_client():
     if _exchange_client is None:
         _exchange_client = Exchange(config.all)
     return _exchange_client
+
+
+def _refresh_runtime_components():
+    global risk_manager, ml_engine, backtester, signal_quality_analyzer, optimizer, governance, preset_manager, _exchange_client
+    config.reload()
+    risk_manager = RiskManager(config, db)
+    ml_engine = MLEngine(config.all)
+    backtester = StrategyBacktester(config)
+    signal_quality_analyzer = SignalQualityAnalyzer(config, db)
+    optimizer = ParameterOptimizer(config, db)
+    governance = GovernanceEngine(config, db)
+    preset_manager = PresetManager(config)
+    _exchange_client = None
 
 
 def _parse_created_at(value: str):
@@ -402,6 +417,47 @@ def _render_override_yaml(draft: Dict[str, Any]) -> str:
     return yaml.safe_dump({'symbol_overrides': symbol_overrides}, allow_unicode=True, sort_keys=False)
 
 
+def _get_local_config_path() -> Path:
+    return Path(config.config_path).with_name('config.local.yaml')
+
+
+def _apply_symbol_override_draft(draft: Dict[str, Any], note: str = None) -> Dict[str, Any]:
+    local_path = _get_local_config_path()
+    local_path.parent.mkdir(parents=True, exist_ok=True)
+    backups_dir = local_path.parent / 'backups'
+    backups_dir.mkdir(parents=True, exist_ok=True)
+
+    before = {}
+    if local_path.exists():
+        with open(local_path, 'r', encoding='utf-8') as f:
+            before = yaml.safe_load(f) or {}
+
+    timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+    backup_path = backups_dir / f'config.local-{timestamp}.yaml'
+    if local_path.exists():
+        shutil.copy2(local_path, backup_path)
+
+    symbol_overrides = (draft.get('symbol_overrides') or {}) if isinstance(draft, dict) else {}
+    after = dict(before)
+    after['symbol_overrides'] = config._deep_merge(before.get('symbol_overrides', {}) or {}, symbol_overrides)
+
+    with open(local_path, 'w', encoding='utf-8') as f:
+        yaml.safe_dump(after, f, allow_unicode=True, sort_keys=False)
+
+    _refresh_runtime_components()
+
+    return {
+        'config_path': str(local_path),
+        'backup_path': str(backup_path) if backup_path.exists() else None,
+        'applied_symbols': sorted(symbol_overrides.keys()),
+        'applied_symbol_count': len(symbol_overrides),
+        'applied_parameter_count': _count_nested_leaf_values(symbol_overrides) if symbol_overrides else 0,
+        'skipped': draft.get('skipped', []) if isinstance(draft, dict) else [],
+        'note': note,
+        'message': 'override 草案已写入 config.local.yaml，并已重新加载配置。',
+    }
+
+
 # ============================================================================
 # 根路由
 # ============================================================================
@@ -692,6 +748,42 @@ def get_signal_parameter_advice_draft():
         },
         'summary': summary,
     })
+
+
+@app.route('/api/signals/parameter-advice/apply-draft', methods=['POST'])
+def apply_signal_parameter_advice_draft():
+    """将 override 草案安全写入 config.local.yaml"""
+    payload = request.get_json(silent=True) or {}
+    note = (payload.get('note') or '').strip() or None
+    draft = payload.get('draft')
+
+    if not draft:
+        days = int(payload.get('days', 14))
+        limit = int(payload.get('limit', 200))
+        window_hours = int(payload.get('window_hours', 24))
+        min_move_pct = float(payload.get('min_move_pct', 1.5))
+        cutoff = datetime.now() - timedelta(days=days)
+        signals = [
+            row for row in db.get_signals(limit=max(limit * 4, 300))
+            if row.get('filtered') and (_parse_created_at(row.get('created_at')) or datetime.min) >= cutoff
+        ]
+        signals = signals[:limit]
+        symbol_rows = _build_symbol_filter_effectiveness(
+            signals,
+            _get_exchange_client(),
+            window_hours=window_hours,
+            min_move_pct=min_move_pct,
+            now=datetime.now(),
+        )
+        advice_rows = _build_symbol_parameter_advice(symbol_rows, config)
+        draft = _build_symbol_override_draft(advice_rows)
+
+    symbol_overrides = (draft.get('symbol_overrides') or {}) if isinstance(draft, dict) else {}
+    if not symbol_overrides:
+        return jsonify({'success': False, 'error': 'draft has no applicable symbol_overrides'}), 400
+
+    result = _apply_symbol_override_draft(draft, note=note)
+    return jsonify({'success': True, 'data': result})
 
 
 @app.route('/api/signals/coin-breakdown')

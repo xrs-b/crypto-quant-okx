@@ -108,6 +108,8 @@ vim config/config.local.yaml
 - `config/config.yaml`：放**可公开**的业务参数，例如 watch_list、杠杆、风控、运行模式
 - `config/config.local.yaml`：只放**私密**参数，例如 API Key、Discord webhook、bot token
 - 两个文件都会被 Git 忽略，不会上 GitHub
+- 仓库会保留 `config/config.local.yaml.example` 作为格式模板，clone 后照住复制即可
+- `config/config.local.yaml` 是**可选文件**：不存在时系统会直接使用主配置继续运行，**不会因为缺少它而报错**
 - 如果你喜欢，也可以直接用环境变量：项目支持 `${ENV_NAME}` / `${ENV_NAME:-default}` 这种写法
 
 ### 4. 运行

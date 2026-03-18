@@ -45,6 +45,10 @@ class Database:
                 strategies_triggered TEXT,
                 filtered INTEGER DEFAULT 0,
                 filter_reason TEXT,
+                filter_code TEXT,
+                filter_group TEXT,
+                action_hint TEXT,
+                filter_details TEXT,
                 executed INTEGER DEFAULT 0,
                 trade_id INTEGER,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -238,6 +242,18 @@ class Database:
             )
         """)
         
+        # 兼容旧库：补充信号诊断字段
+        cursor.execute("PRAGMA table_info(signals)")
+        signal_columns = {row[1] for row in cursor.fetchall()}
+        if 'filter_code' not in signal_columns:
+            cursor.execute("ALTER TABLE signals ADD COLUMN filter_code TEXT")
+        if 'filter_group' not in signal_columns:
+            cursor.execute("ALTER TABLE signals ADD COLUMN filter_group TEXT")
+        if 'action_hint' not in signal_columns:
+            cursor.execute("ALTER TABLE signals ADD COLUMN action_hint TEXT")
+        if 'filter_details' not in signal_columns:
+            cursor.execute("ALTER TABLE signals ADD COLUMN filter_details TEXT")
+
         # 兼容旧库：补充持仓追踪锚点字段
         cursor.execute("PRAGMA table_info(positions)")
         position_columns = {row[1] for row in cursor.fetchall()}
@@ -326,6 +342,10 @@ class Database:
         if not df.empty:
             df['reasons'] = df['reasons'].apply(lambda x: json.loads(x) if x else [])
             df['strategies_triggered'] = df['strategies_triggered'].apply(lambda x: json.loads(x) if x else [])
+            if 'filter_details' in df.columns:
+                df['filter_details'] = df['filter_details'].apply(
+                    lambda x: json.loads(x) if isinstance(x, str) and x else ({ } if x is None or pd.isna(x) else x)
+                )
             df['filtered'] = df['filtered'].astype(bool)
             df['executed'] = df['executed'].astype(bool)
         

@@ -1,6 +1,7 @@
 """
 信号验证与记录模块 - 增强版
 """
+import json
 from typing import Dict, List
 from datetime import datetime, timedelta
 from core.config import Config
@@ -10,11 +11,38 @@ from core.exchange import Exchange
 class SignalValidator:
     """信号验证器 - 过滤不符合条件的信号"""
 
+    FILTER_META = {
+        'NO_DIRECTION': {'group': 'signal', 'action_hint': '先观察方向分数与触发策略，当前未形成可执行方向'},
+        'EXISTING_SAME_SIDE_POSITION': {'group': 'position', 'action_hint': '已有同向持仓，优先等平仓或切换币种'},
+        'COOLDOWN_ACTIVE': {'group': 'risk', 'action_hint': '冷却期未结束，等剩余时间归零后再观察'},
+        'LOW_BALANCE': {'group': 'risk', 'action_hint': '先补足可用余额，或者下调仓位比例'},
+        'MAX_EXPOSURE': {'group': 'risk', 'action_hint': '总风险占用已高，建议降低 position_size 或等待仓位释放'},
+        'MAX_SYMBOL_EXPOSURE': {'group': 'risk', 'action_hint': '单币种占用过高，避免继续集中在同一币种'},
+        'LOW_VOLATILITY': {'group': 'market', 'action_hint': '市场太平静，当前更适合继续观望，不建议强行入场'},
+        'HIGH_VOLATILITY': {'group': 'market', 'action_hint': '市场过于剧烈，先等待波动回落再评估'},
+        'COUNTER_TREND': {'group': 'market', 'action_hint': '当前方向逆大趋势，除非策略明确允许，否则继续观望'},
+        'INSUFFICIENT_STRATEGY_COUNT': {'group': 'signal', 'action_hint': '触发策略太少，可继续观察是否补齐确认条件'},
+        'WEAK_SIGNAL_STRENGTH': {'group': 'signal', 'action_hint': '信号强度不足，建议继续等确认而非急于开仓'},
+    }
+
     def __init__(self, config: Config, exchange: Exchange):
         self.config = config
         self.exchange = exchange
         self.trading_config = config.get('trading', {})
         self.strategies_config = config.get('strategies', {})
+
+    def _failure(self, code: str, reason: str, details: Dict, detail_key: str = None) -> tuple:
+        meta = self.FILTER_META.get(code, {})
+        if detail_key and detail_key in details and isinstance(details[detail_key], dict):
+            details[detail_key]['code'] = code
+            details[detail_key]['group'] = meta.get('group', 'other')
+            details[detail_key]['action_hint'] = meta.get('action_hint', '')
+        details['filter_meta'] = {
+            'code': code,
+            'group': meta.get('group', 'other'),
+            'action_hint': meta.get('action_hint', ''),
+        }
+        return False, reason, details
 
     def validate(self, signal, current_positions: Dict = None,
                  tracking_data: Dict = None) -> tuple:
@@ -26,7 +54,7 @@ class SignalValidator:
         # 0. 先过滤非方向性信号
         if signal.signal_type not in ['buy', 'sell']:
             details['direction_check'] = {'passed': False, 'reason': '无可执行方向'}
-            return False, '无可执行方向', details
+            return self._failure('NO_DIRECTION', '无可执行方向', details, 'direction_check')
 
         side = 'long' if signal.signal_type == 'buy' else 'short'
 
@@ -38,7 +66,7 @@ class SignalValidator:
                 'reason': f"已有相同方向持仓: {existing.get('side')}",
                 'existing_position': existing
             }
-            return False, f"已有相同方向持仓: {existing.get('side')}", details
+            return self._failure('EXISTING_SAME_SIDE_POSITION', f"已有相同方向持仓: {existing.get('side')}", details, 'position_check')
         details['position_check'] = {'passed': True, 'reason': '无冲突持仓'}
 
         # 2. 冷却时间
@@ -54,7 +82,7 @@ class SignalValidator:
                         'reason': f"冷却期内({diff_minutes:.1f}分钟<{cooldown}分钟)",
                         'remaining_minutes': round(cooldown - diff_minutes, 1)
                     }
-                    return False, f"冷却期内({diff_minutes:.1f}分钟)", details
+                    return self._failure('COOLDOWN_ACTIVE', f"冷却期内({diff_minutes:.1f}分钟)", details, 'cooldown_check')
         details['cooldown_check'] = {'passed': True, 'reason': '冷却时间已过'}
 
         # 3. 资金与风险占比（用比例，不再错误地用绝对市值对 0.3 比较）
@@ -89,7 +117,7 @@ class SignalValidator:
                     'reason': f"余额不足({available_usdt:.2f} USDT)",
                     'available': available_usdt
                 }
-                return False, '余额不足', details
+                return self._failure('LOW_BALANCE', '余额不足', details, 'balance_check')
 
             details['balance_check'] = {
                 'passed': True,
@@ -108,7 +136,7 @@ class SignalValidator:
                 'new_position_ratio': position_ratio,
                 'max_exposure': max_exposure
             }
-            return False, '超过最大持仓比例', details
+            return self._failure('MAX_EXPOSURE', '超过最大持仓比例', details, 'exposure_check')
         details['exposure_check'] = {
             'passed': True,
             'reason': '总风险占用正常',
@@ -122,7 +150,7 @@ class SignalValidator:
                 'passed': False,
                 'reason': f"单币种持仓超过限制({new_symbol_exposure:.2f}>{max_per_symbol:.2f})",
             }
-            return False, '单币种持仓超过限制', details
+            return self._failure('MAX_SYMBOL_EXPOSURE', '单币种持仓超过限制', details, 'symbol_exposure_check')
         details['symbol_exposure_check'] = {
             'passed': True,
             'reason': '单币种风险正常',
@@ -140,7 +168,7 @@ class SignalValidator:
                 'reason': f"波动率过低({context.get('volatility')})",
                 'context': context
             }
-            return False, '波动率过低', details
+            return self._failure('LOW_VOLATILITY', '波动率过低', details, 'market_volatility_check')
 
         if market_filters.get('block_high_volatility', True) and context.get('volatility_too_high'):
             details['market_volatility_check'] = {
@@ -148,7 +176,7 @@ class SignalValidator:
                 'reason': f"波动率过高({context.get('volatility')})",
                 'context': context
             }
-            return False, '波动率过高', details
+            return self._failure('HIGH_VOLATILITY', '波动率过高', details, 'market_volatility_check')
 
         if market_filters.get('block_counter_trend', True):
             if signal.signal_type == 'buy' and trend == 'bearish':
@@ -157,14 +185,14 @@ class SignalValidator:
                     'reason': '信号逆大趋势(当前偏空)',
                     'context': context
                 }
-                return False, '信号逆大趋势', details
+                return self._failure('COUNTER_TREND', '信号逆大趋势', details, 'trend_alignment_check')
             if signal.signal_type == 'sell' and trend == 'bullish':
                 details['trend_alignment_check'] = {
                     'passed': False,
                     'reason': '信号逆大趋势(当前偏多)',
                     'context': context
                 }
-                return False, '信号逆大趋势', details
+                return self._failure('COUNTER_TREND', '信号逆大趋势', details, 'trend_alignment_check')
 
         details['market_context_check'] = {
             'passed': True,
@@ -181,13 +209,13 @@ class SignalValidator:
                 'passed': False,
                 'reason': f"触发策略数不足({len(signal.strategies_triggered)}<{min_strategy_count})"
             }
-            return False, '触发策略数不足', details
+            return self._failure('INSUFFICIENT_STRATEGY_COUNT', '触发策略数不足', details, 'strategy_check')
         if signal.strength < min_strength:
             details['strength_check'] = {
                 'passed': False,
                 'reason': f"信号强度不足({signal.strength}<{min_strength})"
             }
-            return False, '信号强度不足', details
+            return self._failure('WEAK_SIGNAL_STRENGTH', '信号强度不足', details, 'strength_check')
 
         details['strategy_check'] = {
             'passed': True,
@@ -217,6 +245,7 @@ class SignalRecorder:
 
     def record(self, signal, filter_result: tuple = None) -> int:
         passed, reason, details = filter_result or (True, None, {})
+        filter_meta = details.get('filter_meta', {}) if isinstance(details, dict) else {}
         signal_id = self.db.record_signal(
             symbol=signal.symbol,
             signal_type=signal.signal_type,
@@ -226,7 +255,15 @@ class SignalRecorder:
             strategies_triggered=signal.strategies_triggered
         )
         if not passed:
-            self.db.update_signal(signal_id, filtered=1, filter_reason=reason)
+            self.db.update_signal(
+                signal_id,
+                filtered=1,
+                filter_reason=reason,
+                filter_code=filter_meta.get('code'),
+                filter_group=filter_meta.get('group'),
+                action_hint=filter_meta.get('action_hint'),
+                filter_details=json.dumps(details, ensure_ascii=False)
+            )
         for reason_data in signal.reasons:
             self.db.record_strategy_analysis(
                 signal_id=signal_id,

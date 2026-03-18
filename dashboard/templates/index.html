@@ -754,6 +754,21 @@
 
                         <div class="compact-grid">
                             <div class="card mini">
+                                <div class="section-title">override 生效状态</div>
+                                <div class="section-note">睇当前 local override 实际生效到边几只币、边几个关键参数。</div>
+                                <div class="summary-strip" id="optimizerOverrideStatusSummary"></div>
+                                <div style="height:12px"></div>
+                                <table><thead><tr><th>币种</th><th>当前 override</th><th>实际生效参数</th></tr></thead><tbody id="optimizerOverrideStatus"></tbody></table>
+                            </div>
+                            <div class="card mini">
+                                <div class="section-title">override 回滚</div>
+                                <div class="section-note">列出 `config.local` 备份，可一键回滚到指定版本。</div>
+                                <table><thead><tr><th>备份</th><th>时间</th><th>大小</th><th>操作</th></tr></thead><tbody id="optimizerOverrideBackups"></tbody></table>
+                            </div>
+                        </div>
+
+                        <div class="compact-grid">
+                            <div class="card mini">
                                 <div class="section-title">预设管理</div>
                                 <table><thead><tr><th>预设</th><th>路径</th><th>操作</th></tr></thead><tbody id="optimizerPresets"></tbody></table>
                             </div>
@@ -3303,15 +3318,35 @@
                 toast('应用草案失败: ' + (e.message || e), 'bad');
             }
         }
+        async function rollbackOverrideBackup(name) {
+            try {
+                const r = await fetch('/api/signals/overrides/rollback', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({backup_name: name})
+                });
+                const j = await r.json();
+                if (!j.success) {
+                    toast('回滚 override 失败: ' + (j.error || 'unknown'), 'bad');
+                    return;
+                }
+                toast(j.data?.message || 'override 已回滚', 'ok');
+                await refreshAll();
+            } catch (e) {
+                toast('回滚 override 失败: ' + (e.message || e), 'bad');
+            }
+        }
         async function loadOptimizer() {
-            const [data, candidateHistory, presetHistory, mode, gov, paramAdviceResp, paramDraftResp] = await Promise.all([
+            const [data, candidateHistory, presetHistory, mode, gov, paramAdviceResp, paramDraftResp, overrideStatusResp, overrideBackupsResp] = await Promise.all([
                 api('/api/optimizer/results'),
                 api('/api/candidates/history?limit=10'),
                 api('/api/presets/history?limit=10'),
                 api('/api/mode/status'),
                 api('/api/governance/status'),
                 fetch('/api/signals/parameter-advice?days=14&window_hours=24&limit=160').then(r => r.json()),
-                fetch('/api/signals/parameter-advice/draft?days=14&window_hours=24&limit=160').then(r => r.json())
+                fetch('/api/signals/parameter-advice/draft?days=14&window_hours=24&limit=160').then(r => r.json()),
+                fetch('/api/signals/overrides/status').then(r => r.json()),
+                fetch('/api/signals/overrides/backups').then(r => r.json())
             ]);
             const best = data.best_experiment || {};
             document.getElementById('optimizerBest').innerHTML = `
@@ -3393,6 +3428,27 @@
             }
             document.getElementById('optimizerOverrideDraftMeta').innerHTML = paramDraftSkipped || '<div class="item muted">暂无需要跳过的草案项</div>';
             document.getElementById('optimizerOverrideDraftYaml').textContent = paramDraftYaml;
+            const overrideStatus = overrideStatusResp?.data || {};
+            const overrideRows = overrideStatus?.rows || [];
+            const overrideSummaryHost = document.getElementById('optimizerOverrideStatusSummary');
+            if (overrideSummaryHost) {
+                overrideSummaryHost.innerHTML = `
+                    <div class="summary-pill"><div class="k">override 文件</div><div class="v">${overrideStatus.exists ? '已存在' : '未创建'}</div><div class="s">${overrideStatus.config_path || '--'}</div></div>
+                    <div class="summary-pill"><div class="k">override 币种</div><div class="v">${overrideStatus.symbol_override_count ?? 0}</div><div class="s">当前 local override 已配置的币种数</div></div>
+                `;
+            }
+            document.getElementById('optimizerOverrideStatus').innerHTML = overrideRows.length ? overrideRows.map(row => `<tr>
+                <td>${row.symbol || '--'}</td>
+                <td><pre style="white-space:pre-wrap; font-size:12px;">${JSON.stringify(row.override || {}, null, 2)}</pre></td>
+                <td><pre style="white-space:pre-wrap; font-size:12px;">${JSON.stringify(row.effective || {}, null, 2)}</pre></td>
+            </tr>`).join('') : '<tr><td colspan="3" class="muted">暂无 override 生效项</td></tr>';
+            const overrideBackups = overrideBackupsResp?.data || [];
+            document.getElementById('optimizerOverrideBackups').innerHTML = overrideBackups.length ? overrideBackups.map(row => `<tr>
+                <td>${row.name}</td>
+                <td>${row.modified_at || '--'}</td>
+                <td>${row.size || 0}</td>
+                <td><button class="secondary" onclick="rollbackOverrideBackup('${row.name}')">回滚</button></td>
+            </tr>`).join('') : '<tr><td colspan="4" class="muted">暂无 override backup</td></tr>';
             const btcGrid = data.btc_grid || [];
             document.getElementById('optimizerBtcGrid').innerHTML = btcGrid.length ? btcGrid.map(r => `<tr><td>ms=${r.params?.min_strength}, rsi=${r.params?.rsi_strength_weight}, ts=${r.params?.trailing_stop}</td><td>${r.score}</td><td class="${Number(r.summary?.total_return_pct || 0) >= 0 ? 'pos' : 'neg'}">${safe(r.summary?.total_return_pct)}%</td><td class="${Number(r.summary?.max_drawdown_pct || 0) >= 0 ? 'pos' : 'neg'}">${safe(r.summary?.max_drawdown_pct)}%</td></tr>`).join('') : '<tr><td colspan="4" class="muted">暂无 BTC 网格</td></tr>';
             const promotions = data.candidate_promotions || [];

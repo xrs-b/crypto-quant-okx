@@ -1162,6 +1162,90 @@ class TestDashboardApi(unittest.TestCase):
                 dashboard_api.preset_manager = old_preset_manager
                 dashboard_api._exchange_client = old_exchange_client
 
+    def test_override_status_and_rollback_restore_local_config(self):
+        import dashboard.api as dashboard_api
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg_path = os.path.join(tmpdir, 'config.yaml')
+            local_path = os.path.join(tmpdir, 'config.local.yaml')
+            backups_dir = os.path.join(tmpdir, 'backups')
+            os.makedirs(backups_dir, exist_ok=True)
+            with open(cfg_path, 'w', encoding='utf-8') as f:
+                f.write(
+                    "strategies:\n"
+                    "  composite:\n"
+                    "    min_strength: 28\n"
+                    "    min_strategy_count: 1\n"
+                    "market_filters:\n"
+                    "  min_volatility: 0.0045\n"
+                    "  max_volatility: 0.05\n"
+                    "  block_counter_trend: true\n"
+                    "trading:\n"
+                    "  cooldown_minutes: 15\n"
+                )
+            with open(local_path, 'w', encoding='utf-8') as f:
+                f.write(
+                    "symbol_overrides:\n"
+                    "  XRP/USDT:\n"
+                    "    strategies:\n"
+                    "      composite:\n"
+                    "        min_strength: 26\n"
+                )
+            backup_name = 'config.local-20260318-140000.yaml'
+            backup_path = os.path.join(backups_dir, backup_name)
+            with open(backup_path, 'w', encoding='utf-8') as f:
+                f.write(
+                    "symbol_overrides:\n"
+                    "  BTC/USDT:\n"
+                    "    strategies:\n"
+                    "      composite:\n"
+                    "        min_strength: 24\n"
+                )
+
+            old_config = dashboard_api.config
+            old_db = dashboard_api.db
+            old_risk_manager = dashboard_api.risk_manager
+            old_ml_engine = dashboard_api.ml_engine
+            old_backtester = dashboard_api.backtester
+            old_signal_quality_analyzer = dashboard_api.signal_quality_analyzer
+            old_optimizer = dashboard_api.optimizer
+            old_governance = dashboard_api.governance
+            old_preset_manager = dashboard_api.preset_manager
+            old_exchange_client = dashboard_api._exchange_client
+            dashboard_api.config = Config(cfg_path)
+            dashboard_api.db = Database(os.path.join(tmpdir, 'test.db'))
+            try:
+                client = app.test_client()
+                status_resp = client.get('/api/signals/overrides/status')
+                self.assertEqual(status_resp.status_code, 200)
+                self.assertTrue(status_resp.json.get('success'))
+                rows = status_resp.json['data']['rows']
+                self.assertEqual(rows[0]['symbol'], 'XRP/USDT')
+                self.assertEqual(rows[0]['effective']['strategies']['composite']['min_strength'], 26)
+
+                backups_resp = client.get('/api/signals/overrides/backups')
+                self.assertEqual(backups_resp.status_code, 200)
+                self.assertTrue(any(item['name'] == backup_name for item in backups_resp.json.get('data') or []))
+
+                rollback_resp = client.post('/api/signals/overrides/rollback', json={'backup_name': backup_name})
+                self.assertEqual(rollback_resp.status_code, 200)
+                self.assertTrue(rollback_resp.json.get('success'))
+                with open(local_path, 'r', encoding='utf-8') as f:
+                    restored = yaml.safe_load(f) or {}
+                self.assertIn('BTC/USDT', restored.get('symbol_overrides', {}))
+                self.assertNotIn('XRP/USDT', restored.get('symbol_overrides', {}))
+            finally:
+                dashboard_api.config = old_config
+                dashboard_api.db = old_db
+                dashboard_api.risk_manager = old_risk_manager
+                dashboard_api.ml_engine = old_ml_engine
+                dashboard_api.backtester = old_backtester
+                dashboard_api.signal_quality_analyzer = old_signal_quality_analyzer
+                dashboard_api.optimizer = old_optimizer
+                dashboard_api.governance = old_governance
+                dashboard_api.preset_manager = old_preset_manager
+                dashboard_api._exchange_client = old_exchange_client
+
     def test_signal_coin_breakdown_groups_watch_filtered_and_executed_by_symbol(self):
         import dashboard.api as dashboard_api
 

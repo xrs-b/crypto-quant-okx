@@ -153,6 +153,36 @@ def get_signal_filter_reasons():
     return jsonify({'success': True, 'data': data})
 
 
+@app.route('/api/signals/filter-diagnostics')
+def get_signal_filter_diagnostics():
+    """获取标准化过滤诊断排行"""
+    limit = int(request.args.get('limit', 20))
+    signals = db.get_signals(limit=1000)
+    buckets = {}
+    for row in signals:
+        if not row.get('filtered'):
+            continue
+        code = row.get('filter_code') or 'UNCLASSIFIED'
+        bucket = buckets.setdefault(code, {
+            'code': code,
+            'group': row.get('filter_group') or 'other',
+            'reason': row.get('filter_reason') or '未注明原因',
+            'action_hint': row.get('action_hint') or '继续观察',
+            'count': 0,
+            'symbols': set(),
+        })
+        bucket['count'] += 1
+        if row.get('symbol'):
+            bucket['symbols'].add(row.get('symbol'))
+    data = []
+    for bucket in buckets.values():
+        bucket['symbols'] = sorted(bucket['symbols'])
+        bucket['symbol_count'] = len(bucket['symbols'])
+        data.append(bucket)
+    data.sort(key=lambda x: (-x['count'], x['code']))
+    return jsonify({'success': True, 'data': data[:limit], 'count': len(data)})
+
+
 @app.route('/api/signals/coin-breakdown')
 def get_signal_coin_breakdown():
     """按币种拆解观望 / 过滤 / 执行情况"""
@@ -185,9 +215,16 @@ def get_signal_coin_breakdown():
             'latest_time': None,
             'latest_signal_type': None,
             'latest_filter_reason': None,
+            'latest_filter_code': None,
+            'latest_filter_group': None,
+            'latest_action_hint': None,
             'latest_status': 'sample_low',
             'top_filter_reasons': [],
+            'top_filter_codes': [],
+            'filter_groups': {},
             '_reason_counts': {},
+            '_code_counts': {},
+            '_group_counts': {},
             '_latest_sort_key': ('', -1),
         })
         bucket['total_signals'] += 1
@@ -202,7 +239,11 @@ def get_signal_coin_breakdown():
         if row.get('filtered'):
             bucket['filtered_signals'] += 1
             reason = row.get('filter_reason') or '未注明原因'
+            code = row.get('filter_code') or 'UNCLASSIFIED'
+            group = row.get('filter_group') or 'other'
             bucket['_reason_counts'][reason] = bucket['_reason_counts'].get(reason, 0) + 1
+            bucket['_code_counts'][code] = bucket['_code_counts'].get(code, 0) + 1
+            bucket['_group_counts'][group] = bucket['_group_counts'].get(group, 0) + 1
         if row.get('executed'):
             bucket['executed_signals'] += 1
 
@@ -213,6 +254,9 @@ def get_signal_coin_breakdown():
             bucket['latest_time'] = created_at or None
             bucket['latest_signal_type'] = signal_type
             bucket['latest_filter_reason'] = row.get('filter_reason')
+            bucket['latest_filter_code'] = row.get('filter_code')
+            bucket['latest_filter_group'] = row.get('filter_group')
+            bucket['latest_action_hint'] = row.get('action_hint')
             if row.get('executed'):
                 bucket['latest_status'] = 'executed'
             elif signal_type == 'hold':
@@ -231,7 +275,14 @@ def get_signal_coin_breakdown():
             ({'reason': k, 'count': v} for k, v in bucket.pop('_reason_counts', {}).items()),
             key=lambda x: x['count'], reverse=True
         )
+        code_rows = sorted(
+            ({'code': k, 'count': v} for k, v in bucket.pop('_code_counts', {}).items()),
+            key=lambda x: x['count'], reverse=True
+        )
+        group_counts = bucket.pop('_group_counts', {})
         bucket['top_filter_reasons'] = reason_rows[:3]
+        bucket['top_filter_codes'] = code_rows[:3]
+        bucket['filter_groups'] = group_counts
         hold_count = bucket['hold_signals']
         filtered_count = bucket['filtered_signals']
         executed_count = bucket['executed_signals']
@@ -243,6 +294,21 @@ def get_signal_coin_breakdown():
             bucket['breakdown_conclusion'] = '当前主要观望'
         else:
             bucket['breakdown_conclusion'] = '样本仍少'
+
+        dominant_group = None
+        if bucket['filter_groups']:
+            dominant_group = sorted(bucket['filter_groups'].items(), key=lambda x: (-x[1], x[0]))[0][0]
+        bucket['dominant_filter_group'] = dominant_group
+        if bucket.get('latest_status') == 'filtered':
+            bucket['diagnostic_action'] = bucket.get('latest_action_hint') or '先处理最新过滤项再观察后续样本'
+        elif bucket.get('latest_status') == 'watch':
+            bucket['diagnostic_action'] = '当前以观望为主，优先关注方向形成而不是贸然放宽风控'
+        elif bucket.get('latest_status') == 'executed':
+            bucket['diagnostic_action'] = '已有执行样本，下一步观察平仓质量与收益稳定性'
+        elif bucket.get('latest_status') == 'direction_ready':
+            bucket['diagnostic_action'] = '方向已形成，继续关注是否会被风控或市场条件拦截'
+        else:
+            bucket['diagnostic_action'] = '当前样本仍少，继续积累信号再判断'
         rows.append(bucket)
 
     status_rank = {
@@ -263,6 +329,13 @@ def get_signal_coin_breakdown():
         'watch_symbols': sum(1 for x in rows if x.get('latest_status') == 'watch'),
         'filtered_symbols': sum(1 for x in rows if x.get('latest_status') == 'filtered'),
         'executed_symbols': sum(1 for x in rows if x.get('latest_status') == 'executed'),
+        'group_breakdown': {
+            'signal': sum((x.get('filter_groups') or {}).get('signal', 0) for x in rows),
+            'market': sum((x.get('filter_groups') or {}).get('market', 0) for x in rows),
+            'risk': sum((x.get('filter_groups') or {}).get('risk', 0) for x in rows),
+            'position': sum((x.get('filter_groups') or {}).get('position', 0) for x in rows),
+            'other': sum((x.get('filter_groups') or {}).get('other', 0) for x in rows),
+        },
         'period_days': days,
     }
     return jsonify({'success': True, 'data': rows, 'summary': summary, 'count': len(rows)})

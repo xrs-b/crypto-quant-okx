@@ -3,6 +3,7 @@ OKX量化交易系统 - 测试套件
 """
 import sys
 import os
+import json
 import tempfile
 from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -17,7 +18,7 @@ from core.config import Config
 from core.database import Database
 from core.exchange import Exchange
 from core.notifier import NotificationManager
-from signals import SignalDetector, SignalValidator, SignalRecorder
+from signals import Signal, SignalDetector, SignalValidator, SignalRecorder
 from trading import TradingExecutor, RiskManager
 from strategies.strategy_library import StrategyManager
 from bot.run import build_exchange_diagnostics, build_exchange_smoke_plan, execute_exchange_smoke, reconcile_exchange_positions
@@ -257,6 +258,19 @@ class TestConfig(unittest.TestCase):
             os.environ.pop('DISCORD_BOT_TOKEN', None)
         else:
             os.environ['DISCORD_BOT_TOKEN'] = old_bot_token
+
+
+class TestSignalValidator(unittest.TestCase):
+    def test_validate_returns_standardized_filter_meta_for_hold_signal(self):
+        cfg = Config()
+        validator = SignalValidator(cfg, None)
+        signal = Signal(symbol='BTC/USDT', signal_type='hold', price=50000, strength=0)
+        passed, reason, details = validator.validate(signal)
+        self.assertFalse(passed)
+        self.assertEqual(reason, '无可执行方向')
+        self.assertEqual(details['filter_meta']['code'], 'NO_DIRECTION')
+        self.assertEqual(details['filter_meta']['group'], 'signal')
+        self.assertTrue(details['filter_meta']['action_hint'])
 
 
 class TestExchangeAmountLimits(unittest.TestCase):
@@ -584,6 +598,7 @@ class TestNotifications(unittest.TestCase):
         self.assertIn('notify:runtime', db.logs[5]['message'])
         self.assertIn('【信号概览】', db.logs[0]['details']['message'])
         self.assertIn('通知等级：⚠️ 重要', db.logs[0]['details']['message'])
+        self.assertIn('====================', db.logs[0]['details']['message'])
         self.assertIn('【风控拦截】', db.logs[1]['details']['message'])
         self.assertIn('通知等级：🚨 紧急', db.logs[1]['details']['message'])
         self.assertIn('风险拒绝', db.logs[1]['details']['message'])
@@ -710,7 +725,15 @@ class TestDashboardApi(unittest.TestCase):
                 reasons=[],
                 strategies_triggered=['trend_follow']
             )
-            test_db.update_signal(buy_id, filtered=1, filter_reason='信号逆大趋势')
+            test_db.update_signal(
+                buy_id,
+                filtered=1,
+                filter_reason='信号逆大趋势',
+                filter_code='COUNTER_TREND',
+                filter_group='market',
+                action_hint='当前方向逆大趋势，除非策略明确允许，否则继续观望',
+                filter_details=json.dumps({'filter_meta': {'code': 'COUNTER_TREND'}}, ensure_ascii=False)
+            )
 
             hold_id = test_db.record_signal(
                 symbol='BTC/USDT',
@@ -720,7 +743,15 @@ class TestDashboardApi(unittest.TestCase):
                 reasons=[],
                 strategies_triggered=[]
             )
-            test_db.update_signal(hold_id, filtered=1, filter_reason='无可执行方向')
+            test_db.update_signal(
+                hold_id,
+                filtered=1,
+                filter_reason='无可执行方向',
+                filter_code='NO_DIRECTION',
+                filter_group='signal',
+                action_hint='先观察方向分数与触发策略，当前未形成可执行方向',
+                filter_details=json.dumps({'filter_meta': {'code': 'NO_DIRECTION'}}, ensure_ascii=False)
+            )
 
             executed_id = test_db.record_signal(
                 symbol='ETH/USDT',

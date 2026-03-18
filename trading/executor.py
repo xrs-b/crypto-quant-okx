@@ -78,6 +78,8 @@ class TradingExecutor:
                 trade_logger.warning(f"{symbol}: 非U本位合约，跳过")
                 return None
             amount = self.exchange.normalize_contract_amount(symbol, desired_notional, current_price)
+            contract_size = self.exchange.get_contract_size(symbol) if hasattr(self.exchange, 'get_contract_size') else 1.0
+            coin_quantity = self.exchange.contracts_to_coin_quantity(symbol, amount) if hasattr(self.exchange, 'contracts_to_coin_quantity') else amount * contract_size
         except Exception as e:
             trade_logger.error(f"计算下单数量失败: {e}")
             return None
@@ -102,6 +104,8 @@ class TradingExecutor:
                     side=side,
                     entry_price=current_price,
                     quantity=amount,
+                    contract_size=contract_size,
+                    coin_quantity=coin_quantity,
                     leverage=leverage,
                     signal_id=signal_id,
                     notes=f"开仓尝试 #{attempt + 1}"
@@ -113,6 +117,8 @@ class TradingExecutor:
                     side=side,
                     entry_price=current_price,
                     quantity=amount,
+                    contract_size=contract_size,
+                    coin_quantity=coin_quantity,
                     leverage=leverage,
                     current_price=current_price
                 )
@@ -157,6 +163,8 @@ class TradingExecutor:
         
         side = position['side']  # 'long' or 'short'
         quantity = position['quantity']
+        coin_quantity = float(position.get('coin_quantity', 0) or 0)
+        contract_size = float(position.get('contract_size', 1) or 1)
         entry_price = position['entry_price']
         
         # 获取当前价格
@@ -185,10 +193,10 @@ class TradingExecutor:
                 
                 # 计算盈亏
                 if side == 'long':
-                    pnl = (close_price - entry_price) * quantity
+                    pnl = (close_price - entry_price) * coin_quantity
                     pnl_percent = (close_price - entry_price) / entry_price * 100
                 else:
-                    pnl = (entry_price - close_price) * quantity
+                    pnl = (entry_price - close_price) * coin_quantity
                     pnl_percent = (entry_price - close_price) / entry_price * 100
                 
                 # 杠杆后盈亏
@@ -294,7 +302,7 @@ class TradingExecutor:
             anchor = highest_price if highest_price is not None else cache.get('highest_price', position.get('peak_price') or entry_price)
             anchor = max(float(anchor or entry_price), float(position.get('peak_price') or entry_price), float(current_price or entry_price))
             cache['highest_price'] = anchor
-            self.db.update_position(symbol, side, entry_price, position['quantity'], leverage, current_price, peak_price=anchor, trough_price=position.get('trough_price'))
+            self.db.update_position(symbol, side, entry_price, position['quantity'], leverage, current_price, peak_price=anchor, trough_price=position.get('trough_price'), contract_size=position.get('contract_size', 1), coin_quantity=position.get('coin_quantity'))
             stop_price = anchor * (1 - trailing_stop)
             if current_price <= stop_price and current_price > entry_price:
                 pnl_percent = (current_price - entry_price) / entry_price * leverage
@@ -304,7 +312,7 @@ class TradingExecutor:
             anchor = cache.get('lowest_price', position.get('trough_price') or entry_price)
             anchor = min(float(anchor or entry_price), float(position.get('trough_price') or entry_price), float(current_price or entry_price))
             cache['lowest_price'] = anchor
-            self.db.update_position(symbol, side, entry_price, position['quantity'], leverage, current_price, peak_price=position.get('peak_price'), trough_price=anchor)
+            self.db.update_position(symbol, side, entry_price, position['quantity'], leverage, current_price, peak_price=position.get('peak_price'), trough_price=anchor, contract_size=position.get('contract_size', 1), coin_quantity=position.get('coin_quantity'))
             stop_price = anchor * (1 + trailing_stop)
             if current_price >= stop_price and current_price < entry_price:
                 pnl_percent = (entry_price - current_price) / entry_price * leverage
@@ -344,6 +352,8 @@ class TradingExecutor:
                     side=position['side'],
                     entry_price=position['entry_price'],
                     quantity=position['quantity'],
+                    contract_size=position.get('contract_size', 1),
+                    coin_quantity=position.get('coin_quantity'),
                     leverage=position['leverage'],
                     current_price=current_price
                 )
@@ -368,7 +378,7 @@ class TradingExecutor:
         
         for p in positions:
             unrealized_pnl = p.get('unrealized_pnl', 0)
-            value = p.get('quantity', 0) * p.get('current_price', 0)
+            value = p.get('coin_quantity', 0) * p.get('current_price', 0)
             total_pnl += unrealized_pnl
             total_value += value
         
@@ -569,7 +579,7 @@ class RiskManager:
         total_balance = self._get_balance_summary().get('total', 0.0) or 1.0
         total_margin_used = 0.0
         for p in positions:
-            qty = float(p.get('quantity', 0) or 0)
+            qty = float(p.get('coin_quantity', 0) or 0)
             px = float(p.get('current_price', 0) or p.get('entry_price', 0) or 0)
             lev = max(1, int(p.get('leverage', 1) or 1))
             total_margin_used += (qty * px) / lev if qty and px else 0.0

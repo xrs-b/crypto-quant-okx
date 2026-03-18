@@ -113,7 +113,7 @@ class SignalValidator:
 
             for _, pos in current_positions.items():
                 entry = float(pos.get('entry_price', 0) or 0)
-                qty = float(pos.get('quantity', 0) or 0)
+                qty = float(pos.get('coin_quantity', pos.get('quantity', 0)) or 0)
                 lev = max(1, int(pos.get('leverage', 1) or 1))
                 margin_used = (entry * qty) / lev if entry and qty else 0
                 ratio = margin_used / total_usdt if total_usdt > 0 else 0

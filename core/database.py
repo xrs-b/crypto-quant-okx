@@ -65,6 +65,8 @@ class Database:
                 entry_price REAL NOT NULL,
                 exit_price REAL,
                 quantity REAL NOT NULL,
+                contract_size REAL DEFAULT 1,
+                coin_quantity REAL,
                 leverage INTEGER DEFAULT 1,
                 pnl REAL,
                 pnl_percent REAL,
@@ -85,6 +87,8 @@ class Database:
                 entry_price REAL NOT NULL,
                 current_price REAL,
                 quantity REAL NOT NULL,
+                contract_size REAL DEFAULT 1,
+                coin_quantity REAL,
                 leverage INTEGER DEFAULT 1,
                 unrealized_pnl REAL DEFAULT 0,
                 peak_price REAL,
@@ -269,9 +273,20 @@ class Database:
         if 'filter_details' not in signal_columns:
             cursor.execute("ALTER TABLE signals ADD COLUMN filter_details TEXT")
 
-        # 兼容旧库：补充持仓追踪锚点字段
+        # 兼容旧库：补充 trades / positions 单位字段与持仓追踪锚点字段
+        cursor.execute("PRAGMA table_info(trades)")
+        trade_columns = {row[1] for row in cursor.fetchall()}
+        if 'contract_size' not in trade_columns:
+            cursor.execute("ALTER TABLE trades ADD COLUMN contract_size REAL DEFAULT 1")
+        if 'coin_quantity' not in trade_columns:
+            cursor.execute("ALTER TABLE trades ADD COLUMN coin_quantity REAL")
+
         cursor.execute("PRAGMA table_info(positions)")
         position_columns = {row[1] for row in cursor.fetchall()}
+        if 'contract_size' not in position_columns:
+            cursor.execute("ALTER TABLE positions ADD COLUMN contract_size REAL DEFAULT 1")
+        if 'coin_quantity' not in position_columns:
+            cursor.execute("ALTER TABLE positions ADD COLUMN coin_quantity REAL")
         if 'peak_price' not in position_columns:
             cursor.execute("ALTER TABLE positions ADD COLUMN peak_price REAL")
         if 'trough_price' not in position_columns:
@@ -371,16 +386,19 @@ class Database:
     # =========================================================================
     
     def record_trade(self, symbol: str, side: str, entry_price: float,
-                     quantity: float, leverage: int = 1, 
-                     signal_id: int = None, notes: str = None) -> int:
+                     quantity: float, leverage: int = 1,
+                     signal_id: int = None, notes: str = None,
+                     contract_size: float = 1.0, coin_quantity: float = None) -> int:
         """记录交易"""
         conn = self._get_connection()
         cursor = conn.cursor()
+        if coin_quantity is None:
+            coin_quantity = float(quantity or 0) * float(contract_size or 1)
         
         cursor.execute("""
-            INSERT INTO trades (symbol, side, entry_price, quantity, leverage, signal_id, notes)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (symbol, side, entry_price, quantity, leverage, signal_id, notes))
+            INSERT INTO trades (symbol, side, entry_price, quantity, contract_size, coin_quantity, leverage, signal_id, notes)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (symbol, side, entry_price, quantity, contract_size, coin_quantity, leverage, signal_id, notes))
         
         trade_id = cursor.lastrowid
         conn.commit()
@@ -542,16 +560,19 @@ class Database:
     
     def update_position(self, symbol: str, side: str, entry_price: float,
                        quantity: float, leverage: int, current_price: float,
-                       peak_price: float = None, trough_price: float = None):
+                       peak_price: float = None, trough_price: float = None,
+                       contract_size: float = 1.0, coin_quantity: float = None):
         """更新持仓"""
         conn = self._get_connection()
         cursor = conn.cursor()
+        if coin_quantity is None:
+            coin_quantity = float(quantity or 0) * float(contract_size or 1)
         
-        # 计算未实现盈亏
+        # 计算未实现盈亏（按折算币数量）
         if side == 'long':
-            unrealized_pnl = (current_price - entry_price) * quantity
+            unrealized_pnl = (current_price - entry_price) * coin_quantity
         else:
-            unrealized_pnl = (entry_price - current_price) * quantity
+            unrealized_pnl = (entry_price - current_price) * coin_quantity
 
         cursor.execute("SELECT opened_at, peak_price, trough_price FROM positions WHERE symbol = ?", (symbol,))
         existing = cursor.fetchone()
@@ -573,10 +594,10 @@ class Database:
         
         cursor.execute("""
             INSERT OR REPLACE INTO positions 
-            (id, symbol, side, entry_price, current_price, quantity, leverage, 
+            (id, symbol, side, entry_price, current_price, quantity, contract_size, coin_quantity, leverage,
              unrealized_pnl, peak_price, trough_price, opened_at, updated_at)
-            VALUES ((SELECT id FROM positions WHERE symbol = ?), ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP), CURRENT_TIMESTAMP)
-        """, (symbol, symbol, side, entry_price, current_price, quantity, leverage, unrealized_pnl, final_peak, final_trough, opened_at))
+            VALUES ((SELECT id FROM positions WHERE symbol = ?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP), CURRENT_TIMESTAMP)
+        """, (symbol, symbol, side, entry_price, current_price, quantity, contract_size, coin_quantity, leverage, unrealized_pnl, final_peak, final_trough, opened_at))
         
         conn.commit()
         conn.close()
@@ -586,6 +607,13 @@ class Database:
         conn = self._get_connection()
         df = pd.read_sql_query("SELECT * FROM positions", conn)
         conn.close()
+        if not df.empty:
+            if 'contract_size' not in df.columns:
+                df['contract_size'] = 1.0
+            if 'coin_quantity' not in df.columns:
+                df['coin_quantity'] = df['quantity'] * df['contract_size']
+            else:
+                df['coin_quantity'] = df.apply(lambda r: r['coin_quantity'] if pd.notna(r['coin_quantity']) else r['quantity'] * (r['contract_size'] if pd.notna(r['contract_size']) else 1.0), axis=1)
         return df.to_dict('records')
     
     def close_position(self, symbol: str):

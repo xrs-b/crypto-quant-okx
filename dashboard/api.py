@@ -1453,7 +1453,7 @@ def get_system_status():
     signals = db.get_signals(limit=200)
     today_signals = sum(1 for s in signals if s.get('created_at', '').startswith(datetime.now().strftime('%Y-%m-%d')))
     executed_today = sum(1 for s in signals if s.get('created_at', '').startswith(datetime.now().strftime('%Y-%m-%d')) and s.get('executed'))
-    total_value = sum(p.get('quantity', 0) * p.get('current_price', 0) for p in positions)
+    total_value = sum(p.get('coin_quantity', p.get('quantity', 0)) * p.get('current_price', 0) for p in positions)
     unrealized_pnl = sum(p.get('unrealized_pnl', 0) for p in positions)
     risk = risk_manager.get_risk_status()
     balance = risk.get('balance', {}) if isinstance(risk, dict) else {}

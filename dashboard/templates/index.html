@@ -728,9 +728,19 @@
 
                         <div class="compact-grid">
                             <div class="card mini">
+                                <div class="section-title">按币种参数建议器</div>
+                                <div class="section-note">根据 symbol × rule 后验效果，直接给出建议放宽 / 保持 / 灰度测试既参数位。</div>
+                                <div class="summary-strip" id="optimizerParamAdviceSummary"></div>
+                                <div style="height:12px"></div>
+                                <table><thead><tr><th>币种</th><th>参数</th><th>当前</th><th>建议</th><th>动作</th><th>说明</th></tr></thead><tbody id="optimizerParamAdvice"></tbody></table>
+                            </div>
+                            <div class="card mini">
                                 <div class="section-title">专项实验</div>
                                 <div class="list" id="optimizerSymbolSpecific"></div>
                             </div>
+                        </div>
+
+                        <div class="compact-grid">
                             <div class="card mini">
                                 <div class="section-title">预设管理</div>
                                 <table><thead><tr><th>预设</th><th>路径</th><th>操作</th></tr></thead><tbody id="optimizerPresets"></tbody></table>
@@ -3264,12 +3274,13 @@
             await refreshAll();
         }
         async function loadOptimizer() {
-            const [data, candidateHistory, presetHistory, mode, gov] = await Promise.all([
+            const [data, candidateHistory, presetHistory, mode, gov, paramAdviceResp] = await Promise.all([
                 api('/api/optimizer/results'),
                 api('/api/candidates/history?limit=10'),
                 api('/api/presets/history?limit=10'),
                 api('/api/mode/status'),
-                api('/api/governance/status')
+                api('/api/governance/status'),
+                fetch('/api/signals/parameter-advice?days=14&window_hours=24&limit=160').then(r => r.json())
             ]);
             const best = data.best_experiment || {};
             document.getElementById('optimizerBest').innerHTML = `
@@ -3309,6 +3320,33 @@
             const specs = data.symbol_specific || {};
             const specHtml = Object.keys(specs).length ? Object.entries(specs).map(([symbol, rows]) => `<div class="item"><strong>${symbol}</strong><div class="muted">${rows.map(r => `${r.description}: ${r.summary?.total_return_pct}% / win ${r.summary?.win_rate}% / dd ${r.summary?.max_drawdown_pct}%`).join('<br>')}</div></div>`).join('') : '<div class="item muted">暂无专项实验</div>';
             document.getElementById('optimizerSymbolSpecific').innerHTML = specHtml;
+            const paramAdviceRows = paramAdviceResp?.data || [];
+            const paramAdviceSummary = paramAdviceResp?.summary || {};
+            const paramSummaryHost = document.getElementById('optimizerParamAdviceSummary');
+            if (paramSummaryHost) {
+                paramSummaryHost.innerHTML = `
+                    <div class="summary-pill"><div class="k">建议总数</div><div class="v">${paramAdviceSummary.advice_count ?? 0}</div><div class="s">按币种筛出来既可执行建议</div></div>
+                    <div class="summary-pill"><div class="k">优先放宽</div><div class="v">${paramAdviceSummary.relax ?? 0}</div><div class="s">错失机会偏多，值得优先复核</div></div>
+                    <div class="summary-pill"><div class="k">保持当前</div><div class="v">${paramAdviceSummary.keep ?? 0}</div><div class="s">已有明显避险效果，先别乱动</div></div>
+                    <div class="summary-pill"><div class="k">灰度测试</div><div class="v">${paramAdviceSummary.review ?? 0}</div><div class="s">适合做 symbol 级实验，而非全局硬改</div></div>
+                `;
+            }
+            const actionMap = {
+                relax: ['建议放宽', 'warn'],
+                keep: ['保持当前', 'ok'],
+                review: ['灰度测试', 'pending']
+            };
+            document.getElementById('optimizerParamAdvice').innerHTML = paramAdviceRows.length ? paramAdviceRows.map(row => {
+                const [actionLabel, actionClass] = actionMap[row.action] || ['继续观察', 'hold'];
+                return `<tr>
+                    <td>${row.symbol || '--'}<div class="muted" style="margin-top:6px;">${row.filter_code || '--'} ｜ analyzed=${row.analyzed ?? 0}</div></td>
+                    <td>${row.parameter || '--'}</td>
+                    <td>${safe(row.current_value)}</td>
+                    <td>${safe(row.suggested_value)}</td>
+                    <td>${badge(actionLabel, actionClass)}<div class="muted" style="margin-top:6px;">priority=${row.priority || '--'}</div></td>
+                    <td>${row.reason || '--'}<div class="muted" style="margin-top:6px;">missed=${row.missed_profit ?? 0} ｜ avoided=${row.avoided_loss ?? 0} ｜ rate=${row.effectiveness_rate == null ? '--' : row.effectiveness_rate + '%'}</div></td>
+                </tr>`;
+            }).join('') : '<tr><td colspan="6" class="muted">暂无按币种参数建议</td></tr>';
             const btcGrid = data.btc_grid || [];
             document.getElementById('optimizerBtcGrid').innerHTML = btcGrid.length ? btcGrid.map(r => `<tr><td>ms=${r.params?.min_strength}, rsi=${r.params?.rsi_strength_weight}, ts=${r.params?.trailing_stop}</td><td>${r.score}</td><td class="${Number(r.summary?.total_return_pct || 0) >= 0 ? 'pos' : 'neg'}">${safe(r.summary?.total_return_pct)}%</td><td class="${Number(r.summary?.max_drawdown_pct || 0) >= 0 ? 'pos' : 'neg'}">${safe(r.summary?.max_drawdown_pct)}%</td></tr>`).join('') : '<tr><td colspan="4" class="muted">暂无 BTC 网格</td></tr>';
             const promotions = data.candidate_promotions || [];

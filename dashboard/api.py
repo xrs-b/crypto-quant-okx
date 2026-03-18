@@ -421,11 +421,62 @@ def _get_local_config_path() -> Path:
     return Path(config.config_path).with_name('config.local.yaml')
 
 
+def _get_local_backups_dir() -> Path:
+    local_path = _get_local_config_path()
+    backups_dir = local_path.parent / 'backups'
+    backups_dir.mkdir(parents=True, exist_ok=True)
+    return backups_dir
+
+
+def _build_effective_symbol_override_view(cfg: Config) -> List[Dict[str, Any]]:
+    rows = []
+    overrides = cfg.get('symbol_overrides', {}) or {}
+    for symbol in sorted(overrides.keys()):
+        symbol_override = overrides.get(symbol) or {}
+        composite = cfg.get_symbol_section(symbol, 'strategies.composite') if hasattr(cfg, 'get_symbol_section') else cfg.get('strategies.composite', {}) or {}
+        market_filters = cfg.get_symbol_section(symbol, 'market_filters') if hasattr(cfg, 'get_symbol_section') else cfg.get('market_filters', {}) or {}
+        trading = cfg.get_symbol_section(symbol, 'trading') if hasattr(cfg, 'get_symbol_section') else cfg.get('trading', {}) or {}
+        rows.append({
+            'symbol': symbol,
+            'override': symbol_override,
+            'effective': {
+                'strategies': {
+                    'composite': {
+                        'min_strength': composite.get('min_strength'),
+                        'min_strategy_count': composite.get('min_strategy_count'),
+                    }
+                },
+                'market_filters': {
+                    'min_volatility': market_filters.get('min_volatility'),
+                    'max_volatility': market_filters.get('max_volatility'),
+                    'block_counter_trend': market_filters.get('block_counter_trend'),
+                },
+                'trading': {
+                    'cooldown_minutes': trading.get('cooldown_minutes'),
+                    'position_size': trading.get('position_size'),
+                    'max_exposure': trading.get('max_exposure'),
+                }
+            }
+        })
+    return rows
+
+
+def _list_local_override_backups() -> List[Dict[str, Any]]:
+    backups = []
+    for path in sorted(_get_local_backups_dir().glob('config.local-*.yaml'), reverse=True):
+        backups.append({
+            'name': path.name,
+            'path': str(path),
+            'size': path.stat().st_size,
+            'modified_at': datetime.fromtimestamp(path.stat().st_mtime).isoformat(),
+        })
+    return backups
+
+
 def _apply_symbol_override_draft(draft: Dict[str, Any], note: str = None) -> Dict[str, Any]:
     local_path = _get_local_config_path()
     local_path.parent.mkdir(parents=True, exist_ok=True)
-    backups_dir = local_path.parent / 'backups'
-    backups_dir.mkdir(parents=True, exist_ok=True)
+    backups_dir = _get_local_backups_dir()
 
     before = {}
     if local_path.exists():
@@ -784,6 +835,65 @@ def apply_signal_parameter_advice_draft():
 
     result = _apply_symbol_override_draft(draft, note=note)
     return jsonify({'success': True, 'data': result})
+
+
+@app.route('/api/signals/overrides/status')
+def get_signal_override_status():
+    """查看当前 local override 生效状态"""
+    local_path = _get_local_config_path()
+    local_cfg = {}
+    if local_path.exists():
+        with open(local_path, 'r', encoding='utf-8') as f:
+            local_cfg = yaml.safe_load(f) or {}
+    rows = _build_effective_symbol_override_view(config)
+    return jsonify({
+        'success': True,
+        'data': {
+            'config_path': str(local_path),
+            'exists': local_path.exists(),
+            'symbol_override_count': len(local_cfg.get('symbol_overrides', {}) or {}),
+            'rows': rows,
+        }
+    })
+
+
+@app.route('/api/signals/overrides/backups')
+def get_signal_override_backups():
+    """列出 override local config backups"""
+    return jsonify({'success': True, 'data': _list_local_override_backups()})
+
+
+@app.route('/api/signals/overrides/rollback', methods=['POST'])
+def rollback_signal_override_backup():
+    """回滚 config.local.yaml 到指定 backup"""
+    payload = request.get_json(silent=True) or {}
+    backup_name = payload.get('backup_name') or payload.get('name')
+    if not backup_name:
+        return jsonify({'success': False, 'error': 'missing backup_name'}), 400
+
+    backup_path = _get_local_backups_dir() / backup_name
+    if not backup_path.exists():
+        return jsonify({'success': False, 'error': 'backup not found'}), 404
+
+    local_path = _get_local_config_path()
+    restore_backup_path = None
+    if local_path.exists():
+        timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+        restore_backup_path = _get_local_backups_dir() / f'config.local-rollback-before-{timestamp}.yaml'
+        shutil.copy2(local_path, restore_backup_path)
+
+    shutil.copy2(backup_path, local_path)
+    _refresh_runtime_components()
+
+    return jsonify({
+        'success': True,
+        'data': {
+            'config_path': str(local_path),
+            'rolled_back_to': str(backup_path),
+            'pre_restore_backup': str(restore_backup_path) if restore_backup_path else None,
+            'message': 'override local config 已回滚并重新加载。'
+        }
+    })
 
 
 @app.route('/api/signals/coin-breakdown')

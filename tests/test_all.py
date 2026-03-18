@@ -1150,6 +1150,12 @@ class TestDashboardApi(unittest.TestCase):
                 self.assertTrue(applied['notification']['discord']['enabled'])
                 self.assertEqual(applied['symbol_overrides']['XRP/USDT']['strategies']['composite']['min_strength'], 26)
                 self.assertEqual(resp.json['data']['applied_symbol_count'], 1)
+                history_resp = client.get('/api/signals/overrides/history?limit=5')
+                self.assertEqual(history_resp.status_code, 200)
+                self.assertTrue(history_resp.json.get('success'))
+                history_rows = history_resp.json.get('data') or []
+                self.assertEqual(history_rows[0]['action'], 'apply')
+                self.assertIn('XRP/USDT', history_rows[0]['symbols'])
             finally:
                 dashboard_api.config = old_config
                 dashboard_api.db = old_db
@@ -1234,6 +1240,11 @@ class TestDashboardApi(unittest.TestCase):
                     restored = yaml.safe_load(f) or {}
                 self.assertIn('BTC/USDT', restored.get('symbol_overrides', {}))
                 self.assertNotIn('XRP/USDT', restored.get('symbol_overrides', {}))
+                history_resp = client.get('/api/signals/overrides/history?limit=5')
+                self.assertEqual(history_resp.status_code, 200)
+                history_rows = history_resp.json.get('data') or []
+                self.assertEqual(history_rows[0]['action'], 'rollback')
+                self.assertIn('BTC/USDT', history_rows[0]['symbols'])
             finally:
                 dashboard_api.config = old_config
                 dashboard_api.db = old_db

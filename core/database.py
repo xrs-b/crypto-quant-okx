@@ -227,6 +227,21 @@ class Database:
             )
         """)
 
+        # override 应用/回滚审计历史
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS override_audit_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                action TEXT NOT NULL,
+                target_file TEXT,
+                backup_path TEXT,
+                symbols TEXT,
+                parameter_count INTEGER DEFAULT 0,
+                note TEXT,
+                details TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
         # 通知 outbox（给 OpenClaw bridge 消费）
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS notification_outbox (
@@ -833,6 +848,42 @@ class Database:
         """, (approval_type, target, decision, json.dumps(details) if details else None))
         conn.commit()
         conn.close()
+
+    def record_override_audit(self, action: str, target_file: str = None, backup_path: str = None,
+                              symbols: List[str] = None, parameter_count: int = 0, note: str = None,
+                              details: Dict = None):
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO override_audit_history (action, target_file, backup_path, symbols, parameter_count, note, details)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                action,
+                target_file,
+                backup_path,
+                json.dumps(symbols or [], ensure_ascii=False),
+                int(parameter_count or 0),
+                note,
+                json.dumps(details, ensure_ascii=False) if details else None,
+            )
+        )
+        conn.commit()
+        conn.close()
+
+    def get_override_audit_history(self, limit: int = 50) -> List[Dict]:
+        conn = self._get_connection()
+        df = pd.read_sql_query(
+            "SELECT * FROM override_audit_history ORDER BY created_at DESC, id DESC LIMIT ?",
+            conn,
+            params=(limit,)
+        )
+        conn.close()
+        if not df.empty:
+            df['symbols'] = df['symbols'].apply(lambda x: json.loads(x) if x else [])
+            df['details'] = df['details'].apply(lambda x: json.loads(x) if x else {})
+        return df.to_dict('records')
 
     def get_approval_history(self, limit: int = 50) -> List[Dict]:
         conn = self._get_connection()

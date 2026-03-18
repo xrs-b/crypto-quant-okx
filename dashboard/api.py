@@ -495,6 +495,20 @@ def _apply_symbol_override_draft(draft: Dict[str, Any], note: str = None) -> Dic
     with open(local_path, 'w', encoding='utf-8') as f:
         yaml.safe_dump(after, f, allow_unicode=True, sort_keys=False)
 
+    db.record_override_audit(
+        action='apply',
+        target_file=str(local_path),
+        backup_path=str(backup_path) if backup_path.exists() else None,
+        symbols=sorted(symbol_overrides.keys()),
+        parameter_count=_count_nested_leaf_values(symbol_overrides) if symbol_overrides else 0,
+        note=note,
+        details={
+            'draft': draft,
+            'before_symbol_overrides': before.get('symbol_overrides', {}) or {},
+            'after_symbol_overrides': after.get('symbol_overrides', {}) or {},
+        }
+    )
+
     _refresh_runtime_components()
 
     return {
@@ -883,6 +897,25 @@ def rollback_signal_override_backup():
         shutil.copy2(local_path, restore_backup_path)
 
     shutil.copy2(backup_path, local_path)
+    restored_symbols = {}
+    with open(local_path, 'r', encoding='utf-8') as f:
+        restored_cfg = yaml.safe_load(f) or {}
+        restored_symbols = restored_cfg.get('symbol_overrides', {}) or {}
+
+    db.record_override_audit(
+        action='rollback',
+        target_file=str(local_path),
+        backup_path=str(backup_path),
+        symbols=sorted(restored_symbols.keys()),
+        parameter_count=_count_nested_leaf_values(restored_symbols) if restored_symbols else 0,
+        note=None,
+        details={
+            'rolled_back_to': str(backup_path),
+            'pre_restore_backup': str(restore_backup_path) if restore_backup_path else None,
+            'restored_symbol_overrides': restored_symbols,
+        }
+    )
+
     _refresh_runtime_components()
 
     return jsonify({
@@ -894,6 +927,13 @@ def rollback_signal_override_backup():
             'message': 'override local config 已回滚并重新加载。'
         }
     })
+
+
+@app.route('/api/signals/overrides/history')
+def get_signal_override_history():
+    """获取 override 审计历史"""
+    limit = int(request.args.get('limit', 30))
+    return jsonify({'success': True, 'data': db.get_override_audit_history(limit=limit)})
 
 
 @app.route('/api/signals/coin-breakdown')

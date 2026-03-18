@@ -7,6 +7,8 @@ from typing import Dict, List, Optional
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 
+from core.config import Config
+
 
 @dataclass
 class Signal:
@@ -45,6 +47,18 @@ class SignalDetector:
     def __init__(self, config: Dict):
         self.config = config
         self.strategies_config = config.get('strategies', {})
+        self._config_helper = Config.__new__(Config)
+        self._config_helper._config = config
+
+    def _cfg(self, key: str, default=None, symbol: str = None):
+        if symbol:
+            return self._config_helper.get_symbol_value(symbol, key, default)
+        return self._config_helper.get(key, default)
+
+    def _cfg_section(self, key: str, symbol: str = None) -> Dict:
+        if symbol:
+            return self._config_helper.get_symbol_section(symbol, key)
+        return self._config_helper.get(key, {}) or {}
 
     def analyze(self, symbol: str, df: pd.DataFrame,
                 current_price: float, ml_prediction: tuple = None) -> Signal:
@@ -57,21 +71,21 @@ class SignalDetector:
             strength=0,
             indicators=indicators
         )
-        signal.market_context = self._analyze_market_context(df, current_price)
+        signal.market_context = self._analyze_market_context(df, current_price, symbol)
 
         triggered_strategies = []
 
         analyzers = [
-            ('RSI', self.strategies_config.get('rsi', {}).get('enabled', True), lambda: self._analyze_rsi(df, current_price)),
-            ('MACD', self.strategies_config.get('macd', {}).get('enabled', True), lambda: self._analyze_macd(df, current_price)),
-            ('MA_Cross', self.strategies_config.get('ma_cross', {}).get('enabled', True), lambda: self._analyze_ma_cross(df, current_price)),
-            ('Bollinger', self.strategies_config.get('bollinger', {}).get('enabled', True), lambda: self._analyze_bollinger(df, current_price)),
-            ('Volume', self.strategies_config.get('volume', {}).get('enabled', True), lambda: self._analyze_volume(df, current_price)),
-            ('Pattern', self.strategies_config.get('pattern', {}).get('enabled', True), lambda: self._analyze_pattern(df, current_price)),
+            ('RSI', self._cfg('strategies.rsi.enabled', True, symbol), lambda: self._analyze_rsi(df, current_price, symbol)),
+            ('MACD', self._cfg('strategies.macd.enabled', True, symbol), lambda: self._analyze_macd(df, current_price, symbol)),
+            ('MA_Cross', self._cfg('strategies.ma_cross.enabled', True, symbol), lambda: self._analyze_ma_cross(df, current_price, symbol)),
+            ('Bollinger', self._cfg('strategies.bollinger.enabled', True, symbol), lambda: self._analyze_bollinger(df, current_price, symbol)),
+            ('Volume', self._cfg('strategies.volume.enabled', True, symbol), lambda: self._analyze_volume(df, current_price, symbol)),
+            ('Pattern', self._cfg('strategies.pattern.enabled', True, symbol), lambda: self._analyze_pattern(df, current_price, symbol)),
         ]
 
-        if self.config.get('ml', {}).get('enabled', True) and ml_prediction:
-            analyzers.append(('ML', True, lambda: self._analyze_ml(ml_prediction, current_price)))
+        if self._cfg('ml.enabled', True, symbol) and ml_prediction:
+            analyzers.append(('ML', True, lambda: self._analyze_ml(ml_prediction, current_price, symbol)))
 
         for strategy_name, enabled, fn in analyzers:
             if not enabled:
@@ -101,7 +115,7 @@ class SignalDetector:
             'triggered_count': len(triggered_strategies)
         }
 
-        composite_config = self.strategies_config.get('composite', {})
+        composite_config = self._cfg_section('strategies.composite', symbol)
         min_strength = composite_config.get('min_strength', 20)
         min_strategy_count = composite_config.get('min_strategy_count', 1)
 
@@ -172,7 +186,7 @@ class SignalDetector:
         last_close = float(close.iloc[-1] or 1)
         return float(atr / last_close) if last_close else 0.0
 
-    def _analyze_market_context(self, df: pd.DataFrame, current_price: float) -> Dict:
+    def _analyze_market_context(self, df: pd.DataFrame, current_price: float, symbol: str = None) -> Dict:
         close = df[4]
         ma20 = float(close.rolling(20).mean().iloc[-1]) if len(df) >= 20 else current_price
         ma60 = float(close.rolling(60).mean().iloc[-1]) if len(df) >= 60 else ma20
@@ -187,7 +201,7 @@ class SignalDetector:
         else:
             trend = 'sideways'
 
-        vol_cfg = self.config.get('market_filters', {})
+        vol_cfg = self._cfg_section('market_filters', symbol)
         min_volatility = float(vol_cfg.get('min_volatility', 0.003))
         max_volatility = float(vol_cfg.get('max_volatility', 0.05))
         too_low = volatility < min_volatility
@@ -249,8 +263,8 @@ class SignalDetector:
 
         return min(100, max(0, int(round(adjusted))))
 
-    def _analyze_rsi(self, df: pd.DataFrame, price: float) -> Optional[Dict]:
-        config = self.strategies_config.get('rsi', {})
+    def _analyze_rsi(self, df: pd.DataFrame, price: float, symbol: str = None) -> Optional[Dict]:
+        config = self._cfg_section('strategies.rsi', symbol)
         period = config.get('period', 14)
         oversold = config.get('oversold', 35)
         overbought = config.get('overbought', 65)
@@ -279,8 +293,8 @@ class SignalDetector:
                     'metadata': {'period': period, 'overbought': overbought}}
         return None
 
-    def _analyze_macd(self, df: pd.DataFrame, price: float) -> Optional[Dict]:
-        config = self.strategies_config.get('macd', {})
+    def _analyze_macd(self, df: pd.DataFrame, price: float, symbol: str = None) -> Optional[Dict]:
+        config = self._cfg_section('strategies.macd', symbol)
         if 'MACD' not in df.columns or 'MACD_signal' not in df.columns:
             return None
         macd = df['MACD'].iloc[-1]
@@ -303,8 +317,8 @@ class SignalDetector:
                     'metadata': {'crossover': 'bearish'}}
         return None
 
-    def _analyze_ma_cross(self, df: pd.DataFrame, price: float) -> Optional[Dict]:
-        config = self.strategies_config.get('ma_cross', {})
+    def _analyze_ma_cross(self, df: pd.DataFrame, price: float, symbol: str = None) -> Optional[Dict]:
+        config = self._cfg_section('strategies.ma_cross', symbol)
         fast_period = config.get('fast_period', 5)
         slow_period = config.get('slow_period', 20)
         if len(df) < slow_period + 1:
@@ -327,8 +341,8 @@ class SignalDetector:
                     'metadata': {'deviation': deviation}}
         return None
 
-    def _analyze_bollinger(self, df: pd.DataFrame, price: float) -> Optional[Dict]:
-        config = self.strategies_config.get('bollinger', {})
+    def _analyze_bollinger(self, df: pd.DataFrame, price: float, symbol: str = None) -> Optional[Dict]:
+        config = self._cfg_section('strategies.bollinger', symbol)
         if 'BB_lower' not in df.columns or 'BB_upper' not in df.columns:
             return None
         lower = df['BB_lower'].iloc[-1]
@@ -358,8 +372,8 @@ class SignalDetector:
                     'metadata': {'position': position}}
         return None
 
-    def _analyze_volume(self, df: pd.DataFrame, price: float) -> Optional[Dict]:
-        config = self.strategies_config.get('volume', {})
+    def _analyze_volume(self, df: pd.DataFrame, price: float, symbol: str = None) -> Optional[Dict]:
+        config = self._cfg_section('strategies.volume', symbol)
         period = config.get('volume_ma_period', 20)
         multiplier = config.get('volume_multiplier', 1.5)
         if len(df) < period + 1:
@@ -383,8 +397,8 @@ class SignalDetector:
                         'metadata': {'change_pct': change_pct}}
         return None
 
-    def _analyze_pattern(self, df: pd.DataFrame, price: float) -> Optional[Dict]:
-        config = self.strategies_config.get('pattern', {})
+    def _analyze_pattern(self, df: pd.DataFrame, price: float, symbol: str = None) -> Optional[Dict]:
+        config = self._cfg_section('strategies.pattern', symbol)
         if len(df) < 5:
             return None
         opens = df[1].values
@@ -408,11 +422,11 @@ class SignalDetector:
                     'metadata': {'pattern': 'hanging_man'}}
         return None
 
-    def _analyze_ml(self, prediction: tuple, price: float) -> Optional[Dict]:
+    def _analyze_ml(self, prediction: tuple, price: float, symbol: str = None) -> Optional[Dict]:
         if not prediction:
             return None
         pred, prob = prediction
-        min_confidence = self.config.get('ml', {}).get('min_confidence', 0.6)
+        min_confidence = self._cfg('ml.min_confidence', 0.6, symbol)
         if pred == 1 and prob >= min_confidence:
             return {'strategy': 'ML', 'type': 'ml', 'action': 'buy', 'value': prob,
                     'detail': f'ML预测上涨概率{prob*100:.1f}%', 'triggered': True,

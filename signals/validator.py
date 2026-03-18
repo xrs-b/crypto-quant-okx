@@ -31,6 +31,16 @@ class SignalValidator:
         self.trading_config = config.get('trading', {})
         self.strategies_config = config.get('strategies', {})
 
+    def _cfg(self, symbol: str, key: str, default=None):
+        if hasattr(self.config, 'get_symbol_value'):
+            return self.config.get_symbol_value(symbol, key, default)
+        return self.config.get(key, default)
+
+    def _cfg_section(self, symbol: str, key: str) -> Dict:
+        if hasattr(self.config, 'get_symbol_section'):
+            return self.config.get_symbol_section(symbol, key)
+        return self.config.get(key, {}) or {}
+
     def _failure(self, code: str, reason: str, details: Dict, detail_key: str = None) -> tuple:
         meta = self.FILTER_META.get(code, {})
         if detail_key and detail_key in details and isinstance(details[detail_key], dict):
@@ -70,7 +80,7 @@ class SignalValidator:
         details['position_check'] = {'passed': True, 'reason': '无冲突持仓'}
 
         # 2. 冷却时间
-        cooldown = self.trading_config.get('cooldown_minutes', 15)
+        cooldown = self._cfg(signal.symbol, 'trading.cooldown_minutes', 15)
         if tracking_data.get(signal.symbol):
             last_trade = tracking_data[signal.symbol].get('last_trade_time')
             if last_trade:
@@ -86,9 +96,9 @@ class SignalValidator:
         details['cooldown_check'] = {'passed': True, 'reason': '冷却时间已过'}
 
         # 3. 资金与风险占比（用比例，不再错误地用绝对市值对 0.3 比较）
-        position_ratio = float(self.trading_config.get('position_size', 0.1))
-        max_exposure = float(self.trading_config.get('max_exposure', 0.3))
-        max_per_symbol = float(self.trading_config.get('max_position_per_symbol', 0.15))
+        position_ratio = float(self._cfg(signal.symbol, 'trading.position_size', 0.1))
+        max_exposure = float(self._cfg(signal.symbol, 'trading.max_exposure', 0.3))
+        max_per_symbol = float(self._cfg(signal.symbol, 'trading.max_position_per_symbol', 0.15))
 
         available_usdt = None
         current_exposure_ratio = 0.0
@@ -158,7 +168,7 @@ class SignalValidator:
         }
 
         # 4. 市场环境过滤（趋势 / 波动率）
-        market_filters = self.config.get('market_filters', {})
+        market_filters = self._cfg_section(signal.symbol, 'market_filters')
         context = getattr(signal, 'market_context', {}) or {}
         trend = context.get('trend', 'sideways')
 
@@ -202,8 +212,9 @@ class SignalValidator:
         }
 
         # 5. 最低强度与策略数（详细化）
-        min_strategy_count = self.strategies_config.get('composite', {}).get('min_strategy_count', 1)
-        min_strength = self.strategies_config.get('composite', {}).get('min_strength', 20)
+        composite_cfg = self._cfg_section(signal.symbol, 'strategies.composite')
+        min_strategy_count = composite_cfg.get('min_strategy_count', 1)
+        min_strength = composite_cfg.get('min_strength', 20)
         if len(signal.strategies_triggered) < min_strategy_count:
             details['strategy_check'] = {
                 'passed': False,

@@ -741,6 +741,10 @@
                                 <div style="height:12px"></div>
                                 <div class="list" id="optimizerOverrideDraftMeta"></div>
                                 <pre id="optimizerOverrideDraftYaml" style="white-space:pre-wrap; overflow:auto; background:#0b0d12; border:1px solid var(--border); border-radius:12px; padding:12px; font-size:12px;"></pre>
+                                <div style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap;">
+                                    <button onclick="applyOverrideDraft()">应用草案到 config.local.yaml</button>
+                                    <button class="secondary" onclick="navigator.clipboard.writeText(document.getElementById('optimizerOverrideDraftYaml')?.textContent || '')">复制 YAML 草案</button>
+                                </div>
                             </div>
                             <div class="card mini">
                                 <div class="section-title">专项实验</div>
@@ -3280,6 +3284,24 @@
             const msg = j.data?.message || `已应用 preset: ${name}`;
             toast(msg, 'ok');
             await refreshAll();
+        }
+        async function applyOverrideDraft() {
+            try {
+                const r = await fetch('/api/signals/parameter-advice/apply-draft', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({days: 14, window_hours: 24, limit: 160})
+                });
+                const j = await r.json();
+                if (!j.success) {
+                    toast('应用草案失败: ' + (j.error || 'unknown'), 'bad');
+                    return;
+                }
+                toast(j.data?.message || 'override 草案已应用', 'ok');
+                await refreshAll();
+            } catch (e) {
+                toast('应用草案失败: ' + (e.message || e), 'bad');
+            }
         }
         async function loadOptimizer() {
             const [data, candidateHistory, presetHistory, mode, gov, paramAdviceResp, paramDraftResp] = await Promise.all([

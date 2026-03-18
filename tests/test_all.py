@@ -6,6 +6,7 @@ import os
 import json
 import tempfile
 from pathlib import Path
+import yaml
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import unittest
@@ -1093,6 +1094,73 @@ class TestDashboardApi(unittest.TestCase):
             dashboard_api._exchange_client = old_exchange_client
             if os.path.exists('data/test_dashboard_param_draft.db'):
                 os.remove('data/test_dashboard_param_draft.db')
+
+    def test_apply_parameter_advice_draft_writes_local_override_file(self):
+        import dashboard.api as dashboard_api
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg_path = os.path.join(tmpdir, 'config.yaml')
+            local_path = os.path.join(tmpdir, 'config.local.yaml')
+            with open(cfg_path, 'w', encoding='utf-8') as f:
+                f.write(
+                    "strategies:\n"
+                    "  composite:\n"
+                    "    min_strength: 28\n"
+                )
+            with open(local_path, 'w', encoding='utf-8') as f:
+                f.write(
+                    "notification:\n"
+                    "  discord:\n"
+                    "    enabled: true\n"
+                )
+
+            old_config = dashboard_api.config
+            old_db = dashboard_api.db
+            old_risk_manager = dashboard_api.risk_manager
+            old_ml_engine = dashboard_api.ml_engine
+            old_backtester = dashboard_api.backtester
+            old_signal_quality_analyzer = dashboard_api.signal_quality_analyzer
+            old_optimizer = dashboard_api.optimizer
+            old_governance = dashboard_api.governance
+            old_preset_manager = dashboard_api.preset_manager
+            old_exchange_client = dashboard_api._exchange_client
+            dashboard_api.config = Config(cfg_path)
+            dashboard_api.db = Database(os.path.join(tmpdir, 'test.db'))
+            try:
+                client = app.test_client()
+                resp = client.post('/api/signals/parameter-advice/apply-draft', json={
+                    'draft': {
+                        'symbol_overrides': {
+                            'XRP/USDT': {
+                                'strategies': {
+                                    'composite': {
+                                        'min_strength': 26
+                                    }
+                                }
+                            }
+                        },
+                        'skipped': []
+                    },
+                    'note': 'unit test apply'
+                })
+                self.assertEqual(resp.status_code, 200)
+                self.assertTrue(resp.json.get('success'))
+                with open(local_path, 'r', encoding='utf-8') as f:
+                    applied = yaml.safe_load(f) or {}
+                self.assertTrue(applied['notification']['discord']['enabled'])
+                self.assertEqual(applied['symbol_overrides']['XRP/USDT']['strategies']['composite']['min_strength'], 26)
+                self.assertEqual(resp.json['data']['applied_symbol_count'], 1)
+            finally:
+                dashboard_api.config = old_config
+                dashboard_api.db = old_db
+                dashboard_api.risk_manager = old_risk_manager
+                dashboard_api.ml_engine = old_ml_engine
+                dashboard_api.backtester = old_backtester
+                dashboard_api.signal_quality_analyzer = old_signal_quality_analyzer
+                dashboard_api.optimizer = old_optimizer
+                dashboard_api.governance = old_governance
+                dashboard_api.preset_manager = old_preset_manager
+                dashboard_api._exchange_client = old_exchange_client
 
     def test_signal_coin_breakdown_groups_watch_filtered_and_executed_by_symbol(self):
         import dashboard.api as dashboard_api

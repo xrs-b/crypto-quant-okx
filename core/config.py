@@ -8,6 +8,9 @@ from typing import Any, Dict, List, Optional
 from pathlib import Path
 
 
+_MISSING = object()
+
+
 class Config:
     """配置管理类"""
     
@@ -102,18 +105,41 @@ class Config:
             }
         }
     
-    def get(self, key: str, default: Any = None) -> Any:
-        """获取配置项 - 支持点号访问"""
-        keys = key.split('.')
-        value = self._config
+    def _get_nested_value(self, data: Dict, key: str, default: Any = None) -> Any:
+        keys = key.split('.') if key else []
+        value = data
         for k in keys:
             if isinstance(value, dict):
-                value = value.get(k)
+                value = value.get(k, _MISSING)
             else:
                 return default
-            if value is None:
+            if value is _MISSING:
                 return default
-        return value
+        return default if value is None else value
+
+    def get(self, key: str, default: Any = None) -> Any:
+        """获取配置项 - 支持点号访问"""
+        return self._get_nested_value(self._config, key, default)
+
+    def get_symbol_overrides(self, symbol: str) -> Dict:
+        """获取指定币种的局部覆盖配置"""
+        overrides = self.get('symbol_overrides', {}) or {}
+        return overrides.get(symbol, {}) or {}
+
+    def get_symbol_value(self, symbol: str, key: str, default: Any = None) -> Any:
+        """获取币种覆盖后的配置值；无覆盖则回退全局配置"""
+        override_value = self._get_nested_value(self.get_symbol_overrides(symbol), key, _MISSING)
+        if override_value is not _MISSING:
+            return override_value
+        return self.get(key, default)
+
+    def get_symbol_section(self, symbol: str, key: str) -> Dict:
+        """获取币种覆盖后的 section 配置（深度合并）"""
+        base = self.get(key, {}) or {}
+        override = self._get_nested_value(self.get_symbol_overrides(symbol), key, {}) or {}
+        if isinstance(base, dict) and isinstance(override, dict):
+            return self._deep_merge(base, override)
+        return override or base
     
     def set(self, key: str, value: Any):
         """设置配置项"""

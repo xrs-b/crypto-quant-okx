@@ -216,6 +216,22 @@ class TestConfig(unittest.TestCase):
         self.assertGreater(self.config.stop_loss, 0)
         self.assertGreater(self.config.take_profit, self.config.stop_loss)
 
+    def test_symbol_override_value_and_section(self):
+        cfg = Config()
+        cfg._config['strategies'] = {'composite': {'min_strength': 28, 'min_strategy_count': 1}}
+        cfg._config['market_filters'] = {'min_volatility': 0.0045, 'block_counter_trend': True}
+        cfg._config['symbol_overrides'] = {
+            'XRP/USDT': {
+                'strategies': {'composite': {'min_strength': 24}},
+                'market_filters': {'min_volatility': 0.0038}
+            }
+        }
+        self.assertEqual(cfg.get_symbol_value('XRP/USDT', 'strategies.composite.min_strength', 0), 24)
+        self.assertEqual(cfg.get_symbol_value('BTC/USDT', 'strategies.composite.min_strength', 0), 28)
+        section = cfg.get_symbol_section('XRP/USDT', 'market_filters')
+        self.assertEqual(section['min_volatility'], 0.0038)
+        self.assertTrue(section['block_counter_trend'])
+
     def test_position_mode(self):
         """测试持仓模式配置"""
         self.assertIn(self.config.position_mode, ['oneway', 'hedge', 'one-way', 'net', 'single'])
@@ -271,6 +287,19 @@ class TestSignalValidator(unittest.TestCase):
         self.assertEqual(details['filter_meta']['code'], 'NO_DIRECTION')
         self.assertEqual(details['filter_meta']['group'], 'signal')
         self.assertTrue(details['filter_meta']['action_hint'])
+
+    def test_validate_uses_symbol_specific_composite_override(self):
+        cfg = Config()
+        cfg._config.setdefault('strategies', {}).setdefault('composite', {})['min_strength'] = 28
+        cfg._config.setdefault('symbol_overrides', {})['XRP/USDT'] = {
+            'strategies': {'composite': {'min_strength': 20}}
+        }
+        validator = SignalValidator(cfg, None)
+        signal = Signal(symbol='XRP/USDT', signal_type='buy', price=1.0, strength=24, strategies_triggered=['RSI'])
+        passed, reason, details = validator.validate(signal)
+        self.assertTrue(passed)
+        self.assertIsNone(reason)
+        self.assertTrue(details['strength_check']['passed'])
 
 
 class TestExchangeAmountLimits(unittest.TestCase):
@@ -522,6 +551,20 @@ class TestSignalDetector(unittest.TestCase):
         
         self.assertIn('RSI', signal.indicators)
         self.assertIn('MACD', signal.indicators)
+
+    def test_symbol_override_affects_detector_thresholds(self):
+        cfg = Config()
+        cfg._config.setdefault('strategies', {}).setdefault('composite', {}).update({'min_strength': 28, 'min_strategy_count': 1})
+        cfg._config.setdefault('market_filters', {}).update({'min_volatility': 0.0045, 'max_volatility': 0.05})
+        cfg._config.setdefault('symbol_overrides', {})['XRP/USDT'] = {
+            'strategies': {'composite': {'min_strength': 20}},
+            'market_filters': {'min_volatility': 0.1}
+        }
+        detector = SignalDetector(cfg.all)
+        current_price = self.df[4].iloc[-1]
+        signal = detector.analyze('XRP/USDT', self.df, current_price, None)
+        self.assertLess(signal.market_context['volatility'], 0.1)
+        self.assertTrue(signal.market_context['volatility_too_low'])
 
 
 class TestStrategies(unittest.TestCase):

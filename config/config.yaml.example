@@ -175,6 +175,21 @@ symbols:
   watch_list:
     - XRP/USDT
 
+# 按币种局部覆盖：只改你想灰度测试既参数，未写既项会继续沿用全局默认值
+symbol_overrides:
+  BTC/USDT:
+    strategies:
+      composite:
+        min_strategy_count: 2
+    market_filters:
+      block_counter_trend: true
+  XRP/USDT:
+    strategies:
+      composite:
+        min_strength: 26
+    market_filters:
+      min_volatility: 0.0038
+
 trading:
   cooldown_minutes: 15
   leverage: 10

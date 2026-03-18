@@ -608,6 +608,13 @@
                             <table><thead><tr><th>规则</th><th>分组</th><th>避险</th><th>错失</th><th>中性/待观察</th><th>有效率</th></tr></thead><tbody id="filterEffectivenessTable"></tbody></table>
                         </div>
                         <div class="card mini">
+                            <div class="section-title">按币种 × 规则有效性</div>
+                            <div class="section-note">直接睇同一条过滤规则喺边只币上偏向避险，边只币上偏向错失机会。</div>
+                            <div class="summary-strip" id="symbolFilterEffectivenessSummary"></div>
+                            <div style="height:12px"></div>
+                            <table><thead><tr><th>币种 / 规则</th><th>分组</th><th>避险</th><th>错失</th><th>有效率</th><th>调参建议</th></tr></thead><tbody id="symbolFilterEffectivenessTable"></tbody></table>
+                        </div>
+                        <div class="card mini">
                             <div class="section-title">信号记录</div>
                             <table><thead><tr><th>时间</th><th>币种</th><th>信号</th><th>强度</th><th>策略</th><th>是否过滤</th><th>过滤原因</th></tr></thead><tbody id="signalsTable"></tbody></table>
                         </div>
@@ -3096,16 +3103,19 @@
             document.getElementById('tradesTable').innerHTML = rows.length ? rows.map(t => `<tr><td>${t.id}</td><td>${t.symbol}</td><td>${badge(t.side, t.side === 'long' ? 'long' : 'short')}</td><td>${badge(t.status, t.status === 'open' ? 'warn' : 'ok')}</td><td>${money(t.entry_price)}</td><td>${t.exit_price ? money(t.exit_price) : '--'}</td><td>${t.quantity}</td><td class="${Number(t.pnl || 0) >= 0 ? 'pos' : 'neg'}">${t.pnl == null ? '--' : money(t.pnl)}</td><td>${safe(t.open_time)}</td></tr>`).join('') : '<tr><td colspan="9" class="muted">暂无交易记录</td></tr>';
         }
         async function loadSignals() {
-            const [rows, reasons, coinBreakdownResp, filterEffectivenessResp] = await Promise.all([
+            const [rows, reasons, coinBreakdownResp, filterEffectivenessResp, symbolFilterEffectivenessResp] = await Promise.all([
                 api('/api/signals?limit=50'),
                 api('/api/signals/filter-reasons'),
                 fetch('/api/signals/coin-breakdown?days=1&limit=500').then(r => r.json()),
-                fetch('/api/signals/filter-effectiveness?days=7&window_hours=24&limit=60').then(r => r.json())
+                fetch('/api/signals/filter-effectiveness?days=7&window_hours=24&limit=60').then(r => r.json()),
+                fetch('/api/signals/filter-effectiveness/by-symbol?days=14&window_hours=24&limit=120').then(r => r.json())
             ]);
             const coinRows = coinBreakdownResp?.data || [];
             const coinSummary = coinBreakdownResp?.summary || {};
             const effectivenessRows = filterEffectivenessResp?.data || [];
             const effectivenessSummary = filterEffectivenessResp?.summary || {};
+            const symbolEffectivenessRows = symbolFilterEffectivenessResp?.data || [];
+            const symbolEffectivenessSummary = symbolFilterEffectivenessResp?.summary || {};
             document.getElementById('signalsTable').innerHTML = rows.length ? rows.map(s => {
                 const codeText = s.filter_code ? ` [${s.filter_code}]` : '';
                 const hintText = s.action_hint ? `<div class="muted" style="margin-top:6px;">${s.filter_group || '--'} ｜ ${s.action_hint}</div>` : '';
@@ -3135,6 +3145,36 @@
                     <td>${rateText}<div class="muted" style="margin-top:6px;">分析=${row.analyzed ?? 0} ｜ 总数=${row.total ?? 0}</div></td>
                 </tr>`;
             }).join('') : '<tr><td colspan="6" class="muted">暂无过滤规则有效性数据</td></tr>';
+            const symbolEffectivenessSummaryHost = document.getElementById('symbolFilterEffectivenessSummary');
+            if (symbolEffectivenessSummaryHost) {
+                symbolEffectivenessSummaryHost.innerHTML = `
+                    <div class="summary-pill"><div class="k">已分析组合</div><div class="v">${symbolEffectivenessSummary.rows ?? 0}</div><div class="s">symbol × rule 维度样本</div></div>
+                    <div class="summary-pill"><div class="k">建议放宽</div><div class="v">${symbolEffectivenessSummary.consider_relax ?? 0}</div><div class="s">错失机会偏多，值得重点复查</div></div>
+                    <div class="summary-pill"><div class="k">继续严格</div><div class="v">${symbolEffectivenessSummary.keep_strict ?? 0}</div><div class="s">多数在帮你避险，暂不建议放宽</div></div>
+                    <div class="summary-pill"><div class="k">继续观察</div><div class="v">${(symbolEffectivenessSummary.mixed ?? 0) + (symbolEffectivenessSummary.wait ?? 0)}</div><div class="s">样本未够或结果分化</div></div>
+                `;
+            }
+            document.getElementById('symbolFilterEffectivenessTable').innerHTML = symbolEffectivenessRows.length ? symbolEffectivenessRows.map(row => {
+                const rateText = row.effectiveness_rate == null ? '--' : `${row.effectiveness_rate}%`;
+                const sampleText = (row.samples || []).length
+                    ? row.samples.map(item => `${item.status}:${item.favorable_move_pct ?? 0}/${item.adverse_move_pct ?? 0}`).join(' ｜ ')
+                    : '暂无样本';
+                const biasMap = {
+                    keep_strict: ['继续严格', 'ok'],
+                    consider_relax: ['考虑放宽', 'warn'],
+                    mixed: ['表现混合', 'pending'],
+                    wait: ['继续观察', 'hold']
+                };
+                const [biasLabel, biasClass] = biasMap[row.tuning_bias] || ['继续观察', 'hold'];
+                return `<tr>
+                    <td>${row.symbol || '--'}<div class="muted" style="margin-top:6px;">${row.code || '--'} ｜ ${row.reason || '--'}</div></td>
+                    <td>${row.group || '--'}<div class="muted" style="margin-top:6px;">分析=${row.analyzed ?? 0} ｜ 总数=${row.total ?? 0}</div></td>
+                    <td>${row.avoided_loss ?? 0}</td>
+                    <td>${row.missed_profit ?? 0}</td>
+                    <td>${rateText}<div class="muted" style="margin-top:6px;">${sampleText}</div></td>
+                    <td>${badge(biasLabel, biasClass)}<div class="muted" style="margin-top:6px;">${row.tuning_hint || '--'}</div></td>
+                </tr>`;
+            }).join('') : '<tr><td colspan="6" class="muted">暂无按币种规则有效性数据</td></tr>';
             const summaryHost = document.getElementById('signalCoinBreakdownSummary');
             if (summaryHost) {
                 const groups = coinSummary.group_breakdown || {};

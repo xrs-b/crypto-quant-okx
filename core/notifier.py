@@ -316,24 +316,35 @@ class NotificationManager:
             lines.extend(['---', '【风控拦截】', f'拒绝明细：{" | ".join(failed_checks[:3])}'])
         return self.send('decision', title, lines, 'info' if allowed else 'warning', {'signal': signal.to_dict() if hasattr(signal, 'to_dict') else {}, 'details': details}, priority=priority)
 
-    def notify_trade_open(self, symbol: str, side: str, price: float, quantity: float, trade_id: int = None, signal=None) -> Dict:
+    def notify_trade_open(self, symbol: str, side: str, price: float, quantity: float, trade_id: int = None, signal=None, quantity_details: Dict = None) -> Dict:
         priority = 'high'
         pmeta = self._priority_meta(priority)
+        quantity_details = quantity_details or {}
         lines = [
             '【成交概览】',
             f'通知等级：{pmeta["emoji"]} {pmeta["label"]}',
             f'币种：{symbol}',
             f'方向：{"🟢 做多" if side == "long" else "🔴 做空"}',
             f'成交价格：{self._format_price(price)}',
-            f'成交数量：{self._format_quantity(quantity)}',
+        ]
+        if quantity_details:
+            lines.extend([
+                f'下单张数：{self._format_quantity(quantity_details.get("contracts", quantity))}',
+                f'每张面值：{self._format_quantity(quantity_details.get("contract_size"))}',
+                f'折算数量：{self._format_quantity(quantity_details.get("coin_quantity"))} {symbol.split("/")[0]}',
+                f'估算名义价值：{self._format_price(quantity_details.get("notional_usdt"))} USDT',
+            ])
+        else:
+            lines.append(f'成交数量：{self._format_quantity(quantity)}')
+        lines.extend([
             '---',
             '【关联信息】',
             f'Trade ID：{trade_id or "--"}',
             f'信号强度：{getattr(signal, "strength", "--")}',
             f'触发策略：{self._format_strategies(getattr(signal, "strategies_triggered", []) or [])}',
             f'建议动作：观察止盈止损是否按预期挂单/触发',
-        ]
-        return self.send('trade', '✅ 开仓执行成功', lines, 'info', {'trade_id': trade_id, 'symbol': symbol, 'side': side}, priority=priority)
+        ])
+        return self.send('trade', '✅ 开仓执行成功', lines, 'info', {'trade_id': trade_id, 'symbol': symbol, 'side': side, 'quantity_details': quantity_details}, priority=priority)
 
     def notify_trade_open_failed(self, symbol: str, side: str, price: float, reason: str, signal=None, details: Dict = None) -> Dict:
         priority = 'urgent'

@@ -113,6 +113,15 @@ class DiagnosticExchangeStub:
     def get_order_symbol(self, symbol):
         return f'{symbol}:USDT'
 
+    def get_contract_size(self, symbol):
+        return 0.01
+
+    def contracts_to_coin_quantity(self, symbol, contracts):
+        return contracts * self.get_contract_size(symbol)
+
+    def estimate_notional_usdt(self, symbol, contracts, price):
+        return self.contracts_to_coin_quantity(symbol, contracts) * price
+
     def fetch_ticker(self, symbol):
         return {'last': 50000}
 
@@ -652,20 +661,23 @@ class TestNotifications(unittest.TestCase):
         signal = Signal(symbol='BTC/USDT', signal_type='buy', price=50000, strength=88, strategies_triggered=['RSI', 'MACD'])
         notifier.notify_signal(signal, True, None, {'passed': True})
         notifier.notify_decision(signal, False, '风险拒绝', {'risk_gate': {'passed': False, 'reason': '风险拒绝'}})
+        notifier.notify_trade_open('XRP/USDT', 'long', 1.48, 61040, trade_id=99, signal=signal, quantity_details={'contracts': 61040, 'contract_size': 0.01, 'coin_quantity': 610.4, 'notional_usdt': 903.39})
         notifier.notify_trade_open_failed('BTC/USDT', 'long', 50000, '交易所拒绝', signal, {'code': 'mock'})
         notifier.notify_trade_close_failed('BTC/USDT', 'long', '平仓失败', {'code': 'mock'})
         notifier.notify_reconcile_issue({'summary': {'exchange_positions': 2, 'local_positions': 1, 'open_trades': 1, 'exchange_missing_local_position': 1, 'local_position_missing_exchange': 0, 'open_trade_missing_exchange': 0, 'exchange_missing_open_trade': 1}})
         runtime = notifier.notify_runtime('skip', ['币种：BTC/USDT', '原因：测试跳过'])
         duplicate_runtime = notifier.notify_runtime('skip', ['币种：BTC/USDT', '原因：测试跳过'])
         probe = notifier.test_discord()
-        self.assertEqual(len(db.logs), 8)
-        self.assertGreaterEqual(len(db.outbox), 8)
+        self.assertEqual(len(db.logs), 9)
+        self.assertGreaterEqual(len(db.outbox), 9)
         self.assertEqual(db.outbox[0]['channel'], 'discord')
         self.assertEqual(runtime['outbox_status'], 'disabled')
         self.assertEqual(duplicate_runtime['outbox_status'], 'disabled')
         self.assertIn('notify:signal', db.logs[0]['message'])
-        self.assertIn('notify:runtime', db.logs[5]['message'])
+        self.assertIn('notify:runtime', db.logs[6]['message'])
         self.assertIn('【信号概览】', db.logs[0]['details']['message'])
+        self.assertIn('下单张数：61,040', db.logs[2]['details']['message'])
+        self.assertIn('折算数量：610.4 XRP', db.logs[2]['details']['message'])
         self.assertIn('通知等级：⚠️ 重要', db.logs[0]['details']['message'])
         self.assertIn('====================', db.logs[0]['details']['message'])
         self.assertIn('【风控拦截】', db.logs[1]['details']['message'])

@@ -543,7 +543,21 @@ class TradingBot:
                         if trade_id:
                             summary['opened'] += 1
                             self.recorder.mark_executed(signal_id, trade_id)
-                            self.notifier.notify_trade_open(symbol, side, current_price, self.db.get_latest_open_trade(symbol, side).get('quantity') if self.db.get_latest_open_trade(symbol, side) else 0, trade_id, signal)
+                            latest_trade = self.db.get_latest_open_trade(symbol, side)
+                            contracts = latest_trade.get('quantity') if latest_trade else 0
+                            quantity_details = {}
+                            try:
+                                contract_size = self.exchange.get_contract_size(symbol)
+                                coin_quantity = self.exchange.contracts_to_coin_quantity(symbol, contracts)
+                                quantity_details = {
+                                    'contracts': contracts,
+                                    'contract_size': contract_size,
+                                    'coin_quantity': coin_quantity,
+                                    'notional_usdt': self.exchange.estimate_notional_usdt(symbol, contracts, current_price),
+                                }
+                            except Exception:
+                                quantity_details = {}
+                            self.notifier.notify_trade_open(symbol, side, current_price, contracts, trade_id, signal, quantity_details=quantity_details)
                             print(f"   ✅ 开{'多' if side == 'long' else '空'}成功! Trade ID: {trade_id}")
                         else:
                             self.notifier.notify_trade_open_failed(symbol, side, current_price, '交易所拒绝或执行器返回空结果', signal, {'signal_id': signal_id})

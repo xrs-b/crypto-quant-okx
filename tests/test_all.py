@@ -912,6 +912,74 @@ class TestDashboardApi(unittest.TestCase):
             if os.path.exists('data/test_dashboard_effectiveness_symbol.db'):
                 os.remove('data/test_dashboard_effectiveness_symbol.db')
 
+    def test_parameter_advice_api_returns_symbol_level_suggestions(self):
+        import dashboard.api as dashboard_api
+
+        test_db = Database('data/test_dashboard_param_advice.db')
+        old_db = dashboard_api.db
+        old_exchange_client = dashboard_api._exchange_client
+        dashboard_api.db = test_db
+        dashboard_api._exchange_client = FakeSignalAnalysisExchange({
+            'XRP/USDT': [[0, 100, 104.5, 99.6, 104.0, 1]],
+            'BTC/USDT': [[0, 100, 100.3, 97.0, 98.0, 1]],
+        })
+        try:
+            old_time = (datetime.now() - timedelta(days=2)).strftime('%Y-%m-%d %H:%M:%S')
+            xrp_id = test_db.record_signal(
+                symbol='XRP/USDT',
+                signal_type='buy',
+                price=100,
+                strength=22,
+                reasons=[],
+                strategies_triggered=['trend_follow']
+            )
+            test_db.update_signal(
+                xrp_id,
+                filtered=1,
+                filter_reason='信号强度不足',
+                filter_code='WEAK_SIGNAL_STRENGTH',
+                filter_group='signal',
+                action_hint='等更强确认',
+                created_at=old_time
+            )
+            btc_id = test_db.record_signal(
+                symbol='BTC/USDT',
+                signal_type='buy',
+                price=100,
+                strength=72,
+                reasons=[],
+                strategies_triggered=['trend_follow']
+            )
+            test_db.update_signal(
+                btc_id,
+                filtered=1,
+                filter_reason='信号逆大趋势',
+                filter_code='COUNTER_TREND',
+                filter_group='market',
+                action_hint='继续等趋势一致',
+                created_at=old_time
+            )
+
+            client = app.test_client()
+            resp = client.get('/api/signals/parameter-advice?days=30&window_hours=24&limit=30&min_move_pct=1.5')
+            self.assertEqual(resp.status_code, 200)
+            self.assertTrue(resp.json.get('success'))
+            rows = resp.json.get('data') or []
+            summary = resp.json.get('summary') or {}
+
+            xrp = next(row for row in rows if row['symbol'] == 'XRP/USDT' and row['parameter'] == 'strategies.composite.min_strength')
+            btc = next(row for row in rows if row['symbol'] == 'BTC/USDT' and row['parameter'] == 'market_filters.block_counter_trend')
+            self.assertEqual(xrp['action'], 'relax')
+            self.assertLess(xrp['suggested_value'], xrp['current_value'])
+            self.assertEqual(btc['action'], 'keep')
+            self.assertEqual(summary['relax'], 1)
+            self.assertEqual(summary['keep'], 1)
+        finally:
+            dashboard_api.db = old_db
+            dashboard_api._exchange_client = old_exchange_client
+            if os.path.exists('data/test_dashboard_param_advice.db'):
+                os.remove('data/test_dashboard_param_advice.db')
+
     def test_signal_coin_breakdown_groups_watch_filtered_and_executed_by_symbol(self):
         import dashboard.api as dashboard_api
 

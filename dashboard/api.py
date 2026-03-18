@@ -270,6 +270,86 @@ def _build_symbol_filter_effectiveness(signals: List[Dict[str, Any]], exchange_c
     return rows
 
 
+def _build_symbol_parameter_advice(symbol_rows: List[Dict[str, Any]], cfg: Config) -> List[Dict[str, Any]]:
+    composite = cfg.get('strategies.composite', {}) or {}
+    market_filters = cfg.get('market_filters', {}) or {}
+    trading = cfg.get('trading', {}) or {}
+    advice = []
+
+    for row in symbol_rows:
+        symbol = row.get('symbol') or '--'
+        code = row.get('code') or 'UNCLASSIFIED'
+        bias = row.get('tuning_bias')
+        analyzed = int(row.get('analyzed') or 0)
+        missed = int(row.get('missed_profit') or 0)
+        avoided = int(row.get('avoided_loss') or 0)
+        rate = row.get('effectiveness_rate')
+
+        if analyzed <= 0:
+            continue
+
+        def push(parameter, current_value, suggested_value, action, reason, priority='medium'):
+            advice.append({
+                'symbol': symbol,
+                'filter_code': code,
+                'parameter': parameter,
+                'current_value': current_value,
+                'suggested_value': suggested_value,
+                'action': action,
+                'priority': priority,
+                'effectiveness_rate': rate,
+                'analyzed': analyzed,
+                'missed_profit': missed,
+                'avoided_loss': avoided,
+                'reason': reason,
+            })
+
+        if code == 'WEAK_SIGNAL_STRENGTH':
+            current = int(composite.get('min_strength', 20) or 20)
+            if bias == 'consider_relax':
+                push('strategies.composite.min_strength', current, max(current - 2, 18), 'relax', '该币种经常因强度不足被挡，但后验更常走出顺向机会', 'high')
+            elif bias == 'keep_strict':
+                push('strategies.composite.min_strength', current, current, 'keep', '该币种上强度门槛多数在帮你避险，建议先保持当前阈值', 'medium')
+
+        elif code == 'INSUFFICIENT_STRATEGY_COUNT':
+            current = int(composite.get('min_strategy_count', 1) or 1)
+            if bias == 'consider_relax' and current > 1:
+                push('strategies.composite.min_strategy_count', current, max(current - 1, 1), 'relax', '该币种经常只差一层确认就被挡，可考虑降低最少策略触发数', 'high')
+            elif bias == 'keep_strict':
+                push('strategies.composite.min_strategy_count', current, current, 'keep', '该币种上多策略确认大多有效，建议保持当前要求', 'medium')
+
+        elif code == 'LOW_VOLATILITY':
+            current = float(market_filters.get('min_volatility', 0.003) or 0.003)
+            if bias == 'consider_relax':
+                push('market_filters.min_volatility', current, round(current * 0.85, 5), 'relax', '该币种低波动过滤后仍多次出现顺向机会，可考虑小幅下调最低波动阈值', 'medium')
+            elif bias == 'keep_strict':
+                push('market_filters.min_volatility', current, current, 'keep', '低波动过滤在该币种上大多帮你避开无效波段', 'low')
+
+        elif code == 'HIGH_VOLATILITY':
+            current = float(market_filters.get('max_volatility', 0.05) or 0.05)
+            if bias == 'consider_relax':
+                push('market_filters.max_volatility', current, round(current * 1.15, 5), 'relax', '该币种高波动过滤后经常错失机会，可考虑小幅放宽最高波动阈值', 'medium')
+            elif bias == 'keep_strict':
+                push('market_filters.max_volatility', current, current, 'keep', '高波动过滤在该币种上仍有明显避险价值', 'low')
+
+        elif code == 'COUNTER_TREND':
+            current = bool(market_filters.get('block_counter_trend', True))
+            if bias == 'consider_relax':
+                push('market_filters.block_counter_trend', current, '保持全局 true，但对该币做灰度放宽试验', 'review', '同一条逆势过滤在该币种上错失机会偏多，建议先做局部实验而唔系全局放开', 'high')
+            elif bias == 'keep_strict':
+                push('market_filters.block_counter_trend', current, current, 'keep', '逆势过滤在该币种上明显有效，建议继续严格执行', 'medium')
+
+        elif code == 'COOLDOWN_ACTIVE':
+            current = int(trading.get('cooldown_minutes', 15) or 15)
+            if bias == 'consider_relax':
+                push('trading.cooldown_minutes', current, max(current - 5, 5), 'relax', '冷却期在该币种上可能偏长，导致重复错失顺向机会', 'medium')
+            elif bias == 'keep_strict':
+                push('trading.cooldown_minutes', current, current, 'keep', '冷却期在该币种上仍有稳定避险作用', 'low')
+
+    advice.sort(key=lambda x: ({'high': 0, 'medium': 1, 'low': 2}.get(x['priority'], 9), x['action'] != 'relax', -(x['missed_profit'] + x['avoided_loss']), x['symbol'], x['parameter']))
+    return advice
+
+
 # ============================================================================
 # 根路由
 # ============================================================================
@@ -478,6 +558,41 @@ def get_signal_filter_effectiveness_by_symbol():
         'keep_strict': sum(1 for row in data if row.get('tuning_bias') == 'keep_strict'),
         'mixed': sum(1 for row in data if row.get('tuning_bias') == 'mixed'),
         'wait': sum(1 for row in data if row.get('tuning_bias') == 'wait'),
+    }
+    return jsonify({'success': True, 'data': data, 'summary': summary, 'count': len(data)})
+
+
+@app.route('/api/signals/parameter-advice')
+def get_signal_parameter_advice():
+    """获取按币种的参数建议器输出"""
+    days = int(request.args.get('days', 14))
+    limit = int(request.args.get('limit', 200))
+    window_hours = int(request.args.get('window_hours', 24))
+    min_move_pct = float(request.args.get('min_move_pct', 1.5))
+    cutoff = datetime.now() - timedelta(days=days)
+    signals = [
+        row for row in db.get_signals(limit=max(limit * 4, 300))
+        if row.get('filtered') and (_parse_created_at(row.get('created_at')) or datetime.min) >= cutoff
+    ]
+    signals = signals[:limit]
+    symbol_rows = _build_symbol_filter_effectiveness(
+        signals,
+        _get_exchange_client(),
+        window_hours=window_hours,
+        min_move_pct=min_move_pct,
+        now=datetime.now(),
+    )
+    data = _build_symbol_parameter_advice(symbol_rows, config)
+    summary = {
+        'days': days,
+        'window_hours': window_hours,
+        'min_move_pct': min_move_pct,
+        'signals': len(signals),
+        'advice_count': len(data),
+        'relax': sum(1 for row in data if row.get('action') == 'relax'),
+        'keep': sum(1 for row in data if row.get('action') == 'keep'),
+        'review': sum(1 for row in data if row.get('action') == 'review'),
+        'high_priority': sum(1 for row in data if row.get('priority') == 'high'),
     }
     return jsonify({'success': True, 'data': data, 'summary': summary, 'count': len(data)})
 

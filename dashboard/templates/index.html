@@ -512,6 +512,7 @@
                             <div class="summary-strip" id="overviewNotificationSummary"></div>
                             <div class="summary-strip" id="overviewForwardFunnel"></div>
                             <div class="summary-strip" id="overviewSignalBreakdown"></div>
+                            <div class="summary-strip" id="overviewSignalBlockers"></div>
                             <div class="summary-strip" id="overviewForwardRisk"></div>
                             <div class="summary-strip" id="overviewForwardReview"></div>
                             <div class="summary-strip" id="overviewForwardSymbols"></div>
@@ -2304,6 +2305,7 @@
             const notificationSummaryHost = document.getElementById('overviewNotificationSummary');
             const forwardFunnelHost = document.getElementById('overviewForwardFunnel');
             const signalBreakdownHost = document.getElementById('overviewSignalBreakdown');
+            const signalBlockersHost = document.getElementById('overviewSignalBlockers');
             const forwardRiskHost = document.getElementById('overviewForwardRisk');
             const forwardReviewHost = document.getElementById('overviewForwardReview');
             const forwardSymbolsHost = document.getElementById('overviewForwardSymbols');
@@ -2897,6 +2899,7 @@
             }
             const lastSummary = runtimeState?.last_summary || {};
             const allSignalRows = await api('/api/signals?limit=200');
+            const filterReasonRows = await api('/api/signals/filter-reasons');
             const todayKey = new Date().toISOString().slice(0,10);
             const todaySignalRows = (allSignalRows || []).filter(x => String(x.created_at || '').startsWith(todayKey));
             const todaySignals = Number(status?.signals?.today_signals || 0);
@@ -2929,6 +2932,19 @@
                     <div class="summary-pill"><div class="k">过滤信号</div><div class="v">${filteredSignals}</div><div class="s">说明有方向，但被市场过滤或验证挡住</div></div>
                     <div class="summary-pill"><div class="k">已执行信号</div><div class="v">${executedSignals}</div><div class="s">真正进入交易执行链路的信号数</div></div>
                     <div class="summary-pill"><div class="k">拆解结论</div><div class="v">${holdSignals && !filteredSignals ? '当前更多系观望' : filteredSignals ? '当前主要被过滤/拦截' : executedSignals ? '当前已有真实执行样本' : '当前样本仍少'}</div><div class="s">帮助判断点解而家睇落会“多数无动作”</div></div>
+                `;
+            }
+            if (signalBlockersHost) {
+                const topReasons = (filterReasonRows || []).slice(0, 3);
+                const blockerText = topReasons.length ? topReasons.map(x => `${x.reason}:${x.count}`).join(' ｜ ') : '最近暂无明显过滤主因';
+                const riskText = topReasons.some(x => String(x.reason || '').includes('冷却') || String(x.reason || '').includes('持仓') || String(x.reason || '').includes('回撤'))
+                    ? '当前更像风控/持仓约束在拦截'
+                    : topReasons.length
+                        ? '当前更像市场环境或信号质量在拦截'
+                        : '当前暂无明显拦截主因';
+                signalBlockersHost.innerHTML = `
+                    <div class="summary-pill"><div class="k">过滤主因 Top</div><div class="v">${blockerText}</div><div class="s">最近过滤原因排行前 3</div></div>
+                    <div class="summary-pill"><div class="k">拦截判断</div><div class="v">${riskText}</div><div class="s">帮助区分系市场问题定风控约束问题</div></div>
                 `;
             }
             const ddPct = Number(status?.risk?.daily_drawdown || 0) * 100;

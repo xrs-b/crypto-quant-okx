@@ -787,6 +787,16 @@ class TestDashboardApi(unittest.TestCase):
         self.assertTrue(resp.json.get('success'))
         self.assertIsInstance(resp.json.get('data'), list)
 
+    def test_system_checklist_returns_runtime_and_model_checks(self):
+        client = app.test_client()
+        resp = client.get('/api/system/checklist')
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.json.get('success'))
+        data = resp.json.get('data') or {}
+        self.assertIn('checks', data)
+        self.assertIn('models', data)
+        self.assertIsInstance(data.get('checks'), list)
+
     def test_evaluate_filtered_signal_outcome_classifies_buy_cases(self):
         import dashboard.api as dashboard_api
 

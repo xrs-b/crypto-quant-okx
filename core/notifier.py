@@ -426,7 +426,16 @@ class NotificationManager:
         }
         level_map = {'start': 'info', 'end': 'info', 'skip': 'warning', 'daemon': 'info'}
         priority_map = {'start': 'normal', 'end': 'normal', 'skip': 'high', 'daemon': 'normal'}
-        return self.send('runtime', title_map.get(phase, '🤖 机器人运行状态'), lines, level_map.get(phase, 'info'), details or {}, priority=priority_map.get(phase, 'normal'))
+        normalized_lines = []
+        for line in lines or []:
+            text = str(line)
+            if '：' in text:
+                key, value = text.split('：', 1)
+                if any(token in key for token in ['时间', '开始', '结束', '完成', '触发时间']):
+                    normalized_lines.append(f'{key}：{self._format_time(value.strip())}')
+                    continue
+            normalized_lines.append(text)
+        return self.send('runtime', title_map.get(phase, '🤖 机器人运行状态'), normalized_lines, level_map.get(phase, 'info'), details or {}, priority=priority_map.get(phase, 'normal'))
 
     def test_discord(self) -> Dict:
         now = datetime.now().isoformat()

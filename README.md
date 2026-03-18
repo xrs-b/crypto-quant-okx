@@ -65,8 +65,10 @@ crypto-quant-okx/
 ├── data/
 │   └── *.py                  # 数据处理
 ├── config/
-│   ├── config.yaml            # 配置文件 (本地)
-│   └── config.yaml.example   # 配置模板
+│   ├── config.yaml            # 本地运行配置（已 git ignore）
+│   ├── config.local.yaml      # 本地私密覆盖（已 git ignore，可选）
+│   ├── config.yaml.example    # 可公开提交的完整示例配置
+│   └── config.local.yaml.example # 私密配置示例
 ├── README.md                  # 项目说明
 └── requirements.txt           # 依赖
 ```
@@ -89,12 +91,24 @@ pip install -r requirements.txt
 ### 3. 配置
 
 ```bash
-# 复制配置文件
+# 公开示例配置 → 本地运行配置
 cp config/config.yaml.example config/config.yaml
 
-# 编辑配置文件
+# 私密配置示例 → 本地 secret 覆盖（推荐）
+cp config/config.local.yaml.example config/config.local.yaml
+
+# 编辑公开参数（币种、风控、模式等）
 vim config/config.yaml
+
+# 编辑私密参数（API Key / webhook / bot token 等）
+vim config/config.local.yaml
 ```
+
+**推荐约定：**
+- `config/config.yaml`：放**可公开**的业务参数，例如 watch_list、杠杆、风控、运行模式
+- `config/config.local.yaml`：只放**私密**参数，例如 API Key、Discord webhook、bot token
+- 两个文件都会被 Git 忽略，不会上 GitHub
+- 如果你喜欢，也可以直接用环境变量：项目支持 `${ENV_NAME}` / `${ENV_NAME:-default}` 这种写法
 
 ### 4. 运行
 
@@ -120,87 +134,69 @@ python3 bot/run.py --dashboard --port 8050
 
 ## ⚙️ 配置说明
 
-### 完整配置项
+### 推荐配置分层
+
+| 文件 | 是否提交 GitHub | 作用 |
+|------|------------------|------|
+| `config/config.yaml.example` | 是 | 完整示例配置，给别人 clone 后参考 |
+| `config/config.yaml` | 否 | 你的本地公开参数配置 |
+| `config/config.local.yaml` | 否 | 你的本地私密覆盖（API Key / Token / Webhook） |
+
+### 公开参数 vs 私密参数
+
+**建议放在 `config/config.yaml` 的内容：**
+- `exchange.mode`
+- `exchange.position_mode`
+- `symbols.watch_list`
+- `symbols.candidate_watch_list`
+- `trading.*`
+- `strategies.*`
+- `market_filters.*`
+- `governance.*`
+
+**建议放在 `config/config.local.yaml` 的内容：**
+- `api.key`
+- `api.secret`
+- `api.passphrase`
+- `notification.discord.bot_token`
+- `notification.discord.webhook_url`
+- `notification.discord.channel_id`
+- 任何 email / telegram 等真实凭证
+
+### 环境变量占位写法
+
+项目支持以下写法：
 
 ```yaml
-# =============================================================================
-# 交易所配置
-# =============================================================================
-exchange: okx                     # 交易所名称
-
-# 交易模式: testnet (模拟) / real (真实)
-mode: testnet
-
-# 持仓模式: oneway(单向) / hedge(双向)
-# 必须与 OKX 账户设置一致，否则容易触发 posSide / 平仓方向错误
-position_mode: oneway
-
-# -----------------------------------------------------------------------------
-# API密钥配置 (必须)
-# -----------------------------------------------------------------------------
 api:
-  key: "你的API Key"              # 登录OKX → API管理 → 创建API
-  secret: "你的Secret"
-  passphrase: "你的Passphrase"
+  key: ${OKX_API_KEY}
+  secret: ${OKX_API_SECRET}
+  passphrase: ${OKX_API_PASSPHRASE}
 
-# -----------------------------------------------------------------------------
-# 交易参数
-# -----------------------------------------------------------------------------
-trading:
-  # 交易对列表
-  symbols:
-    - SOL/USDT
-    - HYPE/USDT
-
-  # 单笔仓位比例 (0.1 = 10%)
-  position_size: 0.1
-
-  # 最大仓位比例 (0.3 = 30%)
-  max_exposure: 0.3
-
-  # 杠杆倍数 (1-50)
-  leverage: 3
-
-  # 止损比例 (0.02 = 2%，按杠杆计算)
-  stop_loss: 0.02
-
-  # 止盈比例 (0.04 = 4%，按杠杆计算)
-  take_profit: 0.04
-
-  # 追踪止损比例 (0.02 = 2%)
-  trailing_stop: 0.02
-
-# -----------------------------------------------------------------------------
-# 策略参数
-# -----------------------------------------------------------------------------
-strategy:
-  rsi_period: 14                  # RSI周期
-  rsi_oversold: 35               # RSI超卖阈值
-  rsi_overbought: 65              # RSI超买阈值
-  macd_fast: 12                   # MACD快线
-  macd_slow: 26                   # MACD慢线
-  macd_signal: 9                   # MACD信号线
-
-# -----------------------------------------------------------------------------
-# Discord通知
-# -----------------------------------------------------------------------------
-discord:
-  enabled: true
-  channel_id: "你的Channel ID"
+notification:
+  discord:
+    bot_token: ${DISCORD_BOT_TOKEN:-}
+    channel_id: ${DISCORD_CHANNEL_ID:-}
 ```
+
+说明：
+- `${VAR}`：必须从环境变量读取，不存在就会变成空字符串
+- `${VAR:-default}`：环境变量不存在时，退回 `default`
 
 ### 切换到真实交易
 
 ```yaml
-# config.yaml
-mode: real  # 改为 real
+# config.yaml / config.local.yaml
+exchange:
+  mode: real
 
-# 更新API密钥为真实账户的密钥
 api:
-  key: "真实API Key"
-  secret: "真实Secret"
-  passphrase: "真实Passphrase"
+  key: your_real_okx_api_key
+  secret: your_real_okx_api_secret
+  passphrase: your_real_okx_api_passphrase
 ```
+
+**强烈建议：**先用 `testnet` 跑通，再切 `real`。
 
 ## 📊 交易参数详解
 

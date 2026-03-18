@@ -2,6 +2,7 @@
 配置管理模块
 """
 import os
+import re
 import yaml
 from typing import Any, Dict, List, Optional
 from pathlib import Path
@@ -42,6 +43,31 @@ class Config:
                 with open(local_path, 'r', encoding='utf-8') as f:
                     local_config = yaml.safe_load(f) or {}
                 self._config = self._deep_merge(self._config, local_config)
+
+        self._config = self._resolve_env_placeholders(self._config)
+
+    def _resolve_env_placeholders(self, value: Any) -> Any:
+        """递归解析 ${VAR} / ${VAR:-default} 环境变量占位符"""
+        if isinstance(value, dict):
+            return {k: self._resolve_env_placeholders(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [self._resolve_env_placeholders(item) for item in value]
+        if not isinstance(value, str):
+            return value
+
+        pattern = re.compile(r'^\$\{([A-Z0-9_]+)(?::-(.*))?\}$')
+        matched = pattern.match(value.strip())
+        if not matched:
+            return value
+
+        env_key = matched.group(1)
+        default_value = matched.group(2)
+        env_value = os.getenv(env_key)
+        if env_value not in (None, ''):
+            return env_value
+        if default_value is not None:
+            return default_value
+        return ''
     
     def _deep_merge(self, base: Dict, override: Dict) -> Dict:
         """深度合并配置"""

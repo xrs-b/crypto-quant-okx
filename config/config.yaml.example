@@ -1,7 +1,23 @@
+# ============================================================================
+# OKX Quant 示例配置（可公开提交）
+# ----------------------------------------------------------------------------
+# 用法建议：
+# 1. 先复制：cp config/config.yaml.example config/config.yaml
+# 2. 再复制：cp config/config.local.yaml.example config/config.local.yaml
+# 3. 把真实 secret 只写进 config.local.yaml，或者改用环境变量
+# 4. config.yaml / config.local.yaml 都不会上传到 GitHub
+#
+# 环境变量写法示例：
+#   key: ${OKX_API_KEY}
+#   bot_token: ${DISCORD_BOT_TOKEN:-}
+# ============================================================================
+
 api:
-  key: your_api_key
-  passphrase: your_passphrase
-  secret: your_api_secret
+  # OKX API（建议放到 config.local.yaml 或环境变量）
+  key: ${OKX_API_KEY:-your_okx_api_key}
+  passphrase: ${OKX_API_PASSPHRASE:-your_okx_api_passphrase}
+  secret: ${OKX_API_SECRET:-your_okx_api_secret}
+
 dashboard:
   auto_refresh_seconds: 30
   enabled: true
@@ -9,6 +25,7 @@ dashboard:
   port: 8050
   theme: dark
   title: OKX量化交易仪表盘
+
 database:
   path: data/trading.db
   retention:
@@ -16,73 +33,89 @@ database:
     signals_days: 90
     trades_days: 365
   type: sqlite
+
 exchange:
   default_leverage: 10
-  mode: testnet
+  mode: testnet         # testnet=模拟盘 / real=真实盘
   name: okx
-  position_mode: oneway      # oneway=单向持仓 / hedge=双向持仓；需与 OKX 账户设置一致
+  position_mode: hedge  # hedge=双向持仓 / oneway=单向持仓；必须与 OKX 账户设置一致
+
+governance:
+  pool_switch:
+    min_hold_hours: 6
+    score_margin: 1.0
+
 logging:
   backup_count: 5
   file: logs/trading.log
   format: '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
   level: INFO
   max_size_mb: 10
+
+market_filters:
+  block_counter_trend: true
+  block_high_volatility: true
+  block_low_volatility: true
+  max_volatility: 0.05
+  min_volatility: 0.0045
+
 ml:
   enabled: true
   features:
-  - RSI
-  - MACD
-  - MACD_signal
-  - MACD_hist
-  - BB_upper
-  - BB_lower
-  - BB_position
-  - MA5_ratio
-  - trend_gap
-  - volume_ratio
-  - returns
-  - returns_3d
-  - returns_5d
-  - volatility
-  - momentum
-  - atr_ratio
+    - RSI
+    - MACD
+    - MACD_signal
+    - MACD_hist
+    - BB_upper
+    - BB_lower
+    - BB_position
+    - MA5_ratio
+    - trend_gap
+    - volume_ratio
+    - returns
+    - returns_3d
+    - returns_5d
+    - volatility
+    - momentum
+    - atr_ratio
   min_confidence: 0.6
   model_path: ml/models
   training:
-    label_horizon: 3           # 预测未来3根K线方向
-    min_return_threshold: 0.002 # 小于此涨跌幅视为噪音样本
-market_filters:
-  block_counter_trend: true
-  block_low_volatility: true
-  block_high_volatility: true
-  min_volatility: 0.003
-  max_volatility: 0.05
+    label_horizon: 3
+    min_return_threshold: 0.002
+
 notification:
   discord:
-    channel_id: '1468585288770125876'
-    webhook_url: ''            # 推荐使用 Discord webhook；如被拦，可改用 bot_token + channel_id
-    webhook_username: 'OKX量化机器人'
-    bot_token: ''              # Discord Bot Token（A-31 fallback 通道）
+    # 建议：channel_id / webhook / bot token 只放 config.local.yaml 或环境变量
+    channel_id: ${DISCORD_CHANNEL_ID:-your_discord_channel_id}
+    webhook_url: ${DISCORD_WEBHOOK_URL:-}
+    webhook_username: OKX量化机器人
+    bot_token: ${DISCORD_BOT_TOKEN:-}
     enabled: true
     notify_errors: true
     notify_signals: true
     notify_trades: true
   email:
     enabled: false
-    password: your_app_password
+    password: ${SMTP_PASSWORD:-your_app_password}
     smtp_host: smtp.gmail.com
     smtp_port: 587
     to_address: your_email@gmail.com
     username: your_email@gmail.com
   telegram:
-    bot_token: ''
-    chat_id: ''
+    bot_token: ${TELEGRAM_BOT_TOKEN:-}
+    chat_id: ${TELEGRAM_CHAT_ID:-}
     enabled: false
+
 runtime:
-  interval_seconds: 3600
+  interval_seconds: 300
   max_runtime_minutes: 30
   mode: interval
   schedule: 0 * * * *
+
+runtime_meta:
+  current_preset: btc-focused
+
 strategies:
   adx:
     enabled: true
@@ -93,11 +126,11 @@ strategies:
     enabled: true
     period: 20
     std_multiplier: 2
-    strength_weight: 20
+    strength_weight: 15
   composite:
     enabled: true
-    min_strategy_count: 2
-    min_strength: 70
+    min_strategy_count: 1
+    min_strength: 28
   divergence:
     enabled: true
     lookback: 20
@@ -112,7 +145,7 @@ strategies:
     fast_period: 12
     signal_period: 9
     slow_period: 26
-    strength_weight: 25
+    strength_weight: 24
   pattern:
     enabled: true
     strength_weight: 20
@@ -121,37 +154,37 @@ strategies:
     overbought: 65
     oversold: 35
     period: 14
-    strength_weight: 30
+    strength_weight: 40
   volume:
     enabled: true
-    strength_weight: 15
+    strength_weight: 32
     volume_ma_period: 20
     volume_multiplier: 1.5
+
 symbols:
-  quote_currency: USDT
-  selection_mode: focused       # focused=主跑精选币种 / broad=全量观察
-  watch_list:
-  - BTC/USDT                    # 当前主运行池（建议先专注 BTC）
   candidate_watch_list:
-  - XRP/USDT                    # 候选观察池（后续可单独验证后再放入主池）
+    - BTC/USDT
+  contract_type: usdt
+  margin_type: isolated
   paused_watch_list:
-  - ETH/USDT
-  - SOL/USDT
-  - HYPE/USDT
+    - ETH/USDT
+    - SOL/USDT
+    - HYPE/USDT
+  quote_currency: USDT
+  selection_mode: focused
+  watch_list:
+    - XRP/USDT
+
 trading:
   cooldown_minutes: 15
   leverage: 10
+  max_consecutive_losses: 3
+  max_daily_drawdown: 0.03
   max_exposure: 0.3
   max_position_per_symbol: 0.15
   max_trades_per_day: 10
   min_trade_interval: 300
-  max_consecutive_losses: 3   # 连续亏损熔断阈值
-  max_daily_drawdown: 0.03    # 日内最大回撤(按账户比例)
   position_size: 0.1
-  stop_loss: 0.02
-  take_profit: 0.04
-  trailing_stop: 0.015
-governance:
-  pool_switch:
-    min_hold_hours: 6        # 主池切换后最少观察期（小时）
-    score_margin: 1.0        # challenger 至少要领先主池既分差，避免来回抖动
+  stop_loss: 0.018
+  take_profit: 0.028
+  trailing_stop: 0.01

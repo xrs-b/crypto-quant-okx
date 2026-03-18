@@ -153,6 +153,121 @@ def get_signal_filter_reasons():
     return jsonify({'success': True, 'data': data})
 
 
+@app.route('/api/signals/coin-breakdown')
+def get_signal_coin_breakdown():
+    """按币种拆解观望 / 过滤 / 执行情况"""
+    limit = int(request.args.get('limit', 1000))
+    days = int(request.args.get('days', 1))
+    include_all = str(request.args.get('all', '')).lower() in ('1', 'true', 'yes')
+    signals = db.get_signals(limit=limit)
+    cutoff = datetime.now() - timedelta(days=days)
+    filtered_signals = []
+    for row in signals:
+        created_at = row.get('created_at')
+        try:
+            created_dt = datetime.fromisoformat(created_at)
+        except Exception:
+            created_dt = None
+        if include_all or not created_dt or created_dt >= cutoff:
+            filtered_signals.append(row)
+
+    grouped = {}
+    for row in filtered_signals:
+        symbol = row.get('symbol') or '--'
+        bucket = grouped.setdefault(symbol, {
+            'symbol': symbol,
+            'total_signals': 0,
+            'hold_signals': 0,
+            'filtered_signals': 0,
+            'executed_signals': 0,
+            'buy_signals': 0,
+            'sell_signals': 0,
+            'latest_time': None,
+            'latest_signal_type': None,
+            'latest_filter_reason': None,
+            'latest_status': 'sample_low',
+            'top_filter_reasons': [],
+            '_reason_counts': {},
+            '_latest_sort_key': ('', -1),
+        })
+        bucket['total_signals'] += 1
+        signal_type = row.get('signal_type')
+        if signal_type == 'hold':
+            bucket['hold_signals'] += 1
+        elif signal_type == 'buy':
+            bucket['buy_signals'] += 1
+        elif signal_type == 'sell':
+            bucket['sell_signals'] += 1
+
+        if row.get('filtered'):
+            bucket['filtered_signals'] += 1
+            reason = row.get('filter_reason') or '未注明原因'
+            bucket['_reason_counts'][reason] = bucket['_reason_counts'].get(reason, 0) + 1
+        if row.get('executed'):
+            bucket['executed_signals'] += 1
+
+        created_at = row.get('created_at') or ''
+        sort_key = (created_at, int(row.get('id') or 0))
+        if sort_key >= bucket['_latest_sort_key']:
+            bucket['_latest_sort_key'] = sort_key
+            bucket['latest_time'] = created_at or None
+            bucket['latest_signal_type'] = signal_type
+            bucket['latest_filter_reason'] = row.get('filter_reason')
+            if row.get('executed'):
+                bucket['latest_status'] = 'executed'
+            elif signal_type == 'hold':
+                bucket['latest_status'] = 'watch'
+            elif row.get('filtered'):
+                bucket['latest_status'] = 'filtered'
+            elif signal_type in ('buy', 'sell'):
+                bucket['latest_status'] = 'direction_ready'
+            else:
+                bucket['latest_status'] = 'sample_low'
+
+    rows = []
+    for bucket in grouped.values():
+        bucket.pop('_latest_sort_key', None)
+        reason_rows = sorted(
+            ({'reason': k, 'count': v} for k, v in bucket.pop('_reason_counts', {}).items()),
+            key=lambda x: x['count'], reverse=True
+        )
+        bucket['top_filter_reasons'] = reason_rows[:3]
+        hold_count = bucket['hold_signals']
+        filtered_count = bucket['filtered_signals']
+        executed_count = bucket['executed_signals']
+        if executed_count > 0:
+            bucket['breakdown_conclusion'] = '已有执行样本'
+        elif filtered_count > hold_count and filtered_count > 0:
+            bucket['breakdown_conclusion'] = '当前主要被过滤'
+        elif hold_count > 0:
+            bucket['breakdown_conclusion'] = '当前主要观望'
+        else:
+            bucket['breakdown_conclusion'] = '样本仍少'
+        rows.append(bucket)
+
+    status_rank = {
+        'filtered': 0,
+        'watch': 1,
+        'direction_ready': 2,
+        'executed': 3,
+        'sample_low': 4,
+    }
+    rows.sort(key=lambda x: (status_rank.get(x.get('latest_status'), 99), -x.get('total_signals', 0), x.get('symbol', '')))
+
+    summary = {
+        'symbols': len(rows),
+        'total_signals': sum(x['total_signals'] for x in rows),
+        'hold_signals': sum(x['hold_signals'] for x in rows),
+        'filtered_signals': sum(x['filtered_signals'] for x in rows),
+        'executed_signals': sum(x['executed_signals'] for x in rows),
+        'watch_symbols': sum(1 for x in rows if x.get('latest_status') == 'watch'),
+        'filtered_symbols': sum(1 for x in rows if x.get('latest_status') == 'filtered'),
+        'executed_symbols': sum(1 for x in rows if x.get('latest_status') == 'executed'),
+        'period_days': days,
+    }
+    return jsonify({'success': True, 'data': rows, 'summary': summary, 'count': len(rows)})
+
+
 @app.route('/api/signals/stats')
 def get_signal_stats():
     """获取信号统计"""

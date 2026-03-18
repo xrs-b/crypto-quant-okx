@@ -82,6 +82,81 @@ def append_runtime_history(event: dict, limit: int = 20):
     save_runtime_state(state)
 
 
+def build_runtime_health_summary(cfg: Config, db: Database) -> dict:
+    runtime = load_runtime_state()
+    risk = RiskManager(cfg, db).get_risk_status()
+    balance = risk.get('balance', {}) if isinstance(risk, dict) else {}
+    mode = PresetManager(cfg).status()
+    ml_engine = MLEngine(cfg.all)
+    model_rows = []
+    for symbol in cfg.symbols:
+        metrics = ml_engine.get_model_metrics(symbol) or {}
+        model_rows.append({
+            'symbol': symbol,
+            'test_accuracy': metrics.get('test_accuracy'),
+            'f1': metrics.get('f1'),
+            'model_file': metrics.get('model_file'),
+        })
+
+    last_summary = runtime.get('last_summary') or {}
+    lines = [
+        f'环境：{cfg.exchange_mode}',
+        f'监听币种：{", ".join(cfg.symbols) or "--"}',
+        f'当前 preset：{mode.get("current_preset") or "manual"}',
+        f'守护间隔：{runtime.get("interval_seconds") or cfg.get("runtime.interval_seconds", 300)} 秒',
+        f'下次运行：{runtime.get("next_run_at") or "--"}',
+        '---',
+        f'最近一轮：signals {last_summary.get("signals", 0)} ｜ passed {last_summary.get("passed", 0)} ｜ opened {last_summary.get("opened", 0)} ｜ errors {last_summary.get("errors", 0)}',
+        f'风险状态：{risk.get("status") or "--"} ｜ 暴露 {risk.get("current_exposure", 0)} / {risk.get("max_exposure", 0)}',
+        f'余额：total {round(float(balance.get("total", 0) or 0), 2)} ｜ free {round(float(balance.get("free", 0) or 0), 2)}',
+    ]
+    if model_rows:
+        model_text = ' ｜ '.join([
+            f"{row['symbol']}: acc={row['test_accuracy'] if row['test_accuracy'] is not None else '--'}, f1={row['f1'] if row['f1'] is not None else '--'}"
+            for row in model_rows
+        ])
+        lines.extend(['---', f'ML 状态：{model_text}'])
+    return {
+        'title': '🩺 每日健康汇总',
+        'lines': lines,
+        'details': {
+            'runtime': runtime,
+            'risk': risk,
+            'mode': mode,
+            'models': model_rows,
+        }
+    }
+
+
+def maybe_send_daily_health_summary(cfg: Config, db: Database, notifier: NotificationManager, force: bool = False) -> dict:
+    runtime = load_runtime_state()
+    health_cfg = cfg.get('runtime.health_summary', {}) or {}
+    enabled = bool(health_cfg.get('enabled', True))
+    hour = int(health_cfg.get('hour', 20) or 20)
+    now = datetime.now()
+    health_state = runtime.get('health_summary', {}) if isinstance(runtime.get('health_summary'), dict) else {}
+    today = now.strftime('%Y-%m-%d')
+
+    if not force:
+        if not enabled:
+            return {'sent': False, 'reason': 'disabled'}
+        if health_state.get('last_sent_date') == today:
+            return {'sent': False, 'reason': 'already-sent'}
+        if now.hour < hour:
+            return {'sent': False, 'reason': 'before-hour', 'hour': hour}
+
+    summary = build_runtime_health_summary(cfg, db)
+    result = notifier.send('runtime', summary['title'], summary['lines'], 'info', summary['details'], priority='normal')
+    runtime['health_summary'] = {
+        'last_sent_at': now.isoformat(),
+        'last_sent_date': today,
+        'hour': hour,
+        'result': result,
+    }
+    save_runtime_state(runtime)
+    return {'sent': True, 'summary': summary, 'result': result}
+
+
 def build_exchange_diagnostics(cfg: Config, exchange: Exchange) -> dict:
     """构建交易所诊断信息（只读，不下单）"""
     report = {
@@ -577,6 +652,7 @@ def main():
     parser.add_argument('--apply-preset', type=str, help='应用预设配置')
     parser.add_argument('--mode-status', action='store_true', help='显示当前模式状态')
     parser.add_argument('--daily-summary', action='store_true', help='生成日报摘要')
+    parser.add_argument('--health-summary', action='store_true', help='立即生成一份健康汇总并发送通知')
     parser.add_argument('--cleanup-runtime-records', action='store_true', help='清理重复的治理/日报运行记录')
     parser.add_argument('--exchange-diagnose', action='store_true', help='只读诊断交易所/合约参数，不执行下单')
     parser.add_argument('--notify-test', action='store_true', help='测试 Discord/webhook 通知链路')
@@ -644,6 +720,10 @@ def main():
             state = load_runtime_state()
             state.update({'next_run_at': datetime.fromtimestamp(time.time() + interval).isoformat(), 'interval_seconds': interval})
             save_runtime_state(state)
+            try:
+                maybe_send_daily_health_summary(cfg, Database(cfg.db_path), notifier)
+            except Exception as e:
+                logger.error(f'发送每日健康汇总失败: {e}')
             time.sleep(interval)
     
     elif args.train:
@@ -764,6 +844,14 @@ def main():
         gov = GovernanceEngine(cfg, db)
         print("\n📰 今日日报:\n")
         print(gov.generate_daily_summary())
+
+    elif args.health_summary:
+        cfg = Config()
+        db = Database(cfg.db_path)
+        notifier = NotificationManager(cfg, db, logger)
+        result = maybe_send_daily_health_summary(cfg, db, notifier, force=True)
+        print("\n🩺 健康汇总:\n")
+        print(json.dumps(result, ensure_ascii=False, indent=2))
 
     elif args.cleanup_runtime_records:
         cfg = Config()

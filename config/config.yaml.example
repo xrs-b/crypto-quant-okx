@@ -112,6 +112,9 @@ runtime:
   max_runtime_minutes: 30
   mode: interval
   schedule: 0 * * * *
+  health_summary:
+    enabled: true
+    hour: 20   # 每日几时发一份健康汇总（24 小时制）
 
 runtime_meta:
   current_preset: btc-focused

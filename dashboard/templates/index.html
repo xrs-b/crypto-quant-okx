@@ -3337,7 +3337,7 @@
             }
         }
         async function loadOptimizer() {
-            const [data, candidateHistory, presetHistory, mode, gov, paramAdviceResp, paramDraftResp, overrideStatusResp, overrideBackupsResp] = await Promise.all([
+            const [data, candidateHistory, presetHistory, mode, gov, paramAdviceResp, paramDraftResp, overrideStatusResp, overrideBackupsResp, overrideHistoryResp] = await Promise.all([
                 api('/api/optimizer/results'),
                 api('/api/candidates/history?limit=10'),
                 api('/api/presets/history?limit=10'),
@@ -3346,7 +3346,8 @@
                 fetch('/api/signals/parameter-advice?days=14&window_hours=24&limit=160').then(r => r.json()),
                 fetch('/api/signals/parameter-advice/draft?days=14&window_hours=24&limit=160').then(r => r.json()),
                 fetch('/api/signals/overrides/status').then(r => r.json()),
-                fetch('/api/signals/overrides/backups').then(r => r.json())
+                fetch('/api/signals/overrides/backups').then(r => r.json()),
+                fetch('/api/signals/overrides/history?limit=20').then(r => r.json())
             ]);
             const best = data.best_experiment || {};
             document.getElementById('optimizerBest').innerHTML = `
@@ -3453,16 +3454,28 @@
             document.getElementById('optimizerBtcGrid').innerHTML = btcGrid.length ? btcGrid.map(r => `<tr><td>ms=${r.params?.min_strength}, rsi=${r.params?.rsi_strength_weight}, ts=${r.params?.trailing_stop}</td><td>${r.score}</td><td class="${Number(r.summary?.total_return_pct || 0) >= 0 ? 'pos' : 'neg'}">${safe(r.summary?.total_return_pct)}%</td><td class="${Number(r.summary?.max_drawdown_pct || 0) >= 0 ? 'pos' : 'neg'}">${safe(r.summary?.max_drawdown_pct)}%</td></tr>`).join('') : '<tr><td colspan="4" class="muted">暂无 BTC 网格</td></tr>';
             const promotions = data.candidate_promotions || [];
             document.getElementById('optimizerPromotions').innerHTML = promotions.length ? promotions.map(p => `<tr><td>${p.symbol}</td><td>${badge(p.decision, p.decision === 'promote' ? 'ok' : p.decision === 'keep_candidate' ? 'warn' : 'bad')}</td><td>${p.reason}</td></tr>`).join('') : '<tr><td colspan="3" class="muted">暂无候选晋升建议</td></tr>';
+            const overrideHistory = overrideHistoryResp?.data || [];
             const historyRows = [];
             (candidateHistory || []).forEach(h => historyRows.push({time: h.created_at, object: h.symbol, action: h.decision, note: h.reason || h.best_variant || '--'}));
             (presetHistory || []).forEach(h => historyRows.push({time: h.created_at, object: h.preset_name, action: 'preset_apply', note: (h.watch_list || []).join(', ') || '--'}));
+            overrideHistory.forEach(h => historyRows.push({
+                time: h.created_at,
+                object: (h.symbols || []).join(', ') || '--',
+                action: `override_${h.action}`,
+                note: `${h.target_file || '--'} ｜ params=${h.parameter_count || 0} ｜ backup=${h.backup_path || '--'}`
+            }));
             historyRows.sort((a,b) => String(b.time).localeCompare(String(a.time)));
             const latestSwitch = (presetHistory || [])[0];
-            document.getElementById('recentPoolSwitchSummary').innerHTML = latestSwitch ? `
-                <div class="item"><strong>最近切池</strong><div class="muted">${latestSwitch.preset_name} ｜ ${(latestSwitch.watch_list || []).join(', ') || '--'}</div></div>
-                <div class="item"><strong>发生时间</strong><div class="muted">${latestSwitch.created_at || '--'}</div></div>
+            const latestOverride = overrideHistory[0];
+            document.getElementById('recentPoolSwitchSummary').innerHTML = `
+                ${latestSwitch ? `<div class="item"><strong>最近切池</strong><div class="muted">${latestSwitch.preset_name} ｜ ${(latestSwitch.watch_list || []).join(', ') || '--'}</div></div>
+                <div class="item"><strong>切池时间</strong><div class="muted">${latestSwitch.created_at || '--'}</div></div>
                 <div class="item"><strong>切后格局</strong><div class="muted">主池 ${currentPool} ｜ 候选 ${candidatePool}</div></div>
-                <div class="item"><strong>观察窗口</strong><div class="muted">${holdHint}</div></div>` : '<div class="item muted">暂无切池摘要</div>';
+                <div class="item"><strong>观察窗口</strong><div class="muted">${holdHint}</div></div>` : '<div class="item muted">暂无切池摘要</div>'}
+                ${latestOverride ? `<div class="item"><strong>最近 override</strong><div class="muted">${latestOverride.action} ｜ ${(latestOverride.symbols || []).join(', ') || '--'}</div></div>
+                <div class="item"><strong>override 时间</strong><div class="muted">${latestOverride.created_at || '--'}</div></div>
+                <div class="item"><strong>影响参数</strong><div class="muted">${latestOverride.parameter_count || 0} 个 ｜ backup ${latestOverride.backup_path || '--'}</div></div>` : '<div class="item muted">暂无 override 审计记录</div>'}
+            `;
             document.getElementById('optimizerHistory').innerHTML = historyRows.length ? historyRows.slice(0,12).map(h => `<tr><td>${h.time}</td><td>${h.object}</td><td>${h.action}</td><td>${shortReason(h.note)}</td></tr>`).join('') : '<tr><td colspan="4" class="muted">暂无历史记录</td></tr>';
             const presets = data.presets || [];
             document.getElementById('optimizerPresets').innerHTML = presets.length ? presets.map(p => `<tr><td>${p.name}</td><td>${p.path}</td><td><button onclick="applyPreset('${p.name}')">应用</button></td></tr>`).join('') : '<tr><td colspan="3" class="muted">暂无预设</td></tr>';

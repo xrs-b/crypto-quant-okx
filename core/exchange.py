@@ -53,6 +53,18 @@ class Exchange:
             raise ValueError(f'无可用市场: {symbol}')
         return market['symbol']
 
+    def get_contract_size(self, symbol: str) -> float:
+        market = self.get_market(symbol)
+        if not market:
+            raise ValueError(f'无可用市场: {symbol}')
+        return float(market.get('contractSize') or 1.0)
+
+    def contracts_to_coin_quantity(self, symbol: str, contracts: float) -> float:
+        return float(contracts or 0) * self.get_contract_size(symbol)
+
+    def estimate_notional_usdt(self, symbol: str, contracts: float, price: float) -> float:
+        return self.contracts_to_coin_quantity(symbol, contracts) * float(price or 0)
+
     def normalize_contract_amount(self, symbol: str, desired_notional_usdt: float, price: float) -> float:
         """把目标名义价值换算成 OKX 需要的 amount（合约张数）"""
         market = self.get_market(symbol)

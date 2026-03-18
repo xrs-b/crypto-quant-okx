@@ -124,15 +124,36 @@ def _evaluate_filtered_signal_outcome(signal: Dict[str, Any], ohlcv: List[List[A
     return result
 
 
-def _build_filter_effectiveness(signals: List[Dict[str, Any]], exchange_client, window_hours: int = 24,
-                                min_move_pct: float = 1.5, now: datetime = None) -> List[Dict[str, Any]]:
+def _evaluate_signals_with_outcomes(signals: List[Dict[str, Any]], exchange_client, window_hours: int = 24,
+                                    min_move_pct: float = 1.5, now: datetime = None) -> List[Dict[str, Any]]:
     now = now or datetime.now()
-    buckets: Dict[str, Dict[str, Any]] = {}
     candle_limit = max(int(window_hours) + 4, 12)
+    evaluated = []
 
     for row in signals:
         if not row.get('filtered'):
             continue
+        created_at = _parse_created_at(row.get('created_at'))
+        if created_at is None or row.get('signal_type') not in ('buy', 'sell'):
+            outcome = _evaluate_filtered_signal_outcome(row, [], window_hours=window_hours, min_move_pct=min_move_pct, now=now)
+        elif now - created_at < timedelta(hours=window_hours):
+            outcome = _evaluate_filtered_signal_outcome(row, [], window_hours=window_hours, min_move_pct=min_move_pct, now=now)
+        else:
+            since_ms = int(created_at.timestamp() * 1000)
+            try:
+                candles = exchange_client.fetch_ohlcv(row['symbol'], '1h', since=since_ms, limit=candle_limit)
+            except Exception:
+                candles = []
+            outcome = _evaluate_filtered_signal_outcome(row, candles, window_hours=window_hours, min_move_pct=min_move_pct, now=now)
+        evaluated.append({**row, 'outcome': outcome})
+    return evaluated
+
+
+def _build_filter_effectiveness(signals: List[Dict[str, Any]], exchange_client, window_hours: int = 24,
+                                min_move_pct: float = 1.5, now: datetime = None) -> List[Dict[str, Any]]:
+    buckets: Dict[str, Dict[str, Any]] = {}
+
+    for row in _evaluate_signals_with_outcomes(signals, exchange_client, window_hours=window_hours, min_move_pct=min_move_pct, now=now):
         code = row.get('filter_code') or 'UNCLASSIFIED'
         bucket = buckets.setdefault(code, {
             'code': code,
@@ -153,20 +174,7 @@ def _build_filter_effectiveness(signals: List[Dict[str, Any]], exchange_client, 
         if row.get('symbol'):
             bucket['symbols'].add(row.get('symbol'))
 
-        outcome = None
-        created_at = _parse_created_at(row.get('created_at'))
-        if created_at is None or row.get('signal_type') not in ('buy', 'sell'):
-            outcome = _evaluate_filtered_signal_outcome(row, [], window_hours=window_hours, min_move_pct=min_move_pct, now=now)
-        elif now - created_at < timedelta(hours=window_hours):
-            outcome = _evaluate_filtered_signal_outcome(row, [], window_hours=window_hours, min_move_pct=min_move_pct, now=now)
-        else:
-            since_ms = int(created_at.timestamp() * 1000)
-            try:
-                candles = exchange_client.fetch_ohlcv(row['symbol'], '1h', since=since_ms, limit=candle_limit)
-            except Exception:
-                candles = []
-            outcome = _evaluate_filtered_signal_outcome(row, candles, window_hours=window_hours, min_move_pct=min_move_pct, now=now)
-
+        outcome = row['outcome']
         status = outcome['status']
         if status in ('avoided_loss', 'missed_profit', 'neutral'):
             bucket['analyzed'] += 1
@@ -191,6 +199,75 @@ def _build_filter_effectiveness(signals: List[Dict[str, Any]], exchange_client, 
 
     data.sort(key=lambda x: (-(x['effectiveness_rate'] if x['effectiveness_rate'] is not None else -1), -x['avoided_loss'], -x['total'], x['code']))
     return data
+
+
+def _build_symbol_filter_effectiveness(signals: List[Dict[str, Any]], exchange_client, window_hours: int = 24,
+                                       min_move_pct: float = 1.5, now: datetime = None) -> List[Dict[str, Any]]:
+    buckets: Dict[str, Dict[str, Any]] = {}
+
+    for row in _evaluate_signals_with_outcomes(signals, exchange_client, window_hours=window_hours, min_move_pct=min_move_pct, now=now):
+        symbol = row.get('symbol') or '--'
+        code = row.get('filter_code') or 'UNCLASSIFIED'
+        key = f'{symbol}::{code}'
+        bucket = buckets.setdefault(key, {
+            'symbol': symbol,
+            'code': code,
+            'group': row.get('filter_group') or 'other',
+            'reason': row.get('filter_reason') or '未注明原因',
+            'action_hint': row.get('action_hint') or '继续观察',
+            'total': 0,
+            'analyzed': 0,
+            'avoided_loss': 0,
+            'missed_profit': 0,
+            'neutral': 0,
+            'pending': 0,
+            'insufficient_data': 0,
+            'latest_created_at': row.get('created_at'),
+            'samples': [],
+        })
+        bucket['total'] += 1
+        if (row.get('created_at') or '') > (bucket.get('latest_created_at') or ''):
+            bucket['latest_created_at'] = row.get('created_at')
+
+        outcome = row['outcome']
+        status = outcome['status']
+        if status in ('avoided_loss', 'missed_profit', 'neutral'):
+            bucket['analyzed'] += 1
+        bucket[status] = bucket.get(status, 0) + 1
+        if len(bucket['samples']) < 2:
+            bucket['samples'].append({
+                'created_at': row.get('created_at'),
+                'status': status,
+                'favorable_move_pct': outcome.get('favorable_move_pct'),
+                'adverse_move_pct': outcome.get('adverse_move_pct'),
+            })
+
+    rows = []
+    for bucket in buckets.values():
+        decisive = bucket['avoided_loss'] + bucket['missed_profit']
+        bucket['effectiveness_rate'] = round(bucket['avoided_loss'] / decisive * 100, 2) if decisive > 0 else None
+        if bucket['effectiveness_rate'] is None:
+            bucket['tuning_bias'] = 'wait'
+            bucket['tuning_hint'] = '有效样本未够，继续积累观察样本'
+        elif bucket['effectiveness_rate'] >= 70:
+            bucket['tuning_bias'] = 'keep_strict'
+            bucket['tuning_hint'] = '该币种上此规则多数在帮你避险，暂时不建议放宽'
+        elif bucket['effectiveness_rate'] <= 40:
+            bucket['tuning_bias'] = 'consider_relax'
+            bucket['tuning_hint'] = '该币种上此规则错失机会偏多，可考虑局部放宽'
+        else:
+            bucket['tuning_bias'] = 'mixed'
+            bucket['tuning_hint'] = '该币种上此规则表现一般，建议继续观察更多样本'
+        rows.append(bucket)
+
+    rows.sort(key=lambda x: (
+        -(x['effectiveness_rate'] if x['effectiveness_rate'] is not None else -1),
+        -x['analyzed'],
+        -x['total'],
+        x['symbol'],
+        x['code']
+    ))
+    return rows
 
 
 # ============================================================================
@@ -366,6 +443,41 @@ def get_signal_filter_effectiveness():
         'neutral': sum(row.get('neutral', 0) for row in data),
         'pending': sum(row.get('pending', 0) for row in data),
         'insufficient_data': sum(row.get('insufficient_data', 0) for row in data),
+    }
+    return jsonify({'success': True, 'data': data, 'summary': summary, 'count': len(data)})
+
+
+@app.route('/api/signals/filter-effectiveness/by-symbol')
+def get_signal_filter_effectiveness_by_symbol():
+    """获取按币种 × 过滤规则的后验有效性统计"""
+    days = int(request.args.get('days', 14))
+    limit = int(request.args.get('limit', 200))
+    window_hours = int(request.args.get('window_hours', 24))
+    min_move_pct = float(request.args.get('min_move_pct', 1.5))
+    cutoff = datetime.now() - timedelta(days=days)
+    signals = [
+        row for row in db.get_signals(limit=max(limit * 4, 300))
+        if row.get('filtered') and (_parse_created_at(row.get('created_at')) or datetime.min) >= cutoff
+    ]
+    signals = signals[:limit]
+    data = _build_symbol_filter_effectiveness(
+        signals,
+        _get_exchange_client(),
+        window_hours=window_hours,
+        min_move_pct=min_move_pct,
+        now=datetime.now(),
+    )
+    summary = {
+        'days': days,
+        'window_hours': window_hours,
+        'min_move_pct': min_move_pct,
+        'signals': len(signals),
+        'rows': len(data),
+        'analyzed': sum(row.get('analyzed', 0) for row in data),
+        'consider_relax': sum(1 for row in data if row.get('tuning_bias') == 'consider_relax'),
+        'keep_strict': sum(1 for row in data if row.get('tuning_bias') == 'keep_strict'),
+        'mixed': sum(1 for row in data if row.get('tuning_bias') == 'mixed'),
+        'wait': sum(1 for row in data if row.get('tuning_bias') == 'wait'),
     }
     return jsonify({'success': True, 'data': data, 'summary': summary, 'count': len(data)})
 

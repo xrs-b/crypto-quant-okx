@@ -3,9 +3,12 @@ OKX量化交易系统 - 测试套件
 """
 import sys
 import os
+import tempfile
+from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import unittest
+from unittest.mock import patch
 import pandas as pd
 import numpy as np
 from datetime import datetime
@@ -215,6 +218,45 @@ class TestConfig(unittest.TestCase):
     def test_position_mode(self):
         """测试持仓模式配置"""
         self.assertIn(self.config.position_mode, ['oneway', 'hedge', 'one-way', 'net', 'single'])
+
+    def test_env_placeholder_resolution_and_local_override(self):
+        old_api_key = os.environ.get('OKX_API_KEY')
+        old_bot_token = os.environ.get('DISCORD_BOT_TOKEN')
+        os.environ['OKX_API_KEY'] = 'env-okx-key'
+        os.environ['DISCORD_BOT_TOKEN'] = 'env-discord-token'
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg_path = os.path.join(tmpdir, 'config.yaml')
+            local_path = os.path.join(tmpdir, 'config.local.yaml')
+            with open(cfg_path, 'w', encoding='utf-8') as f:
+                f.write(
+                    "api:\n"
+                    "  key: ${OKX_API_KEY}\n"
+                    "  secret: ${OKX_API_SECRET:-fallback-secret}\n"
+                    "notification:\n"
+                    "  discord:\n"
+                    "    bot_token: ${DISCORD_BOT_TOKEN:-}\n"
+                    "    channel_id: public-channel\n"
+                )
+            with open(local_path, 'w', encoding='utf-8') as f:
+                f.write(
+                    "notification:\n"
+                    "  discord:\n"
+                    "    channel_id: local-private-channel\n"
+                )
+            with patch('core.config.Path.home', return_value=Path(tmpdir)):
+                cfg = Config(cfg_path)
+            self.assertEqual(cfg.get('api.key'), 'env-okx-key')
+            self.assertEqual(cfg.get('api.secret'), 'fallback-secret')
+            self.assertEqual(cfg.get('notification.discord.bot_token'), 'env-discord-token')
+            self.assertEqual(cfg.get('notification.discord.channel_id'), 'local-private-channel')
+        if old_api_key is None:
+            os.environ.pop('OKX_API_KEY', None)
+        else:
+            os.environ['OKX_API_KEY'] = old_api_key
+        if old_bot_token is None:
+            os.environ.pop('DISCORD_BOT_TOKEN', None)
+        else:
+            os.environ['DISCORD_BOT_TOKEN'] = old_bot_token
 
 
 class TestExchangeAmountLimits(unittest.TestCase):
@@ -652,6 +694,67 @@ class TestDashboardApi(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertTrue(resp.json.get('success'))
         self.assertIsInstance(resp.json.get('data'), list)
+
+    def test_signal_coin_breakdown_groups_watch_filtered_and_executed_by_symbol(self):
+        import dashboard.api as dashboard_api
+
+        test_db = Database('data/test_dashboard_signals.db')
+        old_db = dashboard_api.db
+        dashboard_api.db = test_db
+        try:
+            buy_id = test_db.record_signal(
+                symbol='BTC/USDT',
+                signal_type='buy',
+                price=50000,
+                strength=82,
+                reasons=[],
+                strategies_triggered=['trend_follow']
+            )
+            test_db.update_signal(buy_id, filtered=1, filter_reason='信号逆大趋势')
+
+            hold_id = test_db.record_signal(
+                symbol='BTC/USDT',
+                signal_type='hold',
+                price=50010,
+                strength=18,
+                reasons=[],
+                strategies_triggered=[]
+            )
+            test_db.update_signal(hold_id, filtered=1, filter_reason='无可执行方向')
+
+            executed_id = test_db.record_signal(
+                symbol='ETH/USDT',
+                signal_type='buy',
+                price=3000,
+                strength=76,
+                reasons=[],
+                strategies_triggered=['breakout']
+            )
+            test_db.update_signal(executed_id, executed=1)
+
+            client = app.test_client()
+            resp = client.get('/api/signals/coin-breakdown?days=30')
+            self.assertEqual(resp.status_code, 200)
+            self.assertTrue(resp.json.get('success'))
+            rows = resp.json.get('data') or []
+            summary = resp.json.get('summary') or {}
+
+            btc = next(row for row in rows if row['symbol'] == 'BTC/USDT')
+            eth = next(row for row in rows if row['symbol'] == 'ETH/USDT')
+
+            self.assertEqual(btc['hold_signals'], 1)
+            self.assertEqual(btc['filtered_signals'], 2)
+            self.assertEqual(btc['executed_signals'], 0)
+            self.assertEqual(btc['latest_status'], 'watch')
+            self.assertEqual({item['reason'] for item in btc['top_filter_reasons']}, {'信号逆大趋势', '无可执行方向'})
+            self.assertEqual(eth['executed_signals'], 1)
+            self.assertEqual(eth['latest_status'], 'executed')
+            self.assertEqual(summary['symbols'], 2)
+            self.assertEqual(summary['executed_symbols'], 1)
+        finally:
+            dashboard_api.db = old_db
+            if os.path.exists('data/test_dashboard_signals.db'):
+                os.remove('data/test_dashboard_signals.db')
 
 
 class TestDiagnostics(unittest.TestCase):

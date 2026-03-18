@@ -52,7 +52,9 @@ ml:
     min_return_threshold: 0.002
 notification:
   discord:
-    channel_id: '1468585288770125876'
+    channel_id: ${DISCORD_CHANNEL_ID:-your_discord_channel_id}
+    webhook_url: ${DISCORD_WEBHOOK_URL:-}
+    bot_token: ${DISCORD_BOT_TOKEN:-}
     enabled: true
     notify_errors: true
     notify_signals: true

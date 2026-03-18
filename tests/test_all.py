@@ -22,7 +22,7 @@ from core.notifier import NotificationManager
 from signals import Signal, SignalDetector, SignalValidator, SignalRecorder
 from trading import TradingExecutor, RiskManager
 from strategies.strategy_library import StrategyManager
-from bot.run import build_exchange_diagnostics, build_exchange_smoke_plan, execute_exchange_smoke, reconcile_exchange_positions
+from bot.run import build_exchange_diagnostics, build_exchange_smoke_plan, build_runtime_health_summary, maybe_send_daily_health_summary, execute_exchange_smoke, reconcile_exchange_positions
 from dashboard.api import app
 
 
@@ -779,6 +779,23 @@ class FakeSignalAnalysisExchange:
         return self.candles_by_symbol.get(symbol, [])
 
 
+class FakeHealthNotifier:
+    def __init__(self):
+        self.calls = []
+
+    def send(self, event_type, title, lines, level='info', details=None, priority='normal'):
+        payload = {
+            'event_type': event_type,
+            'title': title,
+            'lines': lines,
+            'level': level,
+            'details': details or {},
+            'priority': priority,
+        }
+        self.calls.append(payload)
+        return {'delivered': False, 'message': '\n'.join(lines), 'title': title}
+
+
 class TestDashboardApi(unittest.TestCase):
     def test_daily_summary_handles_null_pnl(self):
         client = app.test_client()
@@ -1421,6 +1438,41 @@ class TestDiagnostics(unittest.TestCase):
 
         self.assertFalse(result['opened'])
         self.assertIn('testnet', result['error'])
+
+
+class TestHealthSummary(unittest.TestCase):
+    def test_build_runtime_health_summary_contains_core_sections(self):
+        cfg = Config()
+        db = Database('data/test_health_summary.db')
+        try:
+            summary = build_runtime_health_summary(cfg, db)
+            self.assertIn('title', summary)
+            self.assertIn('lines', summary)
+            self.assertIn('details', summary)
+            self.assertTrue(any('环境' in line for line in summary['lines']))
+            self.assertTrue(any('最近一轮' in line for line in summary['lines']))
+        finally:
+            if os.path.exists('data/test_health_summary.db'):
+                os.remove('data/test_health_summary.db')
+
+    def test_maybe_send_daily_health_summary_force_sends(self):
+        import bot.run as bot_run
+        cfg = Config()
+        db = Database('data/test_health_summary_force.db')
+        notifier = FakeHealthNotifier()
+        old_runtime_path = bot_run.RUNTIME_STATE_PATH
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bot_run.RUNTIME_STATE_PATH = Path(tmpdir) / 'runtime_state.json'
+            try:
+                result = maybe_send_daily_health_summary(cfg, db, notifier, force=True)
+                self.assertTrue(result['sent'])
+                self.assertEqual(len(notifier.calls), 1)
+                state = json.loads(bot_run.RUNTIME_STATE_PATH.read_text())
+                self.assertIn('health_summary', state)
+            finally:
+                bot_run.RUNTIME_STATE_PATH = old_runtime_path
+        if os.path.exists('data/test_health_summary_force.db'):
+            os.remove('data/test_health_summary_force.db')
 
 
 class TestTradingExecutor(unittest.TestCase):

@@ -9,6 +9,7 @@ from typing import Dict, List, Any
 import os
 import threading
 import shutil
+import json
 from pathlib import Path
 import yaml
 
@@ -1371,6 +1372,79 @@ def get_account_diagnostic():
     return jsonify({'success': True, 'data': result})
 
 
+def _build_runtime_checklist() -> Dict[str, Any]:
+    runtime = load_runtime_state() or {}
+    watch_list = config.symbols
+    exchange_mode = config.get('exchange.mode', 'testnet')
+    model_rows = []
+    for symbol in watch_list:
+        model_name = ml_engine._symbol_to_name(symbol) if hasattr(ml_engine, '_symbol_to_name') else symbol.replace('/', '_')
+        model_file = Path(ml_engine.model_path) / f'{model_name}_model.pkl'
+        metrics_file = Path(ml_engine.model_path) / f'{model_name}_metrics.json'
+        metrics = None
+        if metrics_file.exists():
+            try:
+                metrics = json.loads(metrics_file.read_text())
+            except Exception:
+                metrics = None
+        model_rows.append({
+            'symbol': symbol,
+            'model_file': str(model_file),
+            'model_exists': model_file.exists(),
+            'metrics_exists': metrics_file.exists(),
+            'test_accuracy': metrics.get('test_accuracy') if metrics else None,
+            'f1': metrics.get('f1') if metrics else None,
+        })
+
+    last_summary = runtime.get('last_summary') or {}
+    last_error = runtime.get('last_error')
+    checks = [
+        {
+            'key': 'dashboard',
+            'label': 'Dashboard 在线',
+            'status': 'ok',
+            'detail': '当前接口可响应，说明 dashboard 进程在线。',
+        },
+        {
+            'key': 'daemon',
+            'label': '守护机器人在线',
+            'status': 'ok' if runtime.get('next_run_at') else 'warn',
+            'detail': f"next_run_at={runtime.get('next_run_at') or '--'} ｜ last_finished_at={runtime.get('last_finished_at') or '--'}",
+        },
+        {
+            'key': 'exchange_mode',
+            'label': '交易环境',
+            'status': 'ok' if exchange_mode == 'testnet' else 'warn',
+            'detail': f'当前模式：{exchange_mode}',
+        },
+        {
+            'key': 'watch_list',
+            'label': '监听币种',
+            'status': 'ok' if watch_list else 'bad',
+            'detail': ', '.join(watch_list) if watch_list else '未配置 watch_list',
+        },
+        {
+            'key': 'latest_cycle',
+            'label': '最近一轮执行',
+            'status': 'bad' if last_error else 'ok',
+            'detail': f"signals={last_summary.get('signals', 0)} ｜ passed={last_summary.get('passed', 0)} ｜ opened={last_summary.get('opened', 0)} ｜ errors={last_summary.get('errors', 0)}",
+        },
+        {
+            'key': 'models',
+            'label': 'ML 模型文件',
+            'status': 'ok' if all(row['model_exists'] for row in model_rows) else 'warn',
+            'detail': ' ｜ '.join([f"{row['symbol']}: model={'Y' if row['model_exists'] else 'N'}, acc={row['test_accuracy']}" for row in model_rows]) or '--',
+        },
+    ]
+    return {
+        'checks': checks,
+        'runtime': runtime,
+        'models': model_rows,
+        'exchange_mode': exchange_mode,
+        'watch_list': watch_list,
+    }
+
+
 @app.route('/api/system/status')
 def get_system_status():
     """获取系统状态"""
@@ -1413,6 +1487,12 @@ def get_system_status():
             'risk': risk
         }
     })
+
+
+@app.route('/api/system/checklist')
+def get_system_checklist():
+    """获取运行状态自检清单"""
+    return jsonify({'success': True, 'data': _build_runtime_checklist()})
 
 
 # ============================================================================

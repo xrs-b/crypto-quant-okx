@@ -39,6 +39,7 @@ from trading.executor import RiskManager
 from bot.run import execute_exchange_smoke, reconcile_exchange_positions, load_runtime_state
 from ml.engine import MLEngine
 from analytics import StrategyBacktester, SignalQualityAnalyzer, ParameterOptimizer, GovernanceEngine
+from analytics.mfe_mae import MFEAnalyzer, get_mfe_mae_analysis
 
 # 初始化
 config = Config()
@@ -2028,6 +2029,73 @@ def health():
         'status': 'healthy',
         'timestamp': datetime.now().isoformat()
     })
+
+
+# ============================================================================
+# MFE / MAE 分析
+# ============================================================================
+
+@app.route('/api/trades/mfe-mae')
+def get_trade_mfe_mae():
+    """
+    MFE/MAE 分析与止盈止损优化诊断
+    
+    返回:
+    - 每笔交易/持仓的 MFE (最大有利偏移) / MAE (最大不利偏移)
+    - 按币种聚合的统计
+    - 止盈/止损/追踪止损建议
+    """
+    try:
+        analyzer = MFEAnalyzer(db)
+        report = analyzer.generate_analysis_report()
+        return jsonify(report)
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': str(e),
+            'error_type': type(e).__name__
+        }), 500
+
+
+@app.route('/api/trades/mfe-mae/by-symbol')
+def get_trade_mfe_mae_by_symbol():
+    """按币种获取 MFE/MAE 分析"""
+    symbol = request.args.get('symbol')
+    try:
+        analyzer = MFEAnalyzer(db)
+        report = analyzer.generate_analysis_report()
+        
+        if symbol:
+            by_symbol = report.get('by_symbol', {})
+            return jsonify(by_symbol.get(symbol, {
+                'status': 'not_found',
+                'message': f'无 {symbol} 的数据'
+            }))
+        return jsonify(report.get('by_symbol', {}))
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 500
+
+
+@app.route('/api/trades/mfe-mae/recommendations')
+def get_trade_mfe_mae_recommendations():
+    """获取止盈止损建议"""
+    try:
+        analyzer = MFEAnalyzer(db)
+        report = analyzer.generate_analysis_report()
+        
+        return jsonify({
+            'stop_loss': report.get('stop_loss', {}),
+            'take_profit': report.get('take_profit', {}),
+            'trailing_stop': report.get('trailing_stop', {}),
+        })
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 500
 
 
 # ============================================================================

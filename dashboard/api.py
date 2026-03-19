@@ -18,18 +18,28 @@ app = Flask(__name__, static_folder='templates', static_url_path='')
 CORS(app)
 
 # Custom JSON encoder to handle NaN/Inf values
-class CustomJSONProvider(app.json_provider_class):
-    def encode(self, obj):
-        import math
-        def replacer(obj):
-            if isinstance(obj, float):
-                if math.isnan(obj) or math.isinf(obj):
-                    return None
-            return obj
-        return super().encode(obj)
+import math
 
-app.json_provider_class = CustomJSONProvider
-app.json = CustomJSONProvider(app)
+class SafeJSONProvider(app.json.__class__):
+    """Custom JSON provider that converts NaN/Inf to null"""
+    
+    def dumps(self, obj, **kwargs):
+        import json as _json
+        
+        def fix_nan(o):
+            if isinstance(o, dict):
+                return {k: fix_nan(v) for k, v in o.items()}
+            elif isinstance(o, list):
+                return [fix_nan(v) for v in o]
+            elif isinstance(o, float):
+                if math.isnan(o) or math.isinf(o):
+                    return None
+            return o
+        
+        return _json.dumps(fix_nan(obj), **kwargs)
+
+# Replace the app's JSON provider
+app.json = SafeJSONProvider(app)
 
 from core.config import Config
 from core.database import Database

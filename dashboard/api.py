@@ -17,6 +17,20 @@ import yaml
 app = Flask(__name__, static_folder='templates', static_url_path='')
 CORS(app)
 
+# Custom JSON encoder to handle NaN/Inf values
+class CustomJSONProvider(app.json_provider_class):
+    def encode(self, obj):
+        import math
+        def replacer(obj):
+            if isinstance(obj, float):
+                if math.isnan(obj) or math.isinf(obj):
+                    return None
+            return obj
+        return super().encode(obj)
+
+app.json_provider_class = CustomJSONProvider
+app.json = CustomJSONProvider(app)
+
 from core.config import Config
 from core.database import Database
 from core.exchange import Exchange

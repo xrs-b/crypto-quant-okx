@@ -20,12 +20,23 @@ exchange:
   default_leverage: 10
   mode: testnet
   name: okx
+  position_mode: hedge
+governance:
+  pool_switch:
+    min_hold_hours: 6
+    score_margin: 1.0
 logging:
   backup_count: 5
   file: logs/trading.log
   format: '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
   level: INFO
   max_size_mb: 10
+market_filters:
+  block_counter_trend: true
+  block_high_volatility: true
+  block_low_volatility: true
+  max_volatility: 0.05
+  min_volatility: 0.0045
 ml:
   enabled: true
   features:
@@ -54,6 +65,7 @@ notification:
   discord:
     channel_id: ${DISCORD_CHANNEL_ID:-your_discord_channel_id}
     webhook_url: ${DISCORD_WEBHOOK_URL:-}
+    webhook_username: OKX量化机器人
     bot_token: ${DISCORD_BOT_TOKEN:-}
     enabled: true
     notify_errors: true
@@ -67,14 +79,16 @@ notification:
     to_address: your_email@gmail.com
     username: your_email@gmail.com
   telegram:
-    bot_token: your_bot_token
-    chat_id: your_chat_id
+    bot_token: ''
+    chat_id: ''
     enabled: false
 runtime:
   interval_seconds: 300
   max_runtime_minutes: 30
   mode: interval
   schedule: 0 * * * *
+runtime_meta:
+  current_preset: xrp-candidate
 strategies:
   adx:
     enabled: true
@@ -120,21 +134,23 @@ strategies:
     volume_ma_period: 20
     volume_multiplier: 1.5
 symbols:
-  contract_type: usdt
-  margin_type: isolated
-  quote_currency: USDT
-  watch_list:
-  - XRP/USDT
   candidate_watch_list:
   - BTC/USDT
+  contract_type: usdt
+  margin_type: isolated
   paused_watch_list:
   - ETH/USDT
   - SOL/USDT
   - HYPE/USDT
+  quote_currency: USDT
   selection_mode: focused
+  watch_list:
+  - XRP/USDT
 trading:
   cooldown_minutes: 15
   leverage: 10
+  max_consecutive_losses: 3
+  max_daily_drawdown: 0.03
   max_exposure: 0.3
   max_position_per_symbol: 0.15
   max_trades_per_day: 10
@@ -143,13 +159,3 @@ trading:
   stop_loss: 0.018
   take_profit: 0.028
   trailing_stop: 0.01
-  max_consecutive_losses: 3
-  max_daily_drawdown: 0.03
-market_filters:
-  block_counter_trend: true
-  block_low_volatility: true
-  block_high_volatility: true
-  min_volatility: 0.0045
-  max_volatility: 0.05
-runtime_meta:
-  current_preset: xrp-candidate

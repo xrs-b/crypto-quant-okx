@@ -1455,10 +1455,126 @@ class TestDashboardApi(unittest.TestCase):
             self.assertEqual(eth['latest_status'], 'executed')
             self.assertEqual(summary['symbols'], 2)
             self.assertEqual(summary['executed_symbols'], 1)
+            
+            # 验证新增的诊断层字段
+            self.assertIn('blocker_dimension', btc)
+            self.assertIn('dominant_blocker', btc)
+            self.assertIn('samples_24h', btc)
+            self.assertIn('samples_48h', btc)
+            self.assertIn('sample_status', btc)
+            self.assertIn('recommendation', btc)
+            self.assertIn('dimension_breakdown', summary)
+            self.assertIn('sample_status', summary)
         finally:
             dashboard_api.db = old_db
             if os.path.exists('data/test_dashboard_signals.db'):
                 os.remove('data/test_dashboard_signals.db')
+
+    def test_coin_breakdown_diagnostic_dimension_classification(self):
+        """测试 coin-breakdown 诊断层字段：阻塞维度分类"""
+        import dashboard.api as dashboard_api
+        test_db = Database('data/test_diagnostic_dimension.db')
+        old_db = dashboard_api.db
+        dashboard_api.db = test_db
+        try:
+            # 添加不同过滤码的信号
+            # NO_DIRECTION -> direction
+            id1 = test_db.record_signal(
+                symbol='BTC/USDT',
+                signal_type='hold',
+                price=50000,
+                strength=10,
+                reasons=[],
+                strategies_triggered=[]
+            )
+            test_db.update_signal(id1, filtered=1, filter_reason='无可执行方向', filter_code='NO_DIRECTION', filter_group='signal', action_hint='等方向明确')
+            
+            # COUNTER_TREND -> trend
+            id2 = test_db.record_signal(
+                symbol='BTC/USDT',
+                signal_type='buy',
+                price=50000,
+                strength=60,
+                reasons=[],
+                strategies_triggered=['RSI']
+            )
+            test_db.update_signal(id2, filtered=1, filter_reason='信号逆大趋势', filter_code='COUNTER_TREND', filter_group='market', action_hint='等趋势一致')
+            
+            # VOLATILITY_LOW -> volatility
+            id3 = test_db.record_signal(
+                symbol='ETH/USDT',
+                signal_type='buy',
+                price=3000,
+                strength=65,
+                reasons=[],
+                strategies_triggered=['MACD']
+            )
+            test_db.update_signal(id3, filtered=1, filter_reason='波动率过低', filter_code='VOLATILITY_LOW', filter_group='market', action_hint='等待波动恢复')
+            
+            client = app.test_client()
+            resp = client.get('/api/signals/coin-breakdown?days=30')
+            self.assertEqual(resp.status_code, 200)
+            rows = resp.json.get('data') or []
+            
+            btc = next(row for row in rows if row['symbol'] == 'BTC/USDT')
+            eth = next(row for row in rows if row['symbol'] == 'ETH/USDT')
+            
+            # 验证 BTC 阻塞维度
+            self.assertIn('direction', btc['blocker_dimension'])
+            self.assertIn('trend', btc['blocker_dimension'])
+            self.assertEqual(btc['dominant_blocker'], 'direction')
+            
+            # 验证 ETH 阻塞维度
+            self.assertIn('volatility', eth['blocker_dimension'])
+            self.assertEqual(eth['dominant_blocker'], 'volatility')
+            
+            # 验证 recommendation 包含维度信息
+            self.assertIn('等方向明确', btc['recommendation'])
+            self.assertIn('等待波动率恢复', eth['recommendation'])
+            
+        finally:
+            dashboard_api.db = old_db
+            if os.path.exists('data/test_diagnostic_dimension.db'):
+                os.remove('data/test_diagnostic_dimension.db')
+
+    def test_coin_breakdown_sample_status_24h_vs_48h(self):
+        """测试 coin-breakdown 样本状态与 24h vs 48h 对比"""
+        import dashboard.api as dashboard_api
+        test_db = Database('data/test_sample_status.db')
+        old_db = dashboard_api.db
+        dashboard_api.db = test_db
+        try:
+            # 添加信号 - 样本不足的情况（只有1个信号）
+            test_db.record_signal(
+                symbol='BTC/USDT',
+                signal_type='hold',
+                price=50000,
+                strength=10,
+                reasons=[],
+                strategies_triggered=[]
+            )
+            
+            client = app.test_client()
+            resp = client.get('/api/signals/coin-breakdown?days=30')
+            self.assertEqual(resp.status_code, 200)
+            rows = resp.json.get('data') or []
+            summary = resp.json.get('summary') or {}
+            
+            btc = next(row for row in rows if row['symbol'] == 'BTC/USDT')
+            
+            # 验证样本状态
+            self.assertEqual(btc['samples_24h'], 1)
+            self.assertEqual(btc['samples_48h'], 1)
+            self.assertEqual(btc['sample_status'], 'insufficient')
+            
+            # 验证全局样本统计
+            self.assertIn('sample_status', summary)
+            self.assertEqual(summary['sample_status']['insufficient'], 1)
+            
+        finally:
+            dashboard_api.db = old_db
+            if os.path.exists('data/test_sample_status.db'):
+                os.remove('data/test_sample_status.db')
 
 
 class TestDiagnostics(unittest.TestCase):

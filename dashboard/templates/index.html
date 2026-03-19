@@ -593,7 +593,7 @@
                                 <div class="section-note">逐只币睇清楚系继续观望、被过滤，定已经开始有执行样本。</div>
                                 <div class="summary-strip" id="signalCoinBreakdownSummary"></div>
                                 <div style="height:12px"></div>
-                                <table><thead><tr><th>币种</th><th>最新状态</th><th>观望</th><th>过滤</th><th>执行</th><th>主拦截分组</th><th>最新诊断 / 建议</th></tr></thead><tbody id="signalCoinBreakdownTable"></tbody></table>
+                                <table><thead><tr><th>币种</th><th>最新状态</th><th>观望</th><th>过滤</th><th>执行</th><th>主阻塞维度</th><th>样本(24h/48h)</th><th>阻塞原因</th><th>诊断建议</th></tr></thead><tbody id="signalCoinBreakdownTable"></tbody></table>
                             </div>
                             <div class="card mini">
                                 <div class="section-title">过滤原因 Top</div>
@@ -3248,21 +3248,33 @@
             };
             document.getElementById('signalCoinBreakdownTable').innerHTML = coinRows.length ? coinRows.map(row => {
                 const [statusLabel, statusClass] = statusMap[row.latest_status] || ['待观察', 'warn'];
+                // 主阻塞维度
+                const dimMap = {direction: '📍方向', trend: '📈趋势', volatility: '📊波动', cooldown: '⏳冷却', position: '💼持仓', risk: '⚠️风险', other: '❓其他'};
+                const dominantBlocker = row.dominant_blocker ? (dimMap[row.dominant_blocker] || row.dominant_blocker) : '--';
+                // 样本状态
+                const sampleStatusClass = row.sample_status === 'sufficient' ? 'ok' : 'warn';
+                const sampleStatusLabel = row.sample_status === 'sufficient' ? '充足' : '不足';
+                const samples24h = row.samples_24h ?? 0;
+                const samples48h = row.samples_48h ?? 0;
+                const sampleText = `${samples24h}/${samples48h}`;
+                // 阻塞原因
                 const reasonsText = (row.top_filter_codes || []).length
-                    ? row.top_filter_codes.map(item => `${item.code}×${item.count}`).join(' ｜ ')
-                    : ((row.top_filter_reasons || []).length ? row.top_filter_reasons.map(item => `${item.reason}×${item.count}`).join(' ｜ ') : (row.latest_filter_reason || row.breakdown_conclusion || '--'));
-                const groupLabel = groupLabelMap[row.dominant_filter_group] || row.dominant_filter_group || '--';
-                const latestMeta = row.latest_filter_code ? `${row.latest_filter_code} ｜ ${row.latest_filter_reason || '--'}` : (row.breakdown_conclusion || '--');
+                    ? row.top_filter_codes.map(item => `${item.code}×${item.count}`).join(' ')
+                    : ((row.top_filter_reasons || []).length ? row.top_filter_reasons.map(item => `${item.reason}×${item.count}`).join(' ') : (row.latest_filter_reason || row.breakdown_conclusion || '--'));
+                // 诊断建议
+                const recommendation = row.recommendation || row.diagnostic_action || '--';
                 return `<tr>
-                    <td>${row.symbol || '--'}</td>
+                    <td><strong>${row.symbol || '--'}</strong></td>
                     <td>${badge(statusLabel, statusClass)}</td>
                     <td>${row.hold_signals ?? 0}</td>
                     <td>${row.filtered_signals ?? 0}</td>
                     <td>${row.executed_signals ?? 0}</td>
-                    <td>${groupLabel}<div class="muted" style="margin-top:6px;">${reasonsText}</div></td>
-                    <td>${latestMeta}<div class="muted" style="margin-top:6px;">${row.diagnostic_action || '--'} ｜ latest=${row.latest_time || '--'}</div></td>
+                    <td>${badge(dominantBlocker, row.dominant_blocker === 'risk' ? 'bad' : row.dominant_blocker === 'direction' ? 'info' : row.dominant_blocker === 'trend' ? 'info' : 'warn')}</td>
+                    <td>${badge(sampleStatusLabel, sampleStatusClass)}<div class="muted" style="margin-top:4px;font-size:11px;">${sampleText}</div></td>
+                    <td><span style="font-size:12px">${reasonsText}</span></td>
+                    <td><div style="font-size:12px">${recommendation}</div></td>
                 </tr>`;
-            }).join('') : '<tr><td colspan="7" class="muted">暂无按币种拆解数据</td></tr>';
+            }).join('') : '<tr><td colspan="9" class="muted">暂无按币种拆解数据</td></tr>';
         }
         async function loadStrategy() {
             const [stats, daily, perf, ml] = await Promise.all([api('/api/strategy/stats'), api('/api/daily/summary'), api('/api/trades/symbol-performance'), api('/api/ml/metrics')]);

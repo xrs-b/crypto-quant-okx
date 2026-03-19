@@ -951,14 +951,48 @@ def get_signal_override_history():
     return jsonify({'success': True, 'data': db.get_override_audit_history(limit=limit)})
 
 
+def _classify_blocker_dimension(code, group, reason):
+    """将过滤码分类到主阻塞维度"""
+    code_upper = (code or '').upper()
+    reason_lower = (reason or '').lower()
+    
+    # direction - 方向相关
+    if 'DIRECTION' in code_upper or 'NO_DIRECTION' in code_upper:
+        return 'direction'
+    # trend - 趋势相关
+    if 'TREND' in code_upper or 'COUNTER_TREND' in code_upper:
+        return 'trend'
+    # volatility - 波动率相关
+    if 'VOLATILITY' in code_upper or 'VOLUME' in code_upper:
+        return 'volatility'
+    # cooldown - 冷却期相关
+    if 'COOLDOWN' in code_upper or 'COOLING' in code_upper or 'RECENT' in code_upper:
+        return 'cooldown'
+    # position - 持仓相关
+    if 'POSITION' in code_upper or 'EXISTS' in code_upper or 'HOLDING' in code_upper:
+        return 'position'
+    # risk - 风险相关
+    if 'RISK' in code_upper or 'DRAWDOWN' in code_upper or 'LOSS' in code_upper or group == 'risk':
+        return 'risk'
+    # other - 其他
+    return 'other'
+
+
 @app.route('/api/signals/coin-breakdown')
 def get_signal_coin_breakdown():
-    """按币种拆解观望 / 过滤 / 执行情况"""
+    """按币种拆解观望 / 过滤 / 执行情况，包含诊断层字段"""
     limit = int(request.args.get('limit', 1000))
     days = int(request.args.get('days', 1))
     include_all = str(request.args.get('all', '')).lower() in ('1', 'true', 'yes')
+    
+    # 支持 24h vs 48h 对比
+    compare_24h = request.args.get('compare_24h', 'true').lower() in ('1', 'true', 'yes')
+    
     signals = db.get_signals(limit=limit)
-    cutoff = datetime.now() - timedelta(days=days)
+    now = datetime.now()
+    
+    # 主周期过滤
+    cutoff = now - timedelta(days=days)
     filtered_signals = []
     for row in signals:
         created_at = row.get('created_at')
@@ -969,6 +1003,11 @@ def get_signal_coin_breakdown():
         if include_all or not created_dt or created_dt >= cutoff:
             filtered_signals.append(row)
 
+    # 24h vs 48h 对比数据
+    signals_24h = [s for s in filtered_signals if datetime.fromisoformat(s['created_at']) >= (now - timedelta(days=1))]
+    signals_48h = [s for s in filtered_signals if datetime.fromisoformat(s['created_at']) >= (now - timedelta(days=2))]
+    
+    # 主周期内每个币的统计
     grouped = {}
     for row in filtered_signals:
         symbol = row.get('symbol') or '--'
@@ -993,6 +1032,9 @@ def get_signal_coin_breakdown():
             '_reason_counts': {},
             '_code_counts': {},
             '_group_counts': {},
+            '_dimension_counts': {},
+            '_24h_signals': 0,
+            '_48h_signals': 0,
             '_latest_sort_key': ('', -1),
         })
         bucket['total_signals'] += 1
@@ -1009,11 +1051,23 @@ def get_signal_coin_breakdown():
             reason = row.get('filter_reason') or '未注明原因'
             code = row.get('filter_code') or 'UNCLASSIFIED'
             group = row.get('filter_group') or 'other'
+            dimension = _classify_blocker_dimension(code, group, reason)
             bucket['_reason_counts'][reason] = bucket['_reason_counts'].get(reason, 0) + 1
             bucket['_code_counts'][code] = bucket['_code_counts'].get(code, 0) + 1
             bucket['_group_counts'][group] = bucket['_group_counts'].get(group, 0) + 1
+            bucket['_dimension_counts'][dimension] = bucket['_dimension_counts'].get(dimension, 0) + 1
         if row.get('executed'):
             bucket['executed_signals'] += 1
+
+        # 24h vs 48h 统计
+        try:
+            created_dt = datetime.fromisoformat(row.get('created_at'))
+            if created_dt >= (now - timedelta(days=1)):
+                bucket['_24h_signals'] += 1
+            if created_dt >= (now - timedelta(days=2)):
+                bucket['_48h_signals'] += 1
+        except Exception:
+            pass
 
         created_at = row.get('created_at') or ''
         sort_key = (created_at, int(row.get('id') or 0))
@@ -1048,9 +1102,20 @@ def get_signal_coin_breakdown():
             key=lambda x: x['count'], reverse=True
         )
         group_counts = bucket.pop('_group_counts', {})
+        dimension_counts = bucket.pop('_dimension_counts', {})
+        
         bucket['top_filter_reasons'] = reason_rows[:3]
         bucket['top_filter_codes'] = code_rows[:3]
         bucket['filter_groups'] = group_counts
+        bucket['blocker_dimension'] = dimension_counts
+        
+        # 主阻塞维度
+        if dimension_counts:
+            dominant_dimension = sorted(dimension_counts.items(), key=lambda x: (-x[1], x[0]))[0][0]
+            bucket['dominant_blocker'] = dominant_dimension
+        else:
+            bucket['dominant_blocker'] = None
+        
         hold_count = bucket['hold_signals']
         filtered_count = bucket['filtered_signals']
         executed_count = bucket['executed_signals']
@@ -1067,6 +1132,14 @@ def get_signal_coin_breakdown():
         if bucket['filter_groups']:
             dominant_group = sorted(bucket['filter_groups'].items(), key=lambda x: (-x[1], x[0]))[0][0]
         bucket['dominant_filter_group'] = dominant_group
+        
+        # 24h vs 48h 对比
+        bucket['samples_24h'] = bucket.pop('_24h_signals', 0)
+        bucket['samples_48h'] = bucket.pop('_48h_signals', 0)
+        bucket['samples_24h_vs_48h'] = bucket['samples_48h'] - bucket['samples_24h'] if compare_24h else None
+        bucket['sample_status'] = 'sufficient' if bucket['samples_48h'] >= 3 else 'insufficient'
+        
+        # 诊断建议
         if bucket.get('latest_status') == 'filtered':
             bucket['diagnostic_action'] = bucket.get('latest_action_hint') or '先处理最新过滤项再观察后续样本'
         elif bucket.get('latest_status') == 'watch':
@@ -1077,6 +1150,31 @@ def get_signal_coin_breakdown():
             bucket['diagnostic_action'] = '方向已形成，继续关注是否会被风控或市场条件拦截'
         else:
             bucket['diagnostic_action'] = '当前样本仍少，继续积累信号再判断'
+        
+        # 综合 recommendation
+        recommendation_parts = []
+        if bucket.get('dominant_blocker'):
+            dim = bucket['dominant_blocker']
+            if dim == 'direction':
+                recommendation_parts.append('等方向明确')
+            elif dim == 'trend':
+                recommendation_parts.append('关注趋势一致性')
+            elif dim == 'volatility':
+                recommendation_parts.append('等待波动率恢复')
+            elif dim == 'cooldown':
+                recommendation_parts.append('等待冷却期结束')
+            elif dim == 'position':
+                recommendation_parts.append('处理现有持仓')
+            elif dim == 'risk':
+                recommendation_parts.append('关注风险指标')
+            else:
+                recommendation_parts.append('检查过滤配置')
+        
+        if bucket.get('sample_status') == 'insufficient':
+            recommendation_parts.append('积累更多样本')
+        
+        bucket['recommendation'] = ' → '.join(recommendation_parts) if recommendation_parts else '继续观察'
+        
         rows.append(bucket)
 
     status_rank = {
@@ -1088,6 +1186,7 @@ def get_signal_coin_breakdown():
     }
     rows.sort(key=lambda x: (status_rank.get(x.get('latest_status'), 99), -x.get('total_signals', 0), x.get('symbol', '')))
 
+    # 全局统计
     summary = {
         'symbols': len(rows),
         'total_signals': sum(x['total_signals'] for x in rows),
@@ -1104,8 +1203,24 @@ def get_signal_coin_breakdown():
             'position': sum((x.get('filter_groups') or {}).get('position', 0) for x in rows),
             'other': sum((x.get('filter_groups') or {}).get('other', 0) for x in rows),
         },
+        # 新增：全局阻塞维度统计
+        'dimension_breakdown': {
+            'direction': sum((x.get('blocker_dimension') or {}).get('direction', 0) for x in rows),
+            'trend': sum((x.get('blocker_dimension') or {}).get('trend', 0) for x in rows),
+            'volatility': sum((x.get('blocker_dimension') or {}).get('volatility', 0) for x in rows),
+            'cooldown': sum((x.get('blocker_dimension') or {}).get('cooldown', 0) for x in rows),
+            'position': sum((x.get('blocker_dimension') or {}).get('position', 0) for x in rows),
+            'risk': sum((x.get('blocker_dimension') or {}).get('risk', 0) for x in rows),
+            'other': sum((x.get('blocker_dimension') or {}).get('other', 0) for x in rows),
+        },
+        # 新增：样本状态统计
+        'sample_status': {
+            'sufficient': sum(1 for x in rows if x.get('sample_status') == 'sufficient'),
+            'insufficient': sum(1 for x in rows if x.get('sample_status') == 'insufficient'),
+        },
         'period_days': days,
     }
+    
     return jsonify({'success': True, 'data': rows, 'summary': summary, 'count': len(rows)})
 
 

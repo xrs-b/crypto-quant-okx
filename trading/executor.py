@@ -3,7 +3,7 @@
 """
 import time
 from typing import Dict, List, Optional, Any
-from datetime import datetime
+from datetime import datetime, timedelta
 from core.config import Config
 from core.exchange import Exchange
 from core.database import Database
@@ -432,6 +432,84 @@ class RiskManager:
         self.trading_config = config.get('trading', {})
         self._exchange = None
 
+    def _loss_guard_enabled(self) -> bool:
+        return bool(self.trading_config.get('loss_streak_lock_enabled', True))
+
+    def _loss_guard_hours(self) -> int:
+        return int(self.trading_config.get('loss_streak_cooldown_hours', 12) or 12)
+
+    def _sync_loss_streak_guard(self) -> Dict[str, Any]:
+        state = self.db.get_risk_guard_state('loss_streak')
+        now = datetime.now()
+        changed = False
+        just_triggered = False
+        auto_recovered = False
+
+        trades = self.db.get_trades(status='closed', limit=200)
+        new_trades = [t for t in reversed(trades) if int(t.get('id', 0) or 0) > int(state.get('last_trade_id', 0) or 0)]
+        for trade in new_trades:
+            state['last_trade_id'] = int(trade.get('id', 0) or state.get('last_trade_id', 0) or 0)
+            pnl = trade.get('pnl')
+            if pnl is None:
+                changed = True
+                continue
+            pnl_value = float(pnl or 0)
+            if pnl_value < 0:
+                state['current_streak'] = int(state.get('current_streak', 0) or 0) + 1
+                state.setdefault('details', {})['last_loss_at'] = trade.get('close_time') or trade.get('open_time')
+            else:
+                state['current_streak'] = 0
+                state.setdefault('details', {})['last_win_at'] = trade.get('close_time') or trade.get('open_time')
+                if state.get('lock_active'):
+                    state['lock_active'] = 0
+                    state['lock_until'] = None
+                    state['triggered_at'] = None
+            changed = True
+
+        lock_until = state.get('lock_until')
+        if state.get('lock_active') and lock_until:
+            try:
+                lock_dt = datetime.fromisoformat(str(lock_until))
+            except Exception:
+                lock_dt = None
+            if lock_dt and now >= lock_dt:
+                state['lock_active'] = 0
+                state['lock_until'] = None
+                state['triggered_at'] = None
+                state['current_streak'] = 0
+                state['reset_at'] = now.isoformat()
+                auto_recovered = True
+                changed = True
+
+        max_consecutive_losses = int(self.trading_config.get('max_consecutive_losses', 3))
+        if self._loss_guard_enabled() and not state.get('lock_active') and int(state.get('current_streak', 0) or 0) >= max_consecutive_losses:
+            state['lock_active'] = 1
+            state['triggered_at'] = now.isoformat()
+            state['lock_until'] = (now + timedelta(hours=self._loss_guard_hours())).isoformat()
+            state.setdefault('details', {})['max_consecutive_losses'] = max_consecutive_losses
+            just_triggered = True
+            changed = True
+
+        if changed:
+            self.db.save_risk_guard_state(state)
+        state['just_triggered'] = just_triggered
+        state['auto_recovered'] = auto_recovered
+        return state
+
+    def manual_reset_loss_streak(self, note: str = None) -> Dict[str, Any]:
+        state = self.db.get_risk_guard_state('loss_streak')
+        state['current_streak'] = 0
+        state['lock_active'] = 0
+        state['lock_until'] = None
+        state['triggered_at'] = None
+        state['reset_at'] = datetime.now().isoformat()
+        details = state.get('details', {}) or {}
+        if note:
+            details['manual_reset_note'] = note
+        state['details'] = details
+        self.db.save_risk_guard_state(state)
+        return state
+
     def can_open_position(self, symbol: str) -> tuple:
         """检查是否可以开仓"""
         details = {}
@@ -453,15 +531,32 @@ class RiskManager:
         details['global_cooldown'] = {'passed': True}
 
         max_consecutive_losses = int(self.trading_config.get('max_consecutive_losses', 3))
-        consecutive_losses = self._get_consecutive_losses()
-        if consecutive_losses >= max_consecutive_losses:
+        loss_guard = self._sync_loss_streak_guard()
+        consecutive_losses = int(loss_guard.get('current_streak', 0) or 0)
+        if loss_guard.get('lock_active'):
             details['loss_streak_limit'] = {
                 'passed': False,
                 'current': consecutive_losses,
-                'max': max_consecutive_losses
+                'max': max_consecutive_losses,
+                'locked': True,
+                'recover_at': loss_guard.get('lock_until'),
+                'triggered_at': loss_guard.get('triggered_at'),
+                'cooldown_hours': self._loss_guard_hours(),
+                'just_triggered': bool(loss_guard.get('just_triggered')),
+                'auto_recovered': bool(loss_guard.get('auto_recovered')),
             }
-            return False, f"连续亏损熔断({consecutive_losses}/{max_consecutive_losses})", details
-        details['loss_streak_limit'] = {'passed': True, 'current': consecutive_losses, 'max': max_consecutive_losses}
+            return False, f"连续亏损熔断冷却中({consecutive_losses}/{max_consecutive_losses})", details
+        details['loss_streak_limit'] = {
+            'passed': True,
+            'current': consecutive_losses,
+            'max': max_consecutive_losses,
+            'locked': False,
+            'recover_at': loss_guard.get('lock_until'),
+            'triggered_at': loss_guard.get('triggered_at'),
+            'cooldown_hours': self._loss_guard_hours(),
+            'just_triggered': bool(loss_guard.get('just_triggered')),
+            'auto_recovered': bool(loss_guard.get('auto_recovered')),
+        }
 
         max_daily_drawdown = float(self.trading_config.get('max_daily_drawdown', 0.03))
         daily_drawdown_ratio = self._get_daily_drawdown_ratio()
@@ -504,7 +599,9 @@ class RiskManager:
         balance = self._get_balance_summary()
         current_exposure = self._get_current_exposure()
         daily_drawdown = self._get_daily_drawdown_ratio()
-        consecutive_losses = self._get_consecutive_losses()
+        loss_guard = self._sync_loss_streak_guard()
+        consecutive_losses = int(loss_guard.get('current_streak', 0) or 0)
+        status = 'locked' if loss_guard.get('lock_active') else ('guarded' if (daily_drawdown > 0 or consecutive_losses > 0) else 'normal')
         return {
             'today_trades': self._get_today_trade_count(),
             'last_trade_time': self._get_last_trade_time().isoformat() if self._get_last_trade_time() else None,
@@ -515,8 +612,13 @@ class RiskManager:
             'max_daily_drawdown': float(self.trading_config.get('max_daily_drawdown', 0.03)),
             'consecutive_losses': consecutive_losses,
             'max_consecutive_losses': int(self.trading_config.get('max_consecutive_losses', 3)),
+            'loss_streak_lock_enabled': self._loss_guard_enabled(),
+            'loss_streak_cooldown_hours': self._loss_guard_hours(),
+            'loss_streak_locked': bool(loss_guard.get('lock_active')),
+            'loss_streak_recover_at': loss_guard.get('lock_until'),
+            'loss_streak_triggered_at': loss_guard.get('triggered_at'),
             'balance': balance,
-            'status': 'guarded' if (daily_drawdown > 0 or consecutive_losses > 0) else 'normal'
+            'status': status
         }
 
     def _get_balance_summary(self) -> Dict[str, float]:

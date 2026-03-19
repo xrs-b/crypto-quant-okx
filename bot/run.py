@@ -110,6 +110,8 @@ def build_runtime_health_summary(cfg: Config, db: Database) -> dict:
         f'风险状态：{risk.get("status") or "--"} ｜ 暴露 {risk.get("current_exposure", 0)} / {risk.get("max_exposure", 0)}',
         f'余额：total {round(float(balance.get("total", 0) or 0), 2)} ｜ free {round(float(balance.get("free", 0) or 0), 2)}',
     ]
+    if risk.get('loss_streak_locked'):
+        lines.extend(['---', f'连亏熔断：{risk.get("consecutive_losses", 0)}/{risk.get("max_consecutive_losses", 0)} ｜ 自动恢复 {risk.get("loss_streak_recover_at") or "--"}'])
     if model_rows:
         model_text = ' ｜ '.join([
             f"{row['symbol']}: acc={row['test_accuracy'] if row['test_accuracy'] is not None else '--'}, f1={row['f1'] if row['f1'] is not None else '--'}"
@@ -531,6 +533,14 @@ class TradingBot:
                     # 风险检查
                     can_open, risk_reason, risk_details = self.risk_mgr.can_open_position(symbol)
                     self.notifier.notify_decision(signal, can_open, risk_reason, risk_details)
+                    lock_info = (risk_details or {}).get('loss_streak_limit', {}) if isinstance(risk_details, dict) else {}
+                    if lock_info.get('just_triggered'):
+                        self.notifier.notify_loss_streak_lock(
+                            current=lock_info.get('current', 0),
+                            max_count=lock_info.get('max', 0),
+                            recover_at=lock_info.get('recover_at'),
+                            details={'symbol': symbol, 'risk_details': risk_details}
+                        )
                     
                     if can_open:
                         side = 'long' if signal.signal_type == 'buy' else 'short'

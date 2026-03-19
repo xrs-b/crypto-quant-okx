@@ -246,6 +246,21 @@ class Database:
             )
         """)
 
+        # 连亏熔断状态（单例）
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS risk_guard_state (
+                guard_key TEXT PRIMARY KEY,
+                current_streak INTEGER DEFAULT 0,
+                lock_active INTEGER DEFAULT 0,
+                lock_until TEXT,
+                triggered_at TEXT,
+                reset_at TEXT,
+                last_trade_id INTEGER DEFAULT 0,
+                details TEXT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
         # 通知 outbox（给 OpenClaw bridge 消费）
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS notification_outbox (
@@ -920,6 +935,47 @@ class Database:
         if not df.empty:
             df['details'] = df['details'].apply(lambda x: json.loads(x) if x else {})
         return df.to_dict('records')
+
+    def get_risk_guard_state(self, guard_key: str = 'loss_streak') -> Dict:
+        conn = self._get_connection()
+        df = pd.read_sql_query("SELECT * FROM risk_guard_state WHERE guard_key = ? LIMIT 1", conn, params=(guard_key,))
+        conn.close()
+        if df.empty:
+            return {
+                'guard_key': guard_key,
+                'current_streak': 0,
+                'lock_active': 0,
+                'lock_until': None,
+                'triggered_at': None,
+                'reset_at': None,
+                'last_trade_id': 0,
+                'details': {},
+            }
+        row = df.iloc[0].to_dict()
+        row['details'] = json.loads(row['details']) if row.get('details') else {}
+        return row
+
+    def save_risk_guard_state(self, state: Dict):
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT OR REPLACE INTO risk_guard_state (guard_key, current_streak, lock_active, lock_until, triggered_at, reset_at, last_trade_id, details, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """,
+            (
+                state.get('guard_key', 'loss_streak'),
+                int(state.get('current_streak', 0) or 0),
+                int(bool(state.get('lock_active', 0))),
+                state.get('lock_until'),
+                state.get('triggered_at'),
+                state.get('reset_at'),
+                int(state.get('last_trade_id', 0) or 0),
+                json.dumps(state.get('details', {}), ensure_ascii=False) if state.get('details') is not None else None,
+            )
+        )
+        conn.commit()
+        conn.close()
 
     def get_latest_approval(self, approval_type: str, target: str = None) -> Optional[Dict]:
         conn = self._get_connection()

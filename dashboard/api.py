@@ -1508,6 +1508,17 @@ def get_risk_status():
     })
 
 
+@app.route('/api/risk/loss-streak/reset', methods=['POST'])
+def reset_loss_streak_guard():
+    """手动清零连亏熔断状态"""
+    payload = request.get_json(silent=True) or {}
+    note = (payload.get('note') or '').strip() or 'manual-reset'
+    state = risk_manager.manual_reset_loss_streak(note=note)
+    db.record_approval('loss_streak_reset', 'loss_streak', 'approved', {'note': note, 'state': state})
+    _refresh_runtime_components()
+    return jsonify({'success': True, 'data': {'state': state, 'message': '连亏熔断已手动清零，系统恢复开仓资格。'}})
+
+
 @app.route('/api/risk/events')
 def get_risk_events():
     """获取最近风控/过滤事件"""

@@ -20,12 +20,23 @@ exchange:
   default_leverage: 10
   mode: testnet
   name: okx
+  position_mode: hedge
+governance:
+  pool_switch:
+    min_hold_hours: 6
+    score_margin: 1.0
 logging:
   backup_count: 5
   file: logs/trading.log
   format: '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
   level: INFO
   max_size_mb: 10
+market_filters:
+  block_counter_trend: true
+  block_high_volatility: true
+  block_low_volatility: true
+  max_volatility: 0.05
+  min_volatility: 0.0045
 ml:
   enabled: true
   features:
@@ -54,6 +65,7 @@ notification:
   discord:
     channel_id: ${DISCORD_CHANNEL_ID:-your_discord_channel_id}
     webhook_url: ${DISCORD_WEBHOOK_URL:-}
+    webhook_username: OKX量化机器人
     bot_token: ${DISCORD_BOT_TOKEN:-}
     enabled: true
     notify_errors: true
@@ -67,14 +79,16 @@ notification:
     to_address: your_email@gmail.com
     username: your_email@gmail.com
   telegram:
-    bot_token: your_bot_token
-    chat_id: your_chat_id
+    bot_token: ''
+    chat_id: ''
     enabled: false
 runtime:
   interval_seconds: 300
   max_runtime_minutes: 30
   mode: interval
   schedule: 0 * * * *
+runtime_meta:
+  current_preset: btc-grid-candidate
 strategies:
   adx:
     enabled: true
@@ -88,7 +102,7 @@ strategies:
     strength_weight: 15
   composite:
     enabled: true
-    min_strategy_count: 2
+    min_strategy_count: 1
     min_strength: 26
   divergence:
     enabled: true
@@ -104,7 +118,7 @@ strategies:
     fast_period: 12
     signal_period: 9
     slow_period: 26
-    strength_weight: 20
+    strength_weight: 24
   pattern:
     enabled: true
     strength_weight: 20
@@ -116,42 +130,32 @@ strategies:
     strength_weight: 40
   volume:
     enabled: true
-    strength_weight: 25
+    strength_weight: 32
     volume_ma_period: 20
     volume_multiplier: 1.5
 symbols:
-  contract_type: usdt
-  margin_type: isolated
-  quote_currency: USDT
-  watch_list:
-  - BTC/USDT
   candidate_watch_list:
   - XRP/USDT
+  contract_type: usdt
+  margin_type: isolated
   paused_watch_list:
   - ETH/USDT
   - SOL/USDT
   - HYPE/USDT
+  quote_currency: USDT
   selection_mode: focused
+  watch_list:
+  - BTC/USDT
 trading:
   cooldown_minutes: 15
   leverage: 10
+  max_consecutive_losses: 3
+  max_daily_drawdown: 0.03
   max_exposure: 0.3
   max_position_per_symbol: 0.15
   max_trades_per_day: 10
   min_trade_interval: 300
   position_size: 0.1
-  stop_loss: 0.02
-  take_profit: 0.04
-  trailing_stop: 0.01
-  max_consecutive_losses: 3
-  max_daily_drawdown: 0.03
-market_filters:
-  block_counter_trend: true
-  block_low_volatility: true
-  block_high_volatility: true
-  min_volatility: 0.0045
-  max_volatility: 0.05
-runtime_meta:
-  current_preset: btc-focused
-  last_applied_at: '2026-03-15T01:24:27.811314'
-  last_backup: /Volumes/MacHD/Projects/crypto-quant-okx/config/backups/config-20260315-012427.yaml
+  stop_loss: 0.018
+  take_profit: 0.035
+  trailing_stop: 0.012

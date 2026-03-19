@@ -2052,9 +2052,18 @@
             setTimeout(() => el.remove(), 2800);
         }
         async function api(url) {
-            const r = await fetch(url);
-            const j = await r.json();
-            return j.data;
+            try {
+                const r = await fetch(url);
+                if (!r.ok) {
+                    console.error('API Error:', r.status, url);
+                    return null;
+                }
+                const j = await r.json();
+                return j.data;
+            } catch (e) {
+                console.error('API Fetch Error:', e.message, url);
+                return null;
+            }
         }
         function updateSectionHeader(tab) {
             const map = {

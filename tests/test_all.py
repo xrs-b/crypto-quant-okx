@@ -794,6 +794,42 @@ class TestNotifications(unittest.TestCase):
         # Restore original
         notifier._send_discord_bot = original_send
 
+    def test_notify_loss_streak_lock_includes_approval_actions_metadata(self):
+        """测试熔断通知包含 approval_actions 元数据，供 OpenClaw bridge 解析"""
+        cfg = Config()
+        cfg._config.setdefault('notification', {}).setdefault('discord', {})
+        cfg._config['notification']['discord'].update({
+            'enabled': True,
+            'webhook_url': 'https://fakewebhook',
+            'bot_token': '',
+            'channel_id': ''
+        })
+        cfg._config.setdefault('dashboard', {}).update({
+            'host': '0.0.0.0',
+            'port': 8050
+        })
+        db = FakeLogDB()
+        notifier = NotificationManager(cfg, db, None)
+        
+        result = notifier.notify_loss_streak_lock(
+            current=3,
+            max_count=3,
+            recover_at='2024-01-01T12:00:00',
+            details={'test': 'data'}
+        )
+        
+        # Verify approval_actions is in outbox details
+        self.assertTrue(len(db.outbox) > 0)
+        outbox_item = db.outbox[-1]
+        self.assertIn('approval_actions', outbox_item.get('details', {}))
+        
+        approval_actions = outbox_item['details']['approval_actions']
+        self.assertEqual(approval_actions['type'], 'loss_streak_reset')
+        self.assertEqual(approval_actions['endpoint'], '/api/risk/loss-streak/reset')
+        self.assertEqual(approval_actions['method'], 'POST')
+        self.assertTrue(approval_actions.get('idempotent', False))
+        self.assertIn('payload', approval_actions)
+
 
 class TestReconcilePositions(unittest.TestCase):
     def test_reconcile_exchange_positions(self):

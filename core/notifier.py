@@ -464,6 +464,19 @@ class NotificationManager:
         # Use localhost for local access, or bind address for remote
         dashboard_url = f'http://localhost:{dashboard_port}' if dashboard_host in ('0.0.0.0', '127.0.0.1') else f'http://{dashboard_host}:{dashboard_port}'
         
+        # Approval actions metadata for OpenClaw bridge (protocol layer)
+        # OpenClaw can parse this to build interactive buttons
+        approval_actions = {
+            'type': 'loss_streak_reset',
+            'label': '手动清零恢复',
+            'method': 'POST',
+            'endpoint': '/api/risk/loss-streak/reset',
+            'idempotent': True,
+            'payload': {
+                'note': 'discord-approval'
+            }
+        }
+        
         # Only add buttons if bot_token is configured (required for components)
         if self.discord_cfg.get('bot_token') and self.discord_cfg.get('channel_id'):
             components = [
@@ -480,7 +493,10 @@ class NotificationManager:
                 }
             ]
         
-        return self.send('error', '🛑 连亏熔断已触发', lines, 'warning', details or {}, priority=priority, components=components)
+        # Merge approval_actions into details for OpenClaw bridge to consume
+        merged_details = {**(details or {}), 'approval_actions': approval_actions}
+        
+        return self.send('error', '🛑 连亏熔断已触发', lines, 'warning', merged_details, priority=priority, components=components)
 
     def notify_runtime(self, phase: str, lines: List[str], details: Dict = None) -> Dict:
         title_map = {

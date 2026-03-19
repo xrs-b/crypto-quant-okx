@@ -117,13 +117,16 @@ class NotificationManager:
         except error.HTTPError:
             return False
 
-    def _send_discord_bot(self, content: str) -> bool:
+    def _send_discord_bot(self, content: str, components: List[Dict] = None) -> bool:
         bot_token = self.discord_cfg.get('bot_token')
         channel_id = self.discord_cfg.get('channel_id')
         if not bot_token or not channel_id:
             return False
         url = f'https://discord.com/api/v10/channels/{channel_id}/messages'
-        payload = json.dumps({'content': content}).encode('utf-8')
+        payload_data = {'content': content}
+        if components:
+            payload_data['components'] = components
+        payload = json.dumps(payload_data).encode('utf-8')
         headers = dict(self._http_headers)
         headers['Authorization'] = f'Bot {bot_token}'
         req = request.Request(url, data=payload, headers=headers)
@@ -135,7 +138,10 @@ class NotificationManager:
         except error.HTTPError:
             return False
 
-    def _send_discord(self, content: str) -> bool:
+    def _send_discord(self, content: str, components: List[Dict] = None) -> bool:
+        # Buttons/components require bot API, webhook doesn't support them
+        if components:
+            return self._send_discord_bot(content, components)
         return self._send_discord_webhook(content) or self._send_discord_bot(content)
 
     def _dedupe_window(self, event_type: str) -> int:
@@ -232,7 +238,7 @@ class NotificationManager:
             pairs.append(f'{key}={value}')
         return ' | '.join(pairs) if pairs else '--'
 
-    def send(self, event_type: str, title: str, lines: List[str], level: str = 'info', details: Dict = None, priority: str = 'normal') -> Dict:
+    def send(self, event_type: str, title: str, lines: List[str], level: str = 'info', details: Dict = None, priority: str = 'normal', components: List[Dict] = None) -> Dict:
         body = self._render_message(title, lines)
         suppressed, message_key, aggregate_summary = self._should_suppress(event_type, body)
         if aggregate_summary:
@@ -247,7 +253,7 @@ class NotificationManager:
         elif suppressed:
             outbox_status = 'suppressed'
         else:
-            delivered = self._send_discord(body)
+            delivered = self._send_discord(body, components)
             outbox_status = 'delivered' if delivered else 'pending'
         self._update_outbox_status(outbox_id, outbox_status, {
             **(details or {}),
@@ -443,7 +449,38 @@ class NotificationManager:
             '【建议动作】',
             '可在 dashboard 手动清零恢复；若不处理，系统会在冷却结束后自动恢复。',
         ]
-        return self.send('error', '🛑 连亏熔断已触发', lines, 'warning', details or {}, priority=priority)
+        
+        # Build Discord buttons with dashboard link (MVP: using link buttons for fallback)
+        components = None
+        # Use property if available, otherwise fall back to dict access
+        if hasattr(self.config, 'dashboard_config'):
+            dashboard_cfg = self.config.dashboard_config
+            if callable(dashboard_cfg):
+                dashboard_cfg = dashboard_cfg()
+        else:
+            dashboard_cfg = self.config.get('dashboard', {})
+        dashboard_host = dashboard_cfg.get('host', '0.0.0.0')
+        dashboard_port = dashboard_cfg.get('port', 8050)
+        # Use localhost for local access, or bind address for remote
+        dashboard_url = f'http://localhost:{dashboard_port}' if dashboard_host in ('0.0.0.0', '127.0.0.1') else f'http://{dashboard_host}:{dashboard_port}'
+        
+        # Only add buttons if bot_token is configured (required for components)
+        if self.discord_cfg.get('bot_token') and self.discord_cfg.get('channel_id'):
+            components = [
+                {
+                    'type': 1,  # ACTION_ROW
+                    'components': [
+                        {
+                            'type': 2,  # BUTTON
+                            'style': 5,  # LINK
+                            'label': '🎛️ Dashboard 审批',
+                            'url': dashboard_url,
+                        },
+                    ]
+                }
+            ]
+        
+        return self.send('error', '🛑 连亏熔断已触发', lines, 'warning', details or {}, priority=priority, components=components)
 
     def notify_runtime(self, phase: str, lines: List[str], details: Dict = None) -> Dict:
         title_map = {

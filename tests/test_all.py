@@ -753,6 +753,47 @@ class TestNotifications(unittest.TestCase):
         self.assertEqual(third['aggregate_summary'], '最近已合并 1 次同类通知（约 300s 内）')
         self.assertIn('【聚合摘要】', third['message'])
 
+    def test_notify_loss_streak_lock_with_buttons(self):
+        """测试熔断通知支持 Discord 按钮 (MVP: link button to dashboard)"""
+        cfg = Config()
+        cfg._config.setdefault('notification', {}).setdefault('discord', {})
+        cfg._config['notification']['discord'].update({
+            'enabled': True,
+            'webhook_url': '',
+            'bot_token': 'fake_token',
+            'channel_id': '123456'
+        })
+        cfg._config.setdefault('dashboard', {}).update({
+            'host': '0.0.0.0',
+            'port': 8050
+        })
+        db = FakeLogDB()
+        notifier = NotificationManager(cfg, db, None)
+        # Mock the bot send to capture components
+        captured_components = []
+        original_send = notifier._send_discord_bot
+        notifier._send_discord_bot = lambda content, components=None: (captured_components.append(components) or True)
+        
+        result = notifier.notify_loss_streak_lock(
+            current=3,
+            max_count=3,
+            recover_at='2024-01-01T12:00:00',
+            details={'test': 'data'}
+        )
+        
+        self.assertTrue(result['enabled'])
+        self.assertIn('连亏熔断已触发', result['message'])
+        self.assertIn('连续亏损：3/3', result['message'])
+        # Verify components were passed (link button to dashboard)
+        self.assertIsNotNone(captured_components[0])
+        self.assertEqual(captured_components[0][0]['type'], 1)  # ACTION_ROW
+        self.assertEqual(captured_components[0][0]['components'][0]['type'], 2)  # BUTTON
+        self.assertEqual(captured_components[0][0]['components'][0]['style'], 5)  # LINK style
+        self.assertIn('Dashboard', captured_components[0][0]['components'][0]['label'])
+        
+        # Restore original
+        notifier._send_discord_bot = original_send
+
 
 class TestReconcilePositions(unittest.TestCase):
     def test_reconcile_exchange_positions(self):

@@ -497,7 +497,20 @@ class RiskManager:
         return state
 
     def manual_reset_loss_streak(self, note: str = None) -> Dict[str, Any]:
+        """手动清零连亏熔断状态，支持幂等调用"""
         state = self.db.get_risk_guard_state('loss_streak')
+        
+        # Idempotency: if already unlocked, return current state without re-recording
+        already_unlocked = not bool(state.get('lock_active', 0))
+        if already_unlocked:
+            return {
+                **state,
+                'idempotent': True,
+                'message': 'already_unlocked',
+                'action': 'no_change'
+            }
+        
+        # Perform reset
         state['current_streak'] = 0
         state['lock_active'] = 0
         state['lock_until'] = None
@@ -508,7 +521,13 @@ class RiskManager:
             details['manual_reset_note'] = note
         state['details'] = details
         self.db.save_risk_guard_state(state)
-        return state
+        
+        return {
+            **state,
+            'idempotent': False,
+            'message': 'reset_completed',
+            'action': 'reset'
+        }
 
     def can_open_position(self, symbol: str) -> tuple:
         """检查是否可以开仓"""

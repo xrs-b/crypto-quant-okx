@@ -375,6 +375,15 @@
         .toast.warn { border-color: rgba(240,185,11,.34); }
         .toast.bad { border-color: rgba(239,68,68,.34); }
         .toast.info { border-color: rgba(96,165,250,.34); }
+        /* Overview center compact layout */
+        #tab-overview .summary-strip { margin-bottom: 8px; }
+        #tab-overview .summary-strip:empty { min-height: 0; margin-bottom: 6px; }
+        #tab-overview .summary-strip:empty::after { content: ''; display: block; height: 1px; background: rgba(255,255,255,.03); border-radius: 2px; }
+        #tab-overview .list { margin-bottom: 12px; }
+        #tab-overview .list:empty { display: none; }
+        #tab-overview .toolbar-inline { margin-bottom: 10px; }
+        /* Compact placeholder for near-empty strips */
+        .summary-strip.is-empty .summary-pill { opacity: 0.4; }
         @media (max-width: 1280px) {
             .stats, .panel-grid, .kpis, .split-3, .diff-grid, .summary-strip { grid-template-columns:1fr; }
             .timeline-item { grid-template-columns: 1fr; }

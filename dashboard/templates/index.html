@@ -3145,47 +3145,58 @@
             document.getElementById('positionsTable').innerHTML = rows.length ? rows.map(p => `<tr><td>${p.symbol}</td><td>${badge(p.side, p.side === 'long' ? 'long' : 'short')}</td><td>${p.quantity}</td><td>${p.leverage}x</td><td>${money(p.entry_price)}</td><td>${money(p.current_price)}</td><td class="${Number(p.unrealized_pnl || 0) >= 0 ? 'pos' : 'neg'}">${money(p.unrealized_pnl)}</td><td>${safe(p.updated_at)}</td></tr>`).join('') : '<tr><td colspan="8" class="muted">暂无持仓</td></tr>';
         }
         async function loadTrades() {
-            const rows = await api('/api/trades?limit=50');
-            document.getElementById('tradesTable').innerHTML = rows.length ? rows.map(t => `<tr><td>${t.id}</td><td>${t.symbol}</td><td>${badge(t.side, t.side === 'long' ? 'long' : 'short')}</td><td>${badge(t.status, t.status === 'open' ? 'warn' : 'ok')}</td><td>${money(t.entry_price)}</td><td>${t.exit_price ? money(t.exit_price) : '--'}</td><td>${t.quantity}</td><td class="${Number(t.pnl || 0) >= 0 ? 'pos' : 'neg'}">${t.pnl == null ? '--' : money(t.pnl)}</td><td>${safe(t.open_time)}</td></tr>`).join('') : '<tr><td colspan="9" class="muted">暂无交易记录</td></tr>';
+            try {
+                const rows = await api('/api/trades?limit=50');
+                if (!rows || !Array.isArray(rows)) {
+                    document.getElementById('tradesTable').innerHTML = '<tr><td colspan="9" class="muted">加载失败，请检查网络</td></tr>';
+                    return;
+                }
+                document.getElementById('tradesTable').innerHTML = rows.length ? rows.map(t => `<tr><td>${t.id}</td><td>${t.symbol}</td><td>${badge(t.side, t.side === 'long' ? 'long' : 'short')}</td><td>${badge(t.status, t.status === 'open' ? 'warn' : 'ok')}</td><td>${money(t.entry_price)}</td><td>${t.exit_price ? money(t.exit_price) : '--'}</td><td>${t.quantity}</td><td class="${Number(t.pnl || 0) >= 0 ? 'pos' : 'neg'}">${t.pnl == null ? '--' : money(t.pnl)}</td><td>${safe(t.open_time)}</td></tr>`).join('') : '<tr><td colspan="9" class="muted">暂无交易记录</td></tr>';
+            } catch (e) {
+                console.error('loadTrades error:', e);
+                document.getElementById('tradesTable').innerHTML = '<tr><td colspan="9" class="muted">加载错误</td></tr>';
+            }
         }
         async function loadSignals() {
-            const [rows, reasons, coinBreakdownResp, filterEffectivenessResp, symbolFilterEffectivenessResp] = await Promise.all([
-                api('/api/signals?limit=50'),
-                api('/api/signals/filter-reasons'),
-                fetch('/api/signals/coin-breakdown?days=1&limit=500').then(r => r.json()),
-                fetch('/api/signals/filter-effectiveness?days=7&window_hours=24&limit=60').then(r => r.json()),
-                fetch('/api/signals/filter-effectiveness/by-symbol?days=14&window_hours=24&limit=120').then(r => r.json())
-            ]);
-            const coinRows = coinBreakdownResp?.data || [];
-            const coinSummary = coinBreakdownResp?.summary || {};
-            const effectivenessRows = filterEffectivenessResp?.data || [];
-            const effectivenessSummary = filterEffectivenessResp?.summary || {};
-            const symbolEffectivenessRows = symbolFilterEffectivenessResp?.data || [];
-            const symbolEffectivenessSummary = symbolFilterEffectivenessResp?.summary || {};
-            document.getElementById('signalsTable').innerHTML = rows.length ? rows.map(s => {
-                const codeText = s.filter_code ? ` [${s.filter_code}]` : '';
-                const hintText = s.action_hint ? `<div class="muted" style="margin-top:6px;">${s.filter_group || '--'} ｜ ${s.action_hint}</div>` : '';
-                return `<tr><td>${s.created_at}</td><td>${s.symbol}</td><td>${badge(s.signal_type, s.signal_type === 'buy' ? 'buy' : s.signal_type === 'sell' ? 'sell' : 'hold')}</td><td>${s.strength}%</td><td>${(s.strategies_triggered || []).join(', ') || '--'}</td><td>${filteredTag(s)}</td><td>${s.filter_reason || '--'}${codeText}${hintText}</td></tr>`;
-            }).join('') : '<tr><td colspan="7" class="muted">暂无信号记录</td></tr>';
-            document.getElementById('filterReasonTable').innerHTML = reasons.length ? reasons.map(r => `<tr><td>${r.reason}</td><td>${r.count}</td></tr>`).join('') : '<tr><td colspan="2" class="muted">暂无过滤数据</td></tr>';
-            const effectivenessSummaryHost = document.getElementById('filterEffectivenessSummary');
-            if (effectivenessSummaryHost) {
-                effectivenessSummaryHost.innerHTML = `
-                    <div class="summary-pill"><div class="k">已分析样本</div><div class="v">${effectivenessSummary.analyzed ?? 0}</div><div class="s">已完成 24h 后验观察</div></div>
-                    <div class="summary-pill"><div class="k">成功避险</div><div class="v">${effectivenessSummary.avoided_loss ?? 0}</div><div class="s">过滤后若硬做，更易先吃逆向波动</div></div>
-                    <div class="summary-pill"><div class="k">错失机会</div><div class="v">${effectivenessSummary.missed_profit ?? 0}</div><div class="s">过滤后其实有较明显顺向机会</div></div>
-                    <div class="summary-pill"><div class="k">待观察</div><div class="v">${(effectivenessSummary.pending ?? 0) + (effectivenessSummary.insufficient_data ?? 0)}</div><div class="s">样本未成熟或暂时缺行情数据</div></div>
-                `;
-            }
-            document.getElementById('filterEffectivenessTable').innerHTML = effectivenessRows.length ? effectivenessRows.map(row => {
-                const rateText = row.effectiveness_rate == null ? '--' : `${row.effectiveness_rate}%`;
-                const sampleText = (row.samples || []).length
-                    ? row.samples.map(item => `${item.symbol}:${item.status}`).join(' ｜ ')
-                    : '暂无样本';
-                return `<tr>
-                    <td>${row.code}<div class="muted" style="margin-top:6px;">${row.reason || '--'}</div></td>
-                    <td>${row.group || '--'}<div class="muted" style="margin-top:6px;">${row.action_hint || '--'}</div></td>
-                    <td>${row.avoided_loss ?? 0}</td>
+            try {
+                const [rows, reasons, coinBreakdownResp, filterEffectivenessResp, symbolFilterEffectivenessResp] = await Promise.all([
+                    api('/api/signals?limit=50'),
+                    api('/api/signals/filter-reasons'),
+                    fetch('/api/signals/coin-breakdown?days=1&limit=500').then(r => r.json()),
+                    fetch('/api/signals/filter-effectiveness?days=7&window_hours=24&limit=60').then(r => r.json()),
+                    fetch('/api/signals/filter-effectiveness/by-symbol?days=14&window_hours=24&limit=120').then(r => r.json())
+                ]);
+                const safeRows = Array.isArray(rows) ? rows : [];
+                const safeReasons = Array.isArray(reasons) ? reasons : [];
+                const coinSummary = coinBreakdownResp?.summary || {};
+                const effectivenessRows = filterEffectivenessResp?.data || [];
+                const effectivenessSummary = filterEffectivenessResp?.summary || {};
+                const symbolEffectivenessRows = symbolFilterEffectivenessResp?.data || [];
+                const symbolEffectivenessSummary = symbolFilterEffectivenessResp?.summary || {};
+                document.getElementById('signalsTable').innerHTML = safeRows.length ? safeRows.map(s => {
+                    const codeText = s.filter_code ? ` [${s.filter_code}]` : '';
+                    const hintText = s.action_hint ? `<div class="muted" style="margin-top:6px;">${s.filter_group || '--'} ｜ ${s.action_hint}</div>` : '';
+                    return `<tr><td>${s.created_at}</td><td>${s.symbol}</td><td>${badge(s.signal_type, s.signal_type === 'buy' ? 'buy' : s.signal_type === 'sell' ? 'sell' : 'hold')}</td><td>${s.strength}%</td><td>${(s.strategies_triggered || []).join(', ') || '--'}</td><td>${filteredTag(s)}</td><td>${s.filter_reason || '--'}${codeText}${hintText}</td></tr>`;
+                }).join('') : '<tr><td colspan="7" class="muted">暂无信号记录</td></tr>';
+                document.getElementById('filterReasonTable').innerHTML = safeReasons.length ? safeReasons.map(r => `<tr><td>${r.reason}</td><td>${r.count}</td></tr>`).join('') : '<tr><td colspan="2" class="muted">暂无过滤数据</td></tr>';
+                const effectivenessSummaryHost = document.getElementById('filterEffectivenessSummary');
+                if (effectivenessSummaryHost) {
+                    effectivenessSummaryHost.innerHTML = `
+                        <div class="summary-pill"><div class="k">已分析样本</div><div class="v">${effectivenessSummary.analyzed ?? 0}</div><div class="s">已完成 24h 后验观察</div></div>
+                        <div class="summary-pill"><div class="k">成功避险</div><div class="v">${effectivenessSummary.avoided_loss ?? 0}</div><div class="s">过滤后若硬做，更易先吃逆向波动</div></div>
+                        <div class="summary-pill"><div class="k">错失机会</div><div class="v">${effectivenessSummary.missed_profit ?? 0}</div><div class="s">过滤后其实有较明显顺向机会</div></div>
+                        <div class="summary-pill"><div class="k">待观察</div><div class="v">${(effectivenessSummary.pending ?? 0) + (effectivenessSummary.insufficient_data ?? 0)}</div><div class="s">样本未成熟或暂时缺行情数据</div></div>
+                    `;
+                }
+                document.getElementById('filterEffectivenessTable').innerHTML = effectivenessRows.length ? effectivenessRows.map(row => {
+                    const rateText = row.effectiveness_rate == null ? '--' : `${row.effectiveness_rate}%`;
+                    const sampleText = (row.samples || []).length
+                        ? row.samples.map(item => `${item.symbol}:${item.status}`).join(' ｜ ')
+                        : '暂无样本';
+                    return `<tr>
+                        <td>${row.code}<div class="muted" style="margin-top:6px;">${row.reason || '--'}</div></td>
+                        <td>${row.group || '--'}<div class="muted" style="margin-top:6px;">${row.action_hint || '--'}</div></td>
+                        <td>${row.avoided_loss ?? 0}</td>
                     <td>${row.missed_profit ?? 0}</td>
                     <td>${row.neutral ?? 0} / ${row.pending ?? 0}<div class="muted" style="margin-top:6px;">${sampleText}</div></td>
                     <td>${rateText}<div class="muted" style="margin-top:6px;">分析=${row.analyzed ?? 0} ｜ 总数=${row.total ?? 0}</div></td>
@@ -3275,6 +3286,14 @@
                     <td><div style="font-size:12px">${recommendation}</div></td>
                 </tr>`;
             }).join('') : '<tr><td colspan="9" class="muted">暂无按币种拆解数据</td></tr>';
+            } catch (e) {
+                console.error('loadSignals error:', e);
+                document.getElementById('signalsTable').innerHTML = '<tr><td colspan="7" class="muted">加载错误</td></tr>';
+                document.getElementById('filterReasonTable').innerHTML = '<tr><td colspan="2" class="muted">加载错误</td></tr>';
+                document.getElementById('filterEffectivenessTable').innerHTML = '<tr><td colspan="6" class="muted">加载错误</td></tr>';
+                document.getElementById('symbolFilterEffectivenessTable').innerHTML = '<tr><td colspan="6" class="muted">加载错误</td></tr>';
+                document.getElementById('signalCoinBreakdownTable').innerHTML = '<tr><td colspan="9" class="muted">加载错误</td></tr>';
+            }
         }
         async function loadStrategy() {
             const [stats, daily, perf, ml] = await Promise.all([api('/api/strategy/stats'), api('/api/daily/summary'), api('/api/trades/symbol-performance'), api('/api/ml/metrics')]);

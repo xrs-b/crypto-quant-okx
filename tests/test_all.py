@@ -1859,6 +1859,130 @@ class TestRiskManager(unittest.TestCase):
         self.assertGreater(ratio, 0)
 
 
+class TestMFEAnalyzer(unittest.TestCase):
+    """MFE/MAE 分析器测试"""
+    
+    def test_sample_data_report(self):
+        """测试示例数据报告生成"""
+        from analytics.mfe_mae import MFEAnalyzer
+        
+        analyzer = MFEAnalyzer(db=None)
+        report = analyzer.generate_analysis_report()
+        
+        self.assertEqual(report['status'], 'sample')
+        self.assertIn('stop_loss', report)
+        self.assertIn('take_profit', report)
+        self.assertIn('trailing_stop', report)
+        self.assertIsNotNone(report['stop_loss']['recommended_sl_pct'])
+        self.assertIsNotNone(report['take_profit']['recommended_tp_pct'])
+    
+    def test_calculate_mfe_mae_from_positions(self):
+        """测试从持仓计算 MFE/MAE"""
+        from analytics.mfe_mae import MFEAnalyzer
+        
+        analyzer = MFEAnalyzer(db=None)
+        
+        # 测试多头持仓
+        positions = [
+            {'symbol': 'BTC/USDT', 'side': 'long', 'entry_price': 50000, 
+             'peak_price': 55000, 'trough_price': 48000, 'coin_quantity': 0.1},
+        ]
+        
+        results = analyzer.calculate_mfe_mae_from_positions(positions)
+        
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]['mfe_pct'], 10.0)  # (55000-50000)/50000 * 100
+        self.assertEqual(results[0]['mae_pct'], 4.0)   # (50000-48000)/50000 * 100
+        
+        # 测试空头持仓
+        short_positions = [
+            {'symbol': 'ETH/USDT', 'side': 'short', 'entry_price': 3000, 
+             'peak_price': 3200, 'trough_price': 2800, 'coin_quantity': 1},
+        ]
+        
+        results = analyzer.calculate_mfe_mae_from_positions(short_positions)
+        
+        self.assertEqual(results[0]['mfe_pct'], 6.67)  # (3000-2800)/3000 * 100
+        self.assertEqual(results[0]['mae_pct'], 6.67)  # (3200-3000)/3000 * 100
+    
+    def test_stop_loss_recommendation(self):
+        """测试止损建议计算"""
+        from analytics.mfe_mae import MFEAnalyzer
+        
+        analyzer = MFEAnalyzer(db=None)
+        
+        # 测试样本不足
+        result = analyzer.get_stop_loss_recommendation([1, 2])
+        self.assertIsNone(result['recommended_sl_pct'])
+        self.assertIn('样本不足', result['reason'])
+        
+        # 测试足够样本
+        mae_pcts = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]
+        result = analyzer.get_stop_loss_recommendation(mae_pcts)
+        
+        self.assertIsNotNone(result['recommended_sl_pct'])
+        self.assertEqual(result['sample_size'], 10)
+        # 75% 分位数应该是 7.5% 左右
+        self.assertAlmostEqual(result['recommended_sl_pct'], 7.5, delta=1)
+    
+    def test_take_profit_recommendation(self):
+        """测试止盈建议计算"""
+        from analytics.mfe_mae import MFEAnalyzer
+        
+        analyzer = MFEAnalyzer(db=None)
+        
+        mfe_pcts = [2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0, 20.0]
+        result = analyzer.get_take_profit_recommendation(mfe_pcts)
+        
+        self.assertIsNotNone(result['recommended_tp_pct'])
+        self.assertEqual(result['sample_size'], 10)
+        # 50% 分位数应该是 12%（索引5，即第6个元素）
+        self.assertAlmostEqual(result['recommended_tp_pct'], 12.0, delta=1)
+    
+    def test_trailing_stop_suggestion(self):
+        """测试追踪止损建议"""
+        from analytics.mfe_mae import MFEAnalyzer
+        
+        analyzer = MFEAnalyzer(db=None)
+        
+        mfe_pcts = [4.0, 8.0, 12.0]
+        mae_pcts = [2.0, 4.0, 6.0]
+        
+        result = analyzer.get_trailing_stop_suggestion(mfe_pcts, mae_pcts)
+        
+        self.assertIsNotNone(result['activation_threshold_pct'])
+        self.assertIsNotNone(result['trailing_distance_pct'])
+        # avg_mfe = 8, 50% = 4
+        self.assertEqual(result['activation_threshold_pct'], 4.0)
+        # avg_mae = 4
+        self.assertEqual(result['trailing_distance_pct'], 4.0)
+    
+    def test_api_endpoint_sample(self):
+        """测试 API 端点（示例数据场景）"""
+        from dashboard.api import app
+        
+        with app.test_client() as client:
+            resp = client.get('/api/trades/mfe-mae')
+            self.assertEqual(resp.status_code, 200)
+            
+            data = json.loads(resp.data)
+            # 因为没有足够数据，应该返回示例
+            self.assertIn('status', data)
+    
+    def test_api_recommendations_endpoint(self):
+        """测试建议端点"""
+        from dashboard.api import app
+        
+        with app.test_client() as client:
+            resp = client.get('/api/trades/mfe-mae/recommendations')
+            self.assertEqual(resp.status_code, 200)
+            
+            data = json.loads(resp.data)
+            self.assertIn('stop_loss', data)
+            self.assertIn('take_profit', data)
+            self.assertIn('trailing_stop', data)
+
+
 def run_tests():
     """运行所有测试"""
     print("\n" + "="*60)
@@ -1876,6 +2000,7 @@ def run_tests():
     suite.addTests(loader.loadTestsFromTestCase(TestStrategies))
     suite.addTests(loader.loadTestsFromTestCase(TestTradingExecutor))
     suite.addTests(loader.loadTestsFromTestCase(TestRiskManager))
+    suite.addTests(loader.loadTestsFromTestCase(TestMFEAnalyzer))
     
     # 运行测试
     runner = unittest.TextTestRunner(verbosity=2)

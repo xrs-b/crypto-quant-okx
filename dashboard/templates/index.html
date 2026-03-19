@@ -3614,6 +3614,24 @@
             await loadGovernance();
             await refreshAll();
         }
+        async function resetLossStreakGuard() {
+            try {
+                const r = await fetch('/api/risk/loss-streak/reset', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({note: 'dashboard-manual-reset'})
+                });
+                const j = await r.json();
+                if (!j.success) {
+                    toast('清零连亏熔断失败: ' + (j.error || 'unknown'), 'bad');
+                    return;
+                }
+                toast(j.data?.message || '连亏熔断已清零', 'ok');
+                await refreshAll();
+            } catch (e) {
+                toast('清零连亏熔断失败: ' + (e.message || e), 'bad');
+            }
+        }
         async function loadRisk() {
             const [risk, events] = await Promise.all([api('/api/risk/status'), api('/api/risk/events')]);
             document.getElementById('riskCurrentExposure').textContent = pct(risk.current_exposure);
@@ -3624,7 +3642,8 @@
                 <div class="item"><strong>余额</strong><div class="muted">总额 ${money(risk.balance.total)} USDT ｜ 可用 ${money(risk.balance.free)} USDT ｜ 已用 ${money(risk.balance.used)} USDT</div></div>
                 <div class="item"><strong>仓位上限</strong><div class="muted">当前 ${pct(risk.current_exposure)} / 最大 ${pct(risk.max_exposure)} ｜ 单次计划开仓 ${pct(risk.position_size)}</div></div>
                 <div class="item"><strong>回撤熔断</strong><div class="muted">当前 ${pct(risk.daily_drawdown)} / 上限 ${pct(risk.max_daily_drawdown)}</div></div>
-                <div class="item"><strong>亏损熔断</strong><div class="muted">当前连续亏损 ${risk.consecutive_losses} 次 / 上限 ${risk.max_consecutive_losses} 次</div></div>
+                <div class="item"><strong>亏损熔断</strong><div class="muted">当前连续亏损 ${risk.consecutive_losses} 次 / 上限 ${risk.max_consecutive_losses} 次 ｜ 冷却 ${risk.loss_streak_cooldown_hours || '--'}h</div></div>
+                <div class="item"><strong>熔断状态</strong><div class="muted">${risk.loss_streak_locked ? '锁定中，停止新开仓' : '正常'} ｜ ${risk.loss_streak_recover_at ? ('自动恢复：' + risk.loss_streak_recover_at) : '未设置恢复时间'}</div><div style="margin-top:8px;"><button class="secondary" onclick="resetLossStreakGuard()">手动清零连亏熔断</button></div></div>
                 <div class="item"><strong>最后交易时间</strong><div class="muted">${risk.last_trade_time || '暂无'}</div></div>`;
             document.getElementById('riskEventsTable').innerHTML = events.length ? events.map(e => `<tr><td>${e.time}</td><td>${e.symbol}</td><td>${e.reason}</td></tr>`).join('') : '<tr><td colspan="3" class="muted">暂无风控事件</td></tr>';
         }

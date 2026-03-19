@@ -197,6 +197,8 @@ trading:
   cooldown_minutes: 15
   leverage: 10
   max_consecutive_losses: 3
+  loss_streak_lock_enabled: true
+  loss_streak_cooldown_hours: 12
   max_daily_drawdown: 0.03
   max_exposure: 0.3
   max_position_per_symbol: 0.15

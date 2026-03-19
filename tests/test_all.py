@@ -826,6 +826,13 @@ class TestDashboardApi(unittest.TestCase):
         self.assertIn('models', data)
         self.assertIsInstance(data.get('checks'), list)
 
+    def test_risk_loss_streak_reset_endpoint(self):
+        client = app.test_client()
+        resp = client.post('/api/risk/loss-streak/reset', json={'note': 'unit-test'})
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.json.get('success'))
+        self.assertIn('message', resp.json.get('data') or {})
+
     def test_evaluate_filtered_signal_outcome_classifies_buy_cases(self):
         import dashboard.api as dashboard_api
 
@@ -1485,6 +1492,29 @@ class TestHealthSummary(unittest.TestCase):
                 bot_run.RUNTIME_STATE_PATH = old_runtime_path
         if os.path.exists('data/test_health_summary_force.db'):
             os.remove('data/test_health_summary_force.db')
+
+
+class TestRiskManagerLock(unittest.TestCase):
+    def test_loss_streak_lock_triggers_and_manual_reset_clears(self):
+        cfg = Config()
+        cfg._config.setdefault('trading', {}).update({'max_consecutive_losses': 3, 'loss_streak_lock_enabled': True, 'loss_streak_cooldown_hours': 12, 'min_trade_interval': 0, 'max_trades_per_day': 99})
+        db = Database('data/test_risk_lock.db')
+        try:
+            for i in range(3):
+                trade_id = db.record_trade(symbol='XRP/USDT', side='long', entry_price=1.5, quantity=100, leverage=10)
+                db.close_trade(trade_id, exit_price=1.49, pnl=-1, pnl_percent=-1, notes='loss')
+            rm = RiskManager(cfg, db)
+            can_open, reason, details = rm.can_open_position('XRP/USDT')
+            self.assertFalse(can_open)
+            self.assertIn('冷却中', reason)
+            self.assertTrue(details['loss_streak_limit']['locked'])
+            self.assertTrue(details['loss_streak_limit']['recover_at'])
+            state = rm.manual_reset_loss_streak(note='unit-test')
+            self.assertEqual(state['current_streak'], 0)
+            self.assertFalse(state['lock_active'])
+        finally:
+            if os.path.exists('data/test_risk_lock.db'):
+                os.remove('data/test_risk_lock.db')
 
 
 class TestTradingExecutor(unittest.TestCase):

@@ -428,6 +428,23 @@ class NotificationManager:
         lines.extend(['---', '【建议动作】', '先看最近错误日志、通知失败记录与运行状态'])
         return self.send('error', f'❌ {title}', lines, 'error', details or {}, priority=priority)
 
+    def notify_loss_streak_lock(self, current: int, max_count: int, recover_at: str, details: Dict = None) -> Dict:
+        priority = 'urgent'
+        pmeta = self._priority_meta(priority)
+        lines = [
+            '【风控锁定】',
+            f'通知等级：{pmeta["emoji"]} {pmeta["label"]}',
+            f'连续亏损：{current}/{max_count}',
+            f'自动恢复：{self._format_time(recover_at)}',
+            '---',
+            '【系统行为】',
+            '新开仓已暂停，但信号分析会继续运行。',
+            '---',
+            '【建议动作】',
+            '可在 dashboard 手动清零恢复；若不处理，系统会在冷却结束后自动恢复。',
+        ]
+        return self.send('error', '🛑 连亏熔断已触发', lines, 'warning', details or {}, priority=priority)
+
     def notify_runtime(self, phase: str, lines: List[str], details: Dict = None) -> Dict:
         title_map = {
             'start': '⏱️ 机器人周期开始',

@@ -1,0 +1,171 @@
+{% extends "layout.html" %}
+
+{% block title %}交易记录 - OKX量化交易仪表盘{% endblock %}
+{% block active_page %}trades{% endblock %}
+{% block page_title %}交易记录{% endblock %}
+{% block page_desc %}历史交易明细与统计分析{% endblock %}
+
+{% block topbar_actions %}
+<button onclick="loadTrades()">🔄 刷新</button>
+{% endblock %}
+
+{% block content %}
+{# Stats Summary #}
+<div class="stat-grid">
+    <div class="stat-card">
+        <div class="label">30日交易数</div>
+        <div class="value" id="totalTrades">--</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">胜率</div>
+        <div class="value" id="winRate">--</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">30日总盈亏</div>
+        <div class="value" id="totalPnl">--</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">盈利交易</div>
+        <div class="value pos" id="winCount">--</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">亏损交易</div>
+        <div class="value neg" id="lossCount">--</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">平均盈亏</div>
+        <div class="value" id="avgPnl">--</div>
+    </div>
+</div>
+
+{# Filter #}
+<div class="card" style="margin-bottom: 24px;">
+    <div style="display: flex; gap: 12px; align-items: center; flex-wrap: wrap;">
+        <label>筛选:</label>
+        <select id="statusFilter" onchange="loadTrades()" style="padding: 8px 12px; border-radius: 8px; background: var(--panel-3); color: var(--text); border: 1px solid var(--border);">
+            <option value="">全部</option>
+            <option value="open">持仓中</option>
+            <option value="closed">已平仓</option>
+        </select>
+        <input type="text" id="symbolFilter" placeholder="币种(如 BTC-USDT)" 
+               style="padding: 8px 12px; border-radius: 8px; background: var(--panel-3); color: var(--text); border: 1px solid var(--border);" />
+        <button onclick="loadTrades()">应用</button>
+    </div>
+</div>
+
+{# Trades Table #}
+<div class="card">
+    <h3 style="margin: 0 0 16px 0;">交易记录</h3>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>币种</th>
+                    <th>方向</th>
+                    <th>状态</th>
+                    <th>开仓价</th>
+                    <th>平仓价</th>
+                    <th>数量</th>
+                    <th>杠杆</th>
+                    <th>盈亏</th>
+                    <th>盈亏率</th>
+                    <th>开仓时间</th>
+                    <th>平仓时间</th>
+                </tr>
+            </thead>
+            <tbody id="tradesTable">
+                <tr><td colspan="12" class="muted">加载中...</td></tr>
+            </tbody>
+        </table>
+    </div>
+    
+    {# Pagination #}
+    <div id="pagination" style="margin-top: 16px; display: flex; gap: 8px; justify-content: center;">
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let currentPage = 1;
+const pageSize = 20;
+
+async function loadTrades(page = 1) {
+    currentPage = page;
+    const status = document.getElementById('statusFilter').value;
+    const symbol = document.getElementById('symbolFilter').value;
+    
+    try {
+        const [tradesResp, statsResp] = await Promise.all([
+            api(`/api/trades?limit=${pageSize}&status=${status}&symbol=${symbol}`),
+            api('/api/trades/stats?days=30')
+        ]);
+        
+        const trades = tradesResp.data || [];
+        const stats = statsResp.data || {};
+        
+        // Update stats
+        document.getElementById('totalTrades').textContent = stats.total_trades || 0;
+        document.getElementById('winRate').textContent = (stats.win_rate || 0) + '%';
+        
+        const totalPnl = stats.total_pnl || 0;
+        document.getElementById('totalPnl').textContent = money(totalPnl);
+        document.getElementById('totalPnl').className = 'value ' + (totalPnl >= 0 ? 'pos' : 'neg');
+        
+        document.getElementById('winCount').textContent = stats.wins || 0;
+        document.getElementById('lossCount').textContent = stats.losses || 0;
+        document.getElementById('avgPnl').textContent = money(stats.avg_pnl);
+        
+        // Render trades
+        const tbody = document.getElementById('tradesTable');
+        if (trades.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="12" class="muted">暂无交易记录</td></tr>';
+        } else {
+            tbody.innerHTML = trades.map(t => {
+                const pnl = Number(t.pnl || 0);
+                const pnlRate = t.entry_price && t.exit_price 
+                    ? ((t.exit_price - t.entry_price) / t.entry_price * (t.side === 'long' ? 1 : -1) * 100).toFixed(2) + '%'
+                    : '--';
+                return `<tr>
+                    <td>${t.id}</td>
+                    <td>${t.symbol}</td>
+                    <td>${badge(t.side, t.side === 'long' ? 'long' : 'short')}</td>
+                    <td>${badge(t.status, t.status === 'open' ? 'warn' : 'ok')}</td>
+                    <td>${money(t.entry_price)}</td>
+                    <td>${t.exit_price ? money(t.exit_price) : '--'}</td>
+                    <td>${t.quantity}</td>
+                    <td>${t.leverage || '--'}x</td>
+                    <td class="${pnl >= 0 ? 'pos' : 'neg'}">${pnl === 0 ? '--' : money(pnl)}</td>
+                    <td class="${parseFloat(pnlRate) >= 0 ? 'pos' : 'neg'}">${pnlRate}</td>
+                    <td>${safe(t.open_time)}</td>
+                    <td>${safe(t.close_time)}</td>
+                </tr>`;
+            }).join('');
+        }
+        
+        // Simple pagination
+        const total = tradesResp.count || 0;
+        const totalPages = Math.ceil(total / pageSize);
+        const pagination = document.getElementById('pagination');
+        if (totalPages > 1) {
+            let pagesHtml = '';
+            for (let i = 1; i <= Math.min(totalPages, 5); i++) {
+                pagesHtml += `<button onclick="loadTrades(${i})" ${i === page ? 'style="background: var(--binance-yellow);"' : ''}>${i}</button>`;
+            }
+            pagination.innerHTML = pagesHtml;
+        } else {
+            pagination.innerHTML = '';
+        }
+        
+        document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString('zh-CN');
+    } catch (e) {
+        console.error('loadTrades error:', e);
+        document.getElementById('tradesTable').innerHTML = '<tr><td colspan="12" class="muted">加载错误</td></tr>';
+    }
+}
+
+// Load on page ready
+loadTrades();
+</script>
+{% endblock %}

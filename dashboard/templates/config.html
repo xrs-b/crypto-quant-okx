@@ -1,0 +1,165 @@
+{% extends "layout.html" %}
+
+{% block title %}系统配置 - OKX量化交易仪表盘{% endblock %}
+{% block page_title %}系统配置{% endblock %}
+{% block page_desc %}系统参数、交易配置与API设置{% endblock %}
+
+{% block topbar_actions %}
+<button onclick="loadConfig()">🔄 刷新</button>
+{% endblock %}
+
+{% block content %}
+{# API Config (Masked) #}
+<div class="card" style="margin-bottom: 24px;">
+    <h3 style="margin: 0 0 16px 0;">API 配置</h3>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>配置项</th>
+                    <th>值</th>
+                </tr>
+            </thead>
+            <tbody id="apiTable">
+                <tr><td colspan="2" class="muted">加载中...</td></tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+
+{# Trading Config #}
+<div class="card" style="margin-bottom: 24px;">
+    <h3 style="margin: 0 0 16px 0;">交易配置</h3>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>参数</th>
+                    <th>当前值</th>
+                    <th>说明</th>
+                </tr>
+            </thead>
+            <tbody id="tradingTable">
+                <tr><td colspan="3" class="muted">加载中...</td></tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+
+{# Symbols #}
+<div class="card" style="margin-bottom: 24px;">
+    <h3 style="margin: 0 0 16px 0;">监听币种</h3>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>#</th>
+                    <th>币种</th>
+                    <th>enabled</th>
+                    <th>权重</th>
+                </tr>
+            </thead>
+            <tbody id="symbolsTable">
+                <tr><td colspan="4" class="muted">加载中...</td></tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+
+{# Risk Limits #}
+<div class="card">
+    <h3 style="margin: 0 0 16px 0;">风控限制</h3>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>参数</th>
+                    <th>值</th>
+                    <th>说明</th>
+                </tr>
+            </thead>
+            <tbody id="riskTable">
+                <tr><td colspan="3" class="muted">加载中...</td></tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function loadConfig() {
+    try {
+        const [configResp, symbolsResp] = await Promise.all([
+            api('/api/config'),
+            api('/api/config/symbols')
+        ]);
+        
+        const cfg = configResp.data || {};
+        const symbols = symbolsResp.data || {};
+        
+        // API Table
+        const apiBody = document.getElementById('apiTable');
+        const apiCfg = cfg.api || {};
+        const apiItems = [
+            ['Endpoint', apiCfg.endpoint || '--'],
+            ['API Key', apiCfg.key || '--'],
+            ['Passphrase', apiCfg.passphrase || '--'],
+            ['模拟交易', apiCfg.simulate !== false ? '是' : '否']
+        ];
+        apiBody.innerHTML = apiItems.map(item => `<tr><td>${item[0]}</td><td>${item[1]}</td></tr>`).join('');
+        
+        // Trading Table
+        const tradingBody = document.getElementById('tradingTable');
+        const trading = symbols;
+        const tradingItems = [
+            ['leverage', trading.leverage, '杠杆倍数'],
+            ['position_size', trading.position_size, '仓位比例'],
+            ['stop_loss', pct(trading.stop_loss), '止损比例'],
+            ['take_profit', pct(trading.take_profit), '止盈比例']
+        ];
+        tradingBody.innerHTML = tradingItems.map(item => `<tr>
+            <td>${item[0]}</td>
+            <td>${item[1]}</td>
+            <td class="muted">${item[2]}</td>
+        </tr>`).join('');
+        
+        // Symbols Table
+        const symbolsBody = document.getElementById('symbolsTable');
+        const symbolList = symbols.symbols || [];
+        if (symbolList.length === 0) {
+            symbolsBody.innerHTML = '<tr><td colspan="4" class="muted">暂无币种配置</td></tr>';
+        } else {
+            symbolsBody.innerHTML = symbolList.map((s, i) => `<tr>
+                <td>${i + 1}</td>
+                <td>${typeof s === 'string' ? s : s.symbol || '--'}</td>
+                <td>${badge((typeof s === 'object' ? s.enabled : true) !== false ? 'enabled' : 'disabled', 
+                    (typeof s === 'object' ? s.enabled : true) !== false ? 'ok' : 'filtered')}</td>
+                <td>${typeof s === 'object' && s.weight != null ? s.weight : '--'}</td>
+            </tr>`).join('');
+        }
+        
+        // Risk Table
+        const riskBody = document.getElementById('riskTable');
+        const risk = cfg.risk || {};
+        const riskItems = [
+            ['max_position_size', risk.max_position_size, '最大持仓数量'],
+            ['max_exposure', pct(risk.max_exposure), '最大风险敞口'],
+            ['max_daily_drawdown', pct(risk.max_daily_drawdown), '日内最大回撤'],
+            ['max_consecutive_losses', risk.max_consecutive_losses, '最大连亏次数']
+        ];
+        riskBody.innerHTML = riskItems.map(item => `<tr>
+            <td>${item[0]}</td>
+            <td>${item[1]}</td>
+            <td class="muted">${item[2]}</td>
+        </tr>`).join('');
+        
+        document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString('zh-CN');
+    } catch (e) {
+        console.error('loadConfig error:', e);
+    }
+}
+
+loadConfig();
+</script>
+{% endblock %}

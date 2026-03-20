@@ -1,0 +1,141 @@
+{% extends "layout.html" %}
+
+{% block title %}回测分析 - OKX量化交易仪表盘{% endblock %}
+{% block page_title %}回测分析{% endblock %}
+{% block page_desc %}历史回测结果与策略表现分析{% endblock %}
+
+{% block topbar_actions %}
+<button onclick="loadBacktest()">🔄 刷新</button>
+{% endblock %}
+
+{% block content %}
+{# Stats Cards #}
+<div class="stat-grid">
+    <div class="stat-card">
+        <div class="label">回测周期</div>
+        <div class="value" id="period">--</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">总收益率</div>
+        <div class="value" id="totalReturn">--</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">夏普比率</div>
+        <div class="value" id="sharpeRatio">--</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">最大回撤</div>
+        <div class="value" id="maxDrawdown">--</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">胜率</div>
+        <div class="value" id="winRate">--</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">交易次数</div>
+        <div class="value" id="tradeCount">--</div>
+    </div>
+</div>
+
+{# Symbol Performance #}
+<div class="card" style="margin-bottom: 24px;">
+    <h3 style="margin: 0 0 16px 0;">分币种表现</h3>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>币种</th>
+                    <th>收益率</th>
+                    <th>交易次数</th>
+                    <th>胜率</th>
+                    <th>平均持仓</th>
+                    <th>最大回撤</th>
+                </tr>
+            </thead>
+            <tbody id="symbolTable">
+                <tr><td colspan="6" class="muted">加载中...</td></tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+
+{# Daily Returns #}
+<div class="card">
+    <h3 style="margin: 0 0 16px 0;">日收益率分布</h3>
+    <div id="dailyReturnsChart">
+        <div class="muted">加载中...</div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function loadBacktest() {
+    try {
+        const resp = await api('/api/backtest/summary');
+        const data = resp.data || {};
+        
+        // Stats
+        document.getElementById('period').textContent = data.period || '--';
+        
+        const totalReturn = data.total_return;
+        document.getElementById('totalReturn').textContent = pct(totalReturn);
+        document.getElementById('totalReturn').className = 'value ' + (Number(totalReturn) >= 0 ? 'pos' : 'neg');
+        
+        document.getElementById('sharpeRatio').textContent = data.sharpe_ratio != null ? data.sharpe_ratio.toFixed(2) : '--';
+        
+        const maxDd = data.max_drawdown;
+        document.getElementById('maxDrawdown').textContent = pct(maxDd);
+        document.getElementById('maxDrawdown').className = 'value neg';
+        
+        const winRate = data.win_rate;
+        document.getElementById('winRate').textContent = pct(winRate);
+        document.getElementById('winRate').className = 'value ' + (winRate >= 0.5 ? 'pos' : 'neg');
+        
+        document.getElementById('tradeCount').textContent = data.trade_count || '--';
+        
+        // Symbol table
+        const symbolBody = document.getElementById('symbolTable');
+        const symbols = data.by_symbol || [];
+        if (symbols.length === 0) {
+            symbolBody.innerHTML = '<tr><td colspan="6" class="muted">暂无数据</td></tr>';
+        } else {
+            symbolBody.innerHTML = symbols.map(s => {
+                const ret = s.return != null ? pct(s.return) : '--';
+                const cls = Number(s.return) >= 0 ? 'pos' : 'neg';
+                return `<tr>
+                    <td>${s.symbol || '--'}</td>
+                    <td class="${cls}">${ret}</td>
+                    <td>${s.trade_count || 0}</td>
+                    <td>${s.win_rate != null ? pct(s.win_rate) : '--'}</td>
+                    <td>${s.avg_holding != null ? s.avg_holding.toFixed(1) + 'h' : '--'}</td>
+                    <td>${s.max_drawdown != null ? pct(s.max_drawdown) : '--'}</td>
+                </tr>`;
+            }).join('');
+        }
+        
+        // Daily returns chart (simple list for now)
+        const dailyBody = document.getElementById('dailyReturnsChart');
+        const daily = data.daily_returns || [];
+        if (daily.length === 0) {
+            dailyBody.innerHTML = '<div class="muted">暂无日收益数据</div>';
+        } else {
+            dailyBody.innerHTML = '<div style="display: flex; flex-wrap: wrap; gap: 4px;">' + 
+                daily.slice(-30).map(d => {
+                    const val = Number(d.return);
+                    const color = val >= 0 ? 'var(--success)' : 'var(--danger)';
+                    const height = Math.min(Math.abs(val) * 100, 40);
+                    return `<div style="width: 12px; height: ${20 + height}px; background: ${color}; border-radius: 2px;" title="${d.date}: ${pct(d.return)}"></div>`;
+                }).join('') + '</div>';
+        }
+        
+        document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString('zh-CN');
+    } catch (e) {
+        console.error('loadBacktest error:', e);
+    }
+}
+
+loadBacktest();
+setInterval(loadBacktest, 60000);
+</script>
+{% endblock %}

@@ -66,6 +66,30 @@ def governance():
     return render_template('governance.html', active_page='governance')
 
 
+@app.route('/optimizer')
+def optimizer():
+    """参数优化页面"""
+    return render_template('optimizer.html', active_page='optimizer')
+
+
+@app.route('/backtest')
+def backtest():
+    """回测分析页面"""
+    return render_template('backtest.html', active_page='backtest')
+
+
+@app.route('/quality')
+def quality():
+    """信号质量页面"""
+    return render_template('quality.html', active_page='quality')
+
+
+@app.route('/config')
+def config_page():
+    """系统配置页面"""
+    return render_template('config.html', active_page='config')
+
+
 # ============================================================================
 # 旧版兼容路由 (单页tab模式)
 # ============================================================================

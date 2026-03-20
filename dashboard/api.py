@@ -590,6 +590,21 @@ def get_trades():
     })
 
 
+@app.route('/api/partial-tp-history')
+def get_partial_tp_history():
+    """获取 partial TP 触发历史"""
+    symbol = request.args.get('symbol')
+    limit = int(request.args.get('limit', 100))
+    
+    history = db.get_partial_tp_history(symbol=symbol, limit=limit)
+    
+    return jsonify({
+        'success': True,
+        'data': history,
+        'count': len(history)
+    })
+
+
 @app.route('/api/trades/stats')
 def get_trade_stats():
     """获取交易统计"""

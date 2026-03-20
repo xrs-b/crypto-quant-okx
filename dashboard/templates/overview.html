@@ -11,6 +11,9 @@
     <button class="tab-btn active" data-tab="stats">📊 运行概览</button>
     <button class="tab-btn" data-tab="positions">📈 持仓</button>
     <button class="tab-btn" data-tab="trades">📋 交易</button>
+    <button class="tab-btn" data-tab="health">🏥 系统健康</button>
+    <button class="tab-btn" data-tab="signals">📡 信号概览</button>
+    <button class="tab-btn" data-tab="risk">🛡️ 风控摘要</button>
 </div>
 
 {# Tab 1: Stats #}
@@ -106,6 +109,117 @@
                     <tr><td colspan="9" class="muted">加载中...</td></tr>
                 </tbody>
             </table>
+        </div>
+    </div>
+</div>
+
+{# Tab 4: System Health #}
+<div class="tab-content" id="tab-health">
+    <div class="card" style="margin-bottom: 20px; padding: 16px;">
+        <div class="section-title" style="margin-bottom: 12px;">🏥 系统脉搏</div>
+        <div id="healthChecklist">
+            <div class="muted">加载中...</div>
+        </div>
+    </div>
+    
+    <div class="stat-grid">
+        <div class="stat-card">
+            <div class="label">守护进程</div>
+            <div class="value" id="daemonStatus">--</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">交易环境</div>
+            <div class="value" id="exchangeMode">--</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">监听币种</div>
+            <div class="value" id="watchListCount">--</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">ML模型</div>
+            <div class="value" id="modelStatus">--</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">最近一轮</div>
+            <div class="value" id="lastCycle">--</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">最近错误</div>
+            <div class="value" id="lastError">--</div>
+        </div>
+    </div>
+</div>
+
+{# Tab 5: Signals Overview #}
+<div class="tab-content" id="tab-signals">
+    <div class="card" style="margin-bottom: 20px; padding: 16px;">
+        <div class="section-title" style="margin-bottom: 12px;">📡 信号概览</div>
+        <div id="signalsOverview">
+            <div class="muted">加载中...</div>
+        </div>
+    </div>
+    
+    <div class="stat-grid">
+        <div class="stat-card">
+            <div class="label">今日信号</div>
+            <div class="value" id="todaySignals">--</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">今日执行</div>
+            <div class="value" id="executedToday">--</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">执行率</div>
+            <div class="value" id="executionRate">--</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">30日信号</div>
+            <div class="value" id="totalSignals">--</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">30日执行</div>
+            <div class="value" id="executedSignals">--</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">30日过滤</div>
+            <div class="value" id="filteredSignals">--</div>
+        </div>
+    </div>
+</div>
+
+{# Tab 6: Risk Summary #}
+<div class="tab-content" id="tab-risk">
+    <div class="card" style="margin-bottom: 20px; padding: 16px;">
+        <div class="section-title" style="margin-bottom: 12px;">🛡️ 风控摘要</div>
+        <div id="riskSummary">
+            <div class="muted">加载中...</div>
+        </div>
+    </div>
+    
+    <div class="stat-grid">
+        <div class="stat-card">
+            <div class="label">当前敞口</div>
+            <div class="value" id="currentExposure">--</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">最大敞口</div>
+            <div class="value" id="maxExposure">--</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">连续亏损</div>
+            <div class="value" id="lossStreak">--</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">日内回撤</div>
+            <div class="value" id="dailyDrawdown">--</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">账户余额</div>
+            <div class="value" id="accountBalance">--</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">杠杆倍数</div>
+            <div class="value" id="leverage">--</div>
         </div>
     </div>
 </div>
@@ -227,9 +341,150 @@ async function loadOverview() {
     }
 }
 
+// Load health checklist
+async function loadHealth() {
+    try {
+        const resp = await api('/api/system/checklist');
+        if (resp.success && resp.data) {
+            const data = resp.data;
+            const checks = data.checks || [];
+            
+            // Render checklist
+            const statusIcon = { 'ok': '✅', 'warn': '⚠️', 'bad': '❌' };
+            const statusColor = { 'ok': '#22c55e', 'warn': '#f59e0b', 'bad': '#ef4444' };
+            
+            document.getElementById('healthChecklist').innerHTML = checks.map(c => `
+                <div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid rgba(255,255,255,.05);">
+                    <span style="font-size:16px;">${statusIcon[c.status] || '❓'}</span>
+                    <span style="color:${statusColor[c.status] || '#8b93a7'};font-weight:600;">${c.label}</span>
+                    <span style="color:#8b93a7;font-size:12px;margin-left:auto;">${c.detail || ''}</span>
+                </div>
+            `).join('');
+            
+            // Update stat cards
+            const daemon = checks.find(c => c.key === 'daemon');
+            document.getElementById('daemonStatus').textContent = daemon?.status === 'ok' ? '🟢 在线' : '🔴 离线';
+            document.getElementById('daemonStatus').className = 'value ' + (daemon?.status === 'ok' ? 'pos' : 'neg');
+            
+            const exchange = checks.find(c => c.key === 'exchange_mode');
+            document.getElementById('exchangeMode').textContent = data.exchange_mode || '--';
+            
+            document.getElementById('watchListCount').textContent = (data.watch_list || []).length + ' 个';
+            
+            const models = checks.find(c => c.key === 'models');
+            document.getElementById('modelStatus').textContent = models?.status === 'ok' ? '🟢 就绪' : '⚠️ 缺失';
+            document.getElementById('modelStatus').className = 'value ' + (models?.status === 'ok' ? 'pos' : 'warn');
+            
+            const latest = checks.find(c => c.key === 'latest_cycle');
+            document.getElementById('lastCycle').textContent = latest?.detail?.split('｜')[0]?.replace('signals=', '') || '--';
+            
+            const runtime = data.runtime || {};
+            document.getElementById('lastError').textContent = runtime.last_error ? '⚠️ 有' : '✅ 无';
+            document.getElementById('lastError').className = 'value ' + (runtime.last_error ? 'neg' : 'pos');
+        }
+    } catch (e) {
+        document.getElementById('healthChecklist').innerHTML = '<div class="muted">加载失败</div>';
+    }
+}
+
+// Load signals overview
+async function loadSignalsOverview() {
+    try {
+        const [status, signalStats] = await Promise.all([
+            api('/api/system/status'),
+            api('/api/signals/stats?days=30')
+        ]);
+        
+        const statusData = status.data || {};
+        const signalsData = statusData.signals || {};
+        const statsData = signalStats.data || {};
+        
+        // Today's signals
+        document.getElementById('todaySignals').textContent = signalsData.today_signals || 0;
+        document.getElementById('executedToday').textContent = signalsData.executed_today || 0;
+        document.getElementById('executionRate').textContent = (signalsData.execution_rate || 0) + '%';
+        
+        // 30-day stats
+        document.getElementById('totalSignals').textContent = statsData.total_signals || 0;
+        document.getElementById('executedSignals').textContent = statsData.executed_signals || 0;
+        document.getElementById('filteredSignals').textContent = statsData.filtered_signals || 0;
+        
+        // Update execution rate color
+        const execRate = signalsData.execution_rate || 0;
+        document.getElementById('executionRate').className = 'value ' + (execRate >= 50 ? 'pos' : (execRate >= 20 ? '' : 'neg'));
+        
+        // Render summary
+        document.getElementById('signalsOverview').innerHTML = `
+            <div style="display:flex;gap:20px;flex-wrap:wrap;">
+                <div style="background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.3);border-radius:8px;padding:12px 16px;">
+                    <div style="color:#8b93a7;font-size:12px;">今日执行率</div>
+                    <div style="color:#22c55e;font-size:20px;font-weight:700;">${execRate}%</div>
+                </div>
+                <div style="background:rgba(96,165,250,.1);border:1px solid rgba(96,165,250,.3);border-radius:8px;padding:12px 16px;">
+                    <div style="color:#8b93a7;font-size:12px;">30日执行率</div>
+                    <div style="color:#60a5fa;font-size:20px;font-weight:700;">${statsData.execution_rate || 0}%</div>
+                </div>
+            </div>
+        `;
+    } catch (e) {
+        document.getElementById('signalsOverview').innerHTML = '<div class="muted">加载失败</div>';
+    }
+}
+
+// Load risk summary
+async function loadRiskSummary() {
+    try {
+        const resp = await api('/api/system/status');
+        if (resp.success && resp.data) {
+            const risk = resp.data.risk || {};
+            
+            document.getElementById('currentExposure').textContent = pct(risk.current_exposure);
+            document.getElementById('maxExposure').textContent = pct(risk.max_exposure);
+            document.getElementById('lossStreak').textContent = risk.loss_streak != null ? risk.loss_streak + ' 次' : '--';
+            document.getElementById('dailyDrawdown').textContent = pct(risk.daily_drawdown);
+            document.getElementById('accountBalance').textContent = money(risk.balance?.total);
+            document.getElementById('leverage').textContent = risk.leverage ? risk.leverage + 'x' : '--';
+            
+            // Color coding
+            const exposure = risk.current_exposure || 0;
+            document.getElementById('currentExposure').className = 'value ' + (exposure > 0.7 ? 'neg' : (exposure > 0.4 ? '' : 'pos'));
+            
+            const streak = risk.loss_streak || 0;
+            document.getElementById('lossStreak').className = 'value ' + (streak >= 3 ? 'neg' : (streak > 0 ? '' : 'pos'));
+            
+            const dd = risk.daily_drawdown || 0;
+            document.getElementById('dailyDrawdown').className = 'value ' + (dd > 0.1 ? 'neg' : (dd > 0.05 ? '' : 'pos'));
+            
+            // Render summary
+            const riskLevel = exposure > 0.7 ? '🔴 高风险' : (exposure > 0.4 ? '🟡 中风险' : '🟢 低风险');
+            document.getElementById('riskSummary').innerHTML = `
+                <div style="display:flex;gap:20px;flex-wrap:wrap;">
+                    <div style="background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.3);border-radius:8px;padding:12px 16px;">
+                        <div style="color:#8b93a7;font-size:12px;">风险等级</div>
+                        <div style="color:#ef4444;font-size:20px;font-weight:700;">${riskLevel}</div>
+                    </div>
+                    <div style="background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.3);border-radius:8px;padding:12px 16px;">
+                        <div style="color:#8b93a7;font-size:12px;">亏损保护</div>
+                        <div style="color:#f59e0b;font-size:20px;font-weight:700;">${risk.max_consecutive_losses || '--'} 次</div>
+                    </div>
+                </div>
+            `;
+        }
+    } catch (e) {
+        document.getElementById('riskSummary').innerHTML = '<div class="muted">加载失败</div>';
+    }
+}
+
 loadOverview();
 loadRegime();
+loadHealth();
+loadSignalsOverview();
+loadRiskSummary();
+
 setInterval(loadOverview, 30000);
 setInterval(loadRegime, 60000);
+setInterval(loadHealth, 60000);
+setInterval(loadSignalsOverview, 60000);
+setInterval(loadRiskSummary, 30000);
 </script>
 {% endblock %}

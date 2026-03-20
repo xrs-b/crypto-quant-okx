@@ -208,3 +208,6 @@ trading:
   stop_loss: 0.018
   take_profit: 0.028
   trailing_stop: 0.01
+  # 盈利触发型追踪止损：盈利达到此阈值后激活追踪（0.01 = 1%）
+  # 设置为 null 或删除则始终激活（旧行为）
+  trailing_activation: 0.01

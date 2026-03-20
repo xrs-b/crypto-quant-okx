@@ -1783,8 +1783,10 @@ class TestTradingExecutor(unittest.TestCase):
         self.assertFalse(fresh_executor._check_cooldown('BTC/USDT'))
 
     def test_trailing_stop_tracks_high_for_long(self):
+        # 旧行为测试：设置 trailing_activation=None 保持始终激活
         self.executor.trading_config['take_profit'] = 0.5
         self.executor.trading_config['trailing_stop'] = 0.05
+        self.executor.trading_config['trailing_activation'] = None
         self.db.update_position(symbol='BTC/USDT', side='long', entry_price=100, quantity=1, leverage=1, current_price=100)
         self.assertFalse(self.executor.check_take_profit('BTC/USDT', 110))
         self.assertEqual(self.executor._trade_cache['BTC/USDT']['highest_price'], 110)
@@ -1795,8 +1797,10 @@ class TestTradingExecutor(unittest.TestCase):
         self.assertTrue(self.executor.check_take_profit('BTC/USDT', 104))
 
     def test_trailing_stop_tracks_low_for_short(self):
+        # 旧行为测试：设置 trailing_activation=None 保持始终激活
         self.executor.trading_config['take_profit'] = 0.5
         self.executor.trading_config['trailing_stop'] = 0.05
+        self.executor.trading_config['trailing_activation'] = None
         self.db.update_position(symbol='BTC/USDT', side='short', entry_price=100, quantity=1, leverage=1, current_price=100)
         self.assertFalse(self.executor.check_take_profit('BTC/USDT', 95))
         self.assertEqual(self.executor._trade_cache['BTC/USDT']['lowest_price'], 95)
@@ -1805,6 +1809,47 @@ class TestTradingExecutor(unittest.TestCase):
         self.executor._trade_cache.clear()
         self.assertFalse(self.executor.check_take_profit('BTC/USDT', 96))
         self.assertTrue(self.executor.check_take_profit('BTC/USDT', 99.8))
+
+    def test_trailing_stop_activation_threshold_long(self):
+        """盈利触发型追踪止损 - 多仓"""
+        self.executor.trading_config['take_profit'] = 0.5
+        self.executor.trading_config['trailing_stop'] = 0.05  # 5%
+        self.executor.trading_config['trailing_activation'] = 0.10  # 10% 盈利才激活
+        self.db.update_position(symbol='BTC/USDT', side='long', entry_price=100, quantity=1, leverage=1, current_price=100)
+        
+        # 5% 盈利，未达到 10% 激活阈值，不触发追踪
+        self.assertFalse(self.executor.check_take_profit('BTC/USDT', 105))
+        # 但仍然记录最高价
+        self.assertEqual(self.executor._trade_cache['BTC/USDT']['highest_price'], 105)
+        
+        # 15% 盈利，达到激活阈值，激活追踪
+        self.assertFalse(self.executor.check_take_profit('BTC/USDT', 115))
+        
+        # 价格回落，但未触及追踪止损
+        self.assertFalse(self.executor.check_take_profit('BTC/USDT', 112))
+        
+        # 价格继续回落，触发追踪止损 (115 * 0.95 = 109.25)
+        self.assertTrue(self.executor.check_take_profit('BTC/USDT', 109))
+
+    def test_trailing_stop_activation_threshold_short(self):
+        """盈利触发型追踪止损 - 空仓"""
+        self.executor.trading_config['take_profit'] = 0.5
+        self.executor.trading_config['trailing_stop'] = 0.05  # 5%
+        self.executor.trading_config['trailing_activation'] = 0.10  # 10% 盈利才激活
+        self.db.update_position(symbol='BTC/USDT', side='short', entry_price=100, quantity=1, leverage=1, current_price=100)
+        
+        # 5% 盈利，未达到 10% 激活阈值，不触发追踪
+        self.assertFalse(self.executor.check_take_profit('BTC/USDT', 95))
+        self.assertEqual(self.executor._trade_cache['BTC/USDT']['lowest_price'], 95)
+        
+        # 15% 盈利，达到激活阈值，激活追踪
+        self.assertFalse(self.executor.check_take_profit('BTC/USDT', 85))
+        
+        # 价格回升，但未触及追踪止损
+        self.assertFalse(self.executor.check_take_profit('BTC/USDT', 88))
+        
+        # 价格继续回升，触发追踪止损 (85 * 1.05 = 89.25)
+        self.assertTrue(self.executor.check_take_profit('BTC/USDT', 90))
 
     def test_close_position_auto_reconciles_51169_when_exchange_has_no_position(self):
         db = Database('data/test_close_mismatch.db')

@@ -124,12 +124,13 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
 });
 
 // Regime display mapping
+// Regime = 市场状态/市场格局
 const regimeMap = {
-    'trend': { label: '📈 趋势', color: '#22c55e', desc: '趋势明确' },
-    'range': { label: '🔄 震荡', color: '#60a5fa', desc: '区间波动' },
-    'high_vol': { label: '⚡ 高波动', color: '#f59e0b', desc: '波动较大' },
-    'low_vol': { label: '😴 低波动', color: '#8b93a7', desc: '波动平静' },
-    'risk_anomaly': { label: '🚨 风险异常', color: '#ef4444', desc: '异常波动' },
+    'trend': { label: '📈 趋势 (Trend)', color: '#22c55e', desc: '趋势明确' },
+    'range': { label: '🔄 震荡 (Range)', color: '#60a5fa', desc: '区间波动' },
+    'high_vol': { label: '⚡ 高波动 (High Vol)', color: '#f59e0b', desc: '波动较大' },
+    'low_vol': { label: '😴 低波动 (Low Vol)', color: '#8b93a7', desc: '波动平静' },
+    'risk_anomaly': { label: '🚨 风险异常 (Risk)', color: '#ef4444', desc: '异常波动' },
     'unknown': { label: '❓ 未知', color: '#8b93a7', desc: '数据不足' }
 };
 

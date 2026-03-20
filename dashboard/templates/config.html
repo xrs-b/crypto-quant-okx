@@ -65,7 +65,7 @@
                     <tr>
                         <th>#</th>
                         <th>币种</th>
-                        <th>enabled</th>
+                        <th>启用状态</th>
                         <th>权重</th>
                     </tr>
                 </thead>
@@ -124,10 +124,10 @@ async function loadConfig() {
         const apiBody = document.getElementById('apiTable');
         const apiCfg = cfg.api || {};
         const apiItems = [
-            ['Endpoint', apiCfg.endpoint || '--'],
+            ['接口地址 (Endpoint)', apiCfg.endpoint || '--'],
             ['API Key', apiCfg.key || '--'],
             ['Passphrase', apiCfg.passphrase || '--'],
-            ['模拟交易', apiCfg.simulate !== false ? '是' : '否']
+            ['模拟交易模式', apiCfg.simulate !== false ? '是' : '否']
         ];
         apiBody.innerHTML = apiItems.map(item => `<tr><td>${item[0]}</td><td>${item[1]}</td></tr>`).join('');
         
@@ -135,14 +135,14 @@ async function loadConfig() {
         const tradingBody = document.getElementById('tradingTable');
         const trading = symbols;
         const tradingItems = [
-            ['leverage', trading.leverage, '杠杆倍数'],
-            ['position_size', trading.position_size, '仓位比例'],
-            ['stop_loss', pct(trading.stop_loss), '止损比例'],
-            ['take_profit', pct(trading.take_profit), '止盈比例'],
+            ['杠杆倍数 (leverage)', trading.leverage, '开仓时使用的杠杆倍数'],
+            ['仓位比例 (position_size)', trading.position_size, '每次开仓使用的资金比例'],
+            ['止损比例 (stop_loss)', pct(trading.stop_loss), '亏损达到此比例时止损'],
+            ['止盈比例 (take_profit)', pct(trading.take_profit), '盈利达到此比例时止盈'],
             // Partial TP / 分批止盈
-            ['partial_tp_enabled', trading.partial_tp_enabled ? '✅ 启用' : '❌ 关闭', '分批止盈开关'],
-            ['partial_tp_threshold', pct(trading.partial_tp_threshold), '部分止盈触发阈值（盈利达到此比例时触发）'],
-            ['partial_tp_ratio', pct(trading.partial_tp_ratio), '每次部分平仓比例（仓位占比）']
+            ['分批止盈开关 (partial_tp_enabled)', trading.partial_tp_enabled ? '✅ 启用' : '❌ 关闭', '是否启用分批止盈功能'],
+            ['分批止盈触发阈值', pct(trading.partial_tp_threshold), '盈利达到此比例时触发第一层止盈'],
+            ['每次平仓比例', pct(trading.partial_tp_ratio), '每次部分平仓的仓位占比']
         ];
         tradingBody.innerHTML = tradingItems.map(item => `<tr>
             <td>${item[0]}</td>
@@ -169,10 +169,10 @@ async function loadConfig() {
         const riskBody = document.getElementById('riskTable');
         const risk = cfg.risk || {};
         const riskItems = [
-            ['max_position_size', risk.max_position_size, '最大持仓数量'],
-            ['max_exposure', pct(risk.max_exposure), '最大风险敞口'],
-            ['max_daily_drawdown', pct(risk.max_daily_drawdown), '日内最大回撤'],
-            ['max_consecutive_losses', risk.max_consecutive_losses, '最大连亏次数']
+            ['最大持仓数量', risk.max_position_size, '同时持有仓位数量的上限'],
+            ['最大风险敞口', pct(risk.max_exposure), '总仓位价值占账户比例的上限'],
+            ['日内最大回撤', pct(risk.max_daily_drawdown), '单日亏损比例的容忍上限'],
+            ['最大连亏次数', risk.max_consecutive_losses, '连续亏损次数达到此值后触发熔断']
         ];
         riskBody.innerHTML = riskItems.map(item => `<tr>
             <td>${item[0]}</td>

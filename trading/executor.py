@@ -453,7 +453,17 @@ class TradingExecutor:
         # 检查部分止盈（第一止盈层）
         partial_tp = self._check_partial_take_profit(symbol, leveraged_pnl, position, current_price)
         if partial_tp:
-            # 返回 True 表示触发止盈（部分平仓）
+            # 第一止盈层已触发，检查是否需要检查第二止盈层
+            partial_tp2 = self._check_partial_take_profit2(symbol, leveraged_pnl, current_price)
+            if partial_tp2:
+                # 第二止盈层也触发（在同一周期内不可能，因为会先平第一层）
+                return True
+            # 第一止盈层已执行，但未触发第二止盈层，检查是否继续给 trailing/full TP 机会
+            # 返回 False 让调用方继续检查其他退出条件
+        
+        # 检查部分止盈（第二止盈层）- 只有第一止盈层已执行或未配置时才检查
+        partial_tp2 = self._check_partial_take_profit2(symbol, leveraged_pnl, current_price)
+        if partial_tp2:
             return True
         
         # 普通止盈 - 优先使用配置值，其次 MFE/MAE 建议
@@ -543,6 +553,98 @@ class TradingExecutor:
         
         return False
     
+    def _check_partial_take_profit2(self, symbol: str, leveraged_pnl: float,
+                                     current_price: float) -> bool:
+        """检查部分止盈（第二止盈层 / 多级退出）
+        
+        在第一止盈层执行后，当盈利继续扩大时触发。
+        
+        Returns:
+            True if partial TP2 was executed, False otherwise
+        """
+        # 读取第二止盈层配置（带安全回退）
+        partial_tp2_enabled = self.trading_config.get('partial_tp2_enabled', False)
+        if not partial_tp2_enabled:
+            return False
+        
+        # 获取阈值和比例（带默认值）
+        partial_tp2_threshold = self.trading_config.get('partial_tp2_threshold', 0.03)  # 默认 3%
+        partial_tp2_ratio = self.trading_config.get('partial_tp2_ratio', 0.3)  # 默认平 30%
+        
+        # 检查是否已达到第二止盈阈值
+        if leveraged_pnl >= partial_tp2_threshold:
+            # 检查是否已经执行过第二止盈（避免重复）
+            cache = self._trade_cache.setdefault(symbol, {})
+            if cache.get('partial_tp2_executed', False):
+                return False
+            
+            # 获取当前持仓（第一止盈层执行后可能有剩余）
+            positions = self.db.get_positions()
+            position = None
+            for p in positions:
+                if p.get('symbol') == symbol:
+                    position = p
+                    break
+            
+            if not position:
+                return False
+            
+            # 计算部分平仓数量
+            full_quantity = position.get('quantity', 0)
+            close_quantity = full_quantity * partial_tp2_ratio
+            close_quantity = round(close_quantity, 4)
+            
+            if close_quantity <= 0:
+                return False
+            
+            # 标记为已执行
+            cache['partial_tp2_executed'] = True
+            
+            # 执行部分平仓
+            trade_logger.info(
+                f"{symbol}: 触发第二止盈层 (盈利{leveraged_pnl*100:.2f}%, 阈值{partial_tp2_threshold*100:.1f}%, "
+                f"平{partial_tp2_ratio*100:.0f}%仓位={close_quantity}张)"
+            )
+            
+            # 获取 trade_id 用于记录 partial TP 历史
+            trade = self.db.get_latest_open_trade(symbol, position.get('side'))
+            trade_id = trade.get('id') if trade else None
+            
+            # 计算部分平仓盈亏
+            entry_price = position.get('entry_price', 0)
+            side = position.get('side', 'long')
+            coin_quantity = position.get('coin_quantity', 0) or 0
+            close_coin_quantity = coin_quantity * partial_tp2_ratio
+            if side == 'long':
+                pnl = (current_price - entry_price) * close_coin_quantity
+            else:
+                pnl = (entry_price - current_price) * close_coin_quantity
+            
+            # 执行平仓
+            result = self.close_position(
+                symbol=symbol,
+                reason='partial_tp2',
+                close_price=current_price,
+                close_quantity=close_quantity
+            )
+            
+            # 记录 partial TP 触发历史
+            if result:
+                self.db.record_partial_tp(
+                    trade_id=trade_id,
+                    symbol=symbol,
+                    side=side,
+                    trigger_price=current_price,
+                    close_ratio=partial_tp2_ratio,
+                    close_quantity=close_quantity,
+                    pnl=pnl,
+                    note=f"第二止盈层 | 阈值:{partial_tp2_threshold*100:.1f}%"
+                )
+            
+            return result
+        
+        return False
+    
     def update_positions(self) -> Dict[str, Any]:
         """更新所有持仓状态"""
         positions = self.db.get_positions()
@@ -624,6 +726,7 @@ class TradingExecutor:
             self._trade_cache[symbol] = {}
         # 清除部分止盈标记（新仓位重新开始）
         self._trade_cache[symbol].pop('partial_tp_executed', None)
+        self._trade_cache[symbol].pop('partial_tp2_executed', None)
         if side == 'long':
             self._trade_cache[symbol]['highest_price'] = price
         else:

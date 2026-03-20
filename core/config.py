@@ -99,6 +99,10 @@ class Config:
                 'partial_tp_enabled': False,
                 'partial_tp_threshold': 0.015,
                 'partial_tp_ratio': 0.5,
+                # 第二止盈层（多级退出）- 默认可禁用
+                'partial_tp2_enabled': False,
+                'partial_tp2_threshold': 0.03,
+                'partial_tp2_ratio': 0.3,
             },
             'strategies': {
                 'rsi': {'enabled': True, 'period': 14, 'oversold': 35, 'overbought': 65},

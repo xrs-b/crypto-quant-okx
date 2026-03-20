@@ -1959,7 +1959,11 @@ def get_symbols_config():
             'leverage': trading.get('leverage', 10),
             'position_size': trading.get('position_size', 0.1),
             'stop_loss': trading.get('stop_loss', 0.02),
-            'take_profit': trading.get('take_profit', 0.04)
+            'take_profit': trading.get('take_profit', 0.04),
+            # Partial TP / 分批止盈配置
+            'partial_tp_enabled': trading.get('partial_tp_enabled', False),
+            'partial_tp_threshold': trading.get('partial_tp_threshold', 0.015),
+            'partial_tp_ratio': trading.get('partial_tp_ratio', 0.5)
         }
     })
 

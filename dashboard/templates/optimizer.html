@@ -1,0 +1,132 @@
+{% extends "layout.html" %}
+
+{% block title %}优化建议 - OKX量化交易仪表盘{% endblock %}
+{% block page_title %}优化建议{% endblock %}
+{% block page_desc %}参数优化结果与币种分层策略建议{% endblock %}
+
+{% block topbar_actions %}
+<button onclick="loadOptimizer()">🔄 刷新</button>
+{% endblock %}
+
+{% block content %}
+{# Stats Cards #}
+<div class="stat-grid">
+    <div class="stat-card">
+        <div class="label">优化轮次</div>
+        <div class="value" id="iterationCount">--</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">建议数量</div>
+        <div class="value" id="adviceCount">--</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">待应用</div>
+        <div class="value" id="pendingCount">--</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">已生效</div>
+        <div class="value" id="appliedCount">--</div>
+    </div>
+</div>
+
+{# Parameter Advice #}
+<div class="card" style="margin-bottom: 24px;">
+    <h3 style="margin: 0 0 16px 0;">参数优化建议</h3>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>优先级</th>
+                    <th>参数</th>
+                    <th>当前值</th>
+                    <th>建议值</th>
+                    <th>操作</th>
+                </tr>
+            </thead>
+            <tbody id="adviceTable">
+                <tr><td colspan="5" class="muted">加载中...</td></tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+
+{# Symbol Tiers #}
+<div class="card">
+    <h3 style="margin: 0 0 16px 0;">币种分层</h3>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>层级</th>
+                    <th>币种</th>
+                    <th>权重</th>
+                    <th>状态</th>
+                </tr>
+            </thead>
+            <tbody id="tierTable">
+                <tr><td colspan="4" class="muted">加载中...</td></tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function loadOptimizer() {
+    try {
+        const resp = await api('/api/optimizer/results');
+        const data = resp.data || {};
+        
+        // Stats
+        document.getElementById('iterationCount').textContent = data.iterations || '--';
+        document.getElementById('adviceCount').textContent = (data.parameter_advice || []).length;
+        document.getElementById('pendingCount').textContent = (data.parameter_advice || []).filter(a => a.status === 'pending').length;
+        document.getElementById('appliedCount').textContent = (data.parameter_advice || []).filter(a => a.status === 'applied').length;
+        
+        // Parameter advice table
+        const adviceBody = document.getElementById('adviceTable');
+        const advice = data.parameter_advice || [];
+        if (advice.length === 0) {
+            adviceBody.innerHTML = '<tr><td colspan="5" class="muted">暂无优化建议</td></tr>';
+        } else {
+            adviceBody.innerHTML = advice.map(a => {
+                const priorityClass = {
+                    'high': 'filtered',
+                    'medium': 'warn',
+                    'low': 'info'
+                }[a.priority] || 'info';
+                return `<tr>
+                    <td>${badge(a.priority || 'medium', priorityClass)}</td>
+                    <td>${a.parameter || '--'}</td>
+                    <td>${a.current_value != null ? a.current_value : '--'}</td>
+                    <td>${a.suggested_value != null ? a.suggested_value : '--'}</td>
+                    <td>${a.status === 'applied' ? badge('已应用', 'ok') : badge('待应用', 'warn')}</td>
+                </tr>`;
+            }).join('');
+        }
+        
+        // Tier table
+        const tierBody = document.getElementById('tierTable');
+        const tiers = data.symbol_tiers || [];
+        if (tiers.length === 0) {
+            tierBody.innerHTML = '<tr><td colspan="4" class="muted">暂无分层数据</td></tr>';
+        } else {
+            tierBody.innerHTML = tiers.map(t => `<tr>
+                <td>${badge(t.tier, t.tier === 'tier1' ? 'ok' : t.tier === 'tier2' ? 'warn' : 'info')}</td>
+                <td>${t.symbol || '--'}</td>
+                <td>${t.weight != null ? t.weight : '--'}</td>
+                <td>${badge(t.status || 'active', t.status === 'active' ? 'ok' : 'filtered')}</td>
+            </tr>`).join('');
+        }
+        
+        document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString('zh-CN');
+    } catch (e) {
+        console.error('loadOptimizer error:', e);
+    }
+}
+
+loadOptimizer();
+setInterval(loadOptimizer, 60000);
+</script>
+{% endblock %}

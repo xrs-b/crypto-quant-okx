@@ -1,0 +1,182 @@
+{% extends "layout.html" %}
+
+{% block title %}信号质量 - OKX量化交易仪表盘{% endblock %}
+{% block page_title %}信号质量{% endblock %}
+{% block page_desc %}信号质量分析与过滤效果评估{% endblock %}
+
+{% block topbar_actions %}
+<button onclick="loadQuality()">🔄 刷新</button>
+{% endblock %}
+
+{% block content %}
+{# Quality Stats #}
+<div class="stat-grid">
+    <div class="stat-card">
+        <div class="label">信号总数</div>
+        <div class="value" id="totalSignals">--</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">通过率</div>
+        <div class="value" id="passRate">--</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">过滤数</div>
+        <div class="value" id="filteredCount">--</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">执行数</div>
+        <div class="value" id="executedCount">--</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">平均执行率</div>
+        <div class="value" id="avgExecutionRate">--</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">质量评分</div>
+        <div class="value" id="qualityScore">--</div>
+    </div>
+</div>
+
+{# Filter Effectiveness #}
+<div class="card" style="margin-bottom: 24px;">
+    <h3 style="margin: 0 0 16px 0;">过滤器效果</h3>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>过滤器</th>
+                    <th>通过率</th>
+                    <th>拒绝数</th>
+                    <th>接受数</th>
+                    <th>平均质量提升</th>
+                </tr>
+            </thead>
+            <tbody id="filterTable">
+                <tr><td colspan="5" class="muted">加载中...</td></tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+
+{# Symbol Breakdown #}
+<div class="card" style="margin-bottom: 24px;">
+    <h3 style="margin: 0 0 16px 0;">分币种质量</h3>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>币种</th>
+                    <th>信号数</th>
+                    <th>通过率</th>
+                    <th>平均强度</th>
+                    <th>质量评分</th>
+                </tr>
+            </thead>
+            <tbody id="symbolTable">
+                <tr><td colspan="5" class="muted">加载中...</td></tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+
+{# Recent Filtered #}
+<div class="card">
+    <h3 style="margin: 0 0 16px 0;">最近过滤的信号</h3>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>时间</th>
+                    <th>币种</th>
+                    <th>信号类型</th>
+                    <th>强度</th>
+                    <th>过滤原因</th>
+                </tr>
+            </thead>
+            <tbody id="recentFilteredTable">
+                <tr><td colspan="5" class="muted">加载中...</td></tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function loadQuality() {
+    try {
+        const [qualityResp, filterResp] = await Promise.all([
+            api('/api/signal-quality'),
+            api('/api/signals/filter-effectiveness')
+        ]);
+        
+        const quality = qualityResp.data || {};
+        const filters = filterResp.data || {};
+        
+        // Stats
+        document.getElementById('totalSignals').textContent = quality.total_signals || '--';
+        
+        const passRate = quality.pass_rate;
+        document.getElementById('passRate').textContent = pct(passRate);
+        document.getElementById('passRate').className = 'value ' + (passRate >= 0.3 ? 'pos' : '');
+        
+        document.getElementById('filteredCount').textContent = quality.filtered_count || '--';
+        document.getElementById('executedCount').textContent = quality.executed_count || '--';
+        document.getElementById('avgExecutionRate').textContent = pct(quality.avg_execution_rate);
+        document.getElementById('qualityScore').textContent = quality.quality_score != null ? quality.quality_score.toFixed(1) : '--';
+        
+        // Filter table
+        const filterBody = document.getElementById('filterTable');
+        const filterList = filters.filters || [];
+        if (filterList.length === 0) {
+            filterBody.innerHTML = '<tr><td colspan="5" class="muted">暂无过滤器数据</td></tr>';
+        } else {
+            filterBody.innerHTML = filterList.map(f => `<tr>
+                <td>${f.name || '--'}</td>
+                <td>${pct(f.pass_rate)}</td>
+                <td>${f.rejected_count || 0}</td>
+                <td>${f.accepted_count || 0}</td>
+                <td>${f.avg_quality_improvement != null ? '+' + f.avg_quality_improvement.toFixed(2) : '--'}</td>
+            </tr>`).join('');
+        }
+        
+        // Symbol table
+        const symbolBody = document.getElementById('symbolTable');
+        const symbols = quality.by_symbol || [];
+        if (symbols.length === 0) {
+            symbolBody.innerHTML = '<tr><td colspan="5" class="muted">暂无数据</td></tr>';
+        } else {
+            symbolBody.innerHTML = symbols.map(s => `<tr>
+                <td>${s.symbol || '--'}</td>
+                <td>${s.signal_count || 0}</td>
+                <td>${pct(s.pass_rate)}</td>
+                <td>${s.avg_strength != null ? s.avg_strength.toFixed(1) + '%' : '--'}</td>
+                <td>${s.quality_score != null ? s.quality_score.toFixed(1) : '--'}</td>
+            </tr>`).join('');
+        }
+        
+        // Recent filtered
+        const recentBody = document.getElementById('recentFilteredTable');
+        const recent = filters.recent_filtered || [];
+        if (recent.length === 0) {
+            recentBody.innerHTML = '<tr><td colspan="5" class="muted">暂无最近过滤的信号</td></tr>';
+        } else {
+            recentBody.innerHTML = recent.map(r => `<tr>
+                <td>${r.time || '--'}</td>
+                <td>${r.symbol || '--'}</td>
+                <td>${badge(r.signal_type, r.signal_type === 'buy' ? 'buy' : 'sell')}</td>
+                <td>${r.strength != null ? r.strength + '%' : '--'}</td>
+                <td>${r.filter_reason || '--'}</td>
+            </tr>`).join('');
+        }
+        
+        document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString('zh-CN');
+    } catch (e) {
+        console.error('loadQuality error:', e);
+    }
+}
+
+loadQuality();
+setInterval(loadQuality, 60000);
+</script>
+{% endblock %}

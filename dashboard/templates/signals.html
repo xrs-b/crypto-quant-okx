@@ -152,12 +152,13 @@ function filteredTag(signal) {
 }
 
 // Regime mapping for signals page
+// Regime = 市场状态/市场格局
 const sigRegimeMap = {
-    'trend': { label: '📈 趋势', color: '#22c55e', filterImpact: '无' },
-    'range': { label: '🔄 震荡', color: '#60a5fa', filterImpact: '无' },
-    'high_vol': { label: '⚡ 高波动', color: '#f59e0b', filterImpact: '可拦截' },
-    'low_vol': { label: '😴 低波动', color: '#8b93a7', filterImpact: '默认拦截' },
-    'risk_anomaly': { label: '🚨 风险异常', color: '#ef4444', filterImpact: '强制拦截' },
+    'trend': { label: '📈 趋势 (Trend)', color: '#22c55e', filterImpact: '无' },
+    'range': { label: '🔄 震荡 (Range)', color: '#60a5fa', filterImpact: '无' },
+    'high_vol': { label: '⚡ 高波动 (High Vol)', color: '#f59e0b', filterImpact: '可拦截' },
+    'low_vol': { label: '😴 低波动 (Low Vol)', color: '#8b93a7', filterImpact: '默认拦截' },
+    'risk_anomaly': { label: '🚨 风险异常 (Risk)', color: '#ef4444', filterImpact: '强制拦截' },
     'unknown': { label: '❓ 未知', color: '#8b93a7', filterImpact: '跳过' }
 };
 
@@ -187,6 +188,7 @@ async function loadSignalRegime() {
 }
 
 // Regime distribution display
+// Regime = 市场状态/市场格局
 const regimeDisplayMap = {
     'trend': { label: '📈 趋势', color: '#22c55e', bg: '#22c55e22', border: '#22c55e' },
     'range': { label: '🔄 震荡', color: '#60a5fa', bg: '#60a5fa22', border: '#60a5fa' },
@@ -240,8 +242,8 @@ async function loadRegimeDistribution() {
                         <thead>
                             <tr>
                                 <th>币种</th>
-                                <th>当前Regime</th>
-                                <th>置信度</th>
+                                <th>当前市场状态<br><span style="font-weight:normal;font-size:10px;color:#8b93a7">(Regime)</span></th>
+                                <th>置信度<br><span style="font-weight:normal;font-size:10px;color:#8b93a7">(Confidence)</span></th>
                                 <th>详情</th>
                             </tr>
                         </thead>

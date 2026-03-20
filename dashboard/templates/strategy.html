@@ -48,7 +48,7 @@
                         <th>币种</th>
                         <th>模型文件</th>
                         <th>测试准确率</th>
-                        <th>F1 Score</th>
+                        <th>F1分数</th>
                         <th>状态</th>
                     </tr>
                 </thead>
@@ -117,6 +117,7 @@
 
     <div class="card">
         <div class="section-title">MFE/MAE 分析与止盈止损优化</div>
+        <div class="section-note">MFE (Max Favorable Excursion): 持仓期间最大盈利 | MAE (Max Adverse Excursion): 持仓期间最大亏损</div>
         <div class="stat-grid" style="margin-bottom: 16px;">
             <div class="stat-card">
                 <div class="label">建议止损</div>
@@ -131,15 +132,15 @@
                 <div class="value" id="recTrailingStop">--</div>
             </div>
             <div class="stat-card">
-                <div class="label">平均MFE</div>
+                <div class="label">平均MFE (最大有利偏差)</div>
                 <div class="value pos" id="avgMfe">--</div>
             </div>
             <div class="stat-card">
-                <div class="label">平均MAE</div>
+                <div class="label">平均MAE (最大不利偏差)</div>
                 <div class="value neg" id="avgMae">--</div>
             </div>
             <div class="stat-card">
-                <div class="label">MFE/MAE比率</div>
+                <div class="label">MFE/MAE 比率</div>
                 <div class="value" id="mfeMaeRatio">--</div>
             </div>
         </div>
@@ -149,8 +150,8 @@
                     <tr>
                         <th>币种</th>
                         <th>交易数</th>
-                        <th>平均MFE</th>
-                        <th>平均MAE</th>
+                        <th>平均MFE<br><span style="font-weight:normal;font-size:10px;color:#8b93a7">(最大有利偏差)</span></th>
+                        <th>平均MAE<br><span style="font-weight:normal;font-size:10px;color:#8b93a7">(最大不利偏差)</span></th>
                         <th>最优止损</th>
                         <th>最优止盈</th>
                     </tr>
@@ -378,21 +379,21 @@ async function loadStrategy() {
         
         const rows = [
             {
-                name: 'Partial TP 第一层',
+                name: '分批止盈 (Partial TP) 第一层',
                 enabled: pt1Enabled,
                 threshold: pt1Enabled ? (exitConfig.partial_tp_threshold * 100).toFixed(1) + '%' : '-',
                 ratio: pt1Enabled ? (exitConfig.partial_tp_ratio * 100).toFixed(0) + '%' : '-',
                 suggestion: (recs.take_profit?.recommended * 100).toFixed(1) + '%' || '-'
             },
             {
-                name: 'Partial TP 第二层',
+                name: '分批止盈 (Partial TP) 第二层',
                 enabled: pt2Enabled,
                 threshold: pt2Enabled ? (exitConfig.partial_tp2_threshold * 100).toFixed(1) + '%' : '-',
                 ratio: pt2Enabled ? (exitConfig.partial_tp2_ratio * 100).toFixed(0) + '%' : '-',
                 suggestion: (recs.take_profit?.recommended * 1.5 * 100).toFixed(1) + '%' || '-'
             },
             {
-                name: 'Trailing Activation',
+                name: '追踪激活 (Trailing Activation)',
                 enabled: true,
                 threshold: (exitConfig.trailing_activation * 100).toFixed(1) + '%',
                 ratio: '-',

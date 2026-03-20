@@ -322,40 +322,86 @@ class TradingExecutor:
         
         leverage = position.get('leverage', 1) or 1
         
-        # 追踪止损 - 优先使用 MFE/MAE 建议
+        # 追踪止损 - 优先使用配置值（测试友好），其次 MFE/MAE 建议
         ts_params = self._recommendation_provider.get_trailing_stop(symbol)
-        trailing_stop = ts_params.get('distance', self.trading_config.get('trailing_stop', 0.015))
+        
+        # 追踪距离：优先 config，其次 recommendation
+        config_ts = self.trading_config.get('trailing_stop')
+        rec_ts = ts_params.get('distance')
+        trailing_stop = config_ts if config_ts is not None else rec_ts
+        
+        # 盈利触发型追踪止损：
+        # - 优先 config（可设为 None 表示旧行为：始终激活）
+        # - 其次 recommendation
+        config_ta = self.trading_config.get('trailing_activation')
+        rec_ta = ts_params.get('activation')
+        
+        if config_ta is not None:
+            trailing_activation = config_ta
+        elif rec_ta is not None:
+            trailing_activation = rec_ta
+        else:
+            trailing_activation = 0.01  # 默认 1% 盈利激活
+        
+        # 计算当前盈利比例（杠杆前）
+        try:
+            if side == 'long':
+                pnl_percent = (current_price - entry_price) / entry_price
+            else:
+                pnl_percent = (entry_price - current_price) / entry_price
+        except (TypeError, ZeroDivisionError):
+            pnl_percent = 0
+        
+        # 检查是否已达到激活阈值（None 表示始终激活，作为安全回退）
+        # 一旦激活（trailing_armed），就保持激活状态
         cache = self._trade_cache.setdefault(symbol, {})
+        already_armed = cache.get('trailing_armed', False)
+        trailing_activated = already_armed or (trailing_activation is None or pnl_percent >= trailing_activation)
         
         if side == 'long':
             anchor = highest_price if highest_price is not None else cache.get('highest_price', position.get('peak_price') or entry_price)
             anchor = max(float(anchor or entry_price), float(position.get('peak_price') or entry_price), float(current_price or entry_price))
             cache['highest_price'] = anchor
             self.db.update_position(symbol, side, entry_price, position.get('quantity', 0), leverage, current_price, peak_price=anchor, trough_price=position.get('trough_price'), contract_size=position.get('contract_size', 1) or 1, coin_quantity=position.get('coin_quantity'))
-            stop_price = anchor * (1 - trailing_stop)
-            if current_price <= stop_price and current_price > entry_price:
-                try:
-                    pnl_percent = (current_price - entry_price) / entry_price * leverage
-                except (TypeError, ZeroDivisionError):
-                    pnl_percent = 0
-                trade_logger.info(f"触发追踪止损: {symbol} 盈利{pnl_percent*100:.2f}%")
-                return True
+            
+            # 盈利触发型追踪：只有激活后且价格回落才触发
+            if trailing_activated:
+                stop_price = anchor * (1 - trailing_stop)
+                if current_price <= stop_price and current_price > entry_price:
+                    try:
+                        leveraged_pnl = pnl_percent * leverage
+                    except (TypeError, ZeroDivisionError):
+                        leveraged_pnl = 0
+                    trade_logger.info(f"触发追踪止损: {symbol} 盈利{leveraged_pnl*100:.2f}%")
+                    return True
+            elif cache.get('trailing_armed'):
+                # 记录首次激活
+                trade_logger.info(f"{symbol}: 追踪止损已激活 (盈利{pnl_percent*100:.2f}%, 阈值{trailing_activation*100:.2f}%)")
+            cache['trailing_armed'] = trailing_activated
         else:
             anchor = cache.get('lowest_price', position.get('trough_price') or entry_price)
             anchor = min(float(anchor or entry_price), float(position.get('trough_price') or entry_price), float(current_price or entry_price))
             cache['lowest_price'] = anchor
             self.db.update_position(symbol, side, entry_price, position.get('quantity', 0), leverage, current_price, peak_price=position.get('peak_price'), trough_price=anchor, contract_size=position.get('contract_size', 1) or 1, coin_quantity=position.get('coin_quantity'))
-            stop_price = anchor * (1 + trailing_stop)
-            if current_price >= stop_price and current_price < entry_price:
-                try:
-                    pnl_percent = (entry_price - current_price) / entry_price * leverage
-                except (TypeError, ZeroDivisionError):
-                    pnl_percent = 0
-                trade_logger.info(f"触发追踪止损: {symbol} 盈利{pnl_percent*100:.2f}%")
-                return True
+            
+            # 盈利触发型追踪：只有激活后且价格回升才触发
+            if trailing_activated:
+                stop_price = anchor * (1 + trailing_stop)
+                if current_price >= stop_price and current_price < entry_price:
+                    try:
+                        leveraged_pnl = pnl_percent * leverage
+                    except (TypeError, ZeroDivisionError):
+                        leveraged_pnl = 0
+                    trade_logger.info(f"触发追踪止损: {symbol} 盈利{leveraged_pnl*100:.2f}%")
+                    return True
+            elif cache.get('trailing_armed'):
+                trade_logger.info(f"{symbol}: 追踪止损已激活 (盈利{pnl_percent*100:.2f}%, 阈值{trailing_activation*100:.2f}%)")
+            cache['trailing_armed'] = trailing_activated
         
-        # 普通止盈 - 优先使用 MFE/MAE 建议
-        take_profit = self._recommendation_provider.get_take_profit(symbol)
+        # 普通止盈 - 优先使用配置值，其次 MFE/MAE 建议
+        config_tp = self.trading_config.get('take_profit')
+        rec_tp = self._recommendation_provider.get_take_profit(symbol)
+        take_profit = rec_tp if config_tp is None else config_tp
         
         try:
             if side == 'long':

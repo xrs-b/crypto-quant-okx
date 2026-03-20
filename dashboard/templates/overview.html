@@ -15,6 +15,14 @@
 
 {# Tab 1: Stats #}
 <div class="tab-content active" id="tab-stats">
+    {# Regime Card #}
+    <div class="card" style="margin-bottom: 20px; padding: 16px;">
+        <div class="section-title" style="margin-bottom: 12px;">🌊 市场状态 (Regime)</div>
+        <div id="regimeInfo">
+            <div class="muted">加载中...</div>
+        </div>
+    </div>
+    
     <div class="stat-grid">
         <div class="stat-card">
             <div class="label">账户总额</div>
@@ -115,6 +123,43 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
     });
 });
 
+// Regime display mapping
+const regimeMap = {
+    'trend': { label: '📈 趋势', color: '#22c55e', desc: '趋势明确' },
+    'range': { label: '🔄 震荡', color: '#60a5fa', desc: '区间波动' },
+    'high_vol': { label: '⚡ 高波动', color: '#f59e0b', desc: '波动较大' },
+    'low_vol': { label: '😴 低波动', color: '#8b93a7', desc: '波动平静' },
+    'risk_anomaly': { label: '🚨 风险异常', color: '#ef4444', desc: '异常波动' },
+    'unknown': { label: '❓ 未知', color: '#8b93a7', desc: '数据不足' }
+};
+
+function renderRegime(data) {
+    const r = regimeMap[data.regime] || regimeMap['unknown'];
+    const conf = (data.confidence * 100).toFixed(0);
+    const affectsFilter = data.regime === 'low_vol' || data.regime === 'high_vol' || data.regime === 'risk_anomaly';
+    const filterHint = affectsFilter ? '<span style="color:#f59e0b;font-size:12px;margin-left:8px;">⚠️ 影响过滤</span>' : '';
+    
+    return `<div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;">
+        <div style="background:${r.color}22;border:1px solid ${r.color};border-radius:8px;padding:8px 14px;">
+            <span style="font-size:18px;font-weight:700;color:${r.color};">${r.label}</span>
+            <span style="color:#8b93a7;font-size:13px;margin-left:6px;">置信度 ${conf}%</span>
+            ${filterHint}
+        </div>
+        <div style="color:#8b93a7;font-size:13px;">${data.details || r.desc}</div>
+    </div>`;
+}
+
+async function loadRegime() {
+    try {
+        const resp = await api('/api/regime?symbol=BTC/USDT:USDT&timeframe=1h');
+        if (resp.success && resp.data) {
+            document.getElementById('regimeInfo').innerHTML = renderRegime(resp.data);
+        }
+    } catch (e) {
+        document.getElementById('regimeInfo').innerHTML = '<div class="muted">加载失败</div>';
+    }
+}
+
 async function loadOverview() {
     try {
         const [status, positions, recentTrades] = await Promise.all([
@@ -182,6 +227,8 @@ async function loadOverview() {
 }
 
 loadOverview();
+loadRegime();
 setInterval(loadOverview, 30000);
+setInterval(loadRegime, 60000);
 </script>
 {% endblock %}

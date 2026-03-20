@@ -19,6 +19,14 @@
 
 {# Tab 1: Stats #}
 <div class="tab-content active" id="tab-stats">
+    {# Regime Card #}
+    <div class="card" style="margin-bottom: 20px; padding: 16px;">
+        <div class="section-title" style="margin-bottom: 12px;">🌊 当前市场状态</div>
+        <div id="signalRegimeInfo">
+            <div class="muted">加载中...</div>
+        </div>
+    </div>
+    
     <div class="stat-grid">
         <div class="stat-card">
             <div class="label">总信号数(30d)</div>
@@ -135,6 +143,41 @@ function filteredTag(signal) {
     return badge('待执行', 'warn');
 }
 
+// Regime mapping for signals page
+const sigRegimeMap = {
+    'trend': { label: '📈 趋势', color: '#22c55e', filterImpact: '无' },
+    'range': { label: '🔄 震荡', color: '#60a5fa', filterImpact: '无' },
+    'high_vol': { label: '⚡ 高波动', color: '#f59e0b', filterImpact: '可拦截' },
+    'low_vol': { label: '😴 低波动', color: '#8b93a7', filterImpact: '默认拦截' },
+    'risk_anomaly': { label: '🚨 风险异常', color: '#ef4444', filterImpact: '强制拦截' },
+    'unknown': { label: '❓ 未知', color: '#8b93a7', filterImpact: '跳过' }
+};
+
+async function loadSignalRegime() {
+    try {
+        const resp = await api('/api/regime?symbol=BTC/USDT:USDT&timeframe=1h');
+        if (resp.success && resp.data) {
+            const r = sigRegimeMap[resp.data.regime] || sigRegimeMap['unknown'];
+            const conf = (resp.data.confidence * 100).toFixed(0);
+            document.getElementById('signalRegimeInfo').innerHTML = 
+                `<div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;">
+                    <div style="background:${r.color}22;border:1px solid ${r.color};border-radius:8px;padding:8px 14px;">
+                        <span style="font-size:18px;font-weight:700;color:${r.color};">${r.label}</span>
+                        <span style="color:#8b93a7;font-size:13px;margin-left:6px;">置信度 ${conf}%</span>
+                    </div>
+                    <div style="color:#8b93a7;font-size:13px;">
+                        ${resp.data.details || r.label} | 
+                        <span style="color:${r.filterImpact === '无' ? '#22c55e' : r.filterImpact === '强制拦截' ? '#ef4444' : '#f59e0b'}">
+                            影响过滤: ${r.filterImpact}
+                        </span>
+                    </div>
+                </div>`;
+        }
+    } catch (e) {
+        document.getElementById('signalRegimeInfo').innerHTML = '<div class="muted">加载失败</div>';
+    }
+}
+
 async function loadSignals() {
     try {
         const [signalsResp, statsResp, reasonsResp, coinResp] = await Promise.all([
@@ -219,6 +262,8 @@ async function loadSignals() {
 }
 
 loadSignals();
+loadSignalRegime();
 setInterval(loadSignals, 60000);
+setInterval(loadSignalRegime, 60000);
 </script>
 {% endblock %}

@@ -312,6 +312,132 @@ class TestSignalValidator(unittest.TestCase):
         self.assertTrue(details['strength_check']['passed'])
 
 
+class TestSignalValidatorRegimeFilter(unittest.TestCase):
+    """Regime Layer v1 过滤测试"""
+    
+    def test_regime_risk_anomaly_blocks_signal(self):
+        """风险异常应该拦截信号"""
+        cfg = Config()
+        validator = SignalValidator(cfg, None)
+        
+        # 模拟 risk_anomaly regime
+        signal = Signal(
+            symbol='BTC/USDT',
+            signal_type='buy',
+            price=50000,
+            strength=50,
+            strategies_triggered=['RSI', 'MACD'],
+            market_context={
+                'trend': 'sideways',
+                'volatility': 0.02,
+                'regime': 'risk_anomaly',
+                'regime_confidence': 0.85,
+                'regime_details': '价格日内波动异常(12.5%)'
+            }
+        )
+        
+        passed, reason, details = validator.validate(signal)
+        self.assertFalse(passed)
+        self.assertIn('风险异常', reason)
+        self.assertEqual(details.get('regime_check', {}).get('regime'), 'risk_anomaly')
+    
+    def test_regime_low_vol_blocks_by_default(self):
+        """低波动默认应该拦截"""
+        cfg = Config()
+        validator = SignalValidator(cfg, None)
+        
+        signal = Signal(
+            symbol='BTC/USDT',
+            signal_type='buy',
+            price=50000,
+            strength=50,
+            strategies_triggered=['RSI'],
+            market_context={
+                'trend': 'sideways',
+                'volatility': 0.005,
+                'regime': 'low_vol',
+                'regime_confidence': 0.7,
+                'regime_details': '低波动盘整(vol=0.50%)'
+            }
+        )
+        
+        passed, reason, details = validator.validate(signal)
+        self.assertFalse(passed)
+        self.assertIn('低波动', reason)
+    
+    def test_regime_high_vol_passes_by_default(self):
+        """高波动默认放行（但带警告）"""
+        cfg = Config()
+        validator = SignalValidator(cfg, None)
+        
+        signal = Signal(
+            symbol='BTC/USDT',
+            signal_type='buy',
+            price=50000,
+            strength=50,
+            strategies_triggered=['RSI'],
+            market_context={
+                'trend': 'bullish',
+                'volatility': 0.06,
+                'regime': 'high_vol',
+                'regime_confidence': 0.7,
+                'regime_details': '高波动趋势中(上涨, vol=6.5%)'
+            }
+        )
+        
+        passed, reason, details = validator.validate(signal)
+        self.assertTrue(passed)  # 默认放行
+        self.assertEqual(details.get('regime_check', {}).get('regime'), 'high_vol')
+    
+    def test_regime_unknown_falls_back(self):
+        """regime 未知时回退旧逻辑"""
+        cfg = Config()
+        validator = SignalValidator(cfg, None)
+        
+        # regime unknown 或 confidence 低于 0.5 应该跳过过滤
+        signal = Signal(
+            symbol='BTC/USDT',
+            signal_type='buy',
+            price=50000,
+            strength=50,
+            strategies_triggered=['RSI'],
+            market_context={
+                'trend': 'sideways',
+                'volatility': 0.02,
+                'regime': 'unknown',
+                'regime_confidence': 0.0
+            }
+        )
+        
+        passed, reason, details = validator.validate(signal)
+        # 应该跳过 regime 过滤，回退到旧逻辑
+        self.assertTrue(details.get('regime_check', {}).get('fallback', False))
+    
+    def test_regime_trend_passes(self):
+        """趋势市场应该放行"""
+        cfg = Config()
+        validator = SignalValidator(cfg, None)
+        
+        signal = Signal(
+            symbol='BTC/USDT',
+            signal_type='buy',
+            price=50000,
+            strength=50,
+            strategies_triggered=['MACD'],
+            market_context={
+                'trend': 'bullish',
+                'volatility': 0.025,
+                'regime': 'trend',
+                'regime_confidence': 0.75,
+                'regime_details': '趋势上涨(gap=2.5%)'
+            }
+        )
+        
+        passed, reason, details = validator.validate(signal)
+        self.assertTrue(passed)
+        self.assertEqual(details.get('regime_check', {}).get('regime'), 'trend')
+
+
 class TestExchangeAmountLimits(unittest.TestCase):
     def test_normalize_contract_amount_respects_max_limit(self):
         ex = Exchange.__new__(Exchange)
@@ -575,6 +701,21 @@ class TestSignalDetector(unittest.TestCase):
         signal = detector.analyze('XRP/USDT', self.df, current_price, None)
         self.assertLess(signal.market_context['volatility'], 0.1)
         self.assertTrue(signal.market_context['volatility_too_low'])
+    
+    def test_regime_info_populated(self):
+        """测试 regime 信息被正确填充"""
+        detector = SignalDetector(self.config.all)
+        current_price = self.df[4].iloc[-1]
+        signal = detector.analyze('BTC/USDT', self.df, current_price, None)
+        
+        # 验证 regime_info 字段存在
+        self.assertIn('regime', signal.regime_info)
+        self.assertIn('confidence', signal.regime_info)
+        self.assertIn('regime', signal.market_context)
+        self.assertIn('regime_confidence', signal.market_context)
+        # regime 应该是有效值之一
+        valid_regimes = ['trend', 'range', 'high_vol', 'low_vol', 'risk_anomaly', 'unknown']
+        self.assertIn(signal.market_context['regime'], valid_regimes)
 
 
 class TestStrategies(unittest.TestCase):

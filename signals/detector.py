@@ -8,6 +8,7 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime
 
 from core.config import Config
+from core.regime import detect_regime, Regime
 
 
 @dataclass
@@ -36,6 +37,7 @@ class Signal:
     indicators: Dict = field(default_factory=dict)  # 实时指标值
     direction_score: Dict = field(default_factory=dict)
     market_context: Dict = field(default_factory=dict)
+    regime_info: Dict = field(default_factory=dict)  # Regime Layer v1
 
     def to_dict(self) -> Dict:
         return asdict(self)
@@ -72,6 +74,14 @@ class SignalDetector:
             indicators=indicators
         )
         signal.market_context = self._analyze_market_context(df, current_price, symbol)
+
+        # Regime Layer v1: 检测市场状态并添加到上下文
+        regime_result = detect_regime(df, current_price)
+        signal.regime_info = regime_result.to_dict()
+        # 同步到 market_context 供后续使用
+        signal.market_context['regime'] = regime_result.regime.value
+        signal.market_context['regime_confidence'] = regime_result.confidence
+        signal.market_context['regime_details'] = regime_result.details
 
         triggered_strategies = []
 

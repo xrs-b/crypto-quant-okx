@@ -1,0 +1,280 @@
+{% extends "layout.html" %}
+
+{% block title %}策略分析 - OKX量化交易仪表盘{% endblock %}
+{% block active_page %}strategy{% endblock %}
+{% block page_title %}策略分析{% endblock %}
+{% block page_desc %}策略表现、回测结果与ML模型评估{% endblock %}
+
+{% block topbar_actions %}
+<button onclick="loadStrategy()">🔄 刷新</button>
+{% endblock %}
+
+{% block content %}
+{# Stats Summary #}
+<div class="stat-grid">
+    <div class="stat-card">
+        <div class="label">活跃策略数</div>
+        <div class="value" id="activeStrategies">--</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">30日盈利策略</div>
+        <div class="value pos" id="profitableStrategies">--</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">ML模型准确率</div>
+        <div class="value" id="modelAccuracy">--</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">信号质量评分</div>
+        <div class="value" id="signalQuality">--</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">优化建议数</div>
+        <div class="value" id="optimizerSuggestions">--</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">最近回测</div>
+        <div class="value" id="lastBacktest">--</div>
+    </div>
+</div>
+
+{# ML Models #}
+<div class="card" style="margin-bottom: 24px;">
+    <h3 style="margin: 0 0 16px 0;">ML 模型状态</h3>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>币种</th>
+                    <th>模型文件</th>
+                    <th>测试准确率</th>
+                    <th>F1 Score</th>
+                    <th>状态</th>
+                </tr>
+            </thead>
+            <tbody id="modelsTable">
+                <tr><td colspan="5" class="muted">加载中...</td></tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+
+{# Backtest Results #}
+<div class="card" style="margin-bottom: 24px;">
+    <h3 style="margin: 0 0 16px 0;">回测结果</h3>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>币种</th>
+                    <th>总交易</th>
+                    <th>胜率</th>
+                    <th>总盈亏</th>
+                    <th>平均盈亏</th>
+                    <th>最大回撤</th>
+                    <th>夏普比率</th>
+                </tr>
+            </thead>
+            <tbody id="backtestTable">
+                <tr><td colspan="7" class="muted">加载中...</td></tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+
+{# Signal Quality #}
+<div class="card" style="margin-bottom: 24px;">
+    <h3 style="margin: 0 0 16px 0;">信号质量分析</h3>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>指标</th>
+                    <th>值</th>
+                    <th>说明</th>
+                </tr>
+            </thead>
+            <tbody id="qualityTable">
+                <tr><td colspan="3" class="muted">加载中...</td></tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+
+{# MFE/MAE Analysis #}
+<div class="card">
+    <h3 style="margin: 0 0 16px 0;">MFE/MAE 分析与止盈止损优化</h3>
+    <div class="stat-grid" style="margin-bottom: 16px;">
+        <div class="stat-card">
+            <div class="label">建议止损</div>
+            <div class="value neg" id="recStopLoss">--</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">建议止盈</div>
+            <div class="value pos" id="recTakeProfit">--</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">追踪止损</div>
+            <div class="value" id="recTrailingStop">--</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">平均MFE</div>
+            <div class="value pos" id="avgMfe">--</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">平均MAE</div>
+            <div class="value neg" id="avgMae">--</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">MFE/MAE比率</div>
+            <div class="value" id="mfeMaeRatio">--</div>
+        </div>
+    </div>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>币种</th>
+                    <th>交易数</th>
+                    <th>平均MFE</th>
+                    <th>平均MAE</th>
+                    <th>最优止损</th>
+                    <th>最优止盈</th>
+                </tr>
+            </thead>
+            <tbody id="mfeMaeTable">
+                <tr><td colspan="6" class="muted">加载中...</td></tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function loadStrategy() {
+    try {
+        const [strategyResp, backtestResp, mlResp, qualityResp, mfeMaeResp] = await Promise.all([
+            api('/api/strategy/stats?days=30'),
+            api('/api/backtest/summary'),
+            api('/api/ml/metrics'),
+            api('/api/signal-quality'),
+            api('/api/trades/mfe-mae')
+        ]);
+        
+        const strategy = strategyResp.data || {};
+        const backtest = backtestResp.data || {};
+        const ml = mlResp.data || {};
+        const quality = qualityResp.data || {};
+        const mfeMae = mfeMaeResp.data || {};
+        
+        // Update stats
+        document.getElementById('activeStrategies').textContent = strategy.total_strategies || 0;
+        document.getElementById('profitableStrategies').textContent = strategy.profitable_strategies || 0;
+        
+        // ML model accuracy
+        const accValues = Object.values(ml).filter(m => m && m.test_accuracy != null).map(m => m.test_accuracy);
+        const avgAcc = accValues.length > 0 ? (accValues.reduce((a, b) => a + b, 0) / accValues.length * 100).toFixed(1) : '--';
+        document.getElementById('modelAccuracy').textContent = avgAcc + '%';
+        
+        // Signal quality
+        document.getElementById('signalQuality').textContent = (quality.overall_score || '--') + '/100';
+        
+        // Optimizer
+        document.getElementById('optimizerSuggestions').textContent = quality.suggestions?.length || 0;
+        
+        // Last backtest
+        document.getElementById('lastBacktest').textContent = backtest.last_run || '--';
+        
+        // Render ML models
+        const modelsBody = document.getElementById('modelsTable');
+        const modelRows = Object.entries(ml);
+        if (modelRows.length === 0) {
+            modelsBody.innerHTML = '<tr><td colspan="5" class="muted">暂无模型数据</td></tr>';
+        } else {
+            modelsBody.innerHTML = modelRows.map(([symbol, m]) => {
+                const status = m.model_exists ? badge('已训练', 'ok') : badge('未训练', 'warn');
+                return `<tr>
+                    <td>${symbol}</td>
+                    <td>${m.model_exists ? '存在' : '缺失'}</td>
+                    <td>${m.test_accuracy != null ? (m.test_accuracy * 100).toFixed(1) + '%' : '--'}</td>
+                    <td>${m.f1 != null ? m.f1.toFixed(2) : '--'}</td>
+                    <td>${status}</td>
+                </tr>`;
+            }).join('');
+        }
+        
+        // Render backtest
+        const btBody = document.getElementById('backtestTable');
+        const btResults = backtest.results || [];
+        if (btResults.length === 0) {
+            btBody.innerHTML = '<tr><td colspan="7" class="muted">暂无回测数据</td></tr>';
+        } else {
+            btBody.innerHTML = btResults.slice(0, 20).map(b => {
+                const pnl = Number(b.total_pnl || 0);
+                return `<tr>
+                    <td>${b.symbol}</td>
+                    <td>${b.total_trades || 0}</td>
+                    <td>${b.win_rate != null ? b.win_rate.toFixed(1) + '%' : '--'}</td>
+                    <td class="${pnl >= 0 ? 'pos' : 'neg'}">${money(pnl)}</td>
+                    <td>${money(b.avg_pnl)}</td>
+                    <td class="neg">${b.max_drawdown != null ? (b.max_drawdown * 100).toFixed(1) + '%' : '--'}</td>
+                    <td>${b.sharpe_ratio != null ? b.sharpe_ratio.toFixed(2) : '--'}</td>
+                </tr>`;
+            }).join('');
+        }
+        
+        // Render quality
+        const qualityBody = document.getElementById('qualityTable');
+        const qualityMetrics = quality.metrics || {};
+        if (Object.keys(qualityMetrics).length === 0) {
+            qualityBody.innerHTML = '<tr><td colspan="3" class="muted">暂无质量数据</td></tr>';
+        } else {
+            qualityBody.innerHTML = Object.entries(qualityMetrics).map(([key, val]) => `<tr>
+                <td>${key}</td>
+                <td>${typeof val === 'number' ? val.toFixed(2) : val}</td>
+                <td class="muted">--</td>
+            </tr>`).join('');
+        }
+        
+        // Render MFE/MAE
+        const rec = mfeMae.recommendations || {};
+        document.getElementById('recStopLoss').textContent = rec.stop_loss?.recommended ? (rec.stop_loss.recommended * 100).toFixed(2) + '%' : '--';
+        document.getElementById('recTakeProfit').textContent = rec.take_profit?.recommended ? (rec.take_profit.recommended * 100).toFixed(2) + '%' : '--';
+        document.getElementById('recTrailingStop').textContent = rec.trailing_stop?.recommended ? (rec.trailing_stop.recommended * 100).toFixed(2) + '%' : '--';
+        
+        const bySymbol = mfeMae.by_symbol || {};
+        const avgMfeVal = mfeMae.avg_mfe;
+        const avgMaeVal = mfeMae.avg_mae;
+        document.getElementById('avgMfe').textContent = avgMfeVal != null ? (avgMfeVal * 100).toFixed(2) + '%' : '--';
+        document.getElementById('avgMae').textContent = avgMaeVal != null ? (avgMaeVal * 100).toFixed(2) + '%' : '--';
+        document.getElementById('mfeMaeRatio').textContent = (avgMfeVal && avgMaeVal) ? (avgMfeVal / avgMaeVal).toFixed(2) : '--';
+        
+        const mfeBody = document.getElementById('mfeMaeTable');
+        const symbolRows = Object.entries(bySymbol);
+        if (symbolRows.length === 0) {
+            mfeBody.innerHTML = '<tr><td colspan="6" class="muted">暂无MFE/MAE数据</td></tr>';
+        } else {
+            mfeBody.innerHTML = symbolRows.slice(0, 20).map(([symbol, d]) => `<tr>
+                <td>${symbol}</td>
+                <td>${d.trade_count || 0}</td>
+                <td class="pos">${d.avg_mfe != null ? (d.avg_mfe * 100).toFixed(2) + '%' : '--'}</td>
+                <td class="neg">${d.avg_mae != null ? (d.avg_mae * 100).toFixed(2) + '%' : '--'}</td>
+                <td>${d.optimal_stop_loss ? (d.optimal_stop_loss * 100).toFixed(2) + '%' : '--'}</td>
+                <td>${d.optimal_take_profit ? (d.optimal_take_profit * 100).toFixed(2) + '%' : '--'}</td>
+            </tr>`).join('');
+        }
+        
+        document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString('zh-CN');
+    } catch (e) {
+        console.error('loadStrategy error:', e);
+    }
+}
+
+// Load on page ready
+loadStrategy();
+
+// Auto refresh every 60s
+setInterval(loadStrategy, 60000);
+</script>
+{% endblock %}

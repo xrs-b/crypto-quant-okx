@@ -1,0 +1,266 @@
+{% extends "layout.html" %}
+
+{% block title %}治理审批 - OKX量化交易仪表盘{% endblock %}
+{% block active_page %}governance{% endblock %}
+{% block page_title %}治理审批{% endblock %}
+{% block page_desc %}系统治理、预设切换与审批流程{% endblock %}
+
+{% block topbar_actions %}
+<button onclick="loadGovernance()">🔄 刷新</button>
+{% endblock %}
+
+{% block content %}
+{# Governance Stats #}
+<div class="stat-grid">
+    <div class="stat-card">
+        <div class="label">当前预设</div>
+        <div class="value" id="currentPreset">--</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">预设模式</div>
+        <div class="value" id="presetMode">--</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">待审批数</div>
+        <div class="value" id="pendingApprovals">--</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">今日告警</div>
+        <div class="value" id="todayAlerts">--</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">30日审批</div>
+        <div class="value" id="totalApprovals">--</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">候选池状态</div>
+        <div class="value" id="candidatePool">--</div>
+    </div>
+</div>
+
+{# Pending Approvals #}
+<div class="card" style="margin-bottom: 24px;">
+    <h3 style="margin: 0 0 16px 0;">待审批建议</h3>
+    <div id="pendingList">
+        <div class="muted">加载中...</div>
+    </div>
+</div>
+
+{# Available Presets #}
+<div class="card" style="margin-bottom: 24px;">
+    <h3 style="margin: 0 0 16px 0;">可用预设</h3>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>预设名称</th>
+                    <th>描述</th>
+                    <th>监听币种</th>
+                    <th>操作</th>
+                </tr>
+            </thead>
+            <tbody id="presetsTable">
+                <tr><td colspan="4" class="muted">加载中...</td></tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+
+{# Governance Alerts #}
+<div class="card" style="margin-bottom: 24px;">
+    <h3 style="margin: 0 0 16px 0;">治理告警与建议</h3>
+    <div id="governanceAlerts">
+        <div class="muted">加载中...</div>
+    </div>
+</div>
+
+{# Approval History #}
+<div class="card">
+    <h3 style="margin: 0 0 16px 0;">审批历史</h3>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>时间</th>
+                    <th>类型</th>
+                    <th>目标</th>
+                    <th>决策</th>
+                    <th>备注</th>
+                </tr>
+            </thead>
+            <tbody id="historyTable">
+                <tr><td colspan="5" class="muted">加载中...</td></tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function loadGovernance() {
+    try {
+        const [govResp, pendingResp, presetsResp, historyResp, alertsResp] = await Promise.all([
+            api('/api/governance/status'),
+            api('/api/approvals/pending'),
+            api('/api/presets'),
+            api('/api/approvals/history?limit=20'),
+            api('/api/alerts')
+        ]);
+        
+        const gov = govResp.data || {};
+        const pending = pendingResp.data || [];
+        const presets = presetsResp.data || [];
+        const history = historyResp.data || [];
+        const alerts = alertsResp.data || [];
+        
+        // Update stats
+        document.getElementById('currentPreset').textContent = gov.current_preset || '--';
+        document.getElementById('presetMode').textContent = gov.preset_mode || '--';
+        document.getElementById('pendingApprovals').textContent = pending.length;
+        document.getElementById('todayAlerts').textContent = gov.today_alerts || alerts.filter(a => a.level !== 'info').length;
+        document.getElementById('totalApprovals').textContent = history.length;
+        document.getElementById('candidatePool').textContent = (gov.candidate_pool_size || 0) + ' 币种';
+        
+        // Render pending approvals
+        const pendingList = document.getElementById('pendingList');
+        if (pending.length === 0) {
+            pendingList.innerHTML = '<div class="card" style="padding: 16px;"><span class="muted">暂无待审批建议</span></div>';
+        } else {
+            pendingList.innerHTML = pending.map(p => `
+                <div class="card" style="margin-bottom: 12px; padding: 16px;">
+                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                        <div>
+                            <span class="badge ${p.type === 'btc_grid_upgrade' ? 'warn' : 'info'}">${p.type}</span>
+                            <strong style="margin-left: 8px;">${p.target}</strong>
+                        </div>
+                        <div>
+                            <button onclick="executeApproval('${p.type}', '${p.target}', 'approved')" style="margin-right: 8px;">✅ 批准</button>
+                            <button onclick="executeApproval('${p.type}', '${p.target}', 'rejected')" style="background: var(--danger); color: white;">❌ 拒绝</button>
+                        </div>
+                    </div>
+                    <div class="muted" style="margin-top: 8px;">${p.message || '--'}</div>
+                </div>
+            `).join('');
+        }
+        
+        // Render presets
+        const presetsBody = document.getElementById('presetsTable');
+        if (presets.length === 0) {
+            presetsBody.innerHTML = '<tr><td colspan="4" class="muted">暂无预设</td></tr>';
+        } else {
+            presetsBody.innerHTML = presets.map(p => `
+                <tr>
+                    <td><strong>${p.name}</strong></td>
+                    <td>${p.description || '--'}</td>
+                    <td>${(p.watch_list || []).join(', ') || '--'}</td>
+                    <td>
+                        <button onclick="applyPreset('${p.name}')" ${p.name === gov.current_preset ? 'disabled' : ''}>
+                            ${p.name === gov.current_preset ? '当前' : '应用'}
+                        </button>
+                    </td>
+                </tr>
+            `).join('');
+        }
+        
+        // Render governance alerts
+        const alertsDiv = document.getElementById('governanceAlerts');
+        const govAlerts = gov.alerts || [];
+        if (govAlerts.length === 0) {
+            alertsDiv.innerHTML = '<div class="card" style="padding: 16px;"><span class="muted">暂无治理告警</span></div>';
+        } else {
+            alertsDiv.innerHTML = govAlerts.map(a => {
+                const levelClass = {
+                    'danger': 'neg',
+                    'warning': 'warn',
+                    'info': 'muted'
+                }[a.level] || 'muted';
+                const approvalBadge = a.approval_required 
+                    ? (a.approval_pending ? badge('待审批', 'warn') : badge('已审批', 'ok'))
+                    : '';
+                return `
+                <div class="card" style="margin-bottom: 12px; padding: 16px;">
+                    <div>
+                        <span class="badge ${a.level === 'danger' ? 'filtered' : a.level === 'warning' ? 'warn' : 'info'}">${a.level}</span>
+                        ${approvalBadge}
+                        <span style="margin-left: 8px;">${a.message}</span>
+                    </div>
+                    ${a.recommended_action ? `<div class="muted" style="margin-top: 6px;">建议: ${a.recommended_action}</div>` : ''}
+                </div>
+                `;
+            }).join('');
+        }
+        
+        // Render history
+        const historyBody = document.getElementById('historyTable');
+        if (history.length === 0) {
+            historyBody.innerHTML = '<tr><td colspan="5" class="muted">暂无审批历史</td></tr>';
+        } else {
+            historyBody.innerHTML = history.map(h => `
+                <tr>
+                    <td>${h.created_at || '--'}</td>
+                    <td>${h.approval_type || '--'}</td>
+                    <td>${h.target || '--'}</td>
+                    <td>${badge(h.decision, h.decision === 'approved' ? 'ok' : 'filtered')}</td>
+                    <td class="muted">${h.note || '--'}</td>
+                </tr>
+            `).join('');
+        }
+        
+        document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString('zh-CN');
+    } catch (e) {
+        console.error('loadGovernance error:', e);
+    }
+}
+
+async function executeApproval(type, target, decision) {
+    if (!confirm(`确定要${decision === 'approved' ? '批准' : '拒绝'} "${type}: ${target}" 吗？`)) return;
+    
+    try {
+        const resp = await fetch('/api/approvals/execute', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({type, target, decision})
+        });
+        const result = await resp.json();
+        
+        if (result.success) {
+            alert(result.data.message || '操作成功');
+            loadGovernance();
+        } else {
+            alert('操作失败: ' + (result.error || '未知错误'));
+        }
+    } catch (e) {
+        alert('操作失败: ' + e.message);
+    }
+}
+
+async function applyPreset(name) {
+    if (!confirm(`确定要切换到预设 "${name}" 吗？`)) return;
+    
+    try {
+        const resp = await fetch('/api/presets/apply', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({name, auto_restart: true})
+        });
+        const result = await resp.json();
+        
+        if (result.success) {
+            alert('预设切换成功');
+            loadGovernance();
+        } else {
+            alert('预设切换失败: ' + (result.error || '未知错误'));
+        }
+    } catch (e) {
+        alert('预设切换失败: ' + e.message);
+    }
+}
+
+// Load on page ready
+loadGovernance();
+
+// Auto refresh every 60s
+setInterval(loadGovernance, 60000);
+</script>
+{% endblock %}

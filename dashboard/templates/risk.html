@@ -11,110 +11,128 @@
 {% endblock %}
 
 {% block content %}
-{# Risk Stats #}
-<div class="stat-grid">
-    <div class="stat-card">
-        <div class="label">账户余额</div>
-        <div class="value" id="balanceTotal">--</div>
+{# Tab Navigation #}
+<div class="tabs">
+    <button class="tab-btn active" data-tab="overview">🛡️ 风控概览</button>
+    <button class="tab-btn" data-tab="events">⚠️ 告警事件</button>
+</div>
+
+{# Tab 1: Risk Overview #}
+<div class="tab-content active" id="tab-overview">
+    <div class="stat-grid">
+        <div class="stat-card">
+            <div class="label">账户余额</div>
+            <div class="value" id="balanceTotal">--</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">可用余额</div>
+            <div class="value" id="balanceFree">--</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">持仓市值</div>
+            <div class="value" id="positionValue">--</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">未实现盈亏</div>
+            <div class="value" id="unrealizedPnl">--</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">当前风险敞口</div>
+            <div class="value" id="riskExposure">--</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">最大风险敞口</div>
+            <div class="value" id="maxExposure">--</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">日内回撤</div>
+            <div class="value" id="dailyDrawdown">--</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">最大回撤阈值</div>
+            <div class="value" id="maxDailyDd">--</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">连亏次数</div>
+            <div class="value" id="consecutiveLosses">--</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">最大连亏阈值</div>
+            <div class="value" id="maxConsecutiveLosses">--</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">风控状态</div>
+            <div class="value" id="riskStatus">--</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">交易权限</div>
+            <div class="value" id="tradingEnabled">--</div>
+        </div>
     </div>
-    <div class="stat-card">
-        <div class="label">可用余额</div>
-        <div class="value" id="balanceFree">--</div>
-    </div>
-    <div class="stat-card">
-        <div class="label">持仓市值</div>
-        <div class="value" id="positionValue">--</div>
-    </div>
-    <div class="stat-card">
-        <div class="label">未实现盈亏</div>
-        <div class="value" id="unrealizedPnl">--</div>
-    </div>
-    <div class="stat-card">
-        <div class="label">当前风险敞口</div>
-        <div class="value" id="riskExposure">--</div>
-    </div>
-    <div class="stat-card">
-        <div class="label">最大风险敞口</div>
-        <div class="value" id="maxExposure">--</div>
-    </div>
-    <div class="stat-card">
-        <div class="label">日内回撤</div>
-        <div class="value" id="dailyDrawdown">--</div>
-    </div>
-    <div class="stat-card">
-        <div class="label">最大回撤阈值</div>
-        <div class="value" id="maxDailyDd">--</div>
-    </div>
-    <div class="stat-card">
-        <div class="label">连亏次数</div>
-        <div class="value" id="consecutiveLosses">--</div>
-    </div>
-    <div class="stat-card">
-        <div class="label">最大连亏阈值</div>
-        <div class="value" id="maxConsecutiveLosses">--</div>
-    </div>
-    <div class="stat-card">
-        <div class="label">风控状态</div>
-        <div class="value" id="riskStatus">--</div>
-    </div>
-    <div class="stat-card">
-        <div class="label">交易权限</div>
-        <div class="value" id="tradingEnabled">--</div>
+
+    <div class="card">
+        <h3 style="margin: 0 0 16px 0;">风控参数详情</h3>
+        <div class="table-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        <th>参数</th>
+                        <th>当前值</th>
+                        <th>阈值/上限</th>
+                        <th>状态</th>
+                    </tr>
+                </thead>
+                <tbody id="riskDetailsTable">
+                    <tr><td colspan="4" class="muted">加载中...</td></tr>
+                </tbody>
+            </table>
+        </div>
     </div>
 </div>
 
-{# Alerts #}
-<div class="card" style="margin-bottom: 24px;">
-    <h3 style="margin: 0 0 16px 0;">系统告警</h3>
-    <div id="alertsList">
-        <div class="muted">加载中...</div>
+{# Tab 2: Alerts & Events #}
+<div class="tab-content" id="tab-events">
+    <div class="card" style="margin-bottom: 20px;">
+        <h3 style="margin: 0 0 16px 0;">系统告警</h3>
+        <div id="alertsList">
+            <div class="muted">加载中...</div>
+        </div>
     </div>
-</div>
 
-{# Risk Events #}
-<div class="card" style="margin-bottom: 24px;">
-    <h3 style="margin: 0 0 16px 0;">最近风控事件</h3>
-    <div class="table-wrap">
-        <table>
-            <thead>
-                <tr>
-                    <th>时间</th>
-                    <th>币种</th>
-                    <th>信号类型</th>
-                    <th>强度</th>
-                    <th>过滤原因</th>
-                </tr>
-            </thead>
-            <tbody id="riskEventsTable">
-                <tr><td colspan="5" class="muted">加载中...</td></tr>
-            </tbody>
-        </table>
-    </div>
-</div>
-
-{# Risk Details #}
-<div class="card">
-    <h3 style="margin: 0 0 16px 0;">风控参数详情</h3>
-    <div class="table-wrap">
-        <table>
-            <thead>
-                <tr>
-                    <th>参数</th>
-                    <th>当前值</th>
-                    <th>阈值/上限</th>
-                    <th>状态</th>
-                </tr>
-            </thead>
-            <tbody id="riskDetailsTable">
-                <tr><td colspan="4" class="muted">加载中...</td></tr>
-            </tbody>
-        </table>
+    <div class="card">
+        <h3 style="margin: 0 0 16px 0;">最近风控事件</h3>
+        <div class="table-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        <th>时间</th>
+                        <th>币种</th>
+                        <th>信号类型</th>
+                        <th>强度</th>
+                        <th>过滤原因</th>
+                    </tr>
+                </thead>
+                <tbody id="riskEventsTable">
+                    <tr><td colspan="5" class="muted">加载中...</td></tr>
+                </tbody>
+            </table>
+        </div>
     </div>
 </div>
 {% endblock %}
 
 {% block scripts %}
 <script>
+// Tab switching
+document.querySelectorAll('.tab-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+        document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+        document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+        btn.classList.add('active');
+        document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
+    });
+});
+
 async function loadRisk() {
     try {
         const [riskResp, eventsResp, alertsResp, statusResp] = await Promise.all([

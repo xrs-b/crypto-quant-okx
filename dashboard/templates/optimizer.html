@@ -9,70 +9,89 @@
 {% endblock %}
 
 {% block content %}
-{# Stats Cards #}
-<div class="stat-grid">
-    <div class="stat-card">
-        <div class="label">优化轮次</div>
-        <div class="value" id="iterationCount">--</div>
+{# Tab Navigation #}
+<div class="tabs">
+    <button class="tab-btn active" data-tab="advice">📊 优化建议</button>
+    <button class="tab-btn" data-tab="tiers">📑 币种分层</button>
+</div>
+
+{# Tab 1: Parameter Advice #}
+<div class="tab-content active" id="tab-advice">
+    <div class="stat-grid">
+        <div class="stat-card">
+            <div class="label">优化轮次</div>
+            <div class="value" id="iterationCount">--</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">建议数量</div>
+            <div class="value" id="adviceCount">--</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">待应用</div>
+            <div class="value" id="pendingCount">--</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">已生效</div>
+            <div class="value" id="appliedCount">--</div>
+        </div>
     </div>
-    <div class="stat-card">
-        <div class="label">建议数量</div>
-        <div class="value" id="adviceCount">--</div>
-    </div>
-    <div class="stat-card">
-        <div class="label">待应用</div>
-        <div class="value" id="pendingCount">--</div>
-    </div>
-    <div class="stat-card">
-        <div class="label">已生效</div>
-        <div class="value" id="appliedCount">--</div>
+
+    <div class="card">
+        <h3 style="margin: 0 0 16px 0;">参数优化建议</h3>
+        <div class="table-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        <th>优先级</th>
+                        <th>参数</th>
+                        <th>当前值</th>
+                        <th>建议值</th>
+                        <th>操作</th>
+                    </tr>
+                </thead>
+                <tbody id="adviceTable">
+                    <tr><td colspan="5" class="muted">加载中...</td></tr>
+                </tbody>
+            </table>
+        </div>
     </div>
 </div>
 
-{# Parameter Advice #}
-<div class="card" style="margin-bottom: 24px;">
-    <h3 style="margin: 0 0 16px 0;">参数优化建议</h3>
-    <div class="table-wrap">
-        <table>
-            <thead>
-                <tr>
-                    <th>优先级</th>
-                    <th>参数</th>
-                    <th>当前值</th>
-                    <th>建议值</th>
-                    <th>操作</th>
-                </tr>
-            </thead>
-            <tbody id="adviceTable">
-                <tr><td colspan="5" class="muted">加载中...</td></tr>
-            </tbody>
-        </table>
-    </div>
-</div>
-
-{# Symbol Tiers #}
-<div class="card">
-    <h3 style="margin: 0 0 16px 0;">币种分层</h3>
-    <div class="table-wrap">
-        <table>
-            <thead>
-                <tr>
-                    <th>层级</th>
-                    <th>币种</th>
-                    <th>权重</th>
-                    <th>状态</th>
-                </tr>
-            </thead>
-            <tbody id="tierTable">
-                <tr><td colspan="4" class="muted">加载中...</td></tr>
-            </tbody>
-        </table>
+{# Tab 2: Symbol Tiers #}
+<div class="tab-content" id="tab-tiers">
+    <div class="card">
+        <h3 style="margin: 0 0 16px 0;">币种分层</h3>
+        <div class="table-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        <th>层级</th>
+                        <th>币种</th>
+                        <th>权重</th>
+                        <th>状态</th>
+                    </tr>
+                </thead>
+                <tbody id="tierTable">
+                    <tr><td colspan="4" class="muted">加载中...</td></tr>
+                </tbody>
+            </table>
+        </div>
     </div>
 </div>
 {% endblock %}
 
 {% block scripts %}
 <script>
+// Tab switching
+document.querySelectorAll('.tab-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+        document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+        document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+        btn.classList.add('active');
+        document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
+    });
+});
+
 async function loadOptimizer() {
     try {
         const resp = await api('/api/optimizer/results');

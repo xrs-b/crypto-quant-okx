@@ -9,85 +9,107 @@
 {% endblock %}
 
 {% block content %}
-{# API Config (Masked) #}
-<div class="card" style="margin-bottom: 24px;">
-    <h3 style="margin: 0 0 16px 0;">API 配置</h3>
-    <div class="table-wrap">
-        <table>
-            <thead>
-                <tr>
-                    <th>配置项</th>
-                    <th>值</th>
-                </tr>
-            </thead>
-            <tbody id="apiTable">
-                <tr><td colspan="2" class="muted">加载中...</td></tr>
-            </tbody>
-        </table>
+{# Tab Navigation #}
+<div class="tabs">
+    <button class="tab-btn active" data-tab="trading">⚙️ 交易配置</button>
+    <button class="tab-btn" data-tab="symbols">💰 监听币种</button>
+    <button class="tab-btn" data-tab="api">🔐 API设置</button>
+</div>
+
+{# Tab 1: Trading Config #}
+<div class="tab-content active" id="tab-trading">
+    <div class="card" style="margin-bottom: 20px;">
+        <h3 style="margin: 0 0 16px 0;">交易配置</h3>
+        <div class="table-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        <th>参数</th>
+                        <th>当前值</th>
+                        <th>说明</th>
+                    </tr>
+                </thead>
+                <tbody id="tradingTable">
+                    <tr><td colspan="3" class="muted">加载中...</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <div class="card">
+        <h3 style="margin: 0 0 16px 0;">风控限制</h3>
+        <div class="table-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        <th>参数</th>
+                        <th>值</th>
+                        <th>说明</th>
+                    </tr>
+                </thead>
+                <tbody id="riskTable">
+                    <tr><td colspan="3" class="muted">加载中...</td></tr>
+                </tbody>
+            </table>
+        </div>
     </div>
 </div>
 
-{# Trading Config #}
-<div class="card" style="margin-bottom: 24px;">
-    <h3 style="margin: 0 0 16px 0;">交易配置</h3>
-    <div class="table-wrap">
-        <table>
-            <thead>
-                <tr>
-                    <th>参数</th>
-                    <th>当前值</th>
-                    <th>说明</th>
-                </tr>
-            </thead>
-            <tbody id="tradingTable">
-                <tr><td colspan="3" class="muted">加载中...</td></tr>
-            </tbody>
-        </table>
+{# Tab 2: Symbols #}
+<div class="tab-content" id="tab-symbols">
+    <div class="card">
+        <h3 style="margin: 0 0 16px 0;">监听币种</h3>
+        <div class="table-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        <th>#</th>
+                        <th>币种</th>
+                        <th>enabled</th>
+                        <th>权重</th>
+                    </tr>
+                </thead>
+                <tbody id="symbolsTable">
+                    <tr><td colspan="4" class="muted">加载中...</td></tr>
+                </tbody>
+            </table>
+        </div>
     </div>
 </div>
 
-{# Symbols #}
-<div class="card" style="margin-bottom: 24px;">
-    <h3 style="margin: 0 0 16px 0;">监听币种</h3>
-    <div class="table-wrap">
-        <table>
-            <thead>
-                <tr>
-                    <th>#</th>
-                    <th>币种</th>
-                    <th>enabled</th>
-                    <th>权重</th>
-                </tr>
-            </thead>
-            <tbody id="symbolsTable">
-                <tr><td colspan="4" class="muted">加载中...</td></tr>
-            </tbody>
-        </table>
-    </div>
-</div>
-
-{# Risk Limits #}
-<div class="card">
-    <h3 style="margin: 0 0 16px 0;">风控限制</h3>
-    <div class="table-wrap">
-        <table>
-            <thead>
-                <tr>
-                    <th>参数</th>
-                    <th>值</th>
-                    <th>说明</th>
-                </tr>
-            </thead>
-            <tbody id="riskTable">
-                <tr><td colspan="3" class="muted">加载中...</td></tr>
-            </tbody>
-        </table>
+{# Tab 3: API Config #}
+<div class="tab-content" id="tab-api">
+    <div class="card">
+        <h3 style="margin: 0 0 16px 0;">API 配置</h3>
+        <div class="table-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        <th>配置项</th>
+                        <th>值</th>
+                    </tr>
+                </thead>
+                <tbody id="apiTable">
+                    <tr><td colspan="2" class="muted">加载中...</td></tr>
+                </tbody>
+            </table>
+        </div>
     </div>
 </div>
 {% endblock %}
 
 {% block scripts %}
 <script>
+// Tab switching
+document.querySelectorAll('.tab-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+        document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+        document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+        btn.classList.add('active');
+        document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
+    });
+});
+
 async function loadConfig() {
     try {
         const [configResp, symbolsResp] = await Promise.all([

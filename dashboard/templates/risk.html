@@ -1,0 +1,266 @@
+{% extends "layout.html" %}
+
+{% block title %}风控状态 - OKX量化交易仪表盘{% endblock %}
+{% block active_page %}risk{% endblock %}
+{% block page_title %}风控状态{% endblock %}
+{% block page_desc %}系统风控指标、熔断状态与风险事件{% endblock %}
+
+{% block topbar_actions %}
+<button onclick="loadRisk()">🔄 刷新</button>
+<button onclick="resetLossStreak()" id="resetLossStreakBtn" style="display:none;">🔓 重置连亏熔断</button>
+{% endblock %}
+
+{% block content %}
+{# Risk Stats #}
+<div class="stat-grid">
+    <div class="stat-card">
+        <div class="label">账户余额</div>
+        <div class="value" id="balanceTotal">--</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">可用余额</div>
+        <div class="value" id="balanceFree">--</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">持仓市值</div>
+        <div class="value" id="positionValue">--</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">未实现盈亏</div>
+        <div class="value" id="unrealizedPnl">--</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">当前风险敞口</div>
+        <div class="value" id="riskExposure">--</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">最大风险敞口</div>
+        <div class="value" id="maxExposure">--</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">日内回撤</div>
+        <div class="value" id="dailyDrawdown">--</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">最大回撤阈值</div>
+        <div class="value" id="maxDailyDd">--</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">连亏次数</div>
+        <div class="value" id="consecutiveLosses">--</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">最大连亏阈值</div>
+        <div class="value" id="maxConsecutiveLosses">--</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">风控状态</div>
+        <div class="value" id="riskStatus">--</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">交易权限</div>
+        <div class="value" id="tradingEnabled">--</div>
+    </div>
+</div>
+
+{# Alerts #}
+<div class="card" style="margin-bottom: 24px;">
+    <h3 style="margin: 0 0 16px 0;">系统告警</h3>
+    <div id="alertsList">
+        <div class="muted">加载中...</div>
+    </div>
+</div>
+
+{# Risk Events #}
+<div class="card" style="margin-bottom: 24px;">
+    <h3 style="margin: 0 0 16px 0;">最近风控事件</h3>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>时间</th>
+                    <th>币种</th>
+                    <th>信号类型</th>
+                    <th>强度</th>
+                    <th>过滤原因</th>
+                </tr>
+            </thead>
+            <tbody id="riskEventsTable">
+                <tr><td colspan="5" class="muted">加载中...</td></tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+
+{# Risk Details #}
+<div class="card">
+    <h3 style="margin: 0 0 16px 0;">风控参数详情</h3>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>参数</th>
+                    <th>当前值</th>
+                    <th>阈值/上限</th>
+                    <th>状态</th>
+                </tr>
+            </thead>
+            <tbody id="riskDetailsTable">
+                <tr><td colspan="4" class="muted">加载中...</td></tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function loadRisk() {
+    try {
+        const [riskResp, eventsResp, alertsResp, statusResp] = await Promise.all([
+            api('/api/risk/status'),
+            api('/api/risk/events'),
+            api('/api/alerts'),
+            api('/api/system/status')
+        ]);
+        
+        const risk = riskResp.data || {};
+        const events = eventsResp.data || [];
+        const alerts = alertsResp.data || [];
+        const status = statusResp.data || {};
+        
+        const portfolio = status.portfolio || {};
+        
+        // Update balance
+        const balance = risk.balance || {};
+        document.getElementById('balanceTotal').textContent = money(balance.total);
+        document.getElementById('balanceFree').textContent = money(balance.free);
+        document.getElementById('positionValue').textContent = money(portfolio.total_value);
+        
+        const unrealizedPnl = portfolio.unrealized_pnl;
+        document.getElementById('unrealizedPnl').textContent = money(unrealizedPnl);
+        document.getElementById('unrealizedPnl').className = 'value ' + (Number(unrealizedPnl) >= 0 ? 'pos' : 'neg');
+        
+        // Risk exposure
+        document.getElementById('riskExposure').textContent = pct(risk.current_exposure);
+        document.getElementById('maxExposure').textContent = pct(risk.max_exposure);
+        
+        // Drawdown
+        const dailyDd = risk.daily_drawdown;
+        document.getElementById('dailyDrawdown').textContent = pct(dailyDd);
+        document.getElementById('dailyDrawdown').className = 'value ' + (dailyDd >= (risk.max_daily_drawdown || 1) * 0.7 ? 'neg' : '');
+        document.getElementById('maxDailyDd').textContent = pct(risk.max_daily_drawdown);
+        
+        // Consecutive losses
+        const consLosses = risk.consecutive_losses || 0;
+        const maxConsLosses = risk.max_consecutive_losses || 0;
+        document.getElementById('consecutiveLosses').textContent = consLosses;
+        document.getElementById('consecutiveLosses').className = 'value ' + (consLosses >= maxConsLosses ? 'neg' : '');
+        document.getElementById('maxConsecutiveLosses').textContent = maxConsLosses;
+        
+        // Risk status
+        const statusText = risk.risk_status || 'normal';
+        const statusBadge = {
+            'normal': badge('正常', 'ok'),
+            'warning': badge('警告', 'warn'),
+            'stopped': badge('已停止', 'filtered')
+        }[statusText] || statusText;
+        document.getElementById('riskStatus').innerHTML = statusBadge;
+        
+        // Trading enabled
+        const tradingEnabled = risk.trading_enabled !== false;
+        document.getElementById('tradingEnabled').innerHTML = tradingEnabled 
+            ? badge('允许交易', 'ok') 
+            : badge('禁止交易', 'filtered');
+        
+        // Show reset button if loss streak triggered
+        const resetBtn = document.getElementById('resetLossStreakBtn');
+        resetBtn.style.display = (consLosses >= maxConsLosses && !risk.trading_enabled) ? 'inline-block' : 'none';
+        
+        // Render alerts
+        const alertsList = document.getElementById('alertsList');
+        if (alerts.length === 0) {
+            alertsList.innerHTML = '<div class="muted">暂无告警</div>';
+        } else {
+            alertsList.innerHTML = alerts.map(a => {
+                const levelClass = {
+                    'danger': 'neg',
+                    'warn': 'warn',
+                    'info': 'muted'
+                }[a.level] || 'muted';
+                return `<div class="card" style="margin-bottom: 8px; padding: 12px;">
+                    <span class="badge ${a.level === 'danger' ? 'filtered' : a.level === 'warn' ? 'warn' : 'info'}">${a.level}</span>
+                    <span class="${levelClass}" style="margin-left: 8px;">${a.message}</span>
+                </div>`;
+            }).join('');
+        }
+        
+        // Render risk events
+        const eventsBody = document.getElementById('riskEventsTable');
+        if (events.length === 0) {
+            eventsBody.innerHTML = '<tr><td colspan="5" class="muted">暂无风控事件</td></tr>';
+        } else {
+            eventsBody.innerHTML = events.map(e => `<tr>
+                <td>${e.time || '--'}</td>
+                <td>${e.symbol || '--'}</td>
+                <td>${badge(e.signal_type, e.signal_type === 'buy' ? 'buy' : 'sell')}</td>
+                <td>${e.strength != null ? e.strength + '%' : '--'}</td>
+                <td>${e.reason || '--'}</td>
+            </tr>`).join('');
+        }
+        
+        // Render risk details
+        const detailsBody = document.getElementById('riskDetailsTable');
+        const details = [
+            ['当前风险敞口', risk.current_exposure, risk.max_exposure, risk.current_exposure >= risk.max_exposure],
+            ['日内回撤', risk.daily_drawdown, risk.max_daily_drawdown, risk.daily_drawdown >= risk.max_daily_drawdown],
+            ['连亏次数', risk.consecutive_losses, risk.max_consecutive_losses, risk.consecutive_losses >= risk.max_consecutive_losses],
+            ['持仓数量', risk.current_positions, risk.max_positions, risk.current_positions >= risk.max_positions],
+        ];
+        detailsBody.innerHTML = details.map(d => {
+            const curr = d[1] != null ? (typeof d[1] === 'number' && d[1] < 1 ? pct(d[1]) : d[1]) : '--';
+            const max = d[2] != null ? (typeof d[2] === 'number' && d[2] < 1 ? pct(d[2]) : d[2]) : '--';
+            const status = d[3] ? badge('触发', 'filtered') : badge('正常', 'ok');
+            return `<tr>
+                <td>${d[0]}</td>
+                <td>${curr}</td>
+                <td>${max}</td>
+                <td>${status}</td>
+            </tr>`;
+        }).join('');
+        
+        document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString('zh-CN');
+    } catch (e) {
+        console.error('loadRisk error:', e);
+    }
+}
+
+async function resetLossStreak() {
+    if (!confirm('确定要手动重置连亏熔断状态吗？')) return;
+    
+    try {
+        const resp = await fetch('/api/risk/loss-streak/reset', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({note: 'manual-reset-from-dashboard'})
+        });
+        const result = await resp.json();
+        
+        if (result.success) {
+            alert(result.data.message || '重置成功');
+            loadRisk();
+        } else {
+            alert('重置失败: ' + (result.error || '未知错误'));
+        }
+    } catch (e) {
+        alert('重置失败: ' + e.message);
+    }
+}
+
+// Load on page ready
+loadRisk();
+
+// Auto refresh every 30s
+setInterval(loadRisk, 30000);
+</script>
+{% endblock %}

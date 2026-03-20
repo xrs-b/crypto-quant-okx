@@ -48,6 +48,24 @@ def positions():
     return render_template('overview.html', active_page='positions')
 
 
+@app.route('/strategy')
+def strategy():
+    """策略分析页面"""
+    return render_template('strategy.html', active_page='strategy')
+
+
+@app.route('/risk')
+def risk():
+    """风控状态页面"""
+    return render_template('risk.html', active_page='risk')
+
+
+@app.route('/governance')
+def governance():
+    """治理审批页面"""
+    return render_template('governance.html', active_page='governance')
+
+
 # ============================================================================
 # 旧版兼容路由 (单页tab模式)
 # ============================================================================

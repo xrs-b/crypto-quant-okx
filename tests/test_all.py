@@ -1983,6 +1983,64 @@ class TestMFEAnalyzer(unittest.TestCase):
             self.assertIn('trailing_stop', data)
 
 
+class TestRecommendationProvider(unittest.TestCase):
+    """MFE/MAE 建议提供者测试"""
+    
+    def test_default_values_no_db(self):
+        """测试无数据库时的默认值"""
+        from analytics.recommendation import RecommendationProvider
+        
+        provider = RecommendationProvider(db=None, config=None)
+        
+        self.assertEqual(provider.get_stop_loss(), 0.02)
+        self.assertEqual(provider.get_take_profit(), 0.04)
+        self.assertIsNotNone(provider.get_trailing_stop())
+    
+    def test_fallback_with_insufficient_data(self):
+        """测试样本不足时的回退"""
+        from analytics.recommendation import RecommendationProvider
+        
+        # 使用真实 db 但样本不足
+        test_db = Database('data/trading.db')
+        provider = RecommendationProvider(db=test_db, config=None)
+        
+        rec = provider.get_recommendations_for_symbol('BTC/USDT')
+        
+        # 应该回退到默认值
+        self.assertTrue(rec.get('is_fallback'))
+        self.assertEqual(rec.get('source'), 'default')
+    
+    def test_get_all_recommendations(self):
+        """测试获取完整建议"""
+        from analytics.recommendation import RecommendationProvider
+        
+        provider = RecommendationProvider(db=None, config=None)
+        result = provider.get_all_recommendations()
+        
+        self.assertIn('_meta', result)
+        self.assertIn('defaults', result['_meta'])
+        self.assertEqual(result['_meta']['defaults']['stop_loss'], 0.02)
+    
+    def test_trading_executor_integration(self):
+        """测试交易执行器集成"""
+        from core.config import Config
+        from core.database import Database
+        from trading.executor import TradingExecutor
+        
+        # 使用内存数据库测试
+        test_db = Database(':memory:')
+        
+        # Mock exchange
+        class MockExchange:
+            pass
+        
+        config = Config()
+        executor = TradingExecutor(config, MockExchange(), test_db)
+        
+        # 验证 recommendation provider 已初始化
+        self.assertIsNotNone(executor._recommendation_provider)
+
+
 def run_tests():
     """运行所有测试"""
     print("\n" + "="*60)
@@ -2001,6 +2059,7 @@ def run_tests():
     suite.addTests(loader.loadTestsFromTestCase(TestTradingExecutor))
     suite.addTests(loader.loadTestsFromTestCase(TestRiskManager))
     suite.addTests(loader.loadTestsFromTestCase(TestMFEAnalyzer))
+    suite.addTests(loader.loadTestsFromTestCase(TestRecommendationProvider))
     
     # 运行测试
     runner = unittest.TextTestRunner(verbosity=2)

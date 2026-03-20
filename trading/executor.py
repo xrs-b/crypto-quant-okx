@@ -8,6 +8,7 @@ from core.config import Config
 from core.exchange import Exchange
 from core.database import Database
 from core.logger import trade_logger
+from analytics.recommendation import get_recommendation_provider
 
 
 class TradingExecutor:
@@ -19,6 +20,8 @@ class TradingExecutor:
         self.db = db
         self.trading_config = config.get('trading', {})
         self._trade_cache = {}  # 交易缓存
+        # MFE/MAE 建议提供者
+        self._recommendation_provider = get_recommendation_provider(db, config)
 
     def _exchange_has_position(self, symbol: str, side: str) -> bool:
         try:
@@ -267,7 +270,8 @@ class TradingExecutor:
             return False
         
         leverage = position.get('leverage', 1) or 1
-        stop_loss = self.trading_config.get('stop_loss', 0.02)
+        # 优先使用 MFE/MAE 建议，回退到配置默认值
+        stop_loss = self._recommendation_provider.get_stop_loss(symbol)
         
         # 计算盈亏比例
         try:
@@ -318,8 +322,9 @@ class TradingExecutor:
         
         leverage = position.get('leverage', 1) or 1
         
-        # 追踪止损
-        trailing_stop = self.trading_config.get('trailing_stop', 0.015)
+        # 追踪止损 - 优先使用 MFE/MAE 建议
+        ts_params = self._recommendation_provider.get_trailing_stop(symbol)
+        trailing_stop = ts_params.get('distance', self.trading_config.get('trailing_stop', 0.015))
         cache = self._trade_cache.setdefault(symbol, {})
         
         if side == 'long':
@@ -349,8 +354,8 @@ class TradingExecutor:
                 trade_logger.info(f"触发追踪止损: {symbol} 盈利{pnl_percent*100:.2f}%")
                 return True
         
-        # 普通止盈
-        take_profit = self.trading_config.get('take_profit', 0.04)
+        # 普通止盈 - 优先使用 MFE/MAE 建议
+        take_profit = self._recommendation_provider.get_take_profit(symbol)
         
         try:
             if side == 'long':

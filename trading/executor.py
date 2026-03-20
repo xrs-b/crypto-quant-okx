@@ -244,27 +244,40 @@ class TradingExecutor:
     def check_stop_loss(self, symbol: str, current_price: float) -> bool:
         """检查止损"""
         
+        # 参数校验
+        if not current_price or current_price <= 0:
+            return False
+        
         positions = self.db.get_positions()
         position = None
         for p in positions:
-            if p['symbol'] == symbol:
+            if p.get('symbol') == symbol:
                 position = p
                 break
         
         if not position:
             return False
         
-        side = position['side']
-        entry_price = position['entry_price']
-        leverage = position.get('leverage', 1)
+        # 防御性获取必要字段，避免 KeyError
+        side = position.get('side')
+        entry_price = position.get('entry_price')
         
+        if not side or entry_price is None or entry_price <= 0:
+            trade_logger.warning(f"{symbol}: 持仓数据不完整 (side={side}, entry_price={entry_price})")
+            return False
+        
+        leverage = position.get('leverage', 1) or 1
         stop_loss = self.trading_config.get('stop_loss', 0.02)
         
         # 计算盈亏比例
-        if side == 'long':
-            pnl_percent = (current_price - entry_price) / entry_price
-        else:
-            pnl_percent = (entry_price - current_price) / entry_price
+        try:
+            if side == 'long':
+                pnl_percent = (current_price - entry_price) / entry_price
+            else:
+                pnl_percent = (entry_price - current_price) / entry_price
+        except (TypeError, ZeroDivisionError):
+            trade_logger.error(f"{symbol}: 止损计算失败 (entry_price={entry_price})")
+            return False
         
         # 杠杆后盈亏
         leveraged_pnl = pnl_percent * leverage
@@ -279,10 +292,14 @@ class TradingExecutor:
                          highest_price: float = None) -> bool:
         """检查止盈/追踪止损"""
         
+        # 参数校验
+        if not current_price or current_price <= 0:
+            return False
+        
         positions = self.db.get_positions()
         position = None
         for p in positions:
-            if p['symbol'] == symbol:
+            if p.get('symbol') == symbol:
                 position = p
                 break
         
@@ -290,9 +307,16 @@ class TradingExecutor:
             self._clear_trade_cache(symbol)
             return False
         
-        side = position['side']
-        entry_price = position['entry_price']
-        leverage = position.get('leverage', 1)
+        # 防御性获取必要字段，避免 KeyError
+        side = position.get('side')
+        entry_price = position.get('entry_price')
+        
+        if not side or entry_price is None or entry_price <= 0:
+            trade_logger.warning(f"{symbol}: 持仓数据不完整 (side={side}, entry_price={entry_price})")
+            self._clear_trade_cache(symbol)
+            return False
+        
+        leverage = position.get('leverage', 1) or 1
         
         # 追踪止损
         trailing_stop = self.trading_config.get('trailing_stop', 0.015)
@@ -302,30 +326,40 @@ class TradingExecutor:
             anchor = highest_price if highest_price is not None else cache.get('highest_price', position.get('peak_price') or entry_price)
             anchor = max(float(anchor or entry_price), float(position.get('peak_price') or entry_price), float(current_price or entry_price))
             cache['highest_price'] = anchor
-            self.db.update_position(symbol, side, entry_price, position['quantity'], leverage, current_price, peak_price=anchor, trough_price=position.get('trough_price'), contract_size=position.get('contract_size', 1), coin_quantity=position.get('coin_quantity'))
+            self.db.update_position(symbol, side, entry_price, position.get('quantity', 0), leverage, current_price, peak_price=anchor, trough_price=position.get('trough_price'), contract_size=position.get('contract_size', 1) or 1, coin_quantity=position.get('coin_quantity'))
             stop_price = anchor * (1 - trailing_stop)
             if current_price <= stop_price and current_price > entry_price:
-                pnl_percent = (current_price - entry_price) / entry_price * leverage
+                try:
+                    pnl_percent = (current_price - entry_price) / entry_price * leverage
+                except (TypeError, ZeroDivisionError):
+                    pnl_percent = 0
                 trade_logger.info(f"触发追踪止损: {symbol} 盈利{pnl_percent*100:.2f}%")
                 return True
         else:
             anchor = cache.get('lowest_price', position.get('trough_price') or entry_price)
             anchor = min(float(anchor or entry_price), float(position.get('trough_price') or entry_price), float(current_price or entry_price))
             cache['lowest_price'] = anchor
-            self.db.update_position(symbol, side, entry_price, position['quantity'], leverage, current_price, peak_price=position.get('peak_price'), trough_price=anchor, contract_size=position.get('contract_size', 1), coin_quantity=position.get('coin_quantity'))
+            self.db.update_position(symbol, side, entry_price, position.get('quantity', 0), leverage, current_price, peak_price=position.get('peak_price'), trough_price=anchor, contract_size=position.get('contract_size', 1) or 1, coin_quantity=position.get('coin_quantity'))
             stop_price = anchor * (1 + trailing_stop)
             if current_price >= stop_price and current_price < entry_price:
-                pnl_percent = (entry_price - current_price) / entry_price * leverage
+                try:
+                    pnl_percent = (entry_price - current_price) / entry_price * leverage
+                except (TypeError, ZeroDivisionError):
+                    pnl_percent = 0
                 trade_logger.info(f"触发追踪止损: {symbol} 盈利{pnl_percent*100:.2f}%")
                 return True
         
         # 普通止盈
         take_profit = self.trading_config.get('take_profit', 0.04)
         
-        if side == 'long':
-            pnl_percent = (current_price - entry_price) / entry_price
-        else:
-            pnl_percent = (entry_price - current_price) / entry_price
+        try:
+            if side == 'long':
+                pnl_percent = (current_price - entry_price) / entry_price
+            else:
+                pnl_percent = (entry_price - current_price) / entry_price
+        except (TypeError, ZeroDivisionError):
+            trade_logger.error(f"{symbol}: 止盈计算失败 (entry_price={entry_price})")
+            return False
         
         leveraged_pnl = pnl_percent * leverage
         

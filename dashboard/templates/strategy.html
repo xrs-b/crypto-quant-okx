@@ -15,6 +15,7 @@
     <button class="tab-btn active" data-tab="overview">📊 策略概览</button>
     <button class="tab-btn" data-tab="backtest">📈 回测结果</button>
     <button class="tab-btn" data-tab="quality">🎯 信号质量</button>
+    <button class="tab-btn" data-tab="exit">🚪 退出策略</button>
 </div>
 
 {# Tab 1: Strategy Overview #}
@@ -161,6 +162,69 @@
         </div>
     </div>
 </div>
+
+{# Tab 4: Exit Strategy #}
+<div class="tab-content" id="tab-exit">
+    <div class="stat-grid">
+        <div class="stat-card">
+            <div class="label">Partial TP 第一层</div>
+            <div class="value" id="pt1Status">--</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">Partial TP 第二层</div>
+            <div class="value" id="pt2Status">--</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">总触发次数</div>
+            <div class="value" id="totalTriggers">--</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">触发币种数</div>
+            <div class="value" id="uniqueSymbols">--</div>
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="section-title">退出策略配置</div>
+        <div class="table-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        <th>策略</th>
+                        <th>启用状态</th>
+                        <th>触发阈值</th>
+                        <th>平仓比例</th>
+                        <th>MFE/MAE建议</th>
+                    </tr>
+                </thead>
+                <tbody id="exitConfigTable">
+                    <tr><td colspan="5" class="muted">加载中...</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="section-title">最近触发记录</div>
+        <div class="table-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        <th>时间</th>
+                        <th>币种</th>
+                        <th>方向</th>
+                        <th>触发价格</th>
+                        <th>平仓比例</th>
+                        <th>盈亏</th>
+                    </tr>
+                </thead>
+                <tbody id="exitHistoryTable">
+                    <tr><td colspan="6" class="muted">加载中...</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
 {% endblock %}
 
 {% block scripts %}
@@ -177,12 +241,13 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
 
 async function loadStrategy() {
     try {
-        const [strategyResp, backtestResp, mlResp, qualityResp, mfeMaeResp] = await Promise.all([
+        const [strategyResp, backtestResp, mlResp, qualityResp, mfeMaeResp, exitResp] = await Promise.all([
             api('/api/strategy/stats?days=30'),
             api('/api/backtest/summary'),
             api('/api/ml/metrics'),
             api('/api/signal-quality'),
-            api('/api/trades/mfe-mae')
+            api('/api/trades/mfe-mae'),
+            api('/api/exit-strategy/status')
         ]);
         
         const strategy = strategyResp.data || {};
@@ -286,6 +351,91 @@ async function loadStrategy() {
                 <td>${d.optimal_stop_loss ? (d.optimal_stop_loss * 100).toFixed(2) + '%' : '--'}</td>
                 <td>${d.optimal_take_profit ? (d.optimal_take_profit * 100).toFixed(2) + '%' : '--'}</td>
             </tr>`).join('');
+        }
+        
+        // ========== Load Exit Strategy ==========
+        const exit = exitResp.data || {};
+        const exitConfig = exit.config || {};
+        const exitStats = exit.stats || {};
+        const lastTrigger = exit.last_trigger || {};
+        const recs = exit.recommendations || {};
+        
+        // Update stat cards
+        document.getElementById('pt1Status').innerHTML = exitConfig.partial_tp_enabled 
+            ? badge('已启用', 'ok') 
+            : badge('已禁用', 'muted');
+        document.getElementById('pt2Status').innerHTML = exitConfig.partial_tp2_enabled 
+            ? badge('已启用', 'ok') 
+            : badge('已禁用', 'muted');
+        document.getElementById('totalTriggers').textContent = exitStats.total_triggers || 0;
+        document.getElementById('uniqueSymbols').textContent = exitStats.unique_symbols || 0;
+        
+        // Render exit config table
+        const exitConfigBody = document.getElementById('exitConfigTable');
+        const pt1Enabled = exitConfig.partial_tp_enabled;
+        const pt2Enabled = exitConfig.partial_tp2_enabled;
+        const taRec = recs.trailing_stop || {};
+        
+        const rows = [
+            {
+                name: 'Partial TP 第一层',
+                enabled: pt1Enabled,
+                threshold: pt1Enabled ? (exitConfig.partial_tp_threshold * 100).toFixed(1) + '%' : '-',
+                ratio: pt1Enabled ? (exitConfig.partial_tp_ratio * 100).toFixed(0) + '%' : '-',
+                suggestion: (recs.take_profit?.recommended * 100).toFixed(1) + '%' || '-'
+            },
+            {
+                name: 'Partial TP 第二层',
+                enabled: pt2Enabled,
+                threshold: pt2Enabled ? (exitConfig.partial_tp2_threshold * 100).toFixed(1) + '%' : '-',
+                ratio: pt2Enabled ? (exitConfig.partial_tp2_ratio * 100).toFixed(0) + '%' : '-',
+                suggestion: (recs.take_profit?.recommended * 1.5 * 100).toFixed(1) + '%' || '-'
+            },
+            {
+                name: 'Trailing Activation',
+                enabled: true,
+                threshold: (exitConfig.trailing_activation * 100).toFixed(1) + '%',
+                ratio: '-',
+                suggestion: taRec.recommended ? (taRec.recommended * 100).toFixed(1) + '%' : '-'
+            },
+            {
+                name: '追踪止损 (Trailing Stop)',
+                enabled: taRec.recommended != null,
+                threshold: taRec.recommended ? (taRec.recommended * 100).toFixed(1) + '%' : '-',
+                ratio: '-',
+                suggestion: '-'
+            }
+        ];
+        
+        exitConfigBody.innerHTML = rows.map(r => `
+            <tr>
+                <td>${r.name}</td>
+                <td>${r.enabled ? badge('启用', 'ok') : badge('禁用', 'muted')}</td>
+                <td>${r.threshold}</td>
+                <td>${r.ratio}</td>
+                <td>${r.suggestion}</td>
+            </tr>
+        `).join('');
+        
+        // Render recent triggers
+        const exitHistoryBody = document.getElementById('exitHistoryTable');
+        const triggerHistory = exitStats.by_symbol || {};
+        const symbolEntries = Object.entries(triggerHistory).slice(0, 10);
+        
+        if (symbolEntries.length === 0) {
+            exitHistoryBody.innerHTML = '<tr><td colspan="6" class="muted">暂无触发记录</td></tr>';
+        } else {
+            exitHistoryBody.innerHTML = symbolEntries.map(([symbol, data]) => {
+                const last = lastTrigger.symbol === symbol ? lastTrigger : null;
+                return `<tr>
+                    <td>${last?.created_at ? new Date(last.created_at).toLocaleString('zh-CN') : '-'}</td>
+                    <td>${symbol}</td>
+                    <td>${last?.side || '-'}</td>
+                    <td>${last?.trigger_price ? parseFloat(last.trigger_price).toFixed(2) : '-'}</td>
+                    <td>${last?.close_ratio ? (parseFloat(last.close_ratio) * 100).toFixed(0) + '%' : '-'}</td>
+                    <td class="${(data.total_pnl || 0) >= 0 ? 'pos' : 'neg'}">${(data.total_pnl || 0).toFixed(2)}</td>
+                </tr>`;
+            }).join('');
         }
         
         document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString('zh-CN');

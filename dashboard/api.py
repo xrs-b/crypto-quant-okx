@@ -2131,6 +2131,93 @@ def get_trade_mfe_mae_recommendations():
         }), 500
 
 
+@app.route('/api/exit-strategy/status')
+def get_exit_strategy_status():
+    """
+    获取退出策略状态汇总
+    
+    包含:
+    - 当前退出配置 (partial TP / partial TP2 / trailing)
+    - MFE/MAE 建议
+    - 最近触发历史统计
+    """
+    try:
+        trading = config.get('trading', {}) or {}
+        
+        # 获取 partial TP 历史统计
+        pt_history = db.get_partial_tp_history(limit=1000)
+        
+        # 统计
+        pt_count = len(pt_history)
+        pt_symbols = list(set([r.get('symbol') for r in pt_history if r.get('symbol')]))
+        last_pt = pt_history[0] if pt_history else None
+        
+        # 按币种统计
+        by_symbol = {}
+        for r in pt_history:
+            sym = r.get('symbol')
+            if sym:
+                if sym not in by_symbol:
+                    by_symbol[sym] = {'count': 0, 'total_pnl': 0.0}
+                by_symbol[sym]['count'] += 1
+                by_symbol[sym]['total_pnl'] += float(r.get('pnl') or 0)
+        
+        # 获取 MFE/MAE 建议
+        try:
+            analyzer = MFEAnalyzer(db)
+            report = analyzer.generate_analysis_report()
+            mfe_mae = {
+                'stop_loss': report.get('stop_loss', {}),
+                'take_profit': report.get('take_profit', {}),
+                'trailing_stop': report.get('trailing_stop', {}),
+            }
+        except Exception:
+            mfe_mae = {'stop_loss': {}, 'take_profit': {}, 'trailing_stop': {}}
+        
+        # 构建响应
+        return jsonify({
+            'success': True,
+            'data': {
+                # 退出配置
+                'config': {
+                    'partial_tp_enabled': trading.get('partial_tp_enabled', False),
+                    'partial_tp_threshold': trading.get('partial_tp_threshold', 0.015),
+                    'partial_tp_ratio': trading.get('partial_tp_ratio', 0.5),
+                    'partial_tp2_enabled': trading.get('partial_tp2_enabled', False),
+                    'partial_tp2_threshold': trading.get('partial_tp2_threshold', 0.03),
+                    'partial_tp2_ratio': trading.get('partial_tp2_ratio', 0.3),
+                    # trailing 激活阈值 (从 MFE/MAE 获取或使用默认值)
+                    'trailing_activation': mfe_mae.get('trailing_stop', {}).get('activation') or 0.01,
+                },
+                # MFE/MAE 建议
+                'recommendations': mfe_mae,
+                # 统计摘要
+                'stats': {
+                    'total_triggers': pt_count,
+                    'unique_symbols': len(pt_symbols),
+                    'symbols': pt_symbols[:10],  # 最多10个
+                    'by_symbol': by_symbol,
+                },
+                # 最近触发
+                'last_trigger': {
+                    'id': last_pt.get('id') if last_pt else None,
+                    'symbol': last_pt.get('symbol') if last_pt else None,
+                    'side': last_pt.get('side') if last_pt else None,
+                    'trigger_price': last_pt.get('trigger_price') if last_pt else None,
+                    'close_ratio': last_pt.get('close_ratio') if last_pt else None,
+                    'pnl': last_pt.get('pnl') if last_pt else None,
+                    'created_at': last_pt.get('created_at') if last_pt else None,
+                } if last_pt else None
+            }
+        })
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e),
+            'error_type': type(e).__name__
+        }), 500
+
+
 # ============================================================================
 # 启动
 # ============================================================================

@@ -204,6 +204,44 @@
         
         /* Loading state */
         .loading { opacity: 0.5; pointer-events: none; }
+        
+        /* Tabs / Segmented Control */
+        .tabs { display: flex; gap: 4px; background: var(--panel-2); padding: 4px; border-radius: 12px; margin-bottom: 20px; }
+        .tab-btn {
+            flex: 1;
+            padding: 10px 16px;
+            border: none;
+            border-radius: 10px;
+            background: transparent;
+            color: var(--muted);
+            font-weight: 600;
+            font-size: 13px;
+            cursor: pointer;
+            transition: all .2s ease;
+        }
+        .tab-btn:hover { color: var(--text); }
+        .tab-btn.active {
+            background: var(--panel-3);
+            color: var(--text);
+            box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+        }
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+        
+        /* Collapsible Section */
+        .collapsible { margin-bottom: 16px; }
+        .collapsible-header {
+            display: flex; justify-content: space-between; align-items: center;
+            padding: 14px 18px; background: var(--panel-2); border-radius: 12px;
+            cursor: pointer; border: 1px solid var(--border-soft);
+            transition: all .2s ease;
+        }
+        .collapsible-header:hover { background: var(--panel-3); }
+        .collapsible-header h3 { margin: 0; font-size: 15px; }
+        .collapsible-icon { transition: transform .2s; }
+        .collapsible.open .collapsible-icon { transform: rotate(180deg); }
+        .collapsible-content { display: none; padding-top: 16px; }
+        .collapsible.open .collapsible-content { display: block; }
     </style>
     {% block extra_head %}{% endblock %}
 </head>

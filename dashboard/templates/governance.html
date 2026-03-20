@@ -10,94 +10,114 @@
 {% endblock %}
 
 {% block content %}
-{# Governance Stats #}
-<div class="stat-grid">
-    <div class="stat-card">
-        <div class="label">当前预设</div>
-        <div class="value" id="currentPreset">--</div>
+{# Tab Navigation #}
+<div class="tabs">
+    <button class="tab-btn active" data-tab="status">📊 状态</button>
+    <button class="tab-btn" data-tab="approvals">⚖️ 审批</button>
+    <button class="tab-btn" data-tab="history">📜 历史</button>
+</div>
+
+{# Tab 1: Status #}
+<div class="tab-content active" id="tab-status">
+    <div class="stat-grid">
+        <div class="stat-card">
+            <div class="label">当前预设</div>
+            <div class="value" id="currentPreset">--</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">预设模式</div>
+            <div class="value" id="presetMode">--</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">待审批数</div>
+            <div class="value" id="pendingApprovals">--</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">今日告警</div>
+            <div class="value" id="todayAlerts">--</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">候选池</div>
+            <div class="value" id="candidatePool">--</div>
+        </div>
     </div>
-    <div class="stat-card">
-        <div class="label">预设模式</div>
-        <div class="value" id="presetMode">--</div>
-    </div>
-    <div class="stat-card">
-        <div class="label">待审批数</div>
-        <div class="value" id="pendingApprovals">--</div>
-    </div>
-    <div class="stat-card">
-        <div class="label">今日告警</div>
-        <div class="value" id="todayAlerts">--</div>
-    </div>
-    <div class="stat-card">
-        <div class="label">30日审批</div>
-        <div class="value" id="totalApprovals">--</div>
-    </div>
-    <div class="stat-card">
-        <div class="label">候选池状态</div>
-        <div class="value" id="candidatePool">--</div>
+    
+    {# Available Presets #}
+    <div class="card">
+        <h3 style="margin: 0 0 16px 0;">可用预设</h3>
+        <div class="table-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        <th>预设</th>
+                        <th>描述</th>
+                        <th>监听币种</th>
+                        <th>操作</th>
+                    </tr>
+                </thead>
+                <tbody id="presetsTable">
+                    <tr><td colspan="4" class="muted">加载中...</td></tr>
+                </tbody>
+            </table>
+        </div>
     </div>
 </div>
 
-{# Pending Approvals #}
-<div class="card" style="margin-bottom: 24px;">
-    <h3 style="margin: 0 0 16px 0;">待审批建议</h3>
-    <div id="pendingList">
-        <div class="muted">加载中...</div>
+{# Tab 2: Approvals #}
+<div class="tab-content" id="tab-approvals">
+    {# Pending Approvals #}
+    <div class="card" style="margin-bottom: 20px;">
+        <h3 style="margin: 0 0 16px 0;">待审批建议</h3>
+        <div id="pendingList">
+            <div class="muted">加载中...</div>
+        </div>
+    </div>
+    
+    {# Governance Alerts #}
+    <div class="card">
+        <h3 style="margin: 0 0 16px 0;">治理告警与建议</h3>
+        <div id="governanceAlerts">
+            <div class="muted">加载中...</div>
+        </div>
     </div>
 </div>
 
-{# Available Presets #}
-<div class="card" style="margin-bottom: 24px;">
-    <h3 style="margin: 0 0 16px 0;">可用预设</h3>
-    <div class="table-wrap">
-        <table>
-            <thead>
-                <tr>
-                    <th>预设名称</th>
-                    <th>描述</th>
-                    <th>监听币种</th>
-                    <th>操作</th>
-                </tr>
-            </thead>
-            <tbody id="presetsTable">
-                <tr><td colspan="4" class="muted">加载中...</td></tr>
-            </tbody>
-        </table>
-    </div>
-</div>
-
-{# Governance Alerts #}
-<div class="card" style="margin-bottom: 24px;">
-    <h3 style="margin: 0 0 16px 0;">治理告警与建议</h3>
-    <div id="governanceAlerts">
-        <div class="muted">加载中...</div>
-    </div>
-</div>
-
-{# Approval History #}
-<div class="card">
-    <h3 style="margin: 0 0 16px 0;">审批历史</h3>
-    <div class="table-wrap">
-        <table>
-            <thead>
-                <tr>
-                    <th>时间</th>
-                    <th>类型</th>
-                    <th>目标</th>
-                    <th>决策</th>
-                    <th>备注</th>
-                </tr>
-            </thead>
-            <tbody id="historyTable">
-                <tr><td colspan="5" class="muted">加载中...</td></tr>
-            </tbody>
-        </table>
+{# Tab 3: History #}
+<div class="tab-content" id="tab-history">
+    <div class="card">
+        <h3 style="margin: 0 0 16px 0;">审批历史</h3>
+        <div class="table-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        <th>时间</th>
+                        <th>类型</th>
+                        <th>目标</th>
+                        <th>决策</th>
+                        <th>备注</th>
+                    </tr>
+                </thead>
+                <tbody id="historyTable">
+                    <tr><td colspan="5" class="muted">加载中...</td></tr>
+                </tbody>
+            </table>
+        </div>
     </div>
 </div>
 {% endblock %}
 
 {% block scripts %}
 <script>
+// Tab switching
+document.querySelectorAll('.tab-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+        document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+        document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+        btn.classList.add('active');
+        document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
+    });
+});
+
 async function loadGovernance() {
     try {
         const [govResp, pendingResp, presetsResp, historyResp, alertsResp] = await Promise.all([
@@ -119,7 +139,6 @@ async function loadGovernance() {
         document.getElementById('presetMode').textContent = gov.preset_mode || '--';
         document.getElementById('pendingApprovals').textContent = pending.length;
         document.getElementById('todayAlerts').textContent = gov.today_alerts || alerts.filter(a => a.level !== 'info').length;
-        document.getElementById('totalApprovals').textContent = history.length;
         document.getElementById('candidatePool').textContent = (gov.candidate_pool_size || 0) + ' 币种';
         
         // Render pending approvals
@@ -170,11 +189,6 @@ async function loadGovernance() {
             alertsDiv.innerHTML = '<div class="card" style="padding: 16px;"><span class="muted">暂无治理告警</span></div>';
         } else {
             alertsDiv.innerHTML = govAlerts.map(a => {
-                const levelClass = {
-                    'danger': 'neg',
-                    'warning': 'warn',
-                    'info': 'muted'
-                }[a.level] || 'muted';
                 const approvalBadge = a.approval_required 
                     ? (a.approval_pending ? badge('待审批', 'warn') : badge('已审批', 'ok'))
                     : '';
@@ -257,10 +271,7 @@ async function applyPreset(name) {
     }
 }
 
-// Load on page ready
 loadGovernance();
-
-// Auto refresh every 60s
 setInterval(loadGovernance, 60000);
 </script>
 {% endblock %}

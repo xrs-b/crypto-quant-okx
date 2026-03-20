@@ -6,100 +6,115 @@
 {% block page_desc %}系统运行状态与关键指标{% endblock %}
 
 {% block content %}
-{# Stats Cards #}
-<div class="stat-grid">
-    <div class="stat-card">
-        <div class="label">账户总额</div>
-        <div class="value" id="totalValue">--</div>
-    </div>
-    <div class="stat-card">
-        <div class="label">可用余额</div>
-        <div class="value" id="freeBalance">--</div>
-    </div>
-    <div class="stat-card">
-        <div class="label">持仓市值</div>
-        <div class="value" id="positionValue">--</div>
-    </div>
-    <div class="stat-card">
-        <div class="label">未实现盈亏</div>
-        <div class="value" id="unrealizedPnl">--</div>
-    </div>
-    <div class="stat-card">
-        <div class="label">30日交易数</div>
-        <div class="value" id="totalTrades">--</div>
-    </div>
-    <div class="stat-card">
-        <div class="label">胜率</div>
-        <div class="value" id="winRate">--</div>
-    </div>
-    <div class="stat-card">
-        <div class="label">30日总盈亏</div>
-        <div class="value" id="totalPnl">--</div>
-    </div>
-    <div class="stat-card">
-        <div class="label">当前风险敞口</div>
-        <div class="value" id="riskExposure">--</div>
-    </div>
-    <div class="stat-card">
-        <div class="label">连亏次数</div>
-        <div class="value" id="lossStreak">--</div>
-    </div>
-    <div class="stat-card">
-        <div class="label">日内回撤</div>
-        <div class="value" id="dailyDd">--</div>
+{# Tab Navigation #}
+<div class="tabs">
+    <button class="tab-btn active" data-tab="stats">📊 运行概览</button>
+    <button class="tab-btn" data-tab="positions">📈 持仓</button>
+    <button class="tab-btn" data-tab="trades">📋 交易</button>
+</div>
+
+{# Tab 1: Stats #}
+<div class="tab-content active" id="tab-stats">
+    <div class="stat-grid">
+        <div class="stat-card">
+            <div class="label">账户总额</div>
+            <div class="value" id="totalValue">--</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">可用余额</div>
+            <div class="value" id="freeBalance">--</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">持仓市值</div>
+            <div class="value" id="positionValue">--</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">未实现盈亏</div>
+            <div class="value" id="unrealizedPnl">--</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">30日交易数</div>
+            <div class="value" id="totalTrades">--</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">胜率</div>
+            <div class="value" id="winRate">--</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">30日总盈亏</div>
+            <div class="value" id="totalPnl">--</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">风险敞口</div>
+            <div class="value" id="riskExposure">--</div>
+        </div>
     </div>
 </div>
 
-{# Positions Summary #}
-<div class="card" style="margin-bottom: 24px;">
-    <h3 style="margin: 0 0 16px 0;">当前持仓</h3>
-    <div class="table-wrap">
-        <table>
-            <thead>
-                <tr>
-                    <th>币种</th>
-                    <th>方向</th>
-                    <th>数量</th>
-                    <th>开仓价</th>
-                    <th>现价</th>
-                    <th>未实现盈亏</th>
-                </tr>
-            </thead>
-            <tbody id="overviewPositions">
-                <tr><td colspan="6" class="muted">加载中...</td></tr>
-            </tbody>
-        </table>
+{# Tab 2: Positions #}
+<div class="tab-content" id="tab-positions">
+    <div class="card">
+        <h3 style="margin: 0 0 16px 0;">当前持仓</h3>
+        <div class="table-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        <th>币种</th>
+                        <th>方向</th>
+                        <th>数量</th>
+                        <th>开仓价</th>
+                        <th>现价</th>
+                        <th>未实现盈亏</th>
+                    </tr>
+                </thead>
+                <tbody id="overviewPositions">
+                    <tr><td colspan="6" class="muted">加载中...</td></tr>
+                </tbody>
+            </table>
+        </div>
     </div>
 </div>
 
-{# Recent Trades #}
-<div class="card">
-    <h3 style="margin: 0 0 16px 0;">最近交易</h3>
-    <div class="table-wrap">
-        <table>
-            <thead>
-                <tr>
-                    <th>ID</th>
-                    <th>币种</th>
-                    <th>方向</th>
-                    <th>状态</th>
-                    <th>开仓价</th>
-                    <th>平仓价</th>
-                    <th>数量</th>
-                    <th>盈亏</th>
-                    <th>开仓时间</th>
-                </tr>
-            </thead>
-            <tbody id="recentTrades">
-                <tr><td colspan="9" class="muted">加载中...</td></tr>
-            </tbody>
-        </table>
+{# Tab 3: Trades #}
+<div class="tab-content" id="tab-trades">
+    <div class="card">
+        <h3 style="margin: 0 0 16px 0;">最近交易</h3>
+        <div class="table-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>币种</th>
+                        <th>方向</th>
+                        <th>状态</th>
+                        <th>开仓价</th>
+                        <th>平仓价</th>
+                        <th>数量</th>
+                        <th>盈亏</th>
+                        <th>时间</th>
+                    </tr>
+                </thead>
+                <tbody id="recentTrades">
+                    <tr><td colspan="9" class="muted">加载中...</td></tr>
+                </tbody>
+            </table>
+        </div>
     </div>
 </div>
 {% endblock %}
 
 {% block scripts %}
 <script>
+// Tab switching
+document.querySelectorAll('.tab-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+        document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+        document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+        btn.classList.add('active');
+        document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
+    });
+});
+
 async function loadOverview() {
     try {
         const [status, positions, recentTrades] = await Promise.all([
@@ -130,8 +145,6 @@ async function loadOverview() {
         document.getElementById('totalPnl').className = 'value ' + (totalPnl >= 0 ? 'pos' : 'neg');
         
         document.getElementById('riskExposure').textContent = pct(risk.current_exposure);
-        document.getElementById('lossStreak').textContent = (risk.consecutive_losses || 0) + '/' + (risk.max_consecutive_losses || 0);
-        document.getElementById('dailyDd').textContent = pct(risk.daily_drawdown);
         
         // Render positions
         const positionsData = positions.data || [];
@@ -168,10 +181,7 @@ async function loadOverview() {
     }
 }
 
-// Load on page ready
 loadOverview();
-
-// Auto refresh every 30s
 setInterval(loadOverview, 30000);
 </script>
 {% endblock %}

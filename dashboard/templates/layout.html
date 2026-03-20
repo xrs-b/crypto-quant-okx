@@ -160,6 +160,16 @@
         button:hover, .btn:hover { transform: translateY(-1px); box-shadow: 0 10px 20px rgba(240,185,11,.2); }
         button:active { transform: translateY(0); }
         button:disabled { opacity: .5; cursor: not-allowed; transform: none; }
+        button.secondary, .btn.secondary, .secondary {
+            background: rgba(255,255,255,.05);
+            color: var(--text);
+            border: 1px solid rgba(255,255,255,.08);
+        }
+        button.secondary:hover, .btn.secondary:hover, .secondary:hover {
+            background: rgba(255,255,255,.08);
+            box-shadow: none;
+            transform: none;
+        }
         .card {
             background: var(--panel);
             border: 1px solid var(--border-soft);
@@ -198,9 +208,57 @@
         .badge.warn { background: rgba(240,185,11,.15); color: #f8d56b; }
         .badge.filtered { background: rgba(239,68,68,.15); color: #fca5a5; }
         .empty-state { text-align: center; padding: 40px 20px; color: var(--muted); }
+        .empty-state .icon { font-size: 32px; margin-bottom: 12px; opacity: .5; }
         .muted { color: var(--muted); }
         .pos { color: var(--success); }
         .neg { color: var(--danger); }
+        
+        /* Section Title */
+        .section-title { font-size: 16px; font-weight: 700; margin: 0 0 14px; position: relative; display: inline-block; }
+        .section-title::after {
+            content: '';
+            position: absolute;
+            bottom: -4px;
+            left: 0;
+            width: 24px;
+            height: 2px;
+            background: var(--primary);
+            border-radius: 1px;
+        }
+        
+        /* Risk Alert / Notice */
+        .risk-alert {
+            padding: 12px 14px;
+            border-radius: 14px;
+            border: 1px solid rgba(255,255,255,.06);
+            background: rgba(255,255,255,.03);
+        }
+        .risk-alert.warn { border-color: rgba(240,185,11,.34); background: rgba(240,185,11,.08); color: #ffe39a; }
+        .risk-alert.bad { border-color: rgba(239,68,68,.34); background: rgba(239,68,68,.08); color: #fecaca; }
+        .risk-alert.ok { border-color: rgba(34,197,94,.3); background: rgba(34,197,94,.08); color: #bbf7d0; }
+        .risk-alert.info { border-color: rgba(96,165,250,.34); background: rgba(96,165,250,.08); color: #93c5fd; }
+        
+        /* Section Note */
+        .section-note { color: var(--muted); font-size: 12px; margin: -6px 0 12px; }
+        
+        /* Toolbar Inline */
+        .toolbar-inline { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:12px; }
+        .toolbar-inline .chip-btn {
+            border-radius: 999px;
+            padding: 8px 12px;
+            background: rgba(255,255,255,.05);
+            color: var(--text);
+            border: 1px solid rgba(255,255,255,.08);
+            font-weight: 600;
+            cursor: pointer;
+            transition: all .2s ease;
+        }
+        .toolbar-inline .chip-btn:hover { background: rgba(255,255,255,.08); }
+        .toolbar-inline .chip-btn.active {
+            background: rgba(240,185,11,.16);
+            color: #fff0b8;
+            border-color: rgba(240,185,11,.3);
+        }
         
         /* Loading state */
         .loading { opacity: 0.5; pointer-events: none; }

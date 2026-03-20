@@ -83,7 +83,7 @@
             padding: 0 10px;
         }
         .nav-list { display: grid; gap: 8px; }
-        .nav-btn {
+        .nav-btn, .nav-link {
             width: 100%;
             text-align: left;
             background: transparent;
@@ -95,9 +95,12 @@
             align-items: center;
             gap: 10px;
             font-weight: 600;
+            text-decoration: none;
+            cursor: pointer;
+            transition: all .2s ease;
         }
-        .nav-btn:hover { background: rgba(255,255,255,.04); box-shadow: none; transform: none; }
-        .nav-btn.active {
+        .nav-btn:hover, .nav-link:hover { background: rgba(255,255,255,.04); box-shadow: none; transform: none; }
+        .nav-btn.active, .nav-link.active {
             background: linear-gradient(135deg, rgba(240,185,11,.18), rgba(255,255,255,.08));
             border-color: rgba(240,185,11,.32);
             color: #fff7d6;
@@ -106,7 +109,7 @@
         .nav-dot {
             width: 8px; height: 8px; border-radius: 999px; background: rgba(255,255,255,.22);
         }
-        .nav-btn.active .nav-dot { background: var(--binance-yellow); box-shadow: 0 0 10px rgba(240,185,11,.6); }
+        .nav-btn.active .nav-dot, .nav-link.active .nav-dot { background: var(--binance-yellow); box-shadow: 0 0 10px rgba(240,185,11,.6); }
         .sidebar-footer {
             margin-top: auto;
             padding: 14px;
@@ -408,12 +411,12 @@
                 <p>OKX 骨架 × Binance 点缀。模拟盘、治理审批、风控与量化观察统一控制台。</p>
             </div>
 
-            <div class="sidebar-section-title">Navigation</div>
+            <div class="sidebar-section-title">核心功能</div>
             <div class="nav-list">
-                <button class="nav-btn active" data-tab="overview"><span class="nav-dot"></span><span>总览</span></button>
-                <button class="nav-btn" data-tab="positions"><span class="nav-dot"></span><span>持仓</span></button>
-                <button class="nav-btn" data-tab="trades"><span class="nav-dot"></span><span>交易记录</span></button>
-                <button class="nav-btn" data-tab="signals"><span class="nav-dot"></span><span>信号记录</span></button>
+                <a href="/overview" class="nav-link"><span class="nav-dot"></span><span>总览</span></a>
+                <a href="/positions" class="nav-link"><span class="nav-dot"></span><span>持仓</span></a>
+                <a href="/trades" class="nav-link"><span class="nav-dot"></span><span>交易记录</span></a>
+                <a href="/signals" class="nav-link"><span class="nav-dot"></span><span>信号记录</span></a>
                 <button class="nav-btn" data-tab="strategy"><span class="nav-dot"></span><span>策略分析</span></button>
                 <button class="nav-btn" data-tab="backtest"><span class="nav-dot"></span><span>回测分析</span></button>
                 <button class="nav-btn" data-tab="quality"><span class="nav-dot"></span><span>信号质量</span></button>
@@ -473,63 +476,65 @@
                         <div class="card" style="padding:18px;">
                             <div class="section-title">总览中心</div>
                             <div class="section-note">默认首页，先看组合状态、系统提醒、最近变化，再往下看持仓细节。</div>
-                            <div class="summary-strip" id="overviewManagedHealth"></div>
-                            <div class="summary-strip" id="overviewAccountDiagnostic"></div>
-                            <div class="summary-strip" id="overviewManagedRadar"></div>
-                            <div class="list" id="overviewManagedChecklist"></div>
-                            <div class="summary-strip" id="overviewSmokeKpi"></div>
-                            <div class="summary-strip" id="overviewSmokeTrend"></div>
-                            <div class="summary-strip" id="overviewSmokeCompare"></div>
-                            <div class="summary-strip" id="overviewSmokeErrorTags"></div>
-                            <div class="summary-strip" id="overviewSmokeRisk"></div>
-                            <div class="summary-strip" id="overviewReconcileRisk"></div>
-                            <div class="summary-strip" id="overviewRuntimeState"></div>
-                            <div class="summary-strip" id="overviewRuntimeSummary"></div>
-                            <div class="summary-strip" id="overviewRunContinuity"></div>
-                            <div class="summary-strip" id="overviewRunTrend"></div>
-                            <div class="summary-strip" id="overviewForwardReady"></div>
-                            <div class="summary-strip" id="overviewLongRunWindow"></div>
-                            <div class="summary-strip" id="overviewLongRunRisk"></div>
-                            <div class="summary-strip" id="overviewLongRunSample"></div>
-                            <div class="summary-strip" id="overviewLongRunVerdict"></div>
-                            <div class="summary-strip" id="overviewStageAcceptance"></div>
-                            <div class="summary-strip" id="overviewPhaseSwitch"></div>
-                            <div class="summary-strip" id="overviewFinalDecision"></div>
-                            <div class="summary-strip" id="overviewPriorityNow"></div>
-                            <div class="summary-strip" id="overviewWrapUpStatus"></div>
-                            <div class="summary-strip" id="overviewObservationConfidence"></div>
-                            <div class="summary-strip" id="overviewTopSummary"></div>
-                            <div class="summary-strip" id="overviewDecisionTimestamp"></div>
-                            <div class="summary-strip" id="overviewDecisionStability"></div>
-                            <div class="summary-strip" id="overviewDecisionDrift"></div>
-                            <div class="summary-strip" id="overviewDecisionWhy"></div>
-                            <div class="summary-strip" id="overviewDecisionBoundary"></div>
-                            <div class="summary-strip" id="overviewDecisionRecheck"></div>
-                            <div class="summary-strip" id="overviewAdvanceCriteria"></div>
-                            <div class="summary-strip" id="overviewAdvanceGaps"></div>
-                            <div class="summary-strip" id="overviewAdvancePath"></div>
-                            <div class="summary-strip" id="overviewAdvanceProgress"></div>
-                            <div class="summary-strip" id="overviewAdvanceBlockers"></div>
-                            <div class="list" id="overviewActionQueue"></div>
-                            <div class="toolbar-inline" id="overviewRuntimeToolbar">
-                                <button class="chip-btn active" onclick="setOverviewRuntimeFilter('all')">全部</button>
-                                <button class="chip-btn" onclick="setOverviewRuntimeFilter('error')">异常</button>
-                                <button class="chip-btn" onclick="setOverviewRuntimeFilter('skip')">跳过</button>
-                                <button class="chip-btn" onclick="setOverviewRuntimeFilter('end')">完成</button>
+                            <div class="overview-center-grid">
+                                <div class="summary-strip" id="overviewManagedHealth"></div>
+                                <div class="summary-strip" id="overviewAccountDiagnostic"></div>
+                                <div class="summary-strip" id="overviewManagedRadar"></div>
+                                <div class="list" id="overviewManagedChecklist"></div>
+                                <div class="summary-strip" id="overviewSmokeKpi"></div>
+                                <div class="summary-strip" id="overviewSmokeTrend"></div>
+                                <div class="summary-strip" id="overviewSmokeCompare"></div>
+                                <div class="summary-strip" id="overviewSmokeErrorTags"></div>
+                                <div class="summary-strip" id="overviewSmokeRisk"></div>
+                                <div class="summary-strip" id="overviewReconcileRisk"></div>
+                                <div class="summary-strip" id="overviewRuntimeState"></div>
+                                <div class="summary-strip" id="overviewRuntimeSummary"></div>
+                                <div class="summary-strip" id="overviewRunContinuity"></div>
+                                <div class="summary-strip" id="overviewRunTrend"></div>
+                                <div class="summary-strip" id="overviewForwardReady"></div>
+                                <div class="summary-strip" id="overviewLongRunWindow"></div>
+                                <div class="summary-strip" id="overviewLongRunRisk"></div>
+                                <div class="summary-strip" id="overviewLongRunSample"></div>
+                                <div class="summary-strip" id="overviewLongRunVerdict"></div>
+                                <div class="summary-strip" id="overviewStageAcceptance"></div>
+                                <div class="summary-strip" id="overviewPhaseSwitch"></div>
+                                <div class="summary-strip" id="overviewFinalDecision"></div>
+                                <div class="summary-strip" id="overviewPriorityNow"></div>
+                                <div class="summary-strip" id="overviewWrapUpStatus"></div>
+                                <div class="summary-strip" id="overviewObservationConfidence"></div>
+                                <div class="summary-strip" id="overviewTopSummary"></div>
+                                <div class="summary-strip" id="overviewDecisionTimestamp"></div>
+                                <div class="summary-strip" id="overviewDecisionStability"></div>
+                                <div class="summary-strip" id="overviewDecisionDrift"></div>
+                                <div class="summary-strip" id="overviewDecisionWhy"></div>
+                                <div class="summary-strip" id="overviewDecisionBoundary"></div>
+                                <div class="summary-strip" id="overviewDecisionRecheck"></div>
+                                <div class="summary-strip" id="overviewAdvanceCriteria"></div>
+                                <div class="summary-strip" id="overviewAdvanceGaps"></div>
+                                <div class="summary-strip" id="overviewAdvancePath"></div>
+                                <div class="summary-strip" id="overviewAdvanceProgress"></div>
+                                <div class="summary-strip" id="overviewAdvanceBlockers"></div>
+                                <div class="list" id="overviewActionQueue"></div>
+                                <div class="toolbar-inline" id="overviewRuntimeToolbar">
+                                    <button class="chip-btn active" onclick="setOverviewRuntimeFilter('all')">全部</button>
+                                    <button class="chip-btn" onclick="setOverviewRuntimeFilter('error')">异常</button>
+                                    <button class="chip-btn" onclick="setOverviewRuntimeFilter('skip')">跳过</button>
+                                    <button class="chip-btn" onclick="setOverviewRuntimeFilter('end')">完成</button>
+                                </div>
+                                <div class="summary-strip" id="overviewRuntimeRisk"></div>
+                                <div class="summary-strip" id="overviewNotificationSummary"></div>
+                                <div class="summary-strip" id="overviewForwardFunnel"></div>
+                                <div class="summary-strip" id="overviewSignalBreakdown"></div>
+                                <div class="summary-strip" id="overviewSignalBlockers"></div>
+                                <div class="summary-strip" id="overviewForwardRisk"></div>
+                                <div class="summary-strip" id="overviewForwardReview"></div>
+                                <div class="summary-strip" id="overviewForwardSymbols"></div>
+                                <div class="summary-strip" id="overviewForwardVerdict"></div>
+                                <div class="list" id="overviewForwardObservations"></div>
+                                <div class="list" id="overviewNotificationList"></div>
+                                <div class="list" id="overviewRuntimeHistory"></div>
+                                <div class="list" id="overviewReconcileDetails"></div>
                             </div>
-                            <div class="summary-strip" id="overviewRuntimeRisk"></div>
-                            <div class="summary-strip" id="overviewNotificationSummary"></div>
-                            <div class="summary-strip" id="overviewForwardFunnel"></div>
-                            <div class="summary-strip" id="overviewSignalBreakdown"></div>
-                            <div class="summary-strip" id="overviewSignalBlockers"></div>
-                            <div class="summary-strip" id="overviewForwardRisk"></div>
-                            <div class="summary-strip" id="overviewForwardReview"></div>
-                            <div class="summary-strip" id="overviewForwardSymbols"></div>
-                            <div class="summary-strip" id="overviewForwardVerdict"></div>
-                            <div class="list" id="overviewForwardObservations"></div>
-                            <div class="list" id="overviewNotificationList"></div>
-                            <div class="list" id="overviewRuntimeHistory"></div>
-                            <div class="list" id="overviewReconcileDetails"></div>
                             <div class="compact-grid">
                                 <div class="item">
                                     <strong>组合状态</strong>
@@ -3177,6 +3182,7 @@
                 ]);
                 const safeRows = Array.isArray(rows) ? rows : [];
                 const safeReasons = Array.isArray(reasons) ? reasons : [];
+                const coinRows = Array.isArray(coinBreakdownResp?.data) ? coinBreakdownResp.data : [];
                 const coinSummary = coinBreakdownResp?.summary || {};
                 const effectivenessRows = filterEffectivenessResp?.data || [];
                 const effectivenessSummary = filterEffectivenessResp?.summary || {};

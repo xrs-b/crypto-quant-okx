@@ -1,0 +1,207 @@
+{% extends "layout.html" %}
+
+{% block title %}信号记录 - OKX量化交易仪表盘{% endblock %}
+{% block active_page %}signals{% endblock %}
+{% block page_title %}信号记录{% endblock %}
+{% block page_desc %}交易信号生成与过滤分析{% endblock %}
+
+{% block topbar_actions %}
+<button onclick="loadSignals()">🔄 刷新</button>
+{% endblock %}
+
+{% block content %}
+{# Stats Summary #}
+<div class="stat-grid">
+    <div class="stat-card">
+        <div class="label">总信号数</div>
+        <div class="value" id="totalSignals">--</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">已执行</div>
+        <div class="value pos" id="executedSignals">--</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">已过滤</div>
+        <div class="value neg" id="filteredSignals">--</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">执行率</div>
+        <div class="value" id="executionRate">--</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">观望中</div>
+        <div class="value info" id="holdSignals">--</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">今日信号</div>
+        <div class="value" id="todaySignals">--</div>
+    </div>
+</div>
+
+{# Signals Table #}
+<div class="card" style="margin-bottom: 24px;">
+    <h3 style="margin: 0 0 16px 0;">最近信号</h3>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>时间</th>
+                    <th>币种</th>
+                    <th>信号类型</th>
+                    <th>强度</th>
+                    <th>触发策略</th>
+                    <th>状态</th>
+                    <th>过滤原因</th>
+                </tr>
+            </thead>
+            <tbody id="signalsTable">
+                <tr><td colspan="7" class="muted">加载中...</td></tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+
+{# Filter Reasons #}
+<div class="card" style="margin-bottom: 24px;">
+    <h3 style="margin: 0 0 16px 0;">过滤原因排行</h3>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>原因</th>
+                    <th>次数</th>
+                </tr>
+            </thead>
+            <tbody id="filterReasonTable">
+                <tr><td colspan="2" class="muted">加载中...</td></tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+
+{# Coin Breakdown #}
+<div class="card">
+    <h3 style="margin: 0 0 16px 0;">币种信号分布</h3>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>币种</th>
+                    <th>最新状态</th>
+                    <th>观望</th>
+                    <th>过滤</th>
+                    <th>执行</th>
+                    <th>主阻塞维度</th>
+                    <th>样本(24h/48h)</th>
+                    <th>阻塞原因</th>
+                    <th>诊断建议</th>
+                </tr>
+            </thead>
+            <tbody id="coinBreakdownTable">
+                <tr><td colspan="9" class="muted">加载中...</td></tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function filteredTag(signal) {
+    if (signal.executed) return badge('已执行', 'ok');
+    if (signal.filtered) return badge('已过滤', 'filtered');
+    if (signal.signal_type === 'hold') return badge('观望', 'info');
+    return badge('待执行', 'warn');
+}
+
+async function loadSignals() {
+    try {
+        const [signalsResp, statsResp, reasonsResp, coinResp] = await Promise.all([
+            api('/api/signals?limit=50'),
+            api('/api/signals/stats?days=30'),
+            api('/api/signals/filter-reasons'),
+            api('/api/signals/coin-breakdown?days=1&limit=500')
+        ]);
+        
+        const signals = signalsResp.data || [];
+        const stats = statsResp.data || {};
+        const reasons = reasonsResp.data || [];
+        const coins = coinResp.data || [];
+        const coinSummary = coinResp.summary || {};
+        
+        // Update stats
+        document.getElementById('totalSignals').textContent = stats.total_signals || 0;
+        document.getElementById('executedSignals').textContent = stats.executed_signals || 0;
+        document.getElementById('filteredSignals').textContent = stats.filtered_signals || 0;
+        document.getElementById('executionRate').textContent = (stats.execution_rate || 0) + '%';
+        document.getElementById('holdSignals').textContent = (coinSummary.hold_signals || 0);
+        document.getElementById('todaySignals').textContent = (coinSummary.total_signals || 0);
+        
+        // Render signals
+        const signalsBody = document.getElementById('signalsTable');
+        if (signals.length === 0) {
+            signalsBody.innerHTML = '<tr><td colspan="7" class="muted">暂无信号记录</td></tr>';
+        } else {
+            signalsBody.innerHTML = signals.map(s => {
+                const codeText = s.filter_code ? ` [${s.filter_code}]` : '';
+                const hintText = s.action_hint ? `<div class="muted" style="margin-top:6px;">${s.filter_group || '--'} ｜ ${s.action_hint}</div>` : '';
+                return `<tr>
+                    <td>${s.created_at}</td>
+                    <td>${s.symbol}</td>
+                    <td>${badge(s.signal_type, s.signal_type === 'buy' ? 'buy' : s.signal_type === 'sell' ? 'sell' : 'hold')}</td>
+                    <td>${s.strength}%</td>
+                    <td>${(s.strategies_triggered || []).join(', ') || '--'}</td>
+                    <td>${filteredTag(s)}</td>
+                    <td>${s.filter_reason || '--'}${codeText}${hintText}</td>
+                </tr>`;
+            }).join('');
+        }
+        
+        // Render filter reasons
+        const reasonsBody = document.getElementById('filterReasonTable');
+        if (reasons.length === 0) {
+            reasonsBody.innerHTML = '<tr><td colspan="2" class="muted">暂无过滤数据</td></tr>';
+        } else {
+            reasonsBody.innerHTML = reasons.map(r => `<tr><td>${r.reason}</td><td>${r.count}</td></tr>`).join('');
+        }
+        
+        // Render coin breakdown
+        const coinBody = document.getElementById('coinBreakdownTable');
+        if (coins.length === 0) {
+            coinBody.innerHTML = '<tr><td colspan="9" class="muted">暂无数据</td></tr>';
+        } else {
+            coinBody.innerHTML = coins.slice(0, 20).map(c => {
+                const statusBadge = {
+                    'filtered': badge('已过滤', 'filtered'),
+                    'watch': badge('观望', 'info'),
+                    'executed': badge('已执行', 'ok'),
+                    'direction_ready': badge('待执行', 'warn'),
+                    'sample_low': badge('样本少', 'muted')
+                }[c.latest_status] || '--';
+                return `<tr>
+                    <td>${c.symbol}</td>
+                    <td>${statusBadge}</td>
+                    <td>${c.hold_signals || 0}</td>
+                    <td>${c.filtered_signals || 0}</td>
+                    <td>${c.executed_signals || 0}</td>
+                    <td>${c.dominant_blocker || '--'}</td>
+                    <td>${c.samples_24h || 0}/${c.samples_48h || 0}</td>
+                    <td>${c.dominant_filter_group || '--'}</td>
+                    <td>${c.diagnostic_action || '--'}</td>
+                </tr>`;
+            }).join('');
+        }
+        
+        document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString('zh-CN');
+    } catch (e) {
+        console.error('loadSignals error:', e);
+    }
+}
+
+// Load on page ready
+loadSignals();
+
+// Auto refresh every 60s
+setInterval(loadSignals, 60000);
+</script>
+{% endblock %}

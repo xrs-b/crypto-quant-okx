@@ -1,7 +1,7 @@
 """
-OKX量化交易系统 - 仪表盘
+OKX量化交易系统 - 仪表盘 (多页面版本)
 """
-from flask import Flask, render_template, jsonify, request
+from flask import Flask, render_template, jsonify, request, send_from_directory
 import sys
 import os
 
@@ -14,47 +14,51 @@ app = Flask(__name__)
 app.config['SECRET_KEY'] = 'okx-trading-dashboard-secret-key'
 
 
+# ============================================================================
+# 新版多页面路由
+# ============================================================================
+
 @app.route('/')
 def index():
-    """首页"""
-    stats = db.get_dashboard_stats()
-    positions = db.get_positions()
-    
-    return render_template('dashboard/index.html',
-                         stats=stats,
-                         positions=positions)
+    """新版首页 - 重定向到 overview"""
+    return render_template('overview.html', active_page='dashboard')
+
+
+@app.route('/overview')
+def overview():
+    """总览页面"""
+    return render_template('overview.html', active_page='overview')
 
 
 @app.route('/trades')
 def trades():
-    """交易记录"""
-    page = request.args.get('page', 1, type=int)
-    limit = 20
-    offset = (page - 1) * limit
-    
-    trades = db.get_trades(limit=limit, offset=offset)
-    total = len(trades)
-    
-    return render_template('dashboard/trades.html',
-                         trades=trades,
-                         page=page,
-                         total=total)
+    """交易记录页面"""
+    return render_template('trades.html', active_page='trades')
 
 
 @app.route('/signals')
 def signals():
-    """信号记录"""
-    page = request.args.get('page', 1, type=int)
-    limit = 20
-    offset = (page - 1) * limit
+    """信号记录页面"""
+    return render_template('signals.html', active_page='signals')
+
+
+@app.route('/positions')
+def positions():
+    """持仓页面"""
+    return render_template('overview.html', active_page='positions')
+
+
+# ============================================================================
+# 旧版兼容路由 (单页tab模式)
+# ============================================================================
+
+@app.route('/dashboard/old')
+def dashboard_old():
+    """旧版单页仪表盘 (兼容)"""
+    stats = db.get_dashboard_stats()
+    positions = db.get_positions()
     
-    signals = db.get_signals(limit=limit, offset=offset)
-    stats = db.get_signal_stats()
-    
-    return render_template('dashboard/signals.html',
-                         signals=signals,
-                         stats=stats,
-                         page=page)
+    return send_from_directory('templates', 'index.html')
 
 
 @app.route('/api/stats')

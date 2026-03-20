@@ -1,0 +1,321 @@
+{#
+共享 Layout - Sidebar + Topbar
+#}
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>{% block title %}OKX量化交易仪表盘{% endblock %}</title>
+    <style>
+        :root {
+            --bg: #05060a;
+            --bg-soft: #0b0d12;
+            --panel: #111318;
+            --panel-2: #171a20;
+            --panel-3: #1d2129;
+            --border: #262b34;
+            --border-soft: rgba(255,255,255,.06);
+            --text: #f5f7fa;
+            --muted: #8b93a7;
+            --okx-accent: #ffffff;
+            --binance-yellow: #f0b90b;
+            --binance-yellow-soft: rgba(240,185,11,.14);
+            --primary: #f0b90b;
+            --success: #22c55e;
+            --danger: #ef4444;
+            --warn: #f59e0b;
+            --info: #60a5fa;
+            --shadow: 0 18px 40px rgba(0,0,0,.28);
+            --shadow-soft: 0 10px 24px rgba(0,0,0,.18);
+        }
+        * { box-sizing: border-box; }
+        *::-webkit-scrollbar { width: 10px; height: 10px; }
+        *::-webkit-scrollbar-track { background: rgba(255,255,255,.03); }
+        *::-webkit-scrollbar-thumb { background: rgba(240,185,11,.22); border-radius: 999px; }
+        *::-webkit-scrollbar-thumb:hover { background: rgba(240,185,11,.32); }
+        html, body { height: 100%; }
+        body {
+            margin: 0;
+            font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+            background: radial-gradient(circle at top left, #141821 0%, #090b10 45%, #05060a 100%);
+            color: var(--text);
+        }
+        .app-shell {
+            min-height: 100vh;
+            display: grid;
+            grid-template-columns: 260px minmax(0, 1fr);
+        }
+        .sidebar {
+            border-right: 1px solid var(--border);
+            background: linear-gradient(180deg, rgba(11,13,18,.98) 0%, rgba(7,8,11,.98) 100%);
+            padding: 22px 18px;
+            position: sticky;
+            top: 0;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            gap: 18px;
+            overflow-y: auto;
+        }
+        .brand {
+            padding: 16px;
+            border-radius: 18px;
+            background: linear-gradient(145deg, rgba(255,255,255,.05), rgba(240,185,11,.06));
+            border: 1px solid rgba(255,255,255,.06);
+        }
+        .brand h1 { margin: 0; font-size: 20px; letter-spacing: .2px; }
+        .brand p { margin: 8px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+        .sidebar-section-title {
+            font-size: 11px;
+            letter-spacing: .12em;
+            text-transform: uppercase;
+            color: var(--muted);
+            padding: 0 10px;
+        }
+        .nav-list { display: grid; gap: 8px; }
+        .nav-link {
+            width: 100%;
+            text-align: left;
+            background: transparent;
+            color: var(--text);
+            border: 1px solid transparent;
+            padding: 12px 14px;
+            border-radius: 14px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-weight: 600;
+            text-decoration: none;
+            transition: all .2s ease;
+        }
+        .nav-link:hover {
+            background: rgba(255,255,255,.04);
+            box-shadow: none;
+            transform: none;
+        }
+        .nav-link.active {
+            background: linear-gradient(135deg, rgba(240,185,11,.18), rgba(255,255,255,.08));
+            border-color: rgba(240,185,11,.32);
+            color: #fff7d6;
+            box-shadow: inset 0 0 0 1px rgba(240,185,11,.1);
+        }
+        .nav-dot {
+            width: 8px; height: 8px; border-radius: 999px; background: rgba(255,255,255,.22);
+        }
+        .nav-link.active .nav-dot { background: var(--binance-yellow); box-shadow: 0 0 10px rgba(240,185,11,.6); }
+        .sidebar-footer {
+            margin-top: auto;
+            padding: 14px;
+            border-radius: 16px;
+            background: rgba(255,255,255,.03);
+            border: 1px solid rgba(255,255,255,.05);
+        }
+        .sidebar-footer .muted { font-size: 12px; line-height: 1.5; }
+        .main {
+            min-width: 0;
+            display: flex;
+            flex-direction: column;
+        }
+        .topbar {
+            position: sticky;
+            top: 0;
+            z-index: 20;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 18px;
+            padding: 18px 28px;
+            border-bottom: 1px solid var(--border);
+            backdrop-filter: blur(14px);
+            background: rgba(5,6,10,.82);
+        }
+        .page-title h2 { margin: 0; font-size: 24px; }
+        .page-title p { margin: 6px 0 0; color: var(--muted); font-size: 13px; }
+        .topbar-actions { display:flex; align-items:center; gap:12px; flex-wrap: wrap; justify-content: flex-end; }
+        .pill {
+            padding: 6px 12px;
+            border-radius: 999px;
+            font-size: 12px;
+            background: rgba(34,197,94,.1);
+            color: #86efac;
+            border: 1px solid rgba(34,197,94,.2);
+        }
+        .pill.danger { background: rgba(239,68,68,.1); color: #fca5a5; border-color: rgba(239,68,68,.2); }
+        .pill.warn { background: rgba(240,185,11,.1); color: #f8d56b; border-color: rgba(240,185,11,.2); }
+        .pill.info { background: rgba(96,165,250,.1); color: #93c5fd; border-color: rgba(96,165,250,.2); }
+        .content { padding: 24px 28px; }
+        
+        /* Common components */
+        button, .btn {
+            border: 0;
+            border-radius: 12px;
+            padding: 10px 14px;
+            cursor: pointer;
+            background: var(--primary);
+            color: #241900;
+            font-weight: 700;
+            transition: all .2s ease;
+        }
+        button:hover, .btn:hover { transform: translateY(-1px); box-shadow: 0 10px 20px rgba(240,185,11,.2); }
+        button:active { transform: translateY(0); }
+        button:disabled { opacity: .5; cursor: not-allowed; transform: none; }
+        .card {
+            background: var(--panel);
+            border: 1px solid var(--border-soft);
+            border-radius: 16px;
+            padding: 20px;
+        }
+        .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; margin-bottom: 24px; }
+        .stat-card {
+            background: var(--panel-2);
+            border: 1px solid var(--border-soft);
+            border-radius: 14px;
+            padding: 18px;
+        }
+        .stat-card .label { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+        .stat-card .value { font-size: 22px; font-weight: 700; }
+        .stat-card .value.pos { color: var(--success); }
+        .stat-card .value.neg { color: var(--danger); }
+        .table-wrap { overflow-x: auto; border-radius: 16px; background: var(--panel-2); border: 1px solid var(--border-soft); }
+        table { width:100%; border-collapse: collapse; }
+        th, td { padding: 12px 16px; text-align: left; }
+        th { background: var(--panel-3); font-weight: 600; font-size: 12px; color: var(--muted); text-transform: uppercase; }
+        td { border-top: 1px solid var(--border-soft); font-size: 14px; }
+        .badge {
+            display: inline-block;
+            padding: 4px 10px;
+            border-radius: 999px;
+            font-size: 11px;
+            font-weight: 700;
+        }
+        .badge.long { background: rgba(34,197,94,.15); color: #86efac; }
+        .badge.short { background: rgba(239,68,68,.15); color: #fca5a5; }
+        .badge.buy { background: rgba(34,197,94,.15); color: #86efac; }
+        .badge.sell { background: rgba(239,68,68,.15); color: #fca5a5; }
+        .badge.hold { background: rgba(96,165,250,.15); color: #93c5fd; }
+        .badge.ok { background: rgba(34,197,94,.15); color: #86efac; }
+        .badge.warn { background: rgba(240,185,11,.15); color: #f8d56b; }
+        .badge.filtered { background: rgba(239,68,68,.15); color: #fca5a5; }
+        .empty-state { text-align: center; padding: 40px 20px; color: var(--muted); }
+        .muted { color: var(--muted); }
+        .pos { color: var(--success); }
+        .neg { color: var(--danger); }
+        
+        /* Loading state */
+        .loading { opacity: 0.5; pointer-events: none; }
+    </style>
+    {% block extra_head %}{% endblock %}
+</head>
+<body>
+    <div class="app-shell">
+        {# Sidebar #}
+        <aside class="sidebar">
+            <div class="brand">
+                <h1>🚀 OKX Quant</h1>
+                <p>量化交易仪表盘</p>
+            </div>
+            
+            <div class="sidebar-section-title">核心功能</div>
+            <nav class="nav-list">
+                <a href="/overview" class="nav-link{% if active_page == 'overview' %} active{% endif %}">
+                    <span class="nav-dot"></span><span>总览</span>
+                </a>
+                <a href="/positions" class="nav-link{% if active_page == 'positions' %} active{% endif %}">
+                    <span class="nav-dot"></span><span>持仓</span>
+                </a>
+                <a href="/trades" class="nav-link{% if active_page == 'trades' %} active{% endif %}">
+                    <span class="nav-dot"></span><span>交易记录</span>
+                </a>
+                <a href="/signals" class="nav-link{% if active_page == 'signals' %} active{% endif %}">
+                    <span class="nav-dot"></span><span>信号记录</span>
+                </a>
+            </nav>
+            
+            <div class="sidebar-section-title">分析工具</div>
+            <nav class="nav-list">
+                <a href="/strategy" class="nav-link{% if active_page == 'strategy' %} active{% endif %}">
+                    <span class="nav-dot"></span><span>策略分析</span>
+                </a>
+                <a href="/backtest" class="nav-link{% if active_page == 'backtest' %} active{% endif %}">
+                    <span class="nav-dot"></span><span>回测分析</span>
+                </a>
+                <a href="/quality" class="nav-link{% if active_page == 'quality' %} active{% endif %}">
+                    <span class="nav-dot"></span><span>信号质量</span>
+                </a>
+                <a href="/optimizer" class="nav-link{% if active_page == 'optimizer' %} active{% endif %}">
+                    <span class="nav-dot"></span><span>优化建议</span>
+                </a>
+            </nav>
+            
+            <div class="sidebar-section-title">系统</div>
+            <nav class="nav-list">
+                <a href="/governance" class="nav-link{% if active_page == 'governance' %} active{% endif %}">
+                    <span class="nav-dot"></span><span>治理审批</span>
+                </a>
+                <a href="/risk" class="nav-link{% if active_page == 'risk' %} active{% endif %}">
+                    <span class="nav-dot"></span><span>风控状态</span>
+                </a>
+                <a href="/" class="nav-link{% if active_page == 'dashboard' %} active{% endif %}">
+                    <span class="nav-dot"></span><span>旧版Dashboard</span>
+                </a>
+            </nav>
+            
+            <div class="sidebar-footer">
+                <div class="muted">
+                    <div>系统状态: <span id="systemStatus">● running</span></div>
+                    <div>更新: <span id="lastUpdate">--</span></div>
+                </div>
+            </div>
+        </aside>
+        
+        {# Main Content #}
+        <main class="main">
+            <header class="topbar">
+                <div class="page-title">
+                    <h2 id="pageTitle">{% block page_title %}总览{% endblock %}</h2>
+                    <p id="pageDesc">{% block page_desc %}系统运行状态与关键指标{% endblock %}</p>
+                </div>
+                <div class="topbar-actions">
+                    {% block topbar_actions %}{% endblock %}
+                </div>
+            </header>
+            
+            <div class="content">
+                {% block content %}{% endblock %}
+            </div>
+        </main>
+    </div>
+    
+    <script>
+        // Common utilities
+        function api(url) {
+            return fetch(url).then(r => r.json());
+        }
+        
+        function money(val) {
+            if (val == null) return '--';
+            const num = Number(val);
+            if (isNaN(num)) return val;
+            return num.toLocaleString('zh-CN', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+        }
+        
+        function pct(val) {
+            if (val == null) return '--';
+            return (Number(val) * 100).toFixed(2) + '%';
+        }
+        
+        function badge(text, cls) {
+            return `<span class="badge ${cls}">${text}</span>`;
+        }
+        
+        function safe(val) {
+            return val == null ? '--' : val;
+        }
+        
+        // Auto-refresh timestamp
+        document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString('zh-CN');
+    </script>
+    {% block scripts %}{% endblock %}
+</body>
+</html>

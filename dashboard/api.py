@@ -1978,7 +1978,11 @@ def get_symbols_config():
             # Partial TP / 分批止盈配置
             'partial_tp_enabled': trading.get('partial_tp_enabled', False),
             'partial_tp_threshold': trading.get('partial_tp_threshold', 0.015),
-            'partial_tp_ratio': trading.get('partial_tp_ratio', 0.5)
+            'partial_tp_ratio': trading.get('partial_tp_ratio', 0.5),
+            # 第二止盈层 / 多级退出配置
+            'partial_tp2_enabled': trading.get('partial_tp2_enabled', False),
+            'partial_tp2_threshold': trading.get('partial_tp2_threshold', 0.03),
+            'partial_tp2_ratio': trading.get('partial_tp2_ratio', 0.3)
         }
     })
 

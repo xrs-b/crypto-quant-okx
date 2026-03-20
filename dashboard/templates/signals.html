@@ -27,6 +27,14 @@
         </div>
     </div>
     
+    {# Regime Distribution Card #}
+    <div class="card" style="margin-bottom: 20px; padding: 16px;">
+        <div class="section-title" style="margin-bottom: 12px;">📊 按币种 Regime 分布</div>
+        <div id="regimeDistribution">
+            <div class="muted">加载中...</div>
+        </div>
+    </div>
+    
     <div class="stat-grid">
         <div class="stat-card">
             <div class="label">总信号数(30d)</div>
@@ -178,6 +186,75 @@ async function loadSignalRegime() {
     }
 }
 
+// Regime distribution display
+const regimeDisplayMap = {
+    'trend': { label: '📈 趋势', color: '#22c55e', bg: '#22c55e22', border: '#22c55e' },
+    'range': { label: '🔄 震荡', color: '#60a5fa', bg: '#60a5fa22', border: '#60a5fa' },
+    'high_vol': { label: '⚡ 高波', color: '#f59e0b', bg: '#f59e0b22', border: '#f59e0b' },
+    'low_vol': { label: '😴 低波', color: '#8b93a7', bg: '#8b93a722', border: '#8b93a7' },
+    'risk_anomaly': { label: '🚨 风险', color: '#ef4444', bg: '#ef444422', border: '#ef4444' },
+    'unknown': { label: '❓ 未知', color: '#8b93a7', bg: '#8b93a722', border: '#8b93a7' }
+};
+
+async function loadRegimeDistribution() {
+    try {
+        const resp = await api('/api/regime/distribution?timeframe=1h');
+        if (resp.success && resp.data) {
+            const summary = resp.data.summary || {};
+            const symbols = resp.data.symbols || [];
+            const dist = summary.distribution || {};
+            
+            // 构建分布条
+            const distBars = Object.entries(dist)
+                .filter(([k, v]) => v.count > 0)
+                .sort((a, b) => b[1].count - a[1].count)
+                .map(([reg, v]) => {
+                    const r = regimeDisplayMap[reg] || regimeDisplayMap['unknown'];
+                    return `<span style="background:${r.bg};border:1px solid ${r.border};border-radius:4px;padding:2px 8px;font-size:12px;color:${r.color};margin-right:6px;">
+                        ${r.label} ${v.percentage}%
+                    </span>`;
+                }).join('');
+            
+            // 构建币种列表
+            const symbolItems = symbols.map(s => {
+                const r = regimeDisplayMap[s.regime] || regimeDisplayMap['unknown'];
+                const conf = s.confidence ? (s.confidence * 100).toFixed(0) : '--';
+                return `<tr>
+                    <td style="font-weight:500;">${s.symbol}</td>
+                    <td><span style="background:${r.bg};border:1px solid ${r.border};border-radius:4px;padding:2px 8px;font-size:12px;color:${r.color};">${r.label}</span></td>
+                    <td style="color:#8b93a7;font-size:12px;">${conf}%</td>
+                    <td style="color:#8b93a7;font-size:12px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${s.details || ''}">${s.details || '--'}</td>
+                </tr>`;
+            }).join('');
+            
+            document.getElementById('regimeDistribution').innerHTML = 
+                `<div style="margin-bottom:12px;">
+                    <div style="color:#8b93a7;font-size:13px;margin-bottom:8px;">
+                        主导状态: <strong style="color:${regimeDisplayMap[summary.dominant_regime]?.color || '#8b93a7'}">${regimeDisplayMap[summary.dominant_regime]?.label || '未知'}</strong>
+                        <span style="margin-left:12px;">成功: <strong style="color:#22c55e">${summary.success_count || 0}</strong>/${summary.total_symbols || 0}</span>
+                    </div>
+                    <div style="margin-bottom:8px;">${distBars || '<span class="muted">暂无分布数据</span>'}</div>
+                </div>
+                <div class="table-wrap" style="max-height:200px;overflow-y:auto;">
+                    <table style="font-size:13px;">
+                        <thead>
+                            <tr>
+                                <th>币种</th>
+                                <th>当前Regime</th>
+                                <th>置信度</th>
+                                <th>详情</th>
+                            </tr>
+                        </thead>
+                        <tbody>${symbolItems || '<tr><td colspan="4" class="muted">暂无数据</td></tr>'}</tbody>
+                    </table>
+                </div>`;
+        }
+    } catch (e) {
+        console.error('loadRegimeDistribution error:', e);
+        document.getElementById('regimeDistribution').innerHTML = '<div class="muted">加载失败</div>';
+    }
+}
+
 async function loadSignals() {
     try {
         const [signalsResp, statsResp, reasonsResp, coinResp] = await Promise.all([
@@ -263,7 +340,9 @@ async function loadSignals() {
 
 loadSignals();
 loadSignalRegime();
+loadRegimeDistribution();
 setInterval(loadSignals, 60000);
 setInterval(loadSignalRegime, 60000);
+setInterval(loadRegimeDistribution, 120000);
 </script>
 {% endblock %}

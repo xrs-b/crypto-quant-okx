@@ -10,148 +10,171 @@
 {% endblock %}
 
 {% block content %}
-{# Stats Summary #}
-<div class="stat-grid">
-    <div class="stat-card">
-        <div class="label">活跃策略数</div>
-        <div class="value" id="activeStrategies">--</div>
+{# Tab Navigation #}
+<div class="tabs">
+    <button class="tab-btn active" data-tab="overview">📊 策略概览</button>
+    <button class="tab-btn" data-tab="backtest">📈 回测结果</button>
+    <button class="tab-btn" data-tab="quality">🎯 信号质量</button>
+</div>
+
+{# Tab 1: Strategy Overview #}
+<div class="tab-content active" id="tab-overview">
+    <div class="stat-grid">
+        <div class="stat-card">
+            <div class="label">活跃策略数</div>
+            <div class="value" id="activeStrategies">--</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">30日盈利策略</div>
+            <div class="value pos" id="profitableStrategies">--</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">ML模型准确率</div>
+            <div class="value" id="modelAccuracy">--</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">最近回测</div>
+            <div class="value" id="lastBacktest">--</div>
+        </div>
     </div>
-    <div class="stat-card">
-        <div class="label">30日盈利策略</div>
-        <div class="value pos" id="profitableStrategies">--</div>
-    </div>
-    <div class="stat-card">
-        <div class="label">ML模型准确率</div>
-        <div class="value" id="modelAccuracy">--</div>
-    </div>
-    <div class="stat-card">
-        <div class="label">信号质量评分</div>
-        <div class="value" id="signalQuality">--</div>
-    </div>
-    <div class="stat-card">
-        <div class="label">优化建议数</div>
-        <div class="value" id="optimizerSuggestions">--</div>
-    </div>
-    <div class="stat-card">
-        <div class="label">最近回测</div>
-        <div class="value" id="lastBacktest">--</div>
+
+    <div class="card">
+        <h3 style="margin: 0 0 16px 0;">ML 模型状态</h3>
+        <div class="table-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        <th>币种</th>
+                        <th>模型文件</th>
+                        <th>测试准确率</th>
+                        <th>F1 Score</th>
+                        <th>状态</th>
+                    </tr>
+                </thead>
+                <tbody id="modelsTable">
+                    <tr><td colspan="5" class="muted">加载中...</td></tr>
+                </tbody>
+            </table>
+        </div>
     </div>
 </div>
 
-{# ML Models #}
-<div class="card" style="margin-bottom: 24px;">
-    <h3 style="margin: 0 0 16px 0;">ML 模型状态</h3>
-    <div class="table-wrap">
-        <table>
-            <thead>
-                <tr>
-                    <th>币种</th>
-                    <th>模型文件</th>
-                    <th>测试准确率</th>
-                    <th>F1 Score</th>
-                    <th>状态</th>
-                </tr>
-            </thead>
-            <tbody id="modelsTable">
-                <tr><td colspan="5" class="muted">加载中...</td></tr>
-            </tbody>
-        </table>
+{# Tab 2: Backtest Results #}
+<div class="tab-content" id="tab-backtest">
+    <div class="card">
+        <h3 style="margin: 0 0 16px 0;">回测结果</h3>
+        <div class="table-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        <th>币种</th>
+                        <th>总交易</th>
+                        <th>胜率</th>
+                        <th>总盈亏</th>
+                        <th>平均盈亏</th>
+                        <th>最大回撤</th>
+                        <th>夏普比率</th>
+                    </tr>
+                </thead>
+                <tbody id="backtestTable">
+                    <tr><td colspan="7" class="muted">加载中...</td></tr>
+                </tbody>
+            </table>
+        </div>
     </div>
 </div>
 
-{# Backtest Results #}
-<div class="card" style="margin-bottom: 24px;">
-    <h3 style="margin: 0 0 16px 0;">回测结果</h3>
-    <div class="table-wrap">
-        <table>
-            <thead>
-                <tr>
-                    <th>币种</th>
-                    <th>总交易</th>
-                    <th>胜率</th>
-                    <th>总盈亏</th>
-                    <th>平均盈亏</th>
-                    <th>最大回撤</th>
-                    <th>夏普比率</th>
-                </tr>
-            </thead>
-            <tbody id="backtestTable">
-                <tr><td colspan="7" class="muted">加载中...</td></tr>
-            </tbody>
-        </table>
+{# Tab 3: Signal Quality #}
+<div class="tab-content" id="tab-quality">
+    <div class="card" style="margin-bottom: 20px;">
+        <h3 style="margin: 0 0 16px 0;">信号质量分析</h3>
+        <div class="stat-grid">
+            <div class="stat-card">
+                <div class="label">信号质量评分</div>
+                <div class="value" id="signalQuality">--</div>
+            </div>
+            <div class="stat-card">
+                <div class="label">优化建议数</div>
+                <div class="value" id="optimizerSuggestions">--</div>
+            </div>
+        </div>
+        <div class="table-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        <th>指标</th>
+                        <th>值</th>
+                        <th>说明</th>
+                    </tr>
+                </thead>
+                <tbody id="qualityTable">
+                    <tr><td colspan="3" class="muted">加载中...</td></tr>
+                </tbody>
+            </table>
+        </div>
     </div>
-</div>
 
-{# Signal Quality #}
-<div class="card" style="margin-bottom: 24px;">
-    <h3 style="margin: 0 0 16px 0;">信号质量分析</h3>
-    <div class="table-wrap">
-        <table>
-            <thead>
-                <tr>
-                    <th>指标</th>
-                    <th>值</th>
-                    <th>说明</th>
-                </tr>
-            </thead>
-            <tbody id="qualityTable">
-                <tr><td colspan="3" class="muted">加载中...</td></tr>
-            </tbody>
-        </table>
-    </div>
-</div>
-
-{# MFE/MAE Analysis #}
-<div class="card">
-    <h3 style="margin: 0 0 16px 0;">MFE/MAE 分析与止盈止损优化</h3>
-    <div class="stat-grid" style="margin-bottom: 16px;">
-        <div class="stat-card">
-            <div class="label">建议止损</div>
-            <div class="value neg" id="recStopLoss">--</div>
+    <div class="card">
+        <h3 style="margin: 0 0 16px 0;">MFE/MAE 分析与止盈止损优化</h3>
+        <div class="stat-grid" style="margin-bottom: 16px;">
+            <div class="stat-card">
+                <div class="label">建议止损</div>
+                <div class="value neg" id="recStopLoss">--</div>
+            </div>
+            <div class="stat-card">
+                <div class="label">建议止盈</div>
+                <div class="value pos" id="recTakeProfit">--</div>
+            </div>
+            <div class="stat-card">
+                <div class="label">追踪止损</div>
+                <div class="value" id="recTrailingStop">--</div>
+            </div>
+            <div class="stat-card">
+                <div class="label">平均MFE</div>
+                <div class="value pos" id="avgMfe">--</div>
+            </div>
+            <div class="stat-card">
+                <div class="label">平均MAE</div>
+                <div class="value neg" id="avgMae">--</div>
+            </div>
+            <div class="stat-card">
+                <div class="label">MFE/MAE比率</div>
+                <div class="value" id="mfeMaeRatio">--</div>
+            </div>
         </div>
-        <div class="stat-card">
-            <div class="label">建议止盈</div>
-            <div class="value pos" id="recTakeProfit">--</div>
+        <div class="table-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        <th>币种</th>
+                        <th>交易数</th>
+                        <th>平均MFE</th>
+                        <th>平均MAE</th>
+                        <th>最优止损</th>
+                        <th>最优止盈</th>
+                    </tr>
+                </thead>
+                <tbody id="mfeMaeTable">
+                    <tr><td colspan="6" class="muted">加载中...</td></tr>
+                </tbody>
+            </table>
         </div>
-        <div class="stat-card">
-            <div class="label">追踪止损</div>
-            <div class="value" id="recTrailingStop">--</div>
-        </div>
-        <div class="stat-card">
-            <div class="label">平均MFE</div>
-            <div class="value pos" id="avgMfe">--</div>
-        </div>
-        <div class="stat-card">
-            <div class="label">平均MAE</div>
-            <div class="value neg" id="avgMae">--</div>
-        </div>
-        <div class="stat-card">
-            <div class="label">MFE/MAE比率</div>
-            <div class="value" id="mfeMaeRatio">--</div>
-        </div>
-    </div>
-    <div class="table-wrap">
-        <table>
-            <thead>
-                <tr>
-                    <th>币种</th>
-                    <th>交易数</th>
-                    <th>平均MFE</th>
-                    <th>平均MAE</th>
-                    <th>最优止损</th>
-                    <th>最优止盈</th>
-                </tr>
-            </thead>
-            <tbody id="mfeMaeTable">
-                <tr><td colspan="6" class="muted">加载中...</td></tr>
-            </tbody>
-        </table>
     </div>
 </div>
 {% endblock %}
 
 {% block scripts %}
 <script>
+// Tab switching
+document.querySelectorAll('.tab-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+        document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+        document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+        btn.classList.add('active');
+        document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
+    });
+});
+
 async function loadStrategy() {
     try {
         const [strategyResp, backtestResp, mlResp, qualityResp, mfeMaeResp] = await Promise.all([

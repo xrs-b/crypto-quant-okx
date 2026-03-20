@@ -95,7 +95,10 @@ class Config:
                 'max_exposure': 0.3,
                 'leverage': 10,
                 'stop_loss': 0.02,
-                'take_profit': 0.04
+                'take_profit': 0.04,
+                'partial_tp_enabled': False,
+                'partial_tp_threshold': 0.015,
+                'partial_tp_ratio': 0.5,
             },
             'strategies': {
                 'rsi': {'enabled': True, 'period': 14, 'oversold': 35, 'overbought': 65},

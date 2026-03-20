@@ -1868,6 +1868,117 @@ class TestTradingExecutor(unittest.TestCase):
             if os.path.exists('data/test_close_mismatch.db'):
                 os.remove('data/test_close_mismatch.db')
 
+    def test_partial_take_profit_triggers_and_closes_half(self):
+        """测试部分止盈触发并平掉50%仓位"""
+        # 启用部分止盈，阈值 2%，比例 50%
+        self.executor.trading_config['partial_tp_enabled'] = True
+        self.executor.trading_config['partial_tp_threshold'] = 0.02
+        self.executor.trading_config['partial_tp_ratio'] = 0.5
+        self.executor.trading_config['take_profit'] = 0.10
+        
+        # 设置持仓：10张合约，成本 100
+        self.db.update_position(
+            symbol='BTC/USDT', side='long', entry_price=100,
+            quantity=10, leverage=1, current_price=100,
+            coin_quantity=10, contract_size=1
+        )
+        self.db.record_trade(
+            symbol='BTC/USDT', side='long', entry_price=100,
+            quantity=10, leverage=1
+        )
+        
+        # 价格涨到 102（2%涨幅，杠杆后2%盈利），达到部分止盈阈值
+        self.executor.exchange = FakeExchange(price=102)
+        
+        # 触发部分止盈
+        result = self.executor.check_take_profit('BTC/USDT', 102)
+        self.assertTrue(result)
+        
+        # 验证：仓位应该还剩 5 张
+        positions = self.db.get_positions()
+        self.assertEqual(len(positions), 1)
+        self.assertEqual(positions[0]['quantity'], 5)
+        
+        # 验证：缓存标记已设置
+        self.assertTrue(self.executor._trade_cache['BTC/USDT']['partial_tp_executed'])
+        
+        # 再次检查不应该再触发部分止盈（因为已执行过）
+        result = self.executor.check_take_profit('BTC/USDT', 102)
+        self.assertFalse(result)
+
+    def test_partial_take_profit_disabled_by_default(self):
+        """测试默认禁用部分止盈（安全回退）"""
+        # 默认不启用部分止盈
+        self.executor.trading_config['partial_tp_enabled'] = False
+        self.executor.trading_config['take_profit'] = 0.02
+        
+        self.db.update_position(
+            symbol='BTC/USDT', side='long', entry_price=100,
+            quantity=10, leverage=1, current_price=100,
+            coin_quantity=10, contract_size=1
+        )
+        self.db.record_trade(
+            symbol='BTC/USDT', side='long', entry_price=100,
+            quantity=10, leverage=1
+        )
+        
+        # 价格涨到 102，触发普通止盈
+        self.executor.exchange = FakeExchange(price=102)
+        
+        result = self.executor.check_take_profit('BTC/USDT', 102)
+        # 应该触发止盈（因为 take_profit=0.02）
+        self.assertTrue(result)
+        
+        # 实际执行平仓（模拟 runtime 行为）
+        self.executor.close_position('BTC/USDT', '止盈', close_price=102)
+        
+        # 仓位应该已全部平掉
+        positions = self.db.get_positions()
+        self.assertEqual(len(positions), 0)
+
+    def test_partial_take_profit_new_position_clears_flag(self):
+        """测试新开仓位清除部分止盈标记"""
+        # 启用部分止盈
+        self.executor.trading_config['partial_tp_enabled'] = True
+        self.executor.trading_config['partial_tp_threshold'] = 0.02
+        self.executor.trading_config['partial_tp_ratio'] = 0.5
+        
+        # 模拟之前已有部分止盈标记
+        self.executor._trade_cache['BTC/USDT'] = {'partial_tp_executed': True}
+        
+        # 调用 _seed_trailing_anchor（模拟新开仓）
+        self.executor._seed_trailing_anchor('BTC/USDT', 'long', 100)
+        
+        # 标记应该被清除
+        self.assertNotIn('partial_tp_executed', self.executor._trade_cache.get('BTC/USDT', {}))
+
+    def test_close_position_partial_updates_remaining(self):
+        """测试部分平仓后更新剩余仓位"""
+        self.executor.exchange = FakeExchange(price=110)
+        
+        self.db.update_position(
+            symbol='BTC/USDT', side='long', entry_price=100,
+            quantity=10, leverage=1, current_price=100,
+            coin_quantity=10, contract_size=1
+        )
+        self.db.record_trade(
+            symbol='BTC/USDT', side='long', entry_price=100,
+            quantity=10, leverage=1
+        )
+        
+        # 部分平仓 5 张
+        result = self.executor.close_position(
+            'BTC/USDT', reason='partial_tp', close_price=110, close_quantity=5
+        )
+        
+        self.assertTrue(result)
+        
+        # 验证剩余 5 张
+        positions = self.db.get_positions()
+        self.assertEqual(len(positions), 1)
+        self.assertEqual(positions[0]['quantity'], 5)
+        self.assertEqual(positions[0]['coin_quantity'], 5)
+
 
 class TestRiskManager(unittest.TestCase):
     """风险管理器测试"""

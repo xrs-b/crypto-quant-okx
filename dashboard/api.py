@@ -48,6 +48,7 @@ from core.presets import PresetManager
 from trading.executor import RiskManager
 from bot.run import execute_exchange_smoke, reconcile_exchange_positions, load_runtime_state
 from ml.engine import MLEngine
+from core.regime import RegimeDetector, detect_regime, Regime
 from analytics import StrategyBacktester, SignalQualityAnalyzer, ParameterOptimizer, GovernanceEngine
 from analytics.mfe_mae import MFEAnalyzer, get_mfe_mae_analysis
 
@@ -1661,6 +1662,64 @@ def get_risk_status():
         'success': True,
         'data': risk_manager.get_risk_status()
     })
+
+
+# ============================================================================
+# Regime 市场状态API
+# ============================================================================
+
+@app.route('/api/regime')
+def get_regime():
+    """
+    获取当前市场状态 (Regime Detection)
+    
+    返回:
+    - regime: 当前市场状态 (trend/range/high_vol/low_vol/risk_anomaly/unknown)
+    - confidence: 置信度 0-1
+    - indicators: 原始指标值
+    - details: 简要说明
+    """
+    symbol = request.args.get('symbol', 'BTC/USDT:USDT')
+    timeframe = request.args.get('timeframe', '1h')
+    limit = int(request.args.get('limit', 100))
+    
+    try:
+        # 获取K线数据
+        exchange = _get_exchange_client()
+        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+        
+        if not ohlcv or len(ohlcv) < 30:
+            return jsonify({
+                'success': False,
+                'error': '数据不足，需要至少30根K线'
+            }), 400
+        
+        # 转换为DataFrame
+        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        df.set_index('timestamp', inplace=True)
+        
+        # 检测regime
+        result = detect_regime(df)
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'symbol': symbol,
+                'timeframe': timeframe,
+                'regime': result.regime.value,
+                'confidence': round(result.confidence, 3),
+                'indicators': result.indicators,
+                'details': result.details,
+                'timestamp': datetime.now().isoformat()
+            }
+        })
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e),
+            'error_type': type(e).__name__
+        }), 500
 
 
 @app.route('/api/risk/loss-streak/reset', methods=['POST'])

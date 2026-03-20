@@ -503,12 +503,43 @@ class TradingExecutor:
                 f"平{partial_tp_ratio*100:.0f}%仓位={close_quantity}张)"
             )
             
-            return self.close_position(
+            # 获取 trade_id 用于记录 partial TP 历史
+            trade = self.db.get_latest_open_trade(symbol, position.get('side'))
+            trade_id = trade.get('id') if trade else None
+            
+            # 计算部分平仓盈亏
+            entry_price = position.get('entry_price', 0)
+            side = position.get('side', 'long')
+            coin_quantity = position.get('coin_quantity', 0) or 0
+            contract_size = position.get('contract_size', 1) or 1
+            close_coin_quantity = coin_quantity * partial_tp_ratio
+            if side == 'long':
+                pnl = (current_price - entry_price) * close_coin_quantity
+            else:
+                pnl = (entry_price - current_price) * close_coin_quantity
+            
+            # 执行平仓
+            result = self.close_position(
                 symbol=symbol,
                 reason='partial_tp',
                 close_price=current_price,
                 close_quantity=close_quantity
             )
+            
+            # 记录 partial TP 触发历史
+            if result:
+                self.db.record_partial_tp(
+                    trade_id=trade_id,
+                    symbol=symbol,
+                    side=side,
+                    trigger_price=current_price,
+                    close_ratio=partial_tp_ratio,
+                    close_quantity=close_quantity,
+                    pnl=pnl,
+                    note=f"触发阈值:{partial_tp_threshold*100:.1f}%"
+                )
+            
+            return result
         
         return False
     

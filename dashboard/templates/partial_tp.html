@@ -1,0 +1,109 @@
+{% extends "layout.html" %}
+
+{% block title %}Partial TP 历史 - OKX量化交易仪表盘{% endblock %}
+{% block active_page %}partial_tp{% endblock %}
+{% block page_title %}Partial TP 触发历史{% endblock %}
+{% block page_desc %}分批止盈触发记录与统计分析{% endblock %}
+
+{% block topbar_actions %}
+<button onclick="loadPartialTpHistory()">🔄 刷新</button>
+{% endblock %}
+
+{% block content %}
+{# Filter #}
+<div class="card" style="margin-bottom: 24px;">
+    <div style="display: flex; gap: 12px; align-items: center; flex-wrap: wrap;">
+        <label>筛选:</label>
+        <input type="text" id="symbolFilter" placeholder="币种(如 BTC-USDT)" 
+               style="padding: 8px 12px; border-radius: 8px; background: var(--panel-3); color: var(--text); border: 1px solid var(--border);" />
+        <button onclick="loadPartialTpHistory()">应用</button>
+    </div>
+</div>
+
+{# Partial TP History Table #}
+<div class="card">
+    <div class="section-title">Partial TP 触发记录</div>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>Trade ID</th>
+                    <th>币种</th>
+                    <th>方向</th>
+                    <th>触发价格</th>
+                    <th>平仓比例</th>
+                    <th>平仓数量</th>
+                    <th>盈亏</th>
+                    <th>备注</th>
+                    <th>触发时间</th>
+                </tr>
+            </thead>
+            <tbody id="partialTpTable">
+                <tr><td colspan="10" class="muted">加载中...</td></tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<script>
+async function loadPartialTpHistory() {
+    const symbol = document.getElementById('symbolFilter').value;
+    let url = '/api/partial-tp-history?limit=100';
+    if (symbol) {
+        url += '&symbol=' + encodeURIComponent(symbol);
+    }
+    
+    try {
+        const resp = await fetch(url);
+        const json = await resp.json();
+        
+        if (!json.success) {
+            document.getElementById('partialTpTable').innerHTML = 
+                '<tr><td colspan="10" class="muted">加载失败: ' + (json.error || '未知错误') + '</td></tr>';
+            return;
+        }
+        
+        const data = json.data || [];
+        
+        if (data.length === 0) {
+            document.getElementById('partialTpTable').innerHTML = 
+                '<tr><td colspan="10" class="muted">暂无记录</td></tr>';
+            return;
+        }
+        
+        let html = '';
+        for (const row of data) {
+            const pnl = row.pnl != null ? parseFloat(row.pnl) : 0;
+            const pnlClass = pnl > 0 ? 'pos' : (pnl < 0 ? 'neg' : '');
+            const closeRatio = row.close_ratio != null ? (parseFloat(row.close_ratio) * 100).toFixed(0) + '%' : '-';
+            const createdAt = row.created_at ? new Date(row.created_at).toLocaleString('zh-CN') : '-';
+            
+            html += `
+                <tr>
+                    <td>${row.id || '-'}</td>
+                    <td>${row.trade_id || '-'}</td>
+                    <td>${row.symbol || '-'}</td>
+                    <td>${row.side || '-'}</td>
+                    <td>${row.trigger_price ? parseFloat(row.trigger_price).toFixed(2) : '-'}</td>
+                    <td>${closeRatio}</td>
+                    <td>${row.close_quantity ? parseFloat(row.close_quantity).toFixed(4) : '-'}</td>
+                    <td class="${pnlClass}">${pnl.toFixed(2)}</td>
+                    <td>${row.note || '-'}</td>
+                    <td>${createdAt}</td>
+                </tr>
+            `;
+        }
+        
+        document.getElementById('partialTpTable').innerHTML = html;
+        
+    } catch (e) {
+        document.getElementById('partialTpTable').innerHTML = 
+            '<tr><td colspan="10" class="muted">加载错误: ' + e.message + '</td></tr>';
+    }
+}
+
+// 页面加载时自动加载
+loadPartialTpHistory();
+</script>
+{% endblock %}

@@ -275,7 +275,24 @@ class Database:
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        
+
+        # Partial TP 触发历史表
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS partial_tp_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                trade_id INTEGER,
+                symbol TEXT NOT NULL,
+                side TEXT NOT NULL,
+                trigger_price REAL NOT NULL,
+                close_ratio REAL NOT NULL,
+                close_quantity REAL NOT NULL,
+                pnl REAL,
+                note TEXT,
+                source TEXT DEFAULT 'partial_tp',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
         # 兼容旧库：补充信号诊断字段
         cursor.execute("PRAGMA table_info(signals)")
         signal_columns = {row[1] for row in cursor.fetchall()}
@@ -317,6 +334,8 @@ class Database:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_smoke_runs_created ON smoke_runs(created_at)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_notification_outbox_status ON notification_outbox(status)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_notification_outbox_created ON notification_outbox(created_at)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_partial_tp_history_symbol ON partial_tp_history(symbol)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_partial_tp_history_created ON partial_tp_history(created_at)")
         
         conn.commit()
         conn.close()
@@ -1113,6 +1132,43 @@ class Database:
 
     def mark_notification_delivered(self, notification_id: int, status: str = 'delivered'):
         self.update_notification_outbox(notification_id, status=status)
+
+    # =========================================================================
+    # Partial TP 历史操作
+    # =========================================================================
+
+    def record_partial_tp(self, trade_id: int, symbol: str, side: str,
+                         trigger_price: float, close_ratio: float,
+                         close_quantity: float, pnl: float = None,
+                         note: str = None) -> int:
+        """记录 partial TP 触发历史"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO partial_tp_history (trade_id, symbol, side, trigger_price, close_ratio, close_quantity, pnl, note, source)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'partial_tp')
+        """, (trade_id, symbol, side, trigger_price, close_ratio, close_quantity, pnl, note))
+        row_id = cursor.lastrowid
+        conn.commit()
+        conn.close()
+        return row_id
+
+    def get_partial_tp_history(self, symbol: str = None, limit: int = 100) -> List[Dict]:
+        """获取 partial TP 触发历史"""
+        conn = self._get_connection()
+        query = "SELECT * FROM partial_tp_history"
+        conditions = []
+        params = []
+        if symbol:
+            conditions.append("symbol = ?")
+            params.append(symbol)
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+        df = pd.read_sql_query(query, conn, params=params)
+        conn.close()
+        return df.to_dict('records')
 
     # =========================================================================
     # 清理操作

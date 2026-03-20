@@ -36,6 +36,12 @@ def trades():
     return render_template('trades.html', active_page='trades')
 
 
+@app.route('/partial-tp')
+def partial_tp():
+    """Partial TP 触发历史页面"""
+    return render_template('partial_tp.html', active_page='partial_tp')
+
+
 @app.route('/signals')
 def signals():
     """信号记录页面"""

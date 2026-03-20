@@ -1722,6 +1722,112 @@ def get_regime():
         }), 500
 
 
+@app.route('/api/regime/distribution')
+def get_regime_distribution():
+    """
+    获取 Regime 分布统计 - 按币种
+    
+    返回:
+    - 按币种当前 regime 状态
+    - 最近一段时间的 regime 分布统计
+    """
+    timeframe = request.args.get('timeframe', '1h')
+    limit = int(request.args.get('limit', 100))  # K线根数
+    hours = int(request.args.get('hours', 48))   # 统计时间窗口
+    
+    symbols = config.symbols
+    if not symbols:
+        return jsonify({'success': False, 'error': '未配置监听币种'}), 400
+    
+    results = []
+    regime_counts = {
+        'trend': 0,
+        'range': 0,
+        'high_vol': 0,
+        'low_vol': 0,
+        'risk_anomaly': 0,
+        'unknown': 0
+    }
+    success_count = 0
+    error_count = 0
+    
+    exchange = _get_exchange_client()
+    
+    for symbol in symbols:
+        try:
+            ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+            
+            if not ohlcv or len(ohlcv) < 30:
+                results.append({
+                    'symbol': symbol,
+                    'regime': 'unknown',
+                    'confidence': 0,
+                    'details': '数据不足',
+                    'error': '数据不足'
+                })
+                error_count += 1
+                continue
+            
+            # 转换为DataFrame
+            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+            df.set_index('timestamp', inplace=True)
+            
+            # 检测regime
+            result = detect_regime(df)
+            regime_value = result.regime.value
+            
+            results.append({
+                'symbol': symbol,
+                'regime': regime_value,
+                'confidence': round(result.confidence, 3),
+                'details': result.details,
+                'indicators': {k: round(v, 5) if isinstance(v, float) else v 
+                              for k, v in result.indicators.items()} if result.indicators else {}
+            })
+            regime_counts[regime_value] = regime_counts.get(regime_value, 0) + 1
+            success_count += 1
+            
+        except Exception as e:
+            results.append({
+                'symbol': symbol,
+                'regime': 'unknown',
+                'confidence': 0,
+                'details': '获取失败',
+                'error': str(e)
+            })
+            error_count += 1
+    
+    # 计算分布百分比
+    total = success_count + error_count
+    distribution = {}
+    for regime, count in regime_counts.items():
+        distribution[regime] = {
+            'count': count,
+            'percentage': round(count / max(total, 1) * 100, 1) if total > 0 else 0
+        }
+    
+    # 找出主导 regime
+    dominant_regime = max(regime_counts.items(), key=lambda x: x[1])[0] if regime_counts else 'unknown'
+    
+    return jsonify({
+        'success': True,
+        'data': {
+            'symbols': results,
+            'summary': {
+                'total_symbols': len(symbols),
+                'success_count': success_count,
+                'error_count': error_count,
+                'dominant_regime': dominant_regime,
+                'distribution': distribution,
+                'hours': hours,
+                'timeframe': timeframe
+            },
+            'timestamp': datetime.now().isoformat()
+        }
+    })
+
+
 @app.route('/api/risk/loss-streak/reset', methods=['POST'])
 def reset_loss_streak_guard():
     """手动清零连亏熔断状态（幂等 API）"""

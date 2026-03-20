@@ -149,8 +149,15 @@ class TradingExecutor:
                     return None
     
     def close_position(self, symbol: str, reason: str = 'manual',
-                     close_price: float = None) -> bool:
-        """平仓 - U本位合约"""
+                     close_price: float = None, close_quantity: float = None) -> bool:
+        """平仓 - U本位合约
+        
+        Args:
+            symbol: 交易对
+            reason: 平仓原因
+            close_price: 平仓价格（默认市价）
+            close_quantity: 平仓数量（合约张数），默认全部平仓
+        """
         
         # 获取持仓
         positions = self.db.get_positions()
@@ -165,7 +172,8 @@ class TradingExecutor:
             return False
         
         side = position['side']  # 'long' or 'short'
-        quantity = position['quantity']
+        # 支持部分平仓：使用指定数量或全部
+        quantity = close_quantity if close_quantity is not None else position['quantity']
         coin_quantity = float(position.get('coin_quantity', 0) or 0)
         contract_size = float(position.get('contract_size', 1) or 1)
         entry_price = position['entry_price']
@@ -194,12 +202,23 @@ class TradingExecutor:
                     posSide=side
                 )
                 
-                # 计算盈亏
+                # 计算部分平仓的币数量
+                is_partial = close_quantity is not None and close_quantity < position['quantity']
+                if is_partial:
+                    # 部分平仓：按比例计算币数量
+                    close_ratio = close_quantity / position['quantity']
+                    closed_coin_quantity = coin_quantity * close_ratio
+                    remaining_coin_quantity = coin_quantity - closed_coin_quantity
+                else:
+                    closed_coin_quantity = coin_quantity
+                    remaining_coin_quantity = 0
+                
+                # 计算盈亏（基于实际平仓的币数量）
                 if side == 'long':
-                    pnl = (close_price - entry_price) * coin_quantity
+                    pnl = (close_price - entry_price) * closed_coin_quantity
                     pnl_percent = (close_price - entry_price) / entry_price * 100
                 else:
-                    pnl = (entry_price - close_price) * coin_quantity
+                    pnl = (entry_price - close_price) * closed_coin_quantity
                     pnl_percent = (entry_price - close_price) / entry_price * 100
                 
                 # 杠杆后盈亏
@@ -210,22 +229,39 @@ class TradingExecutor:
                 trade = self.db.get_latest_open_trade(symbol, side)
                 trade_id = trade.get('id') if trade else None
                 if trade_id:
+                    close_note = f"平仓原因: {reason}"
+                    if is_partial:
+                        close_note += f" | 部分平仓({close_ratio*100:.0f}%)"
                     self.db.close_trade(
                         trade_id=trade_id,
                         exit_price=close_price,
                         pnl=pnl,
                         pnl_percent=leveraged_pnl_percent,
-                        notes=f"平仓原因: {reason}"
+                        notes=close_note
                     )
                 else:
                     trade_logger.warning(f"{symbol}: 未找到可关闭的 open trade 记录，持仓会先从本地移除")
                 
-                # 删除持仓
-                self.db.close_position(symbol)
-                
-                # 更新冷却时间
-                self._update_cooldown(symbol)
-                self._clear_trade_cache(symbol)
+                # 部分平仓：更新持仓；全部平仓：删除持仓
+                if is_partial:
+                    self.db.update_position(
+                        symbol=symbol,
+                        side=side,
+                        entry_price=entry_price,
+                        quantity=position['quantity'] - close_quantity,
+                        leverage=leverage,
+                        current_price=close_price,
+                        peak_price=position.get('peak_price'),
+                        trough_price=position.get('trough_price'),
+                        contract_size=contract_size,
+                        coin_quantity=remaining_coin_quantity
+                    )
+                    trade_logger.info(f"{symbol}: 部分平仓完成，剩余{(position['quantity'] - close_quantity):.4f}张")
+                else:
+                    self.db.close_position(symbol)
+                    # 只有全部平仓才清除缓存
+                    self._update_cooldown(symbol)
+                    self._clear_trade_cache(symbol)
                 
                 trade_logger.close(symbol, close_price, pnl, reason)
                 
@@ -414,9 +450,65 @@ class TradingExecutor:
         
         leveraged_pnl = pnl_percent * leverage
         
+        # 检查部分止盈（第一止盈层）
+        partial_tp = self._check_partial_take_profit(symbol, leveraged_pnl, position, current_price)
+        if partial_tp:
+            # 返回 True 表示触发止盈（部分平仓）
+            return True
+        
+        # 普通止盈 - 优先使用配置值，其次 MFE/MAE 建议
         if leveraged_pnl >= take_profit:
             trade_logger.info(f"触发止盈: {symbol} 盈利{leveraged_pnl*100:.2f}%")
             return True
+        
+        return False
+    
+    def _check_partial_take_profit(self, symbol: str, leveraged_pnl: float, 
+                                    position: Dict, current_price: float) -> bool:
+        """检查部分止盈（第一止盈层）
+        
+        Returns:
+            True if partial TP was executed, False otherwise
+        """
+        # 读取分批止盈配置（带安全回退）
+        partial_tp_enabled = self.trading_config.get('partial_tp_enabled', False)
+        if not partial_tp_enabled:
+            return False
+        
+        # 获取阈值和比例（带默认值）
+        partial_tp_threshold = self.trading_config.get('partial_tp_threshold', 0.015)  # 默认 1.5%
+        partial_tp_ratio = self.trading_config.get('partial_tp_ratio', 0.5)  # 默认平 50%
+        
+        # 检查是否已达到部分止盈阈值
+        if leveraged_pnl >= partial_tp_threshold:
+            # 检查是否已经执行过部分止盈（避免重复）
+            cache = self._trade_cache.setdefault(symbol, {})
+            if cache.get('partial_tp_executed', False):
+                return False
+            
+            # 计算部分平仓数量
+            full_quantity = position.get('quantity', 0)
+            close_quantity = full_quantity * partial_tp_ratio
+            close_quantity = round(close_quantity, 4)
+            
+            if close_quantity <= 0:
+                return False
+            
+            # 标记为已执行
+            cache['partial_tp_executed'] = True
+            
+            # 执行部分平仓
+            trade_logger.info(
+                f"{symbol}: 触发部分止盈 (盈利{leveraged_pnl*100:.2f}%, 阈值{partial_tp_threshold*100:.1f}%, "
+                f"平{partial_tp_ratio*100:.0f}%仓位={close_quantity}张)"
+            )
+            
+            return self.close_position(
+                symbol=symbol,
+                reason='partial_tp',
+                close_price=current_price,
+                close_quantity=close_quantity
+            )
         
         return False
     
@@ -499,6 +591,8 @@ class TradingExecutor:
     def _seed_trailing_anchor(self, symbol: str, side: str, price: float):
         if symbol not in self._trade_cache:
             self._trade_cache[symbol] = {}
+        # 清除部分止盈标记（新仓位重新开始）
+        self._trade_cache[symbol].pop('partial_tp_executed', None)
         if side == 'long':
             self._trade_cache[symbol]['highest_price'] = price
         else:

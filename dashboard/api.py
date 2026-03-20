@@ -1,7 +1,7 @@
 """
 仪表盘后端API - Flask实现
 """
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, jsonify, request, send_from_directory, render_template
 from flask_cors import CORS
 from datetime import datetime, timedelta
 import pandas as pd
@@ -556,8 +556,84 @@ def _apply_symbol_override_draft(draft: Dict[str, Any], note: str = None) -> Dic
 
 @app.route('/')
 def index():
-    """仪表盘首页"""
-    return send_from_directory('templates', 'index.html')
+    """仪表盘首页 - 重定向到 overview"""
+    return render_template('overview.html', active_page='overview')
+
+
+# ============================================================================
+# 新版多页面路由
+# ============================================================================
+
+@app.route('/overview')
+def overview():
+    """总览页面"""
+    return render_template('overview.html', active_page='overview')
+
+
+@app.route('/trades')
+def trades():
+    """交易记录页面"""
+    return render_template('trades.html', active_page='trades')
+
+
+@app.route('/partial-tp')
+def partial_tp():
+    """Partial TP 触发历史页面"""
+    return render_template('partial_tp.html', active_page='partial_tp')
+
+
+@app.route('/signals')
+def signals():
+    """信号记录页面"""
+    return render_template('signals.html', active_page='signals')
+
+
+@app.route('/positions')
+def positions():
+    """持仓页面"""
+    return render_template('positions.html', active_page='positions')
+
+
+@app.route('/strategy')
+def strategy():
+    """策略分析页面"""
+    return render_template('strategy.html', active_page='strategy')
+
+
+@app.route('/risk')
+def risk():
+    """风控状态页面"""
+    return render_template('risk.html', active_page='risk')
+
+
+@app.route('/governance')
+def governance():
+    """治理审批页面"""
+    return render_template('governance.html', active_page='governance')
+
+
+@app.route('/optimizer')
+def optimizer():
+    """参数优化页面"""
+    return render_template('optimizer.html', active_page='optimizer')
+
+
+@app.route('/backtest')
+def backtest():
+    """回测分析页面"""
+    return render_template('backtest.html', active_page='backtest')
+
+
+@app.route('/quality')
+def quality():
+    """信号质量页面"""
+    return render_template('quality.html', active_page='quality')
+
+
+@app.route('/config')
+def config_page():
+    """系统配置页面"""
+    return render_template('config.html', active_page='config')
 
 
 # ============================================================================

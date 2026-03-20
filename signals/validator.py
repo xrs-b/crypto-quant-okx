@@ -23,6 +23,10 @@ class SignalValidator:
         'COUNTER_TREND': {'group': 'market', 'action_hint': '当前方向逆大趋势，除非策略明确允许，否则继续观望'},
         'INSUFFICIENT_STRATEGY_COUNT': {'group': 'signal', 'action_hint': '触发策略太少，可继续观察是否补齐确认条件'},
         'WEAK_SIGNAL_STRENGTH': {'group': 'signal', 'action_hint': '信号强度不足，建议继续等确认而非急于开仓'},
+        # Regime Layer v1 - 保守接入
+        'REGIME_RISK_ANOMALY': {'group': 'regime', 'action_hint': '检测到风险异常，市场可能剧烈波动，建议回避'},
+        'REGIME_HIGH_VOL': {'group': 'regime', 'action_hint': '当前波动率较高，需降低仓位或观望'},
+        'REGIME_LOW_VOL': {'group': 'regime', 'action_hint': '市场波动过低，趋势不明确，建议继续观察'},
     }
 
     def __init__(self, config: Config, exchange: Exchange):
@@ -208,8 +212,86 @@ class SignalValidator:
             'passed': True,
             'trend': trend,
             'volatility': context.get('volatility'),
-            'atr_ratio': context.get('atr_ratio')
+            'atr_ratio': context.get('atr_ratio'),
+            'regime': context.get('regime'),
+            'regime_confidence': context.get('regime_confidence')
         }
+
+        # Regime Layer v1: 保守接入 - 基于 regime 状态过滤
+        # 回退逻辑：如果 regime 不明确或数据不足，跳过 regime 过滤
+        regime = context.get('regime', 'unknown')
+        regime_confidence = context.get('regime_confidence', 0.0)
+        
+        # 配置: 是否启用 regime 过滤
+        regime_cfg = self._cfg_section(signal.symbol, 'regime_filters') or {}
+        enable_regime_filter = regime_cfg.get('enabled', True)
+        
+        if enable_regime_filter and regime and regime != 'unknown' and regime_confidence >= 0.5:
+            # RISK_ANOMALY: 高置信风险异常，直接拦截
+            if regime == 'risk_anomaly':
+                details['regime_check'] = {
+                    'passed': False,
+                    'reason': f"风险异常检测({context.get('regime_details', '')})",
+                    'regime': regime,
+                    'confidence': regime_confidence
+                }
+                return self._failure('REGIME_RISK_ANOMALY', f"风险异常: {context.get('regime_details', '')}", details, 'regime_check')
+            
+            # HIGH_VOL: 高波动，降低仓位或拦截（配置决定）
+            if regime == 'high_vol':
+                block_high_vol = regime_cfg.get('block_high_vol', False)
+                if block_high_vol:
+                    details['regime_check'] = {
+                        'passed': False,
+                        'reason': f"高波动市场({context.get('regime_details', '')})",
+                        'regime': regime,
+                        'confidence': regime_confidence
+                    }
+                    return self._failure('REGIME_HIGH_VOL', f"高波动: {context.get('regime_details', '')}", details, 'regime_check')
+                # 否则记录但放行
+                details['regime_check'] = {
+                    'passed': True,
+                    'reason': f"高波动市场但放行({context.get('regime_details', '')})",
+                    'regime': regime,
+                    'confidence': regime_confidence,
+                    'warning': '建议降低仓位'
+                }
+            
+            # LOW_VOL: 低波动盘整，可以拦截（趋势不明确）
+            if regime == 'low_vol':
+                block_low_vol = regime_cfg.get('block_low_vol', True)  # 默认拦截
+                if block_low_vol:
+                    details['regime_check'] = {
+                        'passed': False,
+                        'reason': f"低波动盘整({context.get('regime_details', '')})",
+                        'regime': regime,
+                        'confidence': regime_confidence
+                    }
+                    return self._failure('REGIME_LOW_VOL', f"低波动: {context.get('regime_details', '')}", details, 'regime_check')
+                details['regime_check'] = {
+                    'passed': True,
+                    'reason': f"低波动盘整但放行({context.get('regime_details', '')})",
+                    'regime': regime,
+                    'confidence': regime_confidence
+                }
+            
+            # TREND / RANGE: 暂不拦截，只记录
+            if regime in ['trend', 'range']:
+                details['regime_check'] = {
+                    'passed': True,
+                    'reason': f"市场状态正常({context.get('regime_details', '')})",
+                    'regime': regime,
+                    'confidence': regime_confidence
+                }
+        else:
+            # 回退旧逻辑: regime 不明确或置信度低
+            details['regime_check'] = {
+                'passed': True,
+                'reason': ' regime状态不明或置信度低，跳过过滤',
+                'regime': regime,
+                'confidence': regime_confidence,
+                'fallback': True
+            }
 
         # 5. 最低强度与策略数（详细化）
         composite_cfg = self._cfg_section(signal.symbol, 'strategies.composite')

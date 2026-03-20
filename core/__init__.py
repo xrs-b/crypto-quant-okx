@@ -7,6 +7,7 @@ from .database import db, Database
 from .logger import logger, trade_logger, TradeLogger
 from .exchange import Exchange, Position
 from .notifier import NotificationManager
+from .regime import RegimeDetector, Regime, RegimeResult, detect_regime
 
 __all__ = [
     'config',
@@ -18,5 +19,9 @@ __all__ = [
     'TradeLogger',
     'Exchange',
     'Position',
-    'NotificationManager'
+    'NotificationManager',
+    'RegimeDetector',
+    'Regime',
+    'RegimeResult',
+    'detect_regime',
 ]

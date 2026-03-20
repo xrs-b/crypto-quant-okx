@@ -191,7 +191,8 @@ class NotificationManager:
                 clean_lines.append('')
                 continue
             clean_lines.append(f'• {text}')
-        return '\n'.join([f'**{title}**', *clean_lines, '=============================='])
+        divider = '--------------------------------------------------------------'
+        return '\n'.join([divider, f'**{title}**', *clean_lines, divider])
 
     def _format_strategies(self, strategies: List[str]) -> str:
         return ' / '.join(strategies or []) or '--'

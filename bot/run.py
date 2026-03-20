@@ -439,7 +439,7 @@ class TradingBot:
         print(f"   时间: {started_at}")
         print(f"   币种: {', '.join(self.config.symbols)}")
         print(f"{'='*60}\n")
-        self.notifier.notify_runtime('start', [f'时间：{started_at.isoformat()}', f'监控币种：{", ".join(self.config.symbols)}'])
+        # 开始类推送太噪音，改为只写运行历史，不主动推送
         state = load_runtime_state()
         state.update({'running': True, 'last_started_at': started_at.isoformat(), 'last_error': None})
         save_runtime_state(state)
@@ -455,9 +455,9 @@ class TradingBot:
             available = 0
         
         # 先与交易所持仓对账
+        reconcile_report = {'synced': 0, 'removed': 0}
         try:
             reconcile_report = reconcile_exchange_positions(self.exchange, self.db)
-            self.notifier.notify_runtime('start', [f'持仓对账：同步 {reconcile_report["synced"]} 条 ｜ 清理 {reconcile_report["removed"]} 条'], {'reconcile': reconcile_report})
             reconcile_summary = reconcile_report.get('summary', {})
             reconcile_diff_count = sum(int(reconcile_summary.get(k, 0) or 0) for k in ['exchange_missing_local_position', 'local_position_missing_exchange', 'open_trade_missing_exchange', 'exchange_missing_open_trade'])
             if reconcile_diff_count > 0:
@@ -630,7 +630,14 @@ class TradingBot:
         state.update({'running': False, 'last_finished_at': finished_at.isoformat(), 'last_summary': summary})
         save_runtime_state(state)
         append_runtime_history({'type': 'end', 'time': finished_at.isoformat(), 'message': f'周期完成：信号 {summary["signals"]} / 开仓 {summary["opened"]} / 平仓 {summary["closed"]} / 错误 {summary["errors"]}'})
-        self.notifier.notify_runtime('end', [f'开始：{summary["started_at"]}', f'结束：{summary["finished_at"]}', f'信号：{summary["signals"]} ｜ 通过：{summary["passed"]} ｜ 开仓：{summary["opened"]} ｜ 平仓：{summary["closed"]} ｜ 错误：{summary["errors"]}'], summary)
+        end_lines = [
+            f'开始：{summary["started_at"]}',
+            f'结束：{summary["finished_at"]}',
+            f'监听币种：{", ".join(self.config.symbols)}',
+            f'持仓对账：同步 {reconcile_report.get("synced", 0) if isinstance(reconcile_report, dict) else 0} 条 ｜ 清理 {reconcile_report.get("removed", 0) if isinstance(reconcile_report, dict) else 0} 条',
+            f'信号：{summary["signals"]} ｜ 通过：{summary["passed"]} ｜ 开仓：{summary["opened"]} ｜ 平仓：{summary["closed"]} ｜ 错误：{summary["errors"]}'
+        ]
+        self.notifier.notify_runtime('end', end_lines, summary)
         print(f"\n✅ 交易循环完成! {finished_at}\n")
         return summary
     

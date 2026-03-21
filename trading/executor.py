@@ -72,10 +72,31 @@ class TradingExecutor:
             trade_logger.warning(f"余额不足: {available}")
             return None
         
-        # 计算开仓数量（按目标名义价值 -> 合约张数）
-        leverage = self.trading_config.get('leverage', 10)
+        # 计算开仓数量 - 修复：基于实际杠杆计算，确保保证金占比准确
+        # 步骤1: 先设置杠杆到交易所（确保一致）
+        configured_leverage = self.trading_config.get('leverage', 10)
+        try:
+            if self.exchange.is_futures_symbol(symbol):
+                self.exchange.set_leverage(symbol, configured_leverage)
+        except Exception as e:
+            trade_logger.warning(f"{symbol}: 设置杠杆失败，将使用配置值 - {e}")
+        
+        # 步骤2: 获取实际杠杆（交易所可能调整）
+        effective_leverage = self.exchange.get_actual_leverage(symbol) if hasattr(self.exchange, 'get_actual_leverage') else configured_leverage
+        
+        # 步骤3: 按目标保证金计算名义价值
+        # 目标: 10% 保证金 = available * position_ratio
+        # 名义价值 = 保证金 * 实际杠杆
         position_ratio = self.trading_config.get('position_size', 0.1)
-        desired_notional = available * position_ratio * leverage
+        target_margin = available * position_ratio  # 目标保证金 (e.g., 1000 USDT)
+        desired_notional = target_margin * effective_leverage  # 名义价值 (e.g., 1000 * 10 = 10000 USDT)
+        
+        # 可观察性日志
+        trade_logger.info(
+            f"{symbol}: 仓位计算 - 配置杠杆:{configured_leverage}x, 实际杠杆:{effective_leverage}x, "
+            f"目标保证金:{target_margin:.2f}USDT({position_ratio*100:.0f}%), 目标名义:{desired_notional:.2f}USDT"
+        )
+        
         try:
             if not self.exchange.is_futures_symbol(symbol):
                 trade_logger.warning(f"{symbol}: 非U本位合约，跳过")
@@ -83,6 +104,14 @@ class TradingExecutor:
             amount = self.exchange.normalize_contract_amount(symbol, desired_notional, current_price)
             contract_size = self.exchange.get_contract_size(symbol) if hasattr(self.exchange, 'get_contract_size') else 1.0
             coin_quantity = self.exchange.contracts_to_coin_quantity(symbol, amount) if hasattr(self.exchange, 'contracts_to_coin_quantity') else amount * contract_size
+            
+            # 验证：计算实际保证金占用
+            estimated_margin = (coin_quantity * current_price) / effective_leverage if effective_leverage > 0 else desired_notional
+            actual_margin_ratio = estimated_margin / available if available > 0 else 0
+            trade_logger.info(
+                f"{symbol}: 预估保证金 {estimated_margin:.2f}USDT ({actual_margin_ratio*100:.1f}% of balance), "
+                f"合约数:{amount}, 币数量:{coin_quantity:.4f}"
+            )
         except Exception as e:
             trade_logger.error(f"计算下单数量失败: {e}")
             return None
@@ -907,21 +936,51 @@ class RiskManager:
 
         max_exposure = float(self.trading_config.get('max_exposure', 0.3))
         position_ratio = float(self.trading_config.get('position_size', 0.1))
+        configured_leverage = int(self.trading_config.get('leverage', 10))
+        
+        # 获取实际杠杆用于更准确的预估
+        effective_leverage = configured_leverage
+        if self._exchange:
+            try:
+                effective_leverage = self._exchange.get_actual_leverage(symbol) if hasattr(self._exchange, 'get_actual_leverage') else configured_leverage
+            except Exception:
+                pass
+        
         current_exposure = self._get_current_exposure()
-        projected_exposure = current_exposure + position_ratio
+        
+        # 使用实际杠杆预估新仓位的保证金占用
+        # 目标保证金 = available * position_ratio
+        # 这与 executor.py 中的逻辑保持一致
+        projected_margin_ratio = position_ratio  # 实际保证金占比就是 position_ratio
+        
+        projected_exposure = current_exposure + projected_margin_ratio
+        
+        # 可观察性
+        trade_logger.info(
+            f"风控检查 {symbol}: 当前暴露:{current_exposure*100:.1f}%, "
+            f"计划仓位:{position_ratio*100:.0f}%, 配置杠杆:{configured_leverage}x, 实际杠杆:{effective_leverage}x, "
+            f"预计总暴露:{projected_exposure*100:.1f}%, 上限:{max_exposure*100:.0f}%"
+        )
+        
         if projected_exposure > max_exposure:
             details['exposure_limit'] = {
                 'passed': False,
                 'current': round(current_exposure, 4),
                 'projected': round(projected_exposure, 4),
-                'max': max_exposure
+                'max': max_exposure,
+                'planned_leverage': configured_leverage,
+                'effective_leverage': effective_leverage,
+                'position_ratio': position_ratio
             }
             return False, f"开仓后将超过最大持仓比例({projected_exposure*100:.0f}%)", details
         details['exposure_limit'] = {
             'passed': True,
             'current': round(current_exposure, 4),
             'projected': round(projected_exposure, 4),
-            'max': max_exposure
+            'max': max_exposure,
+            'planned_leverage': configured_leverage,
+            'effective_leverage': effective_leverage,
+            'position_ratio': position_ratio
         }
 
         return True, None, details

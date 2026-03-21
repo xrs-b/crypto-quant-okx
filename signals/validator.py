@@ -142,20 +142,33 @@ class SignalValidator:
             details['balance_check'] = {'passed': True, 'reason': '跳过(无exchange)'}
 
         new_total_exposure = current_exposure_ratio + position_ratio
+        # 获取杠杆信息用于日志
+        configured_leverage = int(self.trading_config.get('leverage', 10))
+        effective_leverage = configured_leverage
+        if self.exchange and hasattr(self.exchange, 'get_actual_leverage'):
+            try:
+                effective_leverage = self.exchange.get_actual_leverage(signal.symbol)
+            except Exception:
+                pass
+        
         if new_total_exposure > max_exposure:
             details['exposure_check'] = {
                 'passed': False,
                 'reason': f"超过最大持仓比例({new_total_exposure:.2f}>{max_exposure:.2f})",
                 'current_exposure': round(current_exposure_ratio, 4),
                 'new_position_ratio': position_ratio,
-                'max_exposure': max_exposure
+                'max_exposure': max_exposure,
+                'planned_leverage': configured_leverage,
+                'effective_leverage': effective_leverage
             }
             return self._failure('MAX_EXPOSURE', '超过最大持仓比例', details, 'exposure_check')
         details['exposure_check'] = {
             'passed': True,
             'reason': '总风险占用正常',
             'current_exposure': round(current_exposure_ratio, 4),
-            'after_open': round(new_total_exposure, 4)
+            'after_open': round(new_total_exposure, 4),
+            'planned_leverage': configured_leverage,
+            'effective_leverage': effective_leverage
         }
 
         new_symbol_exposure = symbol_exposure_ratio + position_ratio

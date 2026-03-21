@@ -72,14 +72,16 @@
                     <tr>
                         <th>币种</th>
                         <th>方向</th>
-                        <th>数量</th>
+                        <th>数量(张)</th>
+                        <th>币数量</th>
                         <th>开仓价</th>
-                        <th>现价</th>
-                        <th>未实现盈亏</th>
+                        <th>当前价</th>
+                        <th>未实现盈亏(U)</th>
+                        <th>未实现盈亏(%)</th>
                     </tr>
                 </thead>
                 <tbody id="overviewPositions">
-                    <tr><td colspan="6" class="muted">加载中...</td></tr>
+                    <tr><td colspan="8" class="muted">加载中...</td></tr>
                 </tbody>
             </table>
         </div>
@@ -100,13 +102,14 @@
                         <th>状态</th>
                         <th>开仓价</th>
                         <th>平仓价</th>
-                        <th>数量</th>
-                        <th>盈亏</th>
+                        <th>数量(张)</th>
+                        <th>已实现盈亏(U)</th>
+                        <th>已实现盈亏(%)</th>
                         <th>时间</th>
                     </tr>
                 </thead>
                 <tbody id="recentTrades">
-                    <tr><td colspan="9" class="muted">加载中...</td></tr>
+                    <tr><td colspan="10" class="muted">加载中...</td></tr>
                 </tbody>
             </table>
         </div>
@@ -297,6 +300,31 @@ async function loadOverview() {
         document.getElementById('unrealizedPnl').textContent = money(unrealizedPnl);
         document.getElementById('unrealizedPnl').className = 'value ' + (unrealizedPnl >= 0 ? 'pos' : 'neg');
         
+        // 计算持仓的未实现盈亏百分比 (加权平均)
+        let unrealizedPnlPercent = 0;
+        let totalPositionValue = 0;
+        for (const p of positionsData) {
+            const entryPrice = Number(p.entry_price || 0);
+            const currentPrice = Number(p.current_price || 0);
+            const coinQty = Number(p.coin_quantity || p.quantity * (p.contract_size || 1));
+            const posValue = coinQty * entryPrice;
+            totalPositionValue += posValue;
+            if (entryPrice > 0 && p.side === 'long') {
+                unrealizedPnlPercent += ((currentPrice - entryPrice) / entryPrice) * 100 * posValue;
+            } else if (entryPrice > 0 && p.side === 'short') {
+                unrealizedPnlPercent += ((entryPrice - currentPrice) / entryPrice) * 100 * posValue;
+            }
+        }
+        if (totalPositionValue > 0) {
+            unrealizedPnlPercent = unrealizedPnlPercent / totalPositionValue;
+        }
+        
+        // 添加未实现盈亏百分比的显示
+        let unrealizedPnlEl = document.getElementById('unrealizedPnl');
+        if (unrealizedPnlEl) {
+            unrealizedPnlEl.title = '未实现盈亏百分比: ' + (positionsData.length > 0 ? unrealizedPnlPercent.toFixed(2) + '%' : '--');
+        }
+        
         document.getElementById('totalTrades').textContent = trading.total_trades_30d || 0;
         document.getElementById('winRate').textContent = (trading.win_rate || 0) + '%';
         
@@ -309,31 +337,59 @@ async function loadOverview() {
         // Render positions
         const positionsData = positions.data || [];
         document.getElementById('overviewPositions').innerHTML = positionsData.length 
-            ? positionsData.map(p => `<tr>
-                <td>${p.symbol}</td>
-                <td>${badge(p.side, p.side === 'long' ? 'long' : 'short')}</td>
-                <td>${p.quantity}</td>
-                <td>${money(p.entry_price)}</td>
-                <td>${money(p.current_price)}</td>
-                <td class="${Number(p.unrealized_pnl || 0) >= 0 ? 'pos' : 'neg'}">${money(p.unrealized_pnl)}</td>
-            </tr>`).join('')
-            : '<tr><td colspan="6" class="muted">暂无持仓</td></tr>';
+            ? positionsData.map(p => {
+                const pnl = Number(p.unrealized_pnl || 0);
+                const entryPrice = Number(p.entry_price || 0);
+                const currentPrice = Number(p.current_price || 0);
+                let pnlPercent = 0;
+                if (entryPrice > 0 && p.side === 'long') {
+                    pnlPercent = ((currentPrice - entryPrice) / entryPrice) * 100;
+                } else if (entryPrice > 0 && p.side === 'short') {
+                    pnlPercent = ((entryPrice - currentPrice) / entryPrice) * 100;
+                }
+                const coinQty = Number(p.coin_quantity || p.quantity * (p.contract_size || 1));
+                return `<tr>
+                    <td>${p.symbol}</td>
+                    <td>${badge(p.side, p.side === 'long' ? 'long' : 'short')}</td>
+                    <td>${p.quantity}</td>
+                    <td>${coinQty.toFixed(4)}</td>
+                    <td>${money(p.entry_price)}</td>
+                    <td>${money(p.current_price)}</td>
+                    <td class="${pnl >= 0 ? 'pos' : 'neg'}">${money(pnl)}</td>
+                    <td class="${pnlPercent >= 0 ? 'pos' : 'neg'}">${pnlPercent.toFixed(2)}%</td>
+                </tr>`;
+            }).join('')
+            : '<tr><td colspan="8" class="muted">暂无持仓</td></tr>';
         
         // Render recent trades
         const tradesData = recentTrades.data || [];
         document.getElementById('recentTrades').innerHTML = tradesData.length
-            ? tradesData.map(t => `<tr>
-                <td>${t.id}</td>
-                <td>${t.symbol}</td>
-                <td>${badge(t.side, t.side === 'long' ? 'long' : 'short')}</td>
-                <td>${badge(t.status, t.status === 'open' ? 'warn' : 'ok')}</td>
-                <td>${money(t.entry_price)}</td>
-                <td>${t.exit_price ? money(t.exit_price) : '--'}</td>
-                <td>${t.quantity}</td>
-                <td class="${Number(t.pnl || 0) >= 0 ? 'pos' : 'neg'}">${t.pnl == null ? '--' : money(t.pnl)}</td>
-                <td>${safe(t.open_time)}</td>
-            </tr>`).join('')
-            : '<tr><td colspan="9" class="muted">暂无交易记录</td></tr>';
+            ? tradesData.map(t => {
+                const pnl = Number(t.pnl || 0);
+                let pnlPercent = Number(t.pnl_percent);
+                if (isNaN(pnlPercent) || pnlPercent === 0) {
+                    const entryPrice = Number(t.entry_price || 0);
+                    const exitPrice = Number(t.exit_price || 0);
+                    if (entryPrice > 0 && exitPrice > 0 && t.side === 'long') {
+                        pnlPercent = ((exitPrice - entryPrice) / entryPrice) * 100;
+                    } else if (entryPrice > 0 && exitPrice > 0 && t.side === 'short') {
+                        pnlPercent = ((entryPrice - exitPrice) / entryPrice) * 100;
+                    }
+                }
+                return `<tr>
+                    <td>${t.id}</td>
+                    <td>${t.symbol}</td>
+                    <td>${badge(t.side, t.side === 'long' ? 'long' : 'short')}</td>
+                    <td>${badge(t.status, t.status === 'open' ? 'warn' : 'ok')}</td>
+                    <td>${money(t.entry_price)}</td>
+                    <td>${t.exit_price ? money(t.exit_price) : '--'}</td>
+                    <td>${t.quantity}</td>
+                    <td class="${pnl >= 0 ? 'pos' : 'neg'}">${t.pnl == null ? '--' : money(t.pnl)}</td>
+                    <td class="${pnlPercent >= 0 ? 'pos' : 'neg'}">${isNaN(pnlPercent) || pnlPercent === 0 ? '--' : pnlPercent.toFixed(2) + '%'}</td>
+                    <td>${safe(t.open_time)}</td>
+                </tr>`;
+            }).join('')
+            : '<tr><td colspan="10" class="muted">暂无交易记录</td></tr>';
         
         document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString('zh-CN');
     } catch (e) {

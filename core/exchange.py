@@ -160,6 +160,32 @@ class Exchange:
             raise
 
     def get_leverage(self, symbol: str) -> int:
+        """获取配置的杠杆倍数"""
+        return self.leverage
+
+    def get_actual_leverage(self, symbol: str) -> int:
+        """获取实际杠杆（优先从交易所API获取，若失败则用配置）
+        
+        Returns:
+            int: 实际杠杆倍数，若获取失败返回配置的默认值
+        """
+        # 尝试从持仓中获取实际杠杆
+        try:
+            positions = self.fetch_positions()
+            for pos in positions:
+                pos_symbol = pos.get('symbol') or pos.get('info', {}).get('instId') or ''
+                # 处理 BTC-USD-SWAP 格式
+                if ':' in pos_symbol:
+                    pos_symbol = pos_symbol.split(':')[0]
+                if pos_symbol == symbol:
+                    # 从持仓信息获取实际杠杆
+                    lev = pos.get('leverage')
+                    if lev:
+                        return int(lev)
+        except Exception:
+            pass
+        
+        # 回退到配置的杠杆
         return self.leverage
 
     def format_symbol(self, symbol: str) -> str:

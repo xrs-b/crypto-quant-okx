@@ -1475,6 +1475,38 @@ def get_strategy_stats():
 
 
 # ============================================================================
+# Forward Readiness API
+# ============================================================================
+
+from signals.readiness import ForwardReadinessChecker, check_forward_readiness
+
+@app.route('/api/forward/readiness')
+def get_forward_readiness():
+    """
+    前向数据就绪检查器
+    
+    自动判断 forward data 是否达到可开始校准 Entry Decision 阈值/权重的门槛。
+    
+    返回状态:
+    - OBSERVE: 样本未够，继续观察
+    - WEAK_READY: 勉强可分析，但分布不足/偏态  
+    - READY: 可开始校准
+    """
+    limit = int(request.args.get('limit', 5000))
+    
+    # 获取信号数据
+    signals = db.get_signals(limit=limit)
+    
+    # 执行就绪检查
+    result = check_forward_readiness(db=db, signals=signals)
+    
+    return jsonify({
+        'success': True,
+        'data': result
+    })
+
+
+# ============================================================================
 # 每日总结API
 # ============================================================================
 

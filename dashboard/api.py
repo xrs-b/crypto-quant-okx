@@ -704,6 +704,25 @@ def config_page_view():
 def get_positions():
     """获取当前持仓"""
     positions = db.get_positions()
+    # 补充显示用字段：名义价值、估算保证金
+    for p in positions:
+        quantity = float(p.get('quantity') or 0)
+        contract_size = float(p.get('contract_size') or 1)
+        # 直接用 quantity * contract_size 计算币数量（更可靠）
+        coin_qty = quantity * contract_size
+        # 处理 NaN 值
+        current_price = p.get('current_price')
+        entry_price = p.get('entry_price')
+        if current_price is None or (isinstance(current_price, float) and math.isnan(current_price)):
+            price = entry_price if entry_price else 0
+        else:
+            price = current_price
+        price = float(price) if price else 0
+        leverage = float(p.get('leverage') or 1)
+        # 名义价值 = 币数量 × 当前价格
+        p['notional_value'] = round(coin_qty * price, 2)
+        # 估算保证金 = 名义价值 / 杠杆
+        p['margin'] = round(p['notional_value'] / leverage, 2) if leverage > 0 else p['notional_value']
     return jsonify({
         'success': True,
         'data': positions,
@@ -719,6 +738,24 @@ def get_trades():
     limit = int(request.args.get('limit', 100))
     
     trades = db.get_trades(symbol=symbol, status=status, limit=limit)
+    # 补充显示用字段：名义价值、估算保证金
+    for t in trades:
+        quantity = float(t.get('quantity') or 0)
+        contract_size = float(t.get('contract_size') or 1)
+        # 直接用 quantity * contract_size 计算币数量（更可靠）
+        coin_qty = quantity * contract_size
+        # 使用开仓价计算名义价值（已平仓用平仓价，持仓用开仓价）
+        # 处理 NaN 值
+        exit_price = t.get('exit_price')
+        entry_price = t.get('entry_price')
+        if exit_price is None or (isinstance(exit_price, float) and math.isnan(exit_price)):
+            price = entry_price if entry_price else 0
+        else:
+            price = exit_price
+        price = float(price) if price else 0
+        leverage = float(t.get('leverage') or 1)
+        t['notional_value'] = round(coin_qty * price, 2)
+        t['margin'] = round(t['notional_value'] / leverage, 2) if leverage > 0 else t['notional_value']
     
     return jsonify({
         'success': True,

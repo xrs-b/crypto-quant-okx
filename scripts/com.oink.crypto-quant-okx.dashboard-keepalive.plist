@@ -15,7 +15,7 @@
     <true/>
 
     <key>StartInterval</key>
-    <integer>3600</integer>
+    <integer>1800</integer>
 
     <key>WorkingDirectory</key>
     <string>/Volumes/MacHD/Projects/crypto-quant-okx</string>

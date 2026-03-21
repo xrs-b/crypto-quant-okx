@@ -15,8 +15,10 @@
                     <th>币种</th>
                     <th>方向</th>
                     <th>杠杆</th>
-                    <th>数量(张)</th>
+                    <th>张数</th>
                     <th>币数量</th>
+                    <th>名义价值</th>
+                    <th>估算保证金</th>
                     <th>开仓价</th>
                     <th>当前价</th>
                     <th>未实现盈亏(U)</th>
@@ -25,7 +27,7 @@
                 </tr>
             </thead>
             <tbody id="positionsTable">
-                <tr><td colspan="10" class="muted">加载中...</td></tr>
+                <tr><td colspan="12" class="muted">加载中...</td></tr>
             </tbody>
         </table>
     </div>
@@ -59,12 +61,16 @@ async function loadPositions() {
             const pnlClass = pnl >= 0 ? 'pos' : 'neg';
             const sideClass = p.side === 'long' ? 'long' : 'short';
             const coinQty = Number(p.coin_quantity || p.quantity * (p.contract_size || 1));
+            const notional = Number(p.notional_value || 0);
+            const margin = Number(p.margin || 0);
             return `<tr>
                 <td>${p.symbol}</td>
                 <td>${badge(p.side, sideClass)}</td>
                 <td>${p.leverage || 1}x</td>
                 <td>${p.quantity}</td>
                 <td>${coinQty.toFixed(4)}</td>
+                <td>$${notional.toFixed(2)}</td>
+                <td>$${margin.toFixed(2)}</td>
                 <td>${money(p.entry_price)}</td>
                 <td>${money(p.current_price)}</td>
                 <td class="${pnlClass}">${money(pnl)}</td>
@@ -75,7 +81,7 @@ async function loadPositions() {
     } catch (e) {
         console.error('loadPositions error:', e);
         document.getElementById('positionsTable').innerHTML = 
-            '<tr><td colspan="10" class="muted">加载失败</td></tr>';
+            '<tr><td colspan="12" class="muted">加载失败</td></tr>';
     }
 }
 

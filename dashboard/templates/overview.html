@@ -72,8 +72,11 @@
                     <tr>
                         <th>币种</th>
                         <th>方向</th>
-                        <th>数量(张)</th>
+                        <th>杠杆</th>
+                        <th>张数</th>
                         <th>币数量</th>
+                        <th>名义价值</th>
+                        <th>估算保证金</th>
                         <th>开仓价</th>
                         <th>当前价</th>
                         <th>未实现盈亏(U)</th>
@@ -81,7 +84,7 @@
                     </tr>
                 </thead>
                 <tbody id="overviewPositions">
-                    <tr><td colspan="8" class="muted">加载中...</td></tr>
+                    <tr><td colspan="11" class="muted">加载中...</td></tr>
                 </tbody>
             </table>
         </div>
@@ -102,14 +105,16 @@
                         <th>状态</th>
                         <th>开仓价</th>
                         <th>平仓价</th>
-                        <th>数量(张)</th>
+                        <th>张数</th>
+                        <th>币数量</th>
+                        <th>名义价值</th>
                         <th>已实现盈亏(U)</th>
                         <th>已实现盈亏(%)</th>
                         <th>时间</th>
                     </tr>
                 </thead>
                 <tbody id="recentTrades">
-                    <tr><td colspan="10" class="muted">加载中...</td></tr>
+                    <tr><td colspan="12" class="muted">加载中...</td></tr>
                 </tbody>
             </table>
         </div>
@@ -348,18 +353,23 @@ async function loadOverview() {
                     pnlPercent = ((entryPrice - currentPrice) / entryPrice) * 100;
                 }
                 const coinQty = Number(p.coin_quantity || p.quantity * (p.contract_size || 1));
+                const notional = Number(p.notional_value || 0);
+                const margin = Number(p.margin || 0);
                 return `<tr>
                     <td>${p.symbol}</td>
                     <td>${badge(p.side, p.side === 'long' ? 'long' : 'short')}</td>
+                    <td>${p.leverage || 1}x</td>
                     <td>${p.quantity}</td>
                     <td>${coinQty.toFixed(4)}</td>
+                    <td>$${notional.toFixed(2)}</td>
+                    <td>$${margin.toFixed(2)}</td>
                     <td>${money(p.entry_price)}</td>
                     <td>${money(p.current_price)}</td>
                     <td class="${pnl >= 0 ? 'pos' : 'neg'}">${money(pnl)}</td>
                     <td class="${pnlPercent >= 0 ? 'pos' : 'neg'}">${pnlPercent.toFixed(2)}%</td>
                 </tr>`;
             }).join('')
-            : '<tr><td colspan="8" class="muted">暂无持仓</td></tr>';
+            : '<tr><td colspan="11" class="muted">暂无持仓</td></tr>';
         
         // Render recent trades
         const tradesData = recentTrades.data || [];
@@ -376,6 +386,8 @@ async function loadOverview() {
                         pnlPercent = ((entryPrice - exitPrice) / entryPrice) * 100;
                     }
                 }
+                const coinQty = Number(t.coin_quantity || t.quantity * (t.contract_size || 1));
+                const notional = Number(t.notional_value || 0);
                 return `<tr>
                     <td>${t.id}</td>
                     <td>${t.symbol}</td>
@@ -384,12 +396,14 @@ async function loadOverview() {
                     <td>${money(t.entry_price)}</td>
                     <td>${t.exit_price ? money(t.exit_price) : '--'}</td>
                     <td>${t.quantity}</td>
+                    <td>${coinQty.toFixed(4)}</td>
+                    <td>$${notional.toFixed(2)}</td>
                     <td class="${pnl >= 0 ? 'pos' : 'neg'}">${t.pnl == null ? '--' : money(t.pnl)}</td>
                     <td class="${pnlPercent >= 0 ? 'pos' : 'neg'}">${isNaN(pnlPercent) || pnlPercent === 0 ? '--' : pnlPercent.toFixed(2) + '%'}</td>
                     <td>${safe(t.open_time)}</td>
                 </tr>`;
             }).join('')
-            : '<tr><td colspan="10" class="muted">暂无交易记录</td></tr>';
+            : '<tr><td colspan="12" class="muted">暂无交易记录</td></tr>';
         
         document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString('zh-CN');
     } catch (e) {

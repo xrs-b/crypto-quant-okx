@@ -495,6 +495,13 @@ class Database:
         
         df = pd.read_sql_query(query, conn, params=params)
         conn.close()
+        if not df.empty:
+            if 'contract_size' not in df.columns:
+                df['contract_size'] = 1.0
+            if 'coin_quantity' not in df.columns:
+                df['coin_quantity'] = df['quantity'] * df['contract_size']
+            else:
+                df['coin_quantity'] = df.apply(lambda r: r['coin_quantity'] if pd.notna(r['coin_quantity']) else r['quantity'] * (r['contract_size'] if pd.notna(r['contract_size']) else 1.0), axis=1)
         return df.to_dict('records')
 
     def get_latest_open_trade(self, symbol: str, side: str = None) -> Optional[Dict]:

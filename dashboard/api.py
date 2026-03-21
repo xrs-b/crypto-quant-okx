@@ -448,6 +448,41 @@ def _get_local_config_path() -> Path:
     return Path(config.config_path).with_name('config.local.yaml')
 
 
+# ========== 配置审计日志 ==========
+CONFIG_AUDIT_PATH = Path(__file__).parent.parent / 'data' / 'config_audit.json'
+
+def _load_config_audit(limit: int = 50) -> List[Dict]:
+    """加载配置审计记录"""
+    try:
+        if CONFIG_AUDIT_PATH.exists():
+            data = json.loads(CONFIG_AUDIT_PATH.read_text())
+            return data.get('records', [])[:limit]
+    except Exception:
+        pass
+    return []
+
+
+def _save_config_audit_record(record: Dict):
+    """保存配置审计记录"""
+    try:
+        CONFIG_AUDIT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        
+        existing = []
+        if CONFIG_AUDIT_PATH.exists():
+            try:
+                existing = json.loads(CONFIG_AUDIT_PATH.read_text()).get('records', [])
+            except Exception:
+                existing = []
+        
+        existing.insert(0, record)
+        # 保留最近100条记录
+        existing = existing[:100]
+        
+        CONFIG_AUDIT_PATH.write_text(json.dumps({'records': existing}, ensure_ascii=False, indent=2))
+    except Exception as e:
+        print(f"[config_audit] 保存审计记录失败: {e}")
+
+
 def _get_local_backups_dir() -> Path:
     local_path = _get_local_config_path()
     backups_dir = local_path.parent / 'backups'
@@ -2789,11 +2824,21 @@ def save_config_form():
     # 重新加载配置
     config.reload()
     
+    # 记录审计日志
+    audit_record = {
+        'timestamp': datetime.now().isoformat(),
+        'fields': saved_fields,
+        'changes': fields,
+        'auto_restart': auto_restart
+    }
+    _save_config_audit_record(audit_record)
+    
     result = {
         'success': True,
         'message': f'已保存 {len(saved_fields)} 个配置项到 config.local.yaml',
         'saved_fields': saved_fields,
-        'saved_path': str(local_config_path)
+        'saved_path': str(local_config_path),
+        'audit_id': audit_record['timestamp']
     }
     
     # 如果请求自动重启
@@ -2847,6 +2892,72 @@ def restart_daemon():
     """API: 重启交易机器人"""
     result = _restart_daemon_internal()
     return jsonify(result)
+
+
+# ========== 配置审计 API ==========
+@app.route('/api/config/audit')
+def get_config_audit():
+    """获取配置变更审计记录"""
+    limit = int(request.args.get('limit', 20))
+    records = _load_config_audit(limit=limit)
+    return jsonify({'success': True, 'data': records, 'count': len(records)})
+
+
+@app.route('/api/config/status')
+def get_config_status():
+    """获取配置生效状态（运行参数 vs 当前配置）"""
+    runtime = load_runtime_state() or {}
+    merged = _get_merged_config()
+    
+    # 关键运行参数对比
+    key_fields = ['runtime.interval_seconds', 'runtime.mode', 'symbols.watch_list']
+    comparison = []
+    
+    for field in key_fields:
+        form_value = _get_field_value(field, merged)
+        runtime_value = runtime.get(field.replace('.', '_'))
+        
+        # 对于 watch_list，需要比较
+        if field == 'symbols.watch_list':
+            runtime_list = runtime.get('watch_list') or []
+            form_list = form_value if isinstance(form_value, list) else []
+            matched = set(runtime_list) == set(form_list) if runtime_list or form_list else True
+            if not matched:
+                comparison.append({
+                    'field': field,
+                    'form_value': form_list,
+                    'runtime_value': runtime_list,
+                    'matched': False,
+                    'note': '重启后生效' if runtime.get('running') else ''
+                })
+        else:
+            matched = str(form_value) == str(runtime_value) if runtime_value else False
+            if not matched:
+                comparison.append({
+                    'field': field,
+                    'form_value': form_value,
+                    'runtime_value': runtime_value,
+                    'matched': matched,
+                    'note': '重启后生效' if runtime.get('running') else ''
+                })
+    
+    # daemon 状态
+    daemon_status = {
+        'running': runtime.get('running', False),
+        'last_started_at': runtime.get('last_started_at'),
+        'last_error': runtime.get('last_error'),
+        'mode': runtime.get('mode'),
+        'interval_seconds': runtime.get('interval_seconds')
+    }
+    
+    return jsonify({
+        'success': True,
+        'data': {
+            'daemon': daemon_status,
+            'comparison': comparison,
+            'pending_restart': len(comparison) > 0 and runtime.get('running', False)
+        }
+    })
 
 
 # ============================================================================

@@ -47,6 +47,7 @@ from core.database import Database
 from core.exchange import Exchange
 from core.presets import PresetManager
 from trading.executor import RiskManager
+from signals.validator import SignalValidator
 from bot.run import execute_exchange_smoke, reconcile_exchange_positions, load_runtime_state
 from ml.engine import MLEngine
 from core.regime import RegimeDetector, detect_regime, Regime
@@ -1863,10 +1864,226 @@ def get_system_checklist():
 @app.route('/api/risk/status')
 def get_risk_status():
     """获取风险状态"""
+    risk_data = risk_manager.get_risk_status()
+    
+    # 扩展返回：sizing 配置（便于前端展示 10%/30% 规则）
+    trading_cfg = config.get('trading', {}) or {}
+    risk_data['sizing_config'] = {
+        '单单保证金比例': float(trading_cfg.get('position_size', 0.1)),
+        '总仓风险上限': float(trading_cfg.get('max_exposure', 0.3)),
+        '单币种上限': float(trading_cfg.get('max_position_per_symbol', 0.15)),
+        '配置杠杆': int(trading_cfg.get('leverage', 10)),
+    }
+    
     return jsonify({
         'success': True,
-        'data': risk_manager.get_risk_status()
+        'data': risk_data
     })
+
+
+@app.route('/api/risk/sizing-preview')
+def get_risk_sizing_preview():
+    """
+    开仓 sizing 预览 - 展示如果现在开仓，风险占用会是多少
+    
+    参数:
+    - symbol: 币种 (如 BTC/USDT:USDT)
+    - side: 方向 (long/short)
+    
+    返回:
+    - 本次计划保证金
+    - 配置杠杆 / 实际杠杆
+    - 当前总风险占用
+    - 本次开仓后总风险占用
+    - 当前单币种占用
+    - 本次开仓后单币种占用
+    - sizing 规则校验结果（仅检查资金/仓位，不检查策略）
+    """
+    symbol = request.args.get('symbol', 'BTC/USDT:USDT')
+    side = request.args.get('side', 'long')
+    
+    try:
+        # 获取当前持仓
+        positions = db.get_positions()
+        current_positions = {}
+        for p in positions:
+            current_positions[p['symbol']] = p
+        
+        # 获取配置
+        trading_cfg = config.get('trading', {}) or {}
+        position_ratio = float(trading_cfg.get('position_size', 0.1))
+        max_exposure = float(trading_cfg.get('max_exposure', 0.3))
+        max_per_symbol = float(trading_cfg.get('max_position_per_symbol', 0.15))
+        configured_leverage = int(trading_cfg.get('leverage', 10))
+        
+        # 获取余额计算计划保证金
+        balance = risk_manager._get_balance_summary()
+        total_balance = balance.get('total', 0) or 1
+        free_balance = balance.get('free', 0)
+        planned_margin = total_balance * position_ratio
+        
+        # 计算当前 exposure（复用 risk_manager 的逻辑）
+        total_margin_used = 0.0
+        symbol_margin_used = 0.0
+        for p in positions:
+            qty = float(p.get('coin_quantity', 0) or 0)
+            px = float(p.get('current_price', 0) or p.get('entry_price', 0) or 0)
+            lev = max(1, int(p.get('leverage', 1) or 1))
+            margin = (qty * px) / lev if qty and px else 0.0
+            total_margin_used += margin
+            if p.get('symbol') == symbol:
+                symbol_margin_used += margin
+        
+        current_total_exposure = total_margin_used / total_balance if total_balance > 0 else 0.0
+        current_symbol_exposure = symbol_margin_used / total_balance if total_balance > 0 else 0.0
+        
+        # 计算开仓后
+        after_open_total = current_total_exposure + position_ratio
+        after_open_symbol = current_symbol_exposure + position_ratio
+        
+        # 检查规则
+        total_exposure_ok = after_open_total <= max_exposure
+        symbol_exposure_ok = after_open_symbol <= max_per_symbol
+        balance_ok = free_balance >= planned_margin
+        
+        will_pass = total_exposure_ok and symbol_exposure_ok and balance_ok
+        block_reason = None
+        if not total_exposure_ok:
+            block_reason = f'总风险占用超限 ({after_open_total*100:.1f}% > {max_exposure*100:.0f}%)'
+        elif not symbol_exposure_ok:
+            block_reason = f'单币种占用超限 ({after_open_symbol*100:.1f}% > {max_per_symbol*100:.0f}%)'
+        elif not balance_ok:
+            block_reason = f'余额不足 ({free_balance:.2f} < {planned_margin:.2f})'
+        
+        result = {
+            'symbol': symbol,
+            'side': side,
+            'will_pass': will_pass,
+            'block_reason': block_reason,
+            # 配置信息
+            'config': {
+                'position_ratio': position_ratio,
+                'max_exposure': max_exposure,
+                'max_per_symbol': max_per_symbol,
+                'configured_leverage': configured_leverage,
+            },
+            # 余额与计划保证金
+            'balance': {
+                'total': balance.get('total', 0),
+                'free': balance.get('free', 0),
+                'planned_margin': round(planned_margin, 2),
+            },
+            # 杠杆
+            'leverage': {
+                'configured': configured_leverage,
+                'effective': configured_leverage,  # 简化显示，实际以交易所为准
+            },
+            # 风险占用
+            'exposure': {
+                'current_total': round(current_total_exposure, 4),
+                'after_open_total': round(after_open_total, 4),
+                'current_symbol': round(current_symbol_exposure, 4),
+                'after_open_symbol': round(after_open_symbol, 4),
+            },
+            # 规则校验
+            'rules_check': {
+                'total_exposure_ok': total_exposure_ok,
+                'symbol_exposure_ok': symbol_exposure_ok,
+                'balance_ok': balance_ok,
+            },
+            # 规则解释（中文化）
+            'rules_summary': _build_sizing_summary(
+                will_pass, block_reason, 
+                current_total_exposure, 
+                after_open_total,
+                max_exposure,
+                after_open_symbol,
+                max_per_symbol,
+                position_ratio,
+                configured_leverage
+            )
+        }
+        
+        return jsonify({
+            'success': True,
+            'data': result
+        })
+        
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e),
+            'error_type': type(e).__name__
+        }), 500
+
+
+def _build_sizing_summary(will_pass, reason, current_total, after_open, max_exp, after_symbol, max_symbol, pos_ratio, lev):
+    """构建 sizing 规则执行摘要（中文化）"""
+    summary = []
+    
+    # 10% 规则
+    summary.append({
+        'rule': '每单保证金',
+        'target': f'{pos_ratio*100:.0f}%',
+        'current': '0%',
+        'after_open': f'{pos_ratio*100:.0f}%',
+        'status': 'ok',
+        'desc': f'每次开仓占用 {pos_ratio*100:.0f}% 保证金'
+    })
+    
+    # 30% 总仓规则
+    total_status = 'ok' if after_open <= max_exp else 'over'
+    summary.append({
+        'rule': '总风险占用',
+        'target': f'{max_exp*100:.0f}%',
+        'current': f'{current_total*100:.1f}%',
+        'after_open': f'{after_open*100:.1f}%',
+        'status': total_status,
+        'desc': f'开仓后总占用 {after_open*100:.1f}% (上限 {max_exp*100:.0f}%)'
+    })
+    
+    # 单币种规则
+    sym_status = 'ok' if after_symbol <= max_symbol else 'over'
+    summary.append({
+        'rule': '单币种占用',
+        'target': f'{max_symbol*100:.0f}%',
+        'current': f'{max(0, after_symbol-pos_ratio)*100:.1f}%',
+        'after_open': f'{after_symbol*100:.1f}%',
+        'status': sym_status,
+        'desc': f'该币种开仓后占用 {after_symbol*100:.1f}% (上限 {max_symbol*100:.0f}%)'
+    })
+    
+    # 杠杆
+    summary.append({
+        'rule': '杠杆倍数',
+        'target': f'{lev}x',
+        'current': '-',
+        'after_open': f'{lev}x',
+        'status': 'ok',
+        'desc': f'配置杠杆 {lev}x，实际以交易所为准'
+    })
+    
+    # 总体结论
+    if will_pass:
+        summary.append({
+            'rule': '✅ 开仓可行性',
+            'target': '通过',
+            'current': '-',
+            'after_open': '通过',
+            'status': 'ok',
+            'desc': '系统将按 10% 单仓 / 30% 总仓 规则执行'
+        })
+    else:
+        summary.append({
+            'rule': '❌ 开仓可行性',
+            'target': '拦截',
+            'current': '-',
+            'after_open': '拦截',
+            'status': 'blocked',
+            'desc': f'原因: {reason}'
+        })
+    
+    return summary
 
 
 # ============================================================================

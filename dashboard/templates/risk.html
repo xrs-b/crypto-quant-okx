@@ -14,6 +14,7 @@
 {# Tab Navigation #}
 <div class="tabs">
     <button class="tab-btn active" data-tab="overview">🛡️ 风控概览</button>
+    <button class="tab-btn" data-tab="sizing">📊 开仓 sizing 预览</button>
     <button class="tab-btn" data-tab="events">⚠️ 告警事件</button>
 </div>
 
@@ -90,7 +91,34 @@
     </div>
 </div>
 
-{# Tab 2: Alerts & Events #}
+{# Tab 2: Sizing Preview #}
+<div class="tab-content" id="tab-sizing">
+    <div class="card" style="margin-bottom: 20px;">
+        <div class="section-title">📊 开仓 sizing 预览 - 规则执行检查</div>
+        <div style="margin-bottom: 16px;">
+            <label style="margin-right: 8px;">选择币种:</label>
+            <select id="sizingSymbol" style="padding: 6px; margin-right: 12px;">
+                <option value="BTC/USDT:USDT">BTC/USDT:USDT</option>
+                <option value="ETH/USDT:USDT">ETH/USDT:USDT</option>
+                <option value="SOL/USDT:USDT">SOL/USDT:USDT</option>
+                <option value="BNB/USDT:USDT">BNB/USDT:USDT</option>
+                <option value="XRP/USDT:USDT">XRP/USDT:USDT</option>
+            </select>
+            <label style="margin-right: 8px;">方向:</label>
+            <select id="sizingSide" style="padding: 6px; margin-right: 12px;">
+                <option value="long">做多 (Long)</option>
+                <option value="short">做空 (Short)</option>
+            </select>
+            <button onclick="loadSizingPreview()" style="padding: 6px 16px;">🔍 预览</button>
+        </div>
+        
+        <div id="sizingPreviewContent">
+            <div class="muted">点击「预览」查看开仓后的风险占用</div>
+        </div>
+    </div>
+</div>
+
+{# Tab 3: Alerts & Events #}
 <div class="tab-content" id="tab-events">
     <div class="card" style="margin-bottom: 20px;">
         <div class="section-title">系统告警</div>
@@ -277,6 +305,104 @@ async function resetLossStreak() {
 
 // Load on page ready
 loadRisk();
+
+async function loadSizingPreview() {
+    const symbol = document.getElementById('sizingSymbol').value;
+    const side = document.getElementById('sizingSide').value;
+    const container = document.getElementById('sizingPreviewContent');
+    
+    container.innerHTML = '<div class="muted">加载中...</div>';
+    
+    try {
+        const resp = await api(`/api/risk/sizing-preview?symbol=${encodeURIComponent(symbol)}&side=${side}`);
+        const data = resp.data || {};
+        
+        if (!resp.success) {
+            container.innerHTML = `<div class="neg">加载失败: ${data.error || '未知错误'}</div>`;
+            return;
+        }
+        
+        const preview = data;
+        const config = preview.config || {};
+        const balance = preview.balance || {};
+        const leverage = preview.leverage || {};
+        const exposure = preview.exposure || {};
+        const rules = preview.rules_summary || [];
+        
+        let html = `
+            <div class="stat-grid" style="margin-bottom: 16px;">
+                <div class="stat-card">
+                    <div class="label">账户总额</div>
+                    <div class="value">${money(balance.total)}</div>
+                </div>
+                <div class="stat-card">
+                    <div class="label">可用余额</div>
+                    <div class="value">${money(balance.free)}</div>
+                </div>
+                <div class="stat-card">
+                    <div class="label">计划保证金</div>
+                    <div class="value">${money(balance.planned_margin)}</div>
+                </div>
+                <div class="stat-card">
+                    <div class="label">配置杠杆</div>
+                    <div class="value">${leverage.configured}x</div>
+                </div>
+            </div>
+            
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>规则</th>
+                            <th>目标值</th>
+                            <th>当前占用</th>
+                            <th>开仓后</th>
+                            <th>状态</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+        `;
+        
+        for (const r of rules) {
+            const statusClass = r.status === 'ok' ? 'pos' : r.status === 'over' ? 'warn' : r.status === 'blocked' ? 'neg' : '';
+            const statusText = r.status === 'ok' ? '✅' : r.status === 'over' ? '⚠️' : r.status === 'blocked' ? '❌' : '';
+            html += `
+                <tr>
+                    <td>${r.rule}</td>
+                    <td>${r.target}</td>
+                    <td>${r.current}</td>
+                    <td class="${statusClass}">${r.after_open}</td>
+                    <td class="${statusClass}">${statusText}</td>
+                </tr>
+            `;
+        }
+        
+        html += `
+                    </tbody>
+                </table>
+            </div>
+        `;
+        
+        if (!preview.will_pass) {
+            html += `
+                <div class="card" style="margin-top: 16px; background: #fff5f5; border: 1px solid #ffcccc;">
+                    <div class="neg">⚠️ 开仓将被拦截: ${preview.block_reason}</div>
+                </div>
+            `;
+        } else {
+            html += `
+                <div class="card" style="margin-top: 16px; background: #f0fff0; border: 1px solid #ccffcc;">
+                    <div class="pos">✅ 系统将按规则执行 (每单 ${(config.position_ratio*100).toFixed(0)}% 保证金 / 总仓 ${(config.max_exposure*100).toFixed(0)}% 上限)</div>
+                </div>
+            `;
+        }
+        
+        container.innerHTML = html;
+        
+    } catch (e) {
+        container.innerHTML = `<div class="neg">加载失败: ${e.message}</div>`;
+    }
+}
 
 // Auto refresh every 30s
 setInterval(loadRisk, 30000);

@@ -96,6 +96,50 @@
     background: var(--bg-secondary, #f5f5f5);
     border-radius: 8px;
     padding: 12px;
+    border-left: 3px solid transparent;
+    transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+/* 风险字段高亮 */
+.form-field.risk-high {
+    border-left-color: #dc3545;
+    background: #fff5f5;
+}
+
+.form-field.risk-high label {
+    color: #dc3545;
+}
+
+.form-field.risk-medium {
+    border-left-color: #ffc107;
+    background: #fffbf0;
+}
+
+.form-field.risk-medium label {
+    color: #856404;
+}
+
+/* 校验错误样式 */
+.form-field.has-error {
+    border-left-color: #dc3545;
+    box-shadow: 0 0 0 2px rgba(220, 53, 69, 0.1);
+}
+
+.form-field .error-msg {
+    font-size: 12px;
+    color: #dc3545;
+    margin-top: 6px;
+    display: none;
+}
+
+.form-field.has-error .error-msg {
+    display: block;
+}
+
+.form-field input.error,
+.form-field select.error {
+    border-color: #dc3545;
+    background: #fff8f8;
 }
 
 .form-field label {
@@ -116,6 +160,16 @@
     font-size: 14px;
     background: var(--bg-primary, #fff);
     color: var(--text-primary, #333);
+    transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.form-field input[type="text"]:focus,
+.form-field input[type="number"]:focus,
+.form-field select:focus,
+.form-field textarea:focus {
+    outline: none;
+    border-color: var(--accent-color, #007bff);
+    box-shadow: 0 0 0 2px rgba(0, 123, 255, 0.1);
 }
 
 .form-field input[type="checkbox"] {
@@ -134,14 +188,37 @@
     font-size: 11px;
     color: var(--accent-color, #007bff);
     margin-top: 4px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.form-field .recommended-text {
+    color: #6c757d;
 }
 
 .form-field .recommended span {
     cursor: pointer;
-    margin-right: 6px;
-    padding: 2px 6px;
-    background: var(--bg-primary, #eee);
+    padding: 2px 8px;
+    background: var(--bg-primary, #e9ecef);
     border-radius: 3px;
+    transition: background 0.2s;
+}
+
+.form-field .recommended span:hover {
+    background: var(--accent-color, #007bff);
+    color: white;
+}
+
+.form-field .recommended .single-reset {
+    color: #6c757d;
+    background: transparent;
+    text-decoration: underline;
+}
+
+.form-field .recommended .single-reset:hover {
+    background: transparent;
+    color: #dc3545;
 }
 
 .form-field.bool-field {
@@ -185,12 +262,67 @@
     border: 1px solid #f5c6cb;
 }
 
+.alert.warning {
+    background: #fff3cd;
+    color: #856404;
+    border: 1px solid #ffeeba;
+}
+
 .tab-content {
     display: none;
 }
 
 .tab-content.active {
     display: block;
+}
+
+/* 配置分层样式 */
+.config-section {
+    margin-bottom: 24px;
+}
+
+.config-section-title {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-muted, #666);
+    margin-bottom: 12px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border-color, #eee);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.config-section-title .icon {
+    font-size: 16px;
+}
+
+.config-section.danger .config-section-title {
+    color: #dc3545;
+}
+
+.config-section.danger .config-section-title .icon {
+    color: #dc3545;
+}
+
+/* Badge for validation status */
+.field-badge {
+    display: inline-block;
+    font-size: 10px;
+    padding: 2px 6px;
+    border-radius: 3px;
+    margin-left: 8px;
+    vertical-align: middle;
+}
+
+.field-badge.valid {
+    background: #d4edda;
+    color: #155724;
+}
+
+.field-badge.invalid {
+    background: #f8d7da;
+    color: #721c24;
 }
 </style>
 {% endblock %}
@@ -208,22 +340,136 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
 });
 
 let formData = {};
+let fieldDefinitions = {};
 
-function renderField(key, field) {
+// 风险字段列表 - 高风险
+const HIGH_RISK_FIELDS = [
+    'trading.leverage',           // 杠杆
+    'trading.max_exposure',       // 最大风险敞口
+    'trading.max_daily_drawdown', // 最大日回撤
+    'trading.max_consecutive_losses', // 最大连亏
+    'trading.max_position_per_symbol' // 每币种最大仓位
+];
+
+// 中等风险字段
+const MEDIUM_RISK_FIELDS = [
+    'trading.position_size',     // 仓位比例
+    'trading.stop_loss',         // 止损比例
+    'trading.take_profit'        // 止盈比例
+];
+
+// 配置分层定义
+const CONFIG_SECTIONS = {
+    trading: {
+        basic: ['trading.stop_loss', 'trading.take_profit', 'trading.trailing_stop', 'trading.trailing_activation', 
+                'trading.partial_tp_enabled', 'trading.partial_tp_threshold', 'trading.partial_tp_ratio',
+                'trading.partial_tp2_enabled', 'trading.partial_tp2_threshold', 'trading.partial_tp2_ratio'],
+        advanced: ['trading.position_size'],
+        danger: ['trading.leverage']
+    },
+    risk: {
+        basic: ['trading.cooldown_minutes', 'trading.min_trade_interval', 'trading.max_trades_per_day'],
+        advanced: [],
+        danger: ['trading.max_exposure', 'trading.max_daily_drawdown', 'trading.max_consecutive_losses', 'trading.max_position_per_symbol']
+    },
+    runtime: {
+        basic: ['runtime.mode', 'runtime.interval_seconds'],
+        advanced: [],
+        danger: []
+    },
+    symbols: {
+        basic: ['symbols.watch_list', 'symbols.selection_mode'],
+        advanced: ['symbols.candidate_watch_list', 'symbols.paused_watch_list'],
+        danger: []
+    },
+    notification: {
+        basic: [],
+        advanced: [],
+        danger: []
+    },
+    strategies: {
+        basic: ['strategies.rsi.enabled', 'strategies.macd.enabled', 'strategies.bollinger.enabled', 'strategies.composite.enabled'],
+        advanced: ['strategies.rsi.period', 'strategies.rsi.oversold', 'strategies.rsi.overbought',
+                   'strategies.macd.fast_period', 'strategies.macd.slow_period',
+                   'strategies.bollinger.period', 'strategies.bollinger.std_multiplier',
+                   'strategies.composite.min_strength'],
+        danger: []
+    }
+};
+
+function getFieldSection(groupKey, fieldKey) {
+    const sections = CONFIG_SECTIONS[groupKey];
+    if (!sections) return 'basic';
+    if (sections.danger.includes(fieldKey)) return 'danger';
+    if (sections.advanced.includes(fieldKey)) return 'advanced';
+    return 'basic';
+}
+
+function getRiskClass(fieldKey) {
+    if (HIGH_RISK_FIELDS.includes(fieldKey)) return 'risk-high';
+    if (MEDIUM_RISK_FIELDS.includes(fieldKey)) return 'risk-medium';
+    return '';
+}
+
+// 字段校验
+function validateField(key, field, value) {
+    const errors = [];
+    
+    // 类型校验
+    if (field.type === 'int') {
+        const num = parseInt(value);
+        if (isNaN(num)) {
+            errors.push('必须是整数');
+        } else {
+            if (field.min !== undefined && num < field.min) errors.push(`不能小于 ${field.min}`);
+            if (field.max !== undefined && num > field.max) errors.push(`不能大于 ${field.max}`);
+        }
+    } else if (field.type === 'float') {
+        const num = parseFloat(value);
+        if (isNaN(num)) {
+            errors.push('必须是数值');
+        } else {
+            if (field.min !== undefined && num < field.min) errors.push(`不能小于 ${field.min}`);
+            if (field.max !== undefined && num > field.max) errors.push(`不能大于 ${field.max}`);
+            // 百分比字段合理性校验
+            if (key.includes('position') || key.includes('exposure') || key.includes('drawdown') || 
+                key.includes('ratio') || key.includes('threshold')) {
+                if (num < 0) errors.push('不能为负数');
+                if (num > 1 && field.max <= 1) errors.push('应为 0~1 之间的比例');
+            }
+        }
+    } else if (field.type === 'list') {
+        if (typeof value === 'string') {
+            const items = value.split(',').map(s => s.trim()).filter(s => s);
+            if (items.length === 0 && field.default && field.default.length > 0) {
+                errors.push('至少需要填写一个交易对');
+            }
+        }
+    }
+    
+    return errors;
+}
+
+function renderField(key, field, groupKey) {
     const value = field.value;
     const fieldId = 'field_' + key.replace(/\./g, '_');
     
     formData[key] = value;
+    fieldDefinitions[key] = field;
+    
+    // 获取风险等级和配置分层
+    const riskClass = getRiskClass(key);
+    const section = getFieldSection(groupKey, key);
     
     let inputHtml = '';
     
     if (field.type === 'bool') {
         inputHtml = `
             <input type="checkbox" id="${fieldId}" ${value ? 'checked' : ''} 
-                   onchange="formData['${key}'] = this.checked">
+                   onchange="formData['${key}'] = this.checked; validateFieldOnInput('${key}')">
         `;
         return `
-            <div class="form-field bool-field">
+            <div class="form-field ${riskClass}" data-field="${key}" data-section="${section}">
                 ${inputHtml}
                 <label for="${fieldId}">${field.label}</label>
             </div>
@@ -235,7 +481,7 @@ function renderField(key, field) {
             `<option value="${opt}" ${value === opt ? 'selected' : ''}>${opt}</option>`
         ).join('');
         inputHtml = `
-            <select id="${fieldId}" onchange="formData['${key}'] = this.value">
+            <select id="${fieldId}" onchange="formData['${key}'] = this.value; validateFieldOnInput('${key}')">
                 ${options}
             </select>
         `;
@@ -244,7 +490,9 @@ function renderField(key, field) {
         inputHtml = `
             <input type="text" id="${fieldId}" value="${displayValue}" 
                    placeholder="BTC/USDT, ETH/USDT"
-                   onchange="formData['${key}'] = this.value">
+                   data-original="${displayValue}"
+                   onchange="formData['${key}'] = this.value; validateFieldOnInput('${key}')"
+                   onblur="formatListField('${fieldId}', '${key}')">
         `;
     } else {
         const step = field.type === 'float' ? '0.001' : '1';
@@ -253,39 +501,141 @@ function renderField(key, field) {
         inputHtml = `
             <input type="number" id="${fieldId}" value="${value}" 
                    step="${step}" ${minAttr} ${maxAttr}
-                   onchange="formData['${key}'] = ${field.type === 'int' ? 'parseInt(this.value)' : 'parseFloat(this.value)'}">
+                   onchange="formData['${key}'] = ${field.type === 'int' ? 'parseInt(this.value)' : 'parseFloat(this.value)'}; validateFieldOnInput('${key}')"
+                   onblur="validateFieldOnInput('${key}')">
         `;
     }
     
-    const recommendedHtml = (field.recommended || []).length > 0 
-        ? `<div class="recommended">推荐: ${field.recommended.map(v => 
-            `<span onclick="setRecommended('${fieldId}', ${field.type === 'list' ? `'${v}'` : v}, '${key}')">${v}</span>`
-        ).join('')}</div>` 
-        : '';
+    // 推荐值和单字段恢复
+    const hasRecommended = (field.recommended || []).length > 0;
+    const recommendedHtml = hasRecommended 
+        ? `<div class="recommended">
+            <span class="recommended-text">推荐:</span> 
+            ${field.recommended.map(v => 
+                `<span onclick="setRecommended('${fieldId}', ${field.type === 'list' ? `'${Array.isArray(v) ? v.join(', ') : v}'` : v}, '${key}')">${Array.isArray(v) ? v.join(', ') : v}</span>`
+            ).join('')}
+            <span class="single-reset" onclick="resetToDefault('${key}')">恢复默认</span>
+           </div>` 
+        : `<div class="recommended">
+            <span class="single-reset" onclick="resetToDefault('${key}')">恢复默认</span>
+           </div>`;
     
     return `
-        <div class="form-field">
+        <div class="form-field ${riskClass}" data-field="${key}" data-section="${section}">
             <label for="${fieldId}">${field.label}</label>
             ${inputHtml}
             ${field.description ? `<div class="description">${field.description}</div>` : ''}
+            <div class="error-msg"></div>
             ${recommendedHtml}
         </div>
     `;
 }
 
+// 格式化 list 字段
+function formatListField(fieldId, key) {
+    const input = document.getElementById(fieldId);
+    const value = input.value;
+    if (typeof value === 'string') {
+        const formatted = value.split(',').map(s => s.trim()).filter(s => s).join(', ');
+        input.value = formatted;
+        formData[key] = formatted;
+    }
+}
+
+// 实时校验单个字段
+function validateFieldOnInput(key) {
+    const field = fieldDefinitions[key];
+    const value = formData[key];
+    const fieldEl = document.querySelector(`[data-field="${key}"]`);
+    const inputEl = fieldEl.querySelector('input, select');
+    const errorEl = fieldEl.querySelector('.error-msg');
+    
+    const errors = validateField(key, field, value);
+    
+    if (errors.length > 0) {
+        fieldEl.classList.add('has-error');
+        inputEl.classList.add('error');
+        errorEl.textContent = errors[0];
+        return false;
+    } else {
+        fieldEl.classList.remove('has-error');
+        inputEl.classList.remove('error');
+        errorEl.textContent = '';
+        return true;
+    }
+}
+
+// 恢复单字段默认值
+function resetToDefault(key) {
+    const field = fieldDefinitions[key];
+    const fieldId = 'field_' + key.replace(/\./g, '_');
+    const input = document.getElementById(fieldId);
+    
+    if (input) {
+        const defaultVal = field.default;
+        if (field.type === 'list') {
+            input.value = Array.isArray(defaultVal) ? defaultVal.join(', ') : '';
+        } else {
+            input.value = defaultVal;
+        }
+        formData[key] = defaultVal;
+        validateFieldOnInput(key);
+    }
+}
+
 function setRecommended(fieldId, value, key) {
-    document.getElementById(fieldId).value = value;
-    formData[key] = value;
+    const input = document.getElementById(fieldId);
+    if (input) {
+        input.value = value;
+        formData[key] = value;
+        validateFieldOnInput(key);
+    }
 }
 
 function renderGroup(groupKey, groupData) {
     const container = document.getElementById(groupKey + '-form');
     if (!container) return;
     
-    let html = '';
+    // 按分层组织字段
+    const sections = { basic: [], advanced: [], danger: [] };
+    
     for (const [fieldKey, field] of Object.entries(groupData.fields)) {
-        html += renderField(fieldKey, field);
+        const section = getFieldSection(groupKey, fieldKey);
+        sections[section].push({ key: fieldKey, field });
     }
+    
+    let html = '';
+    
+    // 渲染危险配置
+    if (sections.danger.length > 0) {
+        html += `<div class="config-section danger">
+            <div class="config-section-title"><span class="icon">⚠️</span> 危险配置 - 请谨慎修改</div>
+            <div class="form-grid">
+                ${sections.danger.map(f => renderField(f.key, f.field, groupKey)).join('')}
+            </div>
+        </div>`;
+    }
+    
+    // 渲染基础配置
+    if (sections.basic.length > 0) {
+        html += `<div class="config-section basic">
+            <div class="config-section-title"><span class="icon">⚙️</span> 基础配置</div>
+            <div class="form-grid">
+                ${sections.basic.map(f => renderField(f.key, f.field, groupKey)).join('')}
+            </div>
+        </div>`;
+    }
+    
+    // 渲染高级配置
+    if (sections.advanced.length > 0) {
+        html += `<div class="config-section advanced">
+            <div class="config-section-title"><span class="icon">🔧</span> 高级配置</div>
+            <div class="form-grid">
+                ${sections.advanced.map(f => renderField(f.key, f.field, groupKey)).join('')}
+            </div>
+        </div>`;
+    }
+    
     container.innerHTML = html || '<div class="muted">暂无配置项</div>';
 }
 
@@ -298,14 +648,31 @@ async function loadConfigForm() {
             renderGroup(groupKey, groupData);
         }
         
-        showMessage('配置已加载', 'success');
+        showMessage('✅ 配置已加载', 'success');
     } catch (e) {
         console.error('loadConfigForm error:', e);
-        showMessage('加载失败: ' + e.message, 'error');
+        showMessage('❌ 加载失败: ' + e.message, 'error');
     }
 }
 
 async function saveConfig() {
+    // 先校验所有字段
+    let hasErrors = false;
+    let errorCount = 0;
+    
+    for (const key of Object.keys(formData)) {
+        const field = fieldDefinitions[key];
+        if (!validateFieldOnInput(key)) {
+            hasErrors = true;
+            errorCount++;
+        }
+    }
+    
+    if (hasErrors) {
+        showMessage(`⚠️ 有 ${errorCount} 个字段校验失败，请修正后再保存`, 'warning');
+        return;
+    }
+    
     try {
         const resp = await api('/api/config/save', {
             method: 'POST',
@@ -313,13 +680,13 @@ async function saveConfig() {
         });
         
         if (resp.success) {
-            showMessage(resp.message || '保存成功', 'success');
+            showMessage('✅ ' + (resp.message || '保存成功'), 'success');
         } else {
-            showMessage(resp.error || '保存失败', 'error');
+            showMessage('❌ ' + (resp.error || '保存失败'), 'error');
         }
     } catch (e) {
         console.error('saveConfig error:', e);
-        showMessage('保存失败: ' + e.message, 'error');
+        showMessage('❌ 保存失败: ' + e.message, 'error');
     }
 }
 
@@ -332,13 +699,13 @@ async function restartDaemon() {
         });
         
         if (resp.success) {
-            showMessage('机器人已重启', 'success');
+            showMessage('✅ 机器人已重启', 'success');
         } else {
-            showMessage(resp.error || '重启失败', 'error');
+            showMessage('❌ ' + (resp.error || '重启失败'), 'error');
         }
     } catch (e) {
         console.error('restartDaemon error:', e);
-        showMessage('重启失败: ' + e.message, 'error');
+        showMessage('❌ 重启失败: ' + e.message, 'error');
     }
 }
 
@@ -347,7 +714,7 @@ function showMessage(msg, type) {
     el.textContent = msg;
     el.className = 'alert ' + type;
     el.style.display = 'block';
-    setTimeout(() => { el.style.display = 'none'; }, 3000);
+    setTimeout(() => { el.style.display = 'none'; }, 4000);
 }
 
 // Initial load

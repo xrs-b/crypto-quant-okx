@@ -347,16 +347,22 @@ class SignalRecorder:
             reasons=signal.reasons,
             strategies_triggered=signal.strategies_triggered
         )
-        if not passed:
-            self.db.update_signal(
-                signal_id,
-                filtered=1,
-                filter_reason=reason,
-                filter_code=filter_meta.get('code'),
-                filter_group=filter_meta.get('group'),
-                action_hint=filter_meta.get('action_hint'),
-                filter_details=json.dumps(details, ensure_ascii=False)
-            )
+        # Always save filter_details (includes entry_decision) for observability
+        # Merge signal's filter_details with validation details
+        signal_filter_details = getattr(signal, 'filter_details', None) or {}
+        # Merge validation details into signal's filter_details
+        if details:
+            signal_filter_details.update(details)
+        
+        self.db.update_signal(
+            signal_id,
+            filtered=1 if not passed else 0,
+            filter_reason=reason,
+            filter_code=filter_meta.get('code') if not passed else None,
+            filter_group=filter_meta.get('group') if not passed else None,
+            action_hint=filter_meta.get('action_hint') if not passed else None,
+            filter_details=json.dumps(signal_filter_details, ensure_ascii=False)
+        )
         for reason_data in signal.reasons:
             self.db.record_strategy_analysis(
                 signal_id=signal_id,

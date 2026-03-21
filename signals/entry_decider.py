@@ -198,11 +198,11 @@ class EntryDecider:
         elif strategy_count == 1:
             score += 10
         
-        # 净强度加分 (0-20)
-        net_component = min(20, int(net / 2))
+        # 净强度加分 (0-20)，只对正向净强度加分，负向净强度不扣分
+        net_component = min(20, max(0, int(net / 2)))
         score += net_component
         
-        score = min(100, score)
+        score = max(0, min(100, score))
         
         # 原因
         if score >= 50:

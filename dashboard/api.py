@@ -12,6 +12,7 @@ import shutil
 import json
 from pathlib import Path
 import yaml
+import difflib
 
 # 初始化Flask
 app = Flask(__name__, static_folder='templates', static_url_path='')
@@ -488,6 +489,30 @@ def _get_local_backups_dir() -> Path:
     backups_dir = local_path.parent / 'backups'
     backups_dir.mkdir(parents=True, exist_ok=True)
     return backups_dir
+
+
+def _cleanup_old_backups(backup_dir: Path, keep: int = 10):
+    """清理旧备份，保留最近 keep 份"""
+    try:
+        backups = sorted(backup_dir.glob('config.local-*.yaml'), key=lambda p: p.stat().st_mtime, reverse=True)
+        for old_backup in backups[keep:]:
+            old_backup.unlink()
+    except Exception as e:
+        print(f"[backup] 清理旧备份失败: {e}")
+
+
+def _list_config_backups() -> List[Dict[str, Any]]:
+    """列出 config.local.yaml 的所有备份"""
+    backups = []
+    backup_dir = _get_local_backups_dir()
+    for path in sorted(backup_dir.glob('config.local-*.yaml'), key=lambda p: p.stat().st_mtime, reverse=True):
+        backups.append({
+            'name': path.name,
+            'path': str(path),
+            'size': path.stat().st_size,
+            'modified_at': datetime.fromtimestamp(path.stat().st_mtime).isoformat(),
+        })
+    return backups
 
 
 def _build_effective_symbol_override_view(cfg: Config) -> List[Dict[str, Any]]:
@@ -2817,6 +2842,23 @@ def save_config_form():
     
     local_config = deep_merge(local_config, nested)
     
+    # 创建备份（在保存前）
+    backup_info = None
+    if local_config_path.exists():
+        backup_dir = local_config_path.parent / 'backups'
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+        backup_filename = f'config.local-{timestamp}.yaml'
+        backup_path = backup_dir / backup_filename
+        shutil.copy2(local_config_path, backup_path)
+        # 清理旧备份，保留最近 10 份
+        _cleanup_old_backups(backup_dir, keep=10)
+        backup_info = {
+            'name': backup_filename,
+            'path': str(backup_path),
+            'created_at': datetime.now().isoformat()
+        }
+    
     # 保存到文件
     with open(local_config_path, 'w', encoding='utf-8') as f:
         yaml.dump(local_config, f, allow_unicode=True, default_flow_style=False)
@@ -2838,7 +2880,8 @@ def save_config_form():
         'message': f'已保存 {len(saved_fields)} 个配置项到 config.local.yaml',
         'saved_fields': saved_fields,
         'saved_path': str(local_config_path),
-        'audit_id': audit_record['timestamp']
+        'audit_id': audit_record['timestamp'],
+        'backup': backup_info
     }
     
     # 如果请求自动重启
@@ -2956,6 +2999,115 @@ def get_config_status():
             'daemon': daemon_status,
             'comparison': comparison,
             'pending_restart': len(comparison) > 0 and runtime.get('running', False)
+        }
+    })
+
+
+# ========== 配置备份/回滚 API ==========
+@app.route('/api/config/backups')
+def list_config_backups():
+    """列出 config.local.yaml 的所有备份"""
+    backups = _list_config_backups()
+    return jsonify({'success': True, 'data': backups, 'count': len(backups)})
+
+
+@app.route('/api/config/rollback', methods=['POST'])
+def rollback_config_backup():
+    """回滚 config.local.yaml 到指定备份"""
+    payload = request.get_json(silent=True) or {}
+    backup_name = payload.get('backup_name')
+    auto_restart = payload.get('auto_restart', False)
+    
+    if not backup_name:
+        return jsonify({'success': False, 'error': 'missing backup_name'}), 400
+    
+    backup_dir = _get_local_backups_dir()
+    backup_path = backup_dir / backup_name
+    
+    if not backup_path.exists():
+        return jsonify({'success': False, 'error': 'backup not found'}), 404
+    
+    local_path = _get_local_config_path()
+    
+    # 创建回滚前的当前配置备份
+    pre_rollback_backup = None
+    if local_path.exists():
+        timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+        pre_rollback_backup = backup_dir / f'config.local-pre-rollback-{timestamp}.yaml'
+        shutil.copy2(local_path, pre_rollback_backup)
+    
+    # 执行回滚
+    shutil.copy2(backup_path, local_path)
+    
+    # 重新加载配置
+    config.reload()
+    
+    # 记录审计
+    audit_record = {
+        'timestamp': datetime.now().isoformat(),
+        'action': 'rollback',
+        'rolled_back_to': backup_name,
+        'pre_rollback_backup': str(pre_rollback_backup) if pre_rollback_backup else None,
+    }
+    _save_config_audit_record(audit_record)
+    
+    result = {
+        'success': True,
+        'message': f'已回滚到备份: {backup_name}',
+        'rolled_back_to': backup_name,
+        'pre_rollback_backup': str(pre_rollback_backup) if pre_rollback_backup else None,
+    }
+    
+    if auto_restart:
+        restart_result = _restart_daemon_internal()
+        result['restarted'] = restart_result
+    
+    return jsonify(result)
+
+
+@app.route('/api/config/diff')
+def config_diff():
+    """对比当前配置与指定备份的差异"""
+    backup_name = request.args.get('backup_name')
+    
+    if not backup_name:
+        return jsonify({'success': False, 'error': 'missing backup_name'}), 400
+    
+    backup_dir = _get_local_backups_dir()
+    backup_path = backup_dir / backup_name
+    
+    if not backup_path.exists():
+        return jsonify({'success': False, 'error': 'backup not found'}), 404
+    
+    local_path = _get_local_config_path()
+    
+    # 读取当前配置
+    current_content = ''
+    if local_path.exists():
+        with open(local_path, 'r', encoding='utf-8') as f:
+            current_content = f.read()
+    
+    # 读取备份配置
+    backup_content = ''
+    with open(backup_path, 'r', encoding='utf-8') as f:
+        backup_content = f.read()
+    
+    # 生成 unified diff
+    diff_lines = list(difflib.unified_diff(
+        backup_content.splitlines(keepends=True),
+        current_content.splitlines(keepends=True),
+        fromfile=f'backup: {backup_name}',
+        tofile='current: config.local.yaml',
+        lineterm=''
+    ))
+    
+    return jsonify({
+        'success': True,
+        'data': {
+            'backup_name': backup_name,
+            'current_path': str(local_path),
+            'backup_path': str(backup_path),
+            'diff': ''.join(diff_lines) if diff_lines else '无差异'
         }
     })
 

@@ -22,6 +22,7 @@
     <button class="tab-btn" data-tab="notification">🔔 通知设置</button>
     <button class="tab-btn" data-tab="strategies">📊 策略开关</button>
     <button class="tab-btn" data-tab="status">📈 状态与审计</button>
+    <button class="tab-btn" data-tab="backups">💾 配置备份</button>
 </div>
 
 {# Tab 1: Trading Config #}
@@ -108,6 +109,30 @@
         <div id="config-audit-list">
             <div class="muted">加载中...</div>
         </div>
+    </div>
+</div>
+
+{# Tab 8: Config Backups #}
+<div class="tab-content" id="tab-backups">
+    <div class="card">
+        <div class="section-title">💾 配置备份管理</div>
+        <p style="color: var(--text-secondary, #666); margin-bottom: 16px;">
+            自动备份在每次保存配置时创建，保留最近 10 份。您可以查看差异或回滚到之前的版本。
+        </p>
+        <div style="margin-bottom: 12px;">
+            <button onclick="loadConfigBackups()">🔄 刷新列表</button>
+        </div>
+        <div id="backup-list">
+            <div class="muted">加载中...</div>
+        </div>
+    </div>
+    
+    <div class="card" style="margin-top: 16px;" id="diff-panel" style="display:none;">
+        <div class="section-title">📄 配置差异对比</div>
+        <div style="margin-bottom: 12px;">
+            <button onclick="closeDiffPanel()">✕ 关闭</button>
+        </div>
+        <pre id="diff-content" style="background: var(--bg-secondary, #f5f5f5); padding: 12px; border-radius: 4px; overflow-x: auto; font-size: 12px; max-height: 400px; overflow-y: auto;"></pre>
     </div>
 </div>
 {% endblock %}
@@ -976,6 +1001,101 @@ function renderConfigAudit(records) {
     html += '</div>';
     
     container.innerHTML = html;
+}
+
+// ========== 配置备份相关函数 ==========
+async function loadConfigBackups() {
+    try {
+        const resp = await api('/api/config/backups');
+        if (resp.success) {
+            renderBackupList(resp.data);
+        } else {
+            showMessage('❌ 加载备份列表失败: ' + resp.error, 'error');
+        }
+    } catch (e) {
+        console.error('loadConfigBackups error:', e);
+        showMessage('❌ 加载备份列表失败', 'error');
+    }
+}
+
+function renderBackupList(backups) {
+    const container = document.getElementById('backup-list');
+    if (!container) return;
+    
+    if (!backups || backups.length === 0) {
+        container.innerHTML = '<div class="muted">暂无备份记录</div>';
+        return;
+    }
+    
+    let html = '<div class="backup-list">';
+    for (const backup of backups) {
+        const time = backup.modified_at ? backup.modified_at.replace('T', ' ').substring(0, 19) : '--';
+        const sizeKB = (backup.size / 1024).toFixed(1);
+        
+        html += `
+            <div class="backup-item" style="display: flex; justify-content: space-between; align-items: center; padding: 12px; border-bottom: 1px solid var(--border-color, #eee);">
+                <div>
+                    <div style="font-weight: 600;">${backup.name}</div>
+                    <div class="muted" style="font-size: 12px;">${time} • ${sizeKB} KB</div>
+                </div>
+                <div style="display: flex; gap: 8px;">
+                    <button class="btn-small" onclick="viewBackupDiff('${backup.name}')">📄 Diff</button>
+                    <button class="btn-small" onclick="rollbackConfig('${backup.name}')">↩️ 回滚</button>
+                </div>
+            </div>
+        `;
+    }
+    html += '</div>';
+    
+    container.innerHTML = html;
+}
+
+async function viewBackupDiff(backupName) {
+    try {
+        const resp = await api('/api/config/diff?backup_name=' + encodeURIComponent(backupName));
+        if (resp.success) {
+            const diffPanel = document.getElementById('diff-panel');
+            const diffContent = document.getElementById('diff-content');
+            diffContent.textContent = resp.data.diff;
+            diffPanel.style.display = 'block';
+            diffPanel.scrollIntoView({ behavior: 'smooth' });
+        } else {
+            showMessage('❌ 获取差异失败: ' + resp.error, 'error');
+        }
+    } catch (e) {
+        console.error('viewBackupDiff error:', e);
+        showMessage('❌ 获取差异失败', 'error');
+    }
+}
+
+function closeDiffPanel() {
+    const diffPanel = document.getElementById('diff-panel');
+    diffPanel.style.display = 'none';
+}
+
+async function rollbackConfig(backupName) {
+    if (!confirm('确定要回滚到备份 ' + backupName + ' 吗？当前配置将自动备份。')) {
+        return;
+    }
+    
+    try {
+        const resp = await api('/api/config/rollback', {
+            method: 'POST',
+            body: JSON.stringify({ backup_name: backupName, auto_restart: false })
+        });
+        
+        if (resp.success) {
+            showMessage('✅ 已回滚到: ' + backupName, 'success');
+            loadConfigBackups();
+            // 刷新配置表单
+            loadConfigForm();
+        } else {
+            showMessage('❌ 回滚失败: ' + resp.error, 'error');
+        }
+    } catch (e) {
+        console.error('rollbackConfig error:', e);
+        showMessage('❌ 回滚失败', 'error');
+    }
 }
 
 // Initial load

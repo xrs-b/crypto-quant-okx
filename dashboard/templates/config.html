@@ -21,6 +21,7 @@
     <button class="tab-btn" data-tab="symbols">💰 监听币种</button>
     <button class="tab-btn" data-tab="notification">🔔 通知设置</button>
     <button class="tab-btn" data-tab="strategies">📊 策略开关</button>
+    <button class="tab-btn" data-tab="status">📈 状态与审计</button>
 </div>
 
 {# Tab 1: Trading Config #}
@@ -78,6 +79,33 @@
     <div class="card">
         <div class="section-title">策略开关与参数</div>
         <div class="form-grid" id="strategies-form">
+            <div class="muted">加载中...</div>
+        </div>
+    </div>
+</div>
+
+{# Tab 7: Status & Audit #}
+<div class="tab-content" id="tab-status">
+    <div class="card">
+        <div class="section-title">🤖 机器人运行状态</div>
+        <div id="daemon-status">
+            <div class="muted">加载中...</div>
+        </div>
+    </div>
+    
+    <div class="card" style="margin-top: 16px;">
+        <div class="section-title">⚠️ 配置生效确认</div>
+        <div id="config-comparison">
+            <div class="muted">加载中...</div>
+        </div>
+    </div>
+    
+    <div class="card" style="margin-top: 16px;">
+        <div class="section-title">📋 配置变更审计</div>
+        <div style="margin-bottom: 12px;">
+            <button onclick="loadConfigStatus()">🔄 刷新状态</button>
+        </div>
+        <div id="config-audit-list">
             <div class="muted">加载中...</div>
         </div>
     </div>
@@ -323,6 +351,118 @@
 .field-badge.invalid {
     background: #f8d7da;
     color: #721c24;
+}
+
+/* ========== Status & Audit Styles ========== */
+.status-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    gap: 12px;
+}
+
+.status-item {
+    background: var(--bg-secondary, #f5f5f5);
+    border-radius: 8px;
+    padding: 12px;
+}
+
+.status-item.status-ok {
+    background: #d4edda;
+    border-left: 3px solid #28a745;
+}
+
+.status-item.status-warn {
+    background: #f8d7da;
+    border-left: 3px solid #dc3545;
+}
+
+.status-label {
+    font-size: 12px;
+    color: #666;
+    margin-bottom: 4px;
+}
+
+.status-value {
+    font-size: 16px;
+    font-weight: 600;
+}
+
+.status-ok {
+    color: #28a745;
+}
+
+.status-warn {
+    color: #dc3545;
+}
+
+.comparison-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.comparison-item {
+    background: #f8f9fa;
+    border: 1px solid #dee2e6;
+    border-radius: 6px;
+    padding: 10px;
+}
+
+.comparison-field {
+    font-weight: 600;
+    margin-bottom: 6px;
+    color: #333;
+}
+
+.comparison-values {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 13px;
+}
+
+.comparison-values code {
+    background: #e9ecef;
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-family: monospace;
+}
+
+.comparison-note {
+    margin-top: 6px;
+    font-size: 12px;
+    color: #ffc107;
+    font-weight: 600;
+}
+
+.audit-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.audit-item {
+    background: #f8f9fa;
+    border-left: 3px solid #007bff;
+    padding: 10px 12px;
+    border-radius: 0 6px 6px 0;
+}
+
+.audit-time {
+    font-size: 12px;
+    color: #666;
+    margin-bottom: 4px;
+}
+
+.audit-fields {
+    font-size: 13px;
+    color: #333;
+}
+
+.audit-auto-restart {
+    font-size: 12px;
+    color: #28a745;
+    margin-top: 4px;
 }
 </style>
 {% endblock %}
@@ -715,6 +855,127 @@ function showMessage(msg, type) {
     el.className = 'alert ' + type;
     el.style.display = 'block';
     setTimeout(() => { el.style.display = 'none'; }, 4000);
+}
+
+// ========== 状态与审计相关函数 ==========
+async function loadConfigStatus() {
+    try {
+        // 加载 daemon 状态和配置对比
+        const statusResp = await api('/api/config/status');
+        if (statusResp.success) {
+            renderDaemonStatus(statusResp.data.daemon);
+            renderConfigComparison(statusResp.data.comparison, statusResp.data.pending_restart);
+        }
+        
+        // 加载审计记录
+        const auditResp = await api('/api/config/audit?limit=20');
+        if (auditResp.success) {
+            renderConfigAudit(auditResp.data);
+        }
+    } catch (e) {
+        console.error('loadConfigStatus error:', e);
+    }
+}
+
+function renderDaemonStatus(daemon) {
+    const container = document.getElementById('daemon-status');
+    if (!container) return;
+    
+    const isRunning = daemon.running;
+    const statusClass = isRunning ? 'status-ok' : 'status-warn';
+    const statusText = isRunning ? '🟢 运行中' : '🔴 已停止';
+    
+    const errorHtml = daemon.last_error 
+        ? `<div style="color: #dc3545; margin-top: 8px;">⚠️ 最近错误: ${daemon.last_error}</div>` 
+        : '';
+    
+    container.innerHTML = `
+        <div class="status-grid">
+            <div class="status-item ${statusClass}">
+                <div class="status-label">运行状态</div>
+                <div class="status-value">${statusText}</div>
+            </div>
+            <div class="status-item">
+                <div class="status-label">运行模式</div>
+                <div class="status-value">${daemon.mode || '--'}</div>
+            </div>
+            <div class="status-item">
+                <div class="status-label">执行间隔</div>
+                <div class="status-value">${daemon.interval_seconds ? daemon.interval_seconds + '秒' : '--'}</div>
+            </div>
+            <div class="status-item">
+                <div class="status-label">上次启动</div>
+                <div class="status-value">${daemon.last_started_at ? daemon.last_started_at.replace('T', ' ').substring(0, 19) : '--'}</div>
+            </div>
+        </div>
+        ${errorHtml}
+    `;
+}
+
+function renderConfigComparison(comparison, pendingRestart) {
+    const container = document.getElementById('config-comparison');
+    if (!container) return;
+    
+    if (!comparison || comparison.length === 0) {
+        container.innerHTML = `
+            <div class="status-ok" style="padding: 12px; border-radius: 6px; background: #d4edda;">
+                ✅ 所有配置已生效，无需重启
+            </div>
+        `;
+        return;
+    }
+    
+    let html = '';
+    if (pendingRestart) {
+        html += `<div class="status-warn" style="padding: 12px; border-radius: 6px; background: #fff3cd; margin-bottom: 12px;">
+            ⚠️ 配置已保存，需要重启机器人才能生效
+        </div>`;
+    }
+    
+    html += '<div class="comparison-list">';
+    for (const item of comparison) {
+        html += `
+            <div class="comparison-item">
+                <div class="comparison-field">${item.field}</div>
+                <div class="comparison-values">
+                    <span>表单值: <code>${JSON.stringify(item.form_value)}</code></span>
+                    <span>当前值: <code>${JSON.stringify(item.runtime_value)}</code></span>
+                </div>
+                ${item.note ? `<div class="comparison-note">${item.note}</div>` : ''}
+            </div>
+        `;
+    }
+    html += '</div>';
+    
+    container.innerHTML = html;
+}
+
+function renderConfigAudit(records) {
+    const container = document.getElementById('config-audit-list');
+    if (!container) return;
+    
+    if (!records || records.length === 0) {
+        container.innerHTML = '<div class="muted">暂无审计记录</div>';
+        return;
+    }
+    
+    let html = '<div class="audit-list">';
+    for (const record of records) {
+        const time = record.timestamp ? record.timestamp.replace('T', ' ').substring(0, 19) : '--';
+        const fields = record.fields ? record.fields.join(', ') : '--';
+        const changesCount = record.changes ? Object.keys(record.changes).length : 0;
+        
+        html += `
+            <div class="audit-item">
+                <div class="audit-time">${time}</div>
+                <div class="audit-fields">修改了 ${changesCount} 个字段: ${fields}</div>
+                <div class="audit-auto-restart">${record.auto_restart ? '🔁 自动重启' : ''}</div>
+            </div>
+        `;
+    }
+    html += '</div>';
+    
+    container.innerHTML = html;
 }
 
 // Initial load

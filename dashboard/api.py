@@ -565,73 +565,73 @@ def index():
 # ============================================================================
 
 @app.route('/overview')
-def overview():
+def overview_page():
     """总览页面"""
     return render_template('overview.html', active_page='overview')
 
 
 @app.route('/trades')
-def trades():
+def trades_page():
     """交易记录页面"""
     return render_template('trades.html', active_page='trades')
 
 
 @app.route('/partial-tp')
-def partial_tp():
+def partial_tp_page():
     """Partial TP 触发历史页面"""
     return render_template('partial_tp.html', active_page='partial_tp')
 
 
 @app.route('/signals')
-def signals():
+def signals_page():
     """信号记录页面"""
     return render_template('signals.html', active_page='signals')
 
 
 @app.route('/positions')
-def positions():
+def positions_page():
     """持仓页面"""
     return render_template('positions.html', active_page='positions')
 
 
 @app.route('/strategy')
-def strategy():
+def strategy_page():
     """策略分析页面"""
     return render_template('strategy.html', active_page='strategy')
 
 
 @app.route('/risk')
-def risk():
+def risk_page():
     """风控状态页面"""
     return render_template('risk.html', active_page='risk')
 
 
 @app.route('/governance')
-def governance():
+def governance_page():
     """治理审批页面"""
     return render_template('governance.html', active_page='governance')
 
 
 @app.route('/optimizer')
-def optimizer():
+def optimizer_page():
     """参数优化页面"""
     return render_template('optimizer.html', active_page='optimizer')
 
 
 @app.route('/backtest')
-def backtest():
+def backtest_page():
     """回测分析页面"""
     return render_template('backtest.html', active_page='backtest')
 
 
 @app.route('/quality')
-def quality():
+def quality_page():
     """信号质量页面"""
     return render_template('quality.html', active_page='quality')
 
 
 @app.route('/config')
-def config_page():
+def config_page_view():
     """系统配置页面"""
     return render_template('config.html', active_page='config')
 
@@ -2290,6 +2290,563 @@ def get_governance_config_history():
     """获取治理参数变更历史"""
     limit = int(request.args.get('limit', 20))
     return jsonify({'success': True, 'data': db.get_governance_config_history(limit=limit)})
+
+
+# ============================================================================
+# 可视化配置表单 API
+# ============================================================================
+
+# 字段元数据定义 - 可扩展
+FIELD_DEFINITIONS = {
+    'trading': {
+        'label': '交易参数',
+        'fields': {
+            'trading.leverage': {
+                'label': '杠杆倍数',
+                'type': 'int',
+                'min': 1,
+                'max': 125,
+                'default': 10,
+                'description': '开仓时使用的杠杆倍数 (1-125)',
+                'recommended': [5, 10, 20, 50]
+            },
+            'trading.position_size': {
+                'label': '仓位比例',
+                'type': 'float',
+                'min': 0.01,
+                'max': 1.0,
+                'default': 0.1,
+                'description': '每次开仓使用的资金比例 (0.01-1.0)',
+                'recommended': [0.05, 0.1, 0.15, 0.2]
+            },
+            'trading.stop_loss': {
+                'label': '止损比例',
+                'type': 'float',
+                'min': 0.001,
+                'max': 0.5,
+                'default': 0.018,
+                'description': '亏损达到此比例时止损',
+                'recommended': [0.01, 0.015, 0.02, 0.03]
+            },
+            'trading.take_profit': {
+                'label': '止盈比例',
+                'type': 'float',
+                'min': 0.001,
+                'max': 0.5,
+                'default': 0.028,
+                'description': '盈利达到此比例时止盈',
+                'recommended': [0.02, 0.028, 0.04, 0.05]
+            },
+            'trading.trailing_stop': {
+                'label': '追踪止损',
+                'type': 'float',
+                'min': 0,
+                'max': 0.2,
+                'default': 0.01,
+                'description': '追踪止损幅度',
+                'recommended': [0.005, 0.01, 0.015, 0.02]
+            },
+            'trading.trailing_activation': {
+                'label': '追踪激活阈值',
+                'type': 'float',
+                'min': 0,
+                'max': 0.2,
+                'default': 0.01,
+                'description': '盈利达到此比例后激活追踪止损',
+                'recommended': [0.005, 0.01, 0.015, 0.02]
+            },
+            'trading.partial_tp_enabled': {
+                'label': '分批止盈启用',
+                'type': 'bool',
+                'default': False,
+                'description': '是否启用分批止盈功能'
+            },
+            'trading.partial_tp_threshold': {
+                'label': '第一止盈触发线',
+                'type': 'float',
+                'min': 0.001,
+                'max': 0.2,
+                'default': 0.015,
+                'description': '盈利达到此比例时触发第一层止盈',
+                'recommended': [0.01, 0.015, 0.02, 0.03]
+            },
+            'trading.partial_tp_ratio': {
+                'label': '第一止盈平仓比例',
+                'type': 'float',
+                'min': 0.1,
+                'max': 0.9,
+                'default': 0.5,
+                'description': '第一层止盈平仓的仓位占比',
+                'recommended': [0.3, 0.5, 0.7]
+            },
+            'trading.partial_tp2_enabled': {
+                'label': '第二止盈启用',
+                'type': 'bool',
+                'default': False,
+                'description': '是否启用第二层分批止盈'
+            },
+            'trading.partial_tp2_threshold': {
+                'label': '第二止盈触发线',
+                'type': 'float',
+                'min': 0.001,
+                'max': 0.3,
+                'default': 0.03,
+                'description': '盈利达到此比例时触发第二层止盈',
+                'recommended': [0.02, 0.03, 0.04, 0.05]
+            },
+            'trading.partial_tp2_ratio': {
+                'label': '第二止盈平仓比例',
+                'type': 'float',
+                'min': 0.1,
+                'max': 1.0,
+                'default': 0.3,
+                'description': '第二层止盈平仓的仓位占比',
+                'recommended': [0.3, 0.5, 0.7]
+            }
+        }
+    },
+    'risk': {
+        'label': '风控参数',
+        'fields': {
+            'trading.max_exposure': {
+                'label': '最大风险敞口',
+                'type': 'float',
+                'min': 0.01,
+                'max': 1.0,
+                'default': 0.3,
+                'description': '总仓位价值占账户比例的上限',
+                'recommended': [0.2, 0.3, 0.5, 0.7]
+            },
+            'trading.max_daily_drawdown': {
+                'label': '日内最大回撤',
+                'type': 'float',
+                'min': 0.01,
+                'max': 0.5,
+                'default': 0.03,
+                'description': '单日亏损比例的容忍上限',
+                'recommended': [0.02, 0.03, 0.05, 0.1]
+            },
+            'trading.max_consecutive_losses': {
+                'label': '最大连亏次数',
+                'type': 'int',
+                'min': 1,
+                'max': 20,
+                'default': 3,
+                'description': '连续亏损次数达到此值后触发熔断',
+                'recommended': [2, 3, 5, 7]
+            },
+            'trading.max_position_per_symbol': {
+                'label': '单币种最大持仓',
+                'type': 'float',
+                'min': 0.01,
+                'max': 1.0,
+                'default': 0.15,
+                'description': '单币种最大持仓比例上限',
+                'recommended': [0.1, 0.15, 0.2, 0.3]
+            },
+            'trading.cooldown_minutes': {
+                'label': '冷却时间(分钟)',
+                'type': 'int',
+                'min': 0,
+                'max': 120,
+                'default': 15,
+                'description': '开仓后等待下次交易的最短时间',
+                'recommended': [5, 10, 15, 30]
+            },
+            'trading.max_trades_per_day': {
+                'label': '每日最大交易次数',
+                'type': 'int',
+                'min': 1,
+                'max': 50,
+                'default': 10,
+                'description': '单日最多开仓次数',
+                'recommended': [5, 10, 15, 20]
+            },
+            'trading.min_trade_interval': {
+                'label': '最小交易间隔(秒)',
+                'type': 'int',
+                'min': 60,
+                'max': 3600,
+                'default': 300,
+                'description': '同一币种最小交易间隔秒数',
+                'recommended': [180, 300, 600, 900]
+            }
+        }
+    },
+    'runtime': {
+        'label': '运行参数',
+        'fields': {
+            'runtime.interval_seconds': {
+                'label': '轮询间隔(秒)',
+                'type': 'int',
+                'min': 60,
+                'max': 3600,
+                'default': 300,
+                'description': '交易循环的间隔秒数',
+                'recommended': [60, 120, 300, 600]
+            },
+            'runtime.mode': {
+                'label': '运行模式',
+                'type': 'select',
+                'options': ['interval', 'schedule', 'realtime'],
+                'default': 'interval',
+                'description': '运行模式: interval=定时, schedule=计划任务, realtime=实时'
+            }
+        }
+    },
+    'symbols': {
+        'label': '监听币种',
+        'fields': {
+            'symbols.watch_list': {
+                'label': '主监控列表',
+                'type': 'list',
+                'default': ['BTC/USDT'],
+                'description': '主要监控的交易对列表'
+            },
+            'symbols.candidate_watch_list': {
+                'label': '候选监控列表',
+                'type': 'list',
+                'default': [],
+                'description': '候选交易对列表'
+            },
+            'symbols.paused_watch_list': {
+                'label': '暂停监控列表',
+                'type': 'list',
+                'default': [],
+                'description': '暂停监控的交易对列表'
+            },
+            'symbols.selection_mode': {
+                'label': '选择模式',
+                'type': 'select',
+                'options': ['focused', 'balanced', 'exploratory'],
+                'default': 'focused',
+                'description': '币种选择模式'
+            }
+        }
+    },
+    'notification': {
+        'label': '通知设置',
+        'fields': {
+            'notification.discord.enabled': {
+                'label': 'Discord启用',
+                'type': 'bool',
+                'default': True,
+                'description': '是否启用Discord通知'
+            },
+            'notification.discord.notify_trades': {
+                'label': '通知交易',
+                'type': 'bool',
+                'default': True,
+                'description': '发送交易通知'
+            },
+            'notification.discord.notify_signals': {
+                'label': '通知信号',
+                'type': 'bool',
+                'default': True,
+                'description': '发送信号通知'
+            },
+            'notification.discord.notify_errors': {
+                'label': '通知错误',
+                'type': 'bool',
+                'default': True,
+                'description': '发送错误通知'
+            }
+        }
+    },
+    'strategies': {
+        'label': '策略开关',
+        'fields': {
+            'strategies.rsi.enabled': {
+                'label': 'RSI策略启用',
+                'type': 'bool',
+                'default': True,
+                'description': '启用RSI超买超卖策略'
+            },
+            'strategies.rsi.period': {
+                'label': 'RSI周期',
+                'type': 'int',
+                'min': 5,
+                'max': 30,
+                'default': 14,
+                'description': 'RSI计算周期'
+            },
+            'strategies.rsi.oversold': {
+                'label': 'RSI超卖阈值',
+                'type': 'int',
+                'min': 10,
+                'max': 50,
+                'default': 35,
+                'description': 'RSI超卖阈值'
+            },
+            'strategies.rsi.overbought': {
+                'label': 'RSI超买阈值',
+                'type': 'int',
+                'min': 50,
+                'max': 90,
+                'default': 65,
+                'description': 'RSI超买阈值'
+            },
+            'strategies.macd.enabled': {
+                'label': 'MACD策略启用',
+                'type': 'bool',
+                'default': True,
+                'description': '启用MACD策略'
+            },
+            'strategies.macd.fast_period': {
+                'label': 'MACD快线周期',
+                'type': 'int',
+                'min': 5,
+                'max': 30,
+                'default': 12,
+                'description': 'MACD快线周期'
+            },
+            'strategies.macd.slow_period': {
+                'label': 'MACD慢线周期',
+                'type': 'int',
+                'min': 15,
+                'max': 50,
+                'default': 26,
+                'description': 'MACD慢线周期'
+            },
+            'strategies.bollinger.enabled': {
+                'label': '布林带策略启用',
+                'type': 'bool',
+                'default': True,
+                'description': '启用布林带策略'
+            },
+            'strategies.bollinger.period': {
+                'label': '布林带周期',
+                'type': 'int',
+                'min': 10,
+                'max': 50,
+                'default': 20,
+                'description': '布林带计算周期'
+            },
+            'strategies.bollinger.std_multiplier': {
+                'label': '布林带标准差倍数',
+                'type': 'float',
+                'min': 1.0,
+                'max': 4.0,
+                'default': 2.0,
+                'description': '布林带标准差倍数'
+            },
+            'strategies.composite.enabled': {
+                'label': '综合策略启用',
+                'type': 'bool',
+                'default': True,
+                'description': '启用多策略综合评分'
+            },
+            'strategies.composite.min_strength': {
+                'label': '综合最小信号强度',
+                'type': 'int',
+                'min': 10,
+                'max': 100,
+                'default': 28,
+                'description': '触发交易所需的最小综合信号强度'
+            }
+        }
+    }
+}
+
+
+def _get_merged_config():
+    """获取合并后的配置(config.yaml + config.local.yaml)"""
+    # 使用 config.all 获取合并后的配置
+    return config.all
+
+
+def _get_field_value(field_key: str, merged_config: dict):
+    """从嵌套配置中获取字段值"""
+    keys = field_key.split('.')
+    value = merged_config
+    for k in keys:
+        if isinstance(value, dict):
+            value = value.get(k)
+        else:
+            return None
+    return value
+
+
+@app.route('/api/config/form')
+def get_config_form():
+    """API: 获取表单配置数据(分组结构 + 当前值 + 元数据)"""
+    merged = _get_merged_config()
+    
+    result = {}
+    for group_key, group_def in FIELD_DEFINITIONS.items():
+        group_data = {
+            'label': group_def['label'],
+            'fields': {}
+        }
+        for field_key, field_def in group_def['fields'].items():
+            current_value = _get_field_value(field_key, merged)
+            # 如果当前值不存在，使用默认值
+            if current_value is None:
+                current_value = field_def.get('default')
+            
+            group_data['fields'][field_key] = {
+                'label': field_def['label'],
+                'type': field_def['type'],
+                'value': current_value,
+                'default': field_def.get('default'),
+                'description': field_def.get('description', ''),
+                'recommended': field_def.get('recommended', []),
+                'min': field_def.get('min'),
+                'max': field_def.get('max'),
+                'options': field_def.get('options', [])
+            }
+        
+        result[group_key] = group_data
+    
+    return jsonify({
+        'success': True,
+        'data': result
+    })
+
+
+@app.route('/api/config/save', methods=['POST'])
+def save_config_form():
+    """API: 保存配置到 config.local.yaml"""
+    pass  # config is already reloaded via config.reload() below
+    
+    payload = request.get_json(silent=True) or {}
+    fields = payload.get('fields', {})
+    auto_restart = payload.get('auto_restart', False)
+    
+    if not fields:
+        return jsonify({'success': False, 'error': '没有要保存的字段'}), 400
+    
+    # 获取 config.local.yaml 路径
+    project_root = Path(__file__).parent.parent
+    local_config_path = project_root / 'config' / 'config.local.yaml'
+    
+    # 读取现有 local 配置(如果存在)
+    local_config = {}
+    if local_config_path.exists():
+        with open(local_config_path, 'r', encoding='utf-8') as f:
+            local_config = yaml.safe_load(f) or {}
+    
+    # 按层级分组写入
+    nested = {}
+    saved_fields = []
+    
+    for field_key, value in fields.items():
+        # 类型转换
+        field_def = None
+        for group in FIELD_DEFINITIONS.values():
+            if field_key in group.get('fields', {}):
+                field_def = group['fields'][field_key]
+                break
+        
+        if field_def:
+            field_type = field_def.get('type', 'string')
+            
+            # 类型转换
+            if field_type == 'int':
+                try:
+                    value = int(value)
+                except (ValueError, TypeError):
+                    value = field_def.get('default', 0)
+            elif field_type == 'float':
+                try:
+                    value = float(value)
+                except (ValueError, TypeError):
+                    value = field_def.get('default', 0.0)
+            elif field_type == 'bool':
+                value = bool(value) if not isinstance(value, bool) else value
+            elif field_type == 'list':
+                if isinstance(value, str):
+                    value = [s.strip() for s in value.split(',') if s.strip()]
+                elif not isinstance(value, list):
+                    value = field_def.get('default', [])
+        
+        # 构建嵌套结构
+        keys = field_key.split('.')
+        current = nested
+        for k in keys[:-1]:
+            if k not in current:
+                current[k] = {}
+            current = current[k]
+        current[keys[-1]] = value
+        saved_fields.append(field_key)
+    
+    # 深度合并到 local_config
+    def deep_merge(base: dict, override: dict) -> dict:
+        result = dict(base)
+        for key, value in override.items():
+            if isinstance(value, dict) and isinstance(result.get(key), dict):
+                result[key] = deep_merge(result[key], value)
+            else:
+                result[key] = value
+        return result
+    
+    local_config = deep_merge(local_config, nested)
+    
+    # 保存到文件
+    with open(local_config_path, 'w', encoding='utf-8') as f:
+        yaml.dump(local_config, f, allow_unicode=True, default_flow_style=False)
+    
+    # 重新加载配置
+    config.reload()
+    
+    result = {
+        'success': True,
+        'message': f'已保存 {len(saved_fields)} 个配置项到 config.local.yaml',
+        'saved_fields': saved_fields,
+        'saved_path': str(local_config_path)
+    }
+    
+    # 如果请求自动重启
+    if auto_restart:
+        restart_result = _restart_daemon_internal()
+        result['restarted'] = restart_result
+    
+    return jsonify(result)
+
+
+def _restart_daemon_internal():
+    """内部重启 daemon 方法"""
+    import signal
+    import subprocess
+    
+    project_root = Path(__file__).parent.parent
+    pid_file = project_root / 'bot.pid'
+    
+    try:
+        # 读取当前 PID
+        if pid_file.exists():
+            with open(pid_file, 'r') as f:
+                old_pid = int(f.read().strip())
+            
+            # 尝试发送 SIGTERM
+            try:
+                os.kill(old_pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass  # 进程已不存在
+        
+        # 启动新进程
+        run_script = project_root / 'bot' / 'run.py'
+        if run_script.exists():
+            # 后台启动
+            subprocess.Popen(
+                ['python3', str(run_script)],
+                cwd=str(project_root),
+                stdout=open(project_root / 'logs' / 'trading.log', 'a'),
+                stderr=subprocess.STDOUT
+            )
+            return {'success': True, 'message': 'Daemon 已重启'}
+        else:
+            return {'success': False, 'error': '找不到 bot/run.py'}
+    
+    except Exception as e:
+        return {'success': False, 'error': str(e)}
+
+
+@app.route('/api/daemon/restart', methods=['POST'])
+def restart_daemon():
+    """API: 重启交易机器人"""
+    result = _restart_daemon_internal()
+    return jsonify(result)
 
 
 # ============================================================================

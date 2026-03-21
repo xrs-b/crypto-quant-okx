@@ -66,16 +66,17 @@
                     <th>状态</th>
                     <th>开仓价</th>
                     <th>平仓价</th>
-                    <th>数量</th>
+                    <th>数量(张)</th>
+                    <th>币数量</th>
                     <th>杠杆</th>
-                    <th>盈亏</th>
-                    <th>盈亏率</th>
+                    <th>已实现盈亏(U)</th>
+                    <th>已实现盈亏(%)</th>
                     <th>开仓时间</th>
                     <th>平仓时间</th>
                 </tr>
             </thead>
             <tbody id="tradesTable">
-                <tr><td colspan="12" class="muted">加载中...</td></tr>
+                <tr><td colspan="13" class="muted">加载中...</td></tr>
             </tbody>
         </table>
     </div>
@@ -120,13 +121,22 @@ async function loadTrades(page = 1) {
         // Render trades
         const tbody = document.getElementById('tradesTable');
         if (trades.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="12" class="muted">暂无交易记录</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="13" class="muted">暂无交易记录</td></tr>';
         } else {
             tbody.innerHTML = trades.map(t => {
                 const pnl = Number(t.pnl || 0);
-                const pnlRate = t.entry_price && t.exit_price 
-                    ? ((t.exit_price - t.entry_price) / t.entry_price * (t.side === 'long' ? 1 : -1) * 100).toFixed(2) + '%'
-                    : '--';
+                // 优先使用数据库的 pnl_percent，否则回退计算
+                let pnlPercent = Number(t.pnl_percent);
+                if (isNaN(pnlPercent) || pnlPercent === 0) {
+                    const entryPrice = Number(t.entry_price || 0);
+                    const exitPrice = Number(t.exit_price || 0);
+                    if (entryPrice > 0 && exitPrice > 0 && t.side === 'long') {
+                        pnlPercent = ((exitPrice - entryPrice) / entryPrice) * 100;
+                    } else if (entryPrice > 0 && exitPrice > 0 && t.side === 'short') {
+                        pnlPercent = ((entryPrice - exitPrice) / entryPrice) * 100;
+                    }
+                }
+                const coinQty = Number(t.coin_quantity || t.quantity * (t.contract_size || 1));
                 return `<tr>
                     <td>${t.id}</td>
                     <td>${t.symbol}</td>
@@ -135,9 +145,10 @@ async function loadTrades(page = 1) {
                     <td>${money(t.entry_price)}</td>
                     <td>${t.exit_price ? money(t.exit_price) : '--'}</td>
                     <td>${t.quantity}</td>
+                    <td>${coinQty.toFixed(4)}</td>
                     <td>${t.leverage || '--'}x</td>
                     <td class="${pnl >= 0 ? 'pos' : 'neg'}">${pnl === 0 ? '--' : money(pnl)}</td>
-                    <td class="${parseFloat(pnlRate) >= 0 ? 'pos' : 'neg'}">${pnlRate}</td>
+                    <td class="${pnlPercent >= 0 ? 'pos' : 'neg'}">${isNaN(pnlPercent) || pnlPercent === 0 ? '--' : pnlPercent.toFixed(2) + '%'}</td>
                     <td>${safe(t.open_time)}</td>
                     <td>${safe(t.close_time)}</td>
                 </tr>`;
@@ -161,7 +172,7 @@ async function loadTrades(page = 1) {
         document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString('zh-CN');
     } catch (e) {
         console.error('loadTrades error:', e);
-        document.getElementById('tradesTable').innerHTML = '<tr><td colspan="12" class="muted">加载错误</td></tr>';
+        document.getElementById('tradesTable').innerHTML = '<tr><td colspan="13" class="muted">加载错误</td></tr>';
     }
 }
 

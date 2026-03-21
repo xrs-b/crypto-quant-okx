@@ -23,7 +23,7 @@ from core.exchange import Exchange
 from core.logger import logger
 from core.notifier import NotificationManager
 from core.presets import PresetManager
-from signals import SignalDetector, SignalValidator, SignalRecorder
+from signals import SignalDetector, SignalValidator, SignalRecorder, EntryDecider
 from trading import TradingExecutor, RiskManager
 from ml.engine import MLEngine, ModelTrainer, DataCollector
 from analytics import StrategyBacktester, SignalQualityAnalyzer, ParameterOptimizer, GovernanceEngine
@@ -423,6 +423,7 @@ class TradingBot:
         self.detector = SignalDetector(self.config.all)
         self.validator = SignalValidator(self.config, self.exchange)
         self.recorder = SignalRecorder(self.db)
+        self.entry_decider = EntryDecider(self.config.all)  # Entry Decision Layer MVP
         self.executor = TradingExecutor(self.config, self.exchange, self.db)
         self.risk_mgr = RiskManager(self.config, self.db)
         self.ml = MLEngine(self.config.all)
@@ -512,6 +513,23 @@ class TradingBot:
                 
                 # 获取当前持仓
                 current_positions = {p['symbol']: p for p in positions}
+                
+                # ===== Entry Decision Layer MVP =====
+                # 评估"这个信号值不值得开单"
+                tracking_data = {}  # 可以从 db 或 cache 获取
+                ml_pred = ml_pred if 'ml_pred' in dir() else None
+                entry_decision = self.entry_decider.decide(
+                    signal, 
+                    current_positions=current_positions,
+                    tracking_data=tracking_data,
+                    ml_prediction=ml_pred
+                )
+                # 将决策结果写入 filter_details 供观测
+                signal.filter_details = signal.filter_details or {}
+                signal.filter_details['entry_decision'] = entry_decision.to_dict()
+                # 打印决策结果
+                print(f"   🎯 开单决策: {entry_decision.decision.upper()} | 分数: {entry_decision.score}")
+                # ================================
                 
                 # 验证信号
                 passed, reason, details = self.validator.validate(signal, current_positions)

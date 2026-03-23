@@ -44,6 +44,10 @@ class DecisionBreakdown:
     execution_risk_reason: str = ""
     ml_confidence_reason: str = ""
 
+    # 观测辅助信息（兼容旧 API，新增字段只会出现在 breakdown 中）
+    signal_conflict_score: int = 0            # 多空冲突程度，越高代表越冲突
+    mean_reversion_bias: bool = False         # 是否主要依赖 RSI / Bollinger / Pattern 等抄底摸顶逻辑
+
 
 @dataclass
 class EntryDecisionResult:
@@ -82,6 +86,7 @@ class EntryDecider:
         # signal_strength
         'min_strength_allow': 25,
         'min_strategy_count_allow': 2,
+        'max_conflict_ratio_allow': 0.35,
         
         # regime
         'min_regime_confidence_allow': 0.5,
@@ -97,6 +102,12 @@ class EntryDecider:
         
         # ml_confidence
         'ml_min_confidence_allow': 0.6,
+
+        # decision
+        'allow_score_min': 68,
+        'block_score_max': 35,
+        'sideways_mean_reversion_watch_max_score': 72,
+        'sideways_ml_only_watch_max_score': 60,
     }
     
     def __init__(self, config: Optional[Dict] = None):
@@ -159,6 +170,9 @@ class EntryDecider:
         breakdown.ml_confidence_score = ml_score
         breakdown.ml_confidence_reason = ml_reason
         
+        breakdown.signal_conflict_score = getattr(signal, '_entry_signal_conflict_score', 0)
+        breakdown.mean_reversion_bias = getattr(signal, '_entry_mean_reversion_bias', False)
+
         result.breakdown = breakdown
         
         # 计算总分 (加权平均)
@@ -179,9 +193,22 @@ class EntryDecider:
         """评估信号强度"""
         strength = getattr(signal, 'strength', 0) or 0
         strategies = getattr(signal, 'strategies_triggered', []) or []
+        reasons = getattr(signal, 'reasons', []) or []
         direction_score = getattr(signal, 'direction_score', {}) or {}
-        net = direction_score.get('net', 0)
-        
+        net = float(direction_score.get('net', 0) or 0)
+        buy_score = float(direction_score.get('buy', 0) or 0)
+        sell_score = float(direction_score.get('sell', 0) or 0)
+        dominant = max(buy_score, sell_score, 0.0)
+        opposing = min(buy_score, sell_score) if buy_score and sell_score else 0.0
+        conflict_ratio = (opposing / dominant) if dominant > 0 else 0.0
+
+        mean_reversion_set = {'RSI', 'Bollinger', 'Pattern'}
+        trend_following_set = {'MACD', 'MA_Cross', 'Volume'}
+        mean_reversion_count = sum(1 for r in reasons if r.get('strategy') in mean_reversion_set)
+        trend_following_count = sum(1 for r in reasons if r.get('strategy') in trend_following_set)
+        ml_count = sum(1 for r in reasons if r.get('strategy') == 'ML')
+        mean_reversion_bias = mean_reversion_count >= 2 and trend_following_count == 0
+
         # 评分逻辑
         score = 0
         
@@ -198,18 +225,34 @@ class EntryDecider:
         elif strategy_count == 1:
             score += 10
         
-        # 净强度加分 (0-20)，只对正向净强度加分，负向净强度不扣分
+        # 净强度加分 (0-20)
         net_component = min(20, max(0, int(net / 2)))
         score += net_component
+
+        # 多空冲突扣分：代表信号链路内部已经打架
+        if conflict_ratio >= self._cfg('max_conflict_ratio_allow', 0.35):
+            score -= min(18, int(conflict_ratio * 30))
+
+        # 横盘里如果主要靠抄底/摸顶，额外保守一点
+        if mean_reversion_bias and ml_count > 0 and strength < 65:
+            score -= 8
         
         score = max(0, min(100, score))
         
         # 原因
+        extras = []
+        if conflict_ratio >= self._cfg('max_conflict_ratio_allow', 0.35):
+            extras.append(f"存在方向冲突({conflict_ratio:.0%})")
+        if mean_reversion_bias:
+            extras.append("偏抄底/摸顶型")
+        extra_text = f"，{'；'.join(extras)}" if extras else ""
         if score >= 50:
-            reason = f"信号强度{strength}，触发{strategy_count}个策略，净强度{net}"
+            reason = f"信号强度{strength}，触发{strategy_count}个策略，净强度{net:.1f}{extra_text}"
         else:
-            reason = f"信号强度偏弱({strength})，仅触发{strategy_count}个策略"
-        
+            reason = f"信号强度偏弱({strength})，仅触发{strategy_count}个策略{extra_text}"
+
+        setattr(signal, '_entry_signal_conflict_score', int(round(conflict_ratio * 100)))
+        setattr(signal, '_entry_mean_reversion_bias', mean_reversion_bias)
         return score, reason
     
     def _eval_regime_alignment(self, signal) -> tuple:
@@ -442,7 +485,11 @@ class EntryDecider:
             (decision, watch_reasons)
         """
         watch_reasons = []
-        
+        market_context = getattr(signal, 'market_context', {}) or {}
+        trend = market_context.get('trend', 'sideways')
+        signal_type = getattr(signal, 'signal_type', 'hold')
+        reasons = getattr(signal, 'reasons', []) or []
+
         # 1. 信号强度不足
         if breakdown.signal_strength_score < 30:
             watch_reasons.append("信号强度不足")
@@ -462,18 +509,47 @@ class EntryDecider:
         # 5. 市场状态不明确
         if breakdown.regime_alignment_score < 30:
             watch_reasons.append("市场状态不明确")
-        
-        # 决策分层
-        # BLOCK: 总分 < 35 或 任意关键维度严重不达标
-        if total_score < 35:
-            return EntryDecision.BLOCK.value, watch_reasons
-        
-        # WATCH: 总分 < 60 或 有观望原因
-        if total_score < 60 or len(watch_reasons) >= 2:
+
+        # 6. 信号链路多空打架
+        if breakdown.signal_conflict_score >= int(self._cfg('max_conflict_ratio_allow', 0.35) * 100):
+            watch_reasons.append("信号链路存在多空冲突")
+
+        mean_reversion_strategies = {'RSI', 'Bollinger', 'Pattern'}
+        trend_following_strategies = {'MACD', 'MA_Cross', 'Volume'}
+        mean_reversion_only = breakdown.mean_reversion_bias and not any(
+            r.get('strategy') in trend_following_strategies for r in reasons
+        )
+        ml_only_with_bollinger = all(r.get('strategy') in {'ML', 'Bollinger'} for r in reasons) and len(reasons) <= 2
+
+        # 7. 横盘内的抄底/摸顶单：默认保守处理，优先 watch/block
+        if signal_type in ['buy', 'sell'] and trend == 'sideways' and mean_reversion_only:
+            watch_reasons.append("横盘中的抄底/摸顶信号，确认度不足")
+            if total_score <= self._cfg('sideways_mean_reversion_watch_max_score', 72):
+                return EntryDecision.WATCH.value, watch_reasons
+
+        # 8. 仅 ML + Bollinger 的轻确认单更容易接飞刀
+        if signal_type in ['buy', 'sell'] and trend == 'sideways' and ml_only_with_bollinger and total_score <= self._cfg('sideways_ml_only_watch_max_score', 60):
+            watch_reasons.append("仅 ML + Bollinger 确认，缺少趋势/量能确认")
             return EntryDecision.WATCH.value, watch_reasons
         
-        # ALLOW: 总分 >= 60 且 关键维度基本达标
-        if total_score >= 60:
+        # 决策分层
+        block_score_max = self._cfg('block_score_max', 35)
+        allow_score_min = self._cfg('allow_score_min', 68)
+
+        # BLOCK: 总分过低，或关键维度极差并伴随多个风险原因
+        if total_score <= block_score_max or (
+            breakdown.trend_alignment_score < 35 and
+            breakdown.volatility_fitness_score < 30 and
+            len(watch_reasons) >= 2
+        ):
+            return EntryDecision.BLOCK.value, watch_reasons
+        
+        # WATCH: 总分不足，或已有明显观望原因
+        if total_score < allow_score_min or len(watch_reasons) >= 1:
+            return EntryDecision.WATCH.value, watch_reasons
+        
+        # ALLOW: 总分更高且无显著风险
+        if total_score >= allow_score_min:
             return EntryDecision.ALLOW.value, watch_reasons
         
         # 默认观望
@@ -485,19 +561,29 @@ class EntryDecider:
         signal_type = getattr(signal, 'signal_type', 'hold')
         strength = getattr(signal, 'strength', 0)
         
+        total_hint = (
+            breakdown.signal_strength_score * 0.25 +
+            breakdown.regime_alignment_score * 0.15 +
+            breakdown.volatility_fitness_score * 0.15 +
+            breakdown.trend_alignment_score * 0.20 +
+            breakdown.execution_risk_score * 0.15 +
+            breakdown.ml_confidence_score * 0.10
+        )
+        total_hint = int(round(total_hint))
+
         if decision == EntryDecision.BLOCK.value:
-            return (f"信号被拦截：总分{breakdown.signal_strength_score}分，"
+            return (f"信号被拦截：总分{total_hint}分，"
                     f"{breakdown.trend_alignment_reason}，{breakdown.volatility_fitness_reason}。"
                     f"建议等待条件改善后再评估。")
         
         elif decision == EntryDecision.WATCH.value:
-            return (f"信号建议观望：总分{breakdown.signal_strength_score}分，"
+            return (f"信号建议观望：总分{total_hint}分，"
                     f"信号强度{strength}，趋势{alignment_to_chinese(breakdown.trend_alignment_score)}，"
                     f"波动{alignment_to_chinese(breakdown.volatility_fitness_score)}。"
                     f"建议继续观察确认。")
         
         else:  # ALLOW
-            return (f"信号允许开单：总分{breakdown.signal_strength_score}分，"
+            return (f"信号允许开单：总分{total_hint}分，"
                     f"{breakdown.trend_alignment_reason}，{breakdown.volatility_fitness_reason}。"
                     f"当前条件适合入场。")
 

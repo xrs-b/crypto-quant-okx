@@ -19,7 +19,7 @@ from core.config import Config
 from core.database import Database
 from core.exchange import Exchange
 from core.notifier import NotificationManager
-from signals import Signal, SignalDetector, SignalValidator, SignalRecorder
+from signals import Signal, SignalDetector, SignalValidator, SignalRecorder, EntryDecider
 from trading import TradingExecutor, RiskManager
 from strategies.strategy_library import StrategyManager
 from bot.run import build_exchange_diagnostics, build_exchange_smoke_plan, build_runtime_health_summary, maybe_send_daily_health_summary, execute_exchange_smoke, reconcile_exchange_positions
@@ -310,6 +310,51 @@ class TestSignalValidator(unittest.TestCase):
         self.assertTrue(passed)
         self.assertIsNone(reason)
         self.assertTrue(details['strength_check']['passed'])
+
+
+class TestEntryDecider(unittest.TestCase):
+    def test_sideways_mean_reversion_buy_gets_watch(self):
+        decider = EntryDecider({})
+        signal = Signal(
+            symbol='XRP/USDT',
+            signal_type='buy',
+            price=1.48,
+            strength=58,
+            strategies_triggered=['RSI', 'Bollinger', 'ML'],
+            reasons=[
+                {'strategy': 'RSI', 'action': 'buy', 'strength': 44.8, 'confidence': 0.95},
+                {'strategy': 'Bollinger', 'action': 'buy', 'strength': 16.8, 'confidence': 0.68},
+                {'strategy': 'ML', 'action': 'buy', 'strength': 25.2, 'confidence': 0.71},
+            ],
+            direction_score={'buy': 73.0, 'sell': 0.0, 'net': 73.0},
+            market_context={'trend': 'sideways', 'volatility': 0.01, 'atr_ratio': 0.01, 'volatility_too_low': False, 'volatility_too_high': False},
+            regime_info={'regime': 'range', 'confidence': 0.7}
+        )
+        result = decider.decide(signal)
+        self.assertEqual(result.decision, 'watch')
+        self.assertTrue(any('横盘' in reason for reason in result.watch_reasons))
+
+    def test_conflicted_signal_loses_allow(self):
+        decider = EntryDecider({})
+        signal = Signal(
+            symbol='XRP/USDT',
+            signal_type='buy',
+            price=1.49,
+            strength=59,
+            strategies_triggered=['RSI', 'Bollinger', 'Volume', 'ML'],
+            reasons=[
+                {'strategy': 'RSI', 'action': 'buy', 'strength': 44.8, 'confidence': 0.95},
+                {'strategy': 'Bollinger', 'action': 'buy', 'strength': 16.8, 'confidence': 0.68},
+                {'strategy': 'Volume', 'action': 'sell', 'strength': 28.8, 'confidence': 0.72},
+                {'strategy': 'ML', 'action': 'buy', 'strength': 23.4, 'confidence': 0.66},
+            ],
+            direction_score={'buy': 58.0, 'sell': 20.0, 'net': 48.0},
+            market_context={'trend': 'sideways', 'volatility': 0.012, 'atr_ratio': 0.012, 'volatility_too_low': False, 'volatility_too_high': False},
+            regime_info={'regime': 'range', 'confidence': 0.7}
+        )
+        result = decider.decide(signal)
+        self.assertNotEqual(result.decision, 'allow')
+        self.assertGreaterEqual(result.breakdown.signal_conflict_score, 34)
 
 
 class TestSignalValidatorRegimeFilter(unittest.TestCase):

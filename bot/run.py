@@ -533,6 +533,26 @@ class TradingBot:
                 
                 # 验证信号
                 passed, reason, details = self.validator.validate(signal, current_positions)
+
+                # Entry Decision 真正接入执行门槛：watch/block 不再继续开仓
+                if passed and signal.signal_type in ['buy', 'sell'] and entry_decision.decision != 'allow':
+                    passed = False
+                    reason = f"EntryDecision={entry_decision.decision}: {entry_decision.reason_summary}"
+                    details = details or {}
+                    details['entry_decision_gate'] = {
+                        'passed': False,
+                        'reason': reason,
+                        'decision': entry_decision.decision,
+                        'score': entry_decision.score,
+                        'watch_reasons': entry_decision.watch_reasons,
+                        'group': 'entry_decision',
+                    }
+                    details['filter_meta'] = {
+                        'code': f"ENTRY_DECISION_{entry_decision.decision.upper()}",
+                        'group': 'entry_decision',
+                        'action_hint': '仅当 Entry Decision=allow 时才执行开仓，当前建议继续观望',
+                    }
+
                 summary['signals'] += 1
                 if passed:
                     summary['passed'] += 1

@@ -138,7 +138,7 @@ class TradingExecutor:
                     quantity=amount,
                     contract_size=contract_size,
                     coin_quantity=coin_quantity,
-                    leverage=leverage,
+                    leverage=effective_leverage,
                     signal_id=signal_id,
                     notes=f"开仓尝试 #{attempt + 1}"
                 )
@@ -151,7 +151,7 @@ class TradingExecutor:
                     quantity=amount,
                     contract_size=contract_size,
                     coin_quantity=coin_quantity,
-                    leverage=leverage,
+                    leverage=effective_leverage,
                     current_price=current_price
                 )
                 
@@ -230,6 +230,11 @@ class TradingExecutor:
                     quantity,
                     posSide=side
                 )
+
+                trade = self.db.get_latest_open_trade(symbol, side)
+                exchange_close = self.exchange.fetch_closed_trade_summary(trade, fallback_price=close_price) if trade else None
+                if exchange_close and exchange_close.get('exit_price'):
+                    close_price = exchange_close['exit_price']
                 
                 # 计算部分平仓的币数量
                 is_partial = close_quantity is not None and close_quantity < position['quantity']
@@ -255,19 +260,22 @@ class TradingExecutor:
                 leveraged_pnl_percent = pnl_percent * leverage
                 
                 # 更新交易记录（positions.id ≠ trades.id，需回查最新 open trade）
-                trade = self.db.get_latest_open_trade(symbol, side)
                 trade_id = trade.get('id') if trade else None
                 if trade_id:
                     close_note = f"平仓原因: {reason}"
                     if is_partial:
                         close_note += f" | 部分平仓({close_ratio*100:.0f}%)"
-                    self.db.close_trade(
-                        trade_id=trade_id,
-                        exit_price=close_price,
-                        pnl=pnl,
-                        pnl_percent=leveraged_pnl_percent,
-                        notes=close_note
-                    )
+                    if exchange_close:
+                        self.db.reconcile_trade_close(trade_id, exchange_close, reason=close_note)
+                    else:
+                        self.db.close_trade(
+                            trade_id=trade_id,
+                            exit_price=close_price,
+                            pnl=pnl,
+                            pnl_percent=leveraged_pnl_percent,
+                            notes=close_note,
+                            close_source='local_market_close'
+                        )
                 else:
                     trade_logger.warning(f"{symbol}: 未找到可关闭的 open trade 记录，持仓会先从本地移除")
                 

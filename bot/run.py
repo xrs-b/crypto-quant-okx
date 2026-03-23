@@ -260,6 +260,29 @@ def build_exchange_smoke_plan(cfg: Config, exchange: Exchange, symbol: str = Non
     return plan
 
 
+
+
+def backfill_closed_trades_from_exchange(exchange: Exchange, db: Database, limit: int = 50) -> dict:
+    report = {'checked': 0, 'patched': 0, 'errors': []}
+    for trade in db.get_trades_missing_close_details(limit=limit):
+        report['checked'] += 1
+        try:
+            fallback_price = trade.get('exit_price') or None
+            if not fallback_price:
+                try:
+                    ticker = exchange.fetch_ticker(trade['symbol'])
+                    fallback_price = ticker.get('last')
+                except Exception:
+                    fallback_price = None
+            summary = exchange.fetch_closed_trade_summary(trade, fallback_price=fallback_price)
+            if not summary and fallback_price:
+                summary = exchange.build_close_summary([], open_trade=trade, fallback_price=fallback_price, source='ticker_fallback')
+            if summary and db.reconcile_trade_close(trade['id'], summary, reason='历史已关闭交易补齐'):
+                report['patched'] += 1
+        except Exception as e:
+            report['errors'].append({'trade_id': trade.get('id'), 'symbol': trade.get('symbol'), 'error': str(e)})
+    return report
+
 def reconcile_exchange_positions(exchange: Exchange, db: Database) -> dict:
     """交易所持仓与本地 DB / open trades 三方对账（第二轮）"""
     report = {
@@ -270,27 +293,27 @@ def reconcile_exchange_positions(exchange: Exchange, db: Database) -> dict:
         'local_open_trades': db.get_trades(status='open', limit=200),
     }
     exchange_positions = exchange.fetch_positions()
+    report['history_backfill'] = backfill_closed_trades_from_exchange(exchange, db, limit=50)
     normalized_symbols = []
     normalized_keys = []
     for pos in exchange_positions:
-        symbol = pos.get('symbol') or pos.get('info', {}).get('instId') or pos.get('info', {}).get('instId')
-        if symbol and ':' in symbol:
-            symbol = symbol.split(':')[0]
-        side = str(pos.get('side') or pos.get('info', {}).get('posSide') or 'long').lower()
-        if side in {'buy', 'long'}:
-            side = 'long'
-        elif side in {'sell', 'short'}:
-            side = 'short'
-        contracts = float(pos.get('contracts', 0) or 0)
+        normalized = pos if pos.get('contract_size') is not None else exchange.normalize_position(pos)
+        if not normalized:
+            continue
+        symbol = normalized['symbol']
+        side = normalized['side']
+        contracts = float(normalized.get('quantity') or normalized.get('contracts') or 0)
         if contracts <= 0:
             continue
-        entry_price = float(pos.get('entryPrice') or pos.get('entry_price') or pos.get('info', {}).get('avgPx') or 0)
-        current_price = float(pos.get('markPrice') or pos.get('last') or pos.get('info', {}).get('markPx') or entry_price or 0)
-        leverage = int(float(pos.get('leverage') or pos.get('info', {}).get('lever') or 1))
-        db.update_position(symbol, side, entry_price, contracts, leverage, current_price)
+        entry_price = float(normalized.get('entry_price') or 0)
+        current_price = float(normalized.get('current_price') or entry_price or 0)
+        leverage = int(float(normalized.get('leverage') or 1))
+        contract_size = float(normalized.get('contract_size') or 1)
+        coin_quantity = float(normalized.get('coin_quantity') or contracts * contract_size)
+        db.update_position(symbol, side, entry_price, contracts, leverage, current_price, contract_size=contract_size, coin_quantity=coin_quantity)
         normalized_symbols.append(symbol)
         normalized_keys.append(f'{symbol}::{side}')
-        report['exchange_positions'].append({'symbol': symbol, 'side': side, 'quantity': contracts, 'entry_price': entry_price, 'current_price': current_price, 'leverage': leverage})
+        report['exchange_positions'].append({'symbol': symbol, 'side': side, 'quantity': contracts, 'coin_quantity': coin_quantity, 'entry_price': entry_price, 'current_price': current_price, 'leverage': leverage, 'realized_pnl': normalized.get('realized_pnl')})
         report['synced'] += 1
     report['removed'] = db.remove_positions_not_in(normalized_symbols)
     report['local_after'] = db.get_positions()
@@ -316,8 +339,17 @@ def reconcile_exchange_positions(exchange: Exchange, db: Database) -> dict:
         matched_local = next((p for p in local_after if p.get('symbol') == symbol and p.get('side') == side), None)
         if matched_local:
             current_price = matched_local.get('current_price') or matched_local.get('entry_price')
-        if trade_id and db.mark_trade_stale_closed(trade_id, '交易所无对应持仓，对账自动收口', close_price=current_price):
-            stale_closed.append({'trade_id': trade_id, 'symbol': symbol, 'side': side})
+        if trade_id:
+            summary = None
+            try:
+                summary = exchange.fetch_closed_trade_summary(row, fallback_price=current_price)
+            except Exception:
+                summary = None
+            if not summary and current_price:
+                summary = exchange.build_close_summary([], open_trade=row, fallback_price=current_price, source='ticker_fallback')
+            changed = db.reconcile_trade_close(trade_id, summary or {'exit_price': current_price, 'source': 'reconcile_fallback', 'fills': []}, reason='自动收口: 交易所无对应持仓，对账自动收口')
+            if changed:
+                stale_closed.append({'trade_id': trade_id, 'symbol': symbol, 'side': side, 'close_source': (summary or {}).get('source', 'reconcile_fallback')})
     if stale_closed:
         report['local_open_trades'] = db.get_trades(status='open', limit=200)
         local_open_trades = report['local_open_trades']
@@ -333,6 +365,7 @@ def reconcile_exchange_positions(exchange: Exchange, db: Database) -> dict:
         'open_trade_missing_exchange': len(report['diff']['open_trade_missing_exchange']),
         'exchange_missing_open_trade': len(report['diff']['exchange_missing_open_trade']),
         'stale_open_trades_closed': len(stale_closed),
+        'history_backfilled': int((report.get('history_backfill') or {}).get('patched', 0) or 0),
     }
     report['stale_closed'] = stale_closed
     return report

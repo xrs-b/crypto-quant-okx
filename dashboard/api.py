@@ -743,8 +743,9 @@ def get_trades():
     for t in trades:
         quantity = float(t.get('quantity') or 0)
         contract_size = float(t.get('contract_size') or 1)
-        # 直接用 quantity * contract_size 计算币数量（更可靠）
-        coin_qty = quantity * contract_size
+        stored_coin_qty = t.get('coin_quantity')
+        coin_qty = float(stored_coin_qty) if stored_coin_qty not in (None, '') and not (isinstance(stored_coin_qty, float) and math.isnan(stored_coin_qty)) else quantity * contract_size
+        t['coin_quantity'] = coin_qty
         # 使用开仓价计算名义价值（已平仓用平仓价，持仓用开仓价）
         # 处理 NaN 值
         exit_price = t.get('exit_price')
@@ -757,6 +758,7 @@ def get_trades():
         leverage = float(t.get('leverage') or 1)
         t['notional_value'] = round(coin_qty * price, 2)
         t['margin'] = round(t['notional_value'] / leverage, 2) if leverage > 0 else t['notional_value']
+        t['close_source'] = t.get('close_source') or 'legacy'
     
     return jsonify({
         'success': True,

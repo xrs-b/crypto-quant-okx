@@ -74,6 +74,8 @@ class Database:
                 open_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 close_time TIMESTAMP,
                 notes TEXT,
+                close_source TEXT,
+                close_fill_count INTEGER DEFAULT 0,
                 FOREIGN KEY (signal_id) REFERENCES signals(id)
             )
         """)
@@ -312,6 +314,10 @@ class Database:
             cursor.execute("ALTER TABLE trades ADD COLUMN contract_size REAL DEFAULT 1")
         if 'coin_quantity' not in trade_columns:
             cursor.execute("ALTER TABLE trades ADD COLUMN coin_quantity REAL")
+        if 'close_source' not in trade_columns:
+            cursor.execute("ALTER TABLE trades ADD COLUMN close_source TEXT")
+        if 'close_fill_count' not in trade_columns:
+            cursor.execute("ALTER TABLE trades ADD COLUMN close_fill_count INTEGER DEFAULT 0")
 
         cursor.execute("PRAGMA table_info(positions)")
         position_columns = {row[1] for row in cursor.fetchall()}
@@ -414,6 +420,26 @@ class Database:
             df['executed'] = df['executed'].astype(bool)
         
         return df.to_dict('records')
+
+    def get_trades_missing_close_details(self, limit: int = 200) -> List[Dict]:
+        conn = self._get_connection()
+        query = """
+            SELECT * FROM trades
+            WHERE status = 'closed'
+              AND (exit_price IS NULL OR pnl IS NULL OR pnl_percent IS NULL OR close_source IS NULL OR close_source = '')
+            ORDER BY close_time DESC, id DESC
+            LIMIT ?
+        """
+        df = pd.read_sql_query(query, conn, params=(limit,))
+        conn.close()
+        if not df.empty:
+            if 'contract_size' not in df.columns:
+                df['contract_size'] = 1.0
+            if 'coin_quantity' not in df.columns:
+                df['coin_quantity'] = df['quantity'] * df['contract_size']
+            else:
+                df['coin_quantity'] = df.apply(lambda r: r['coin_quantity'] if pd.notna(r['coin_quantity']) else r['quantity'] * (r['contract_size'] if pd.notna(r['contract_size']) else 1.0), axis=1)
+        return df.to_dict('records')
     
     # =========================================================================
     # 交易操作
@@ -456,7 +482,8 @@ class Database:
         conn.close()
     
     def close_trade(self, trade_id: int, exit_price: float, pnl: float, 
-                    pnl_percent: float, notes: str = None):
+                    pnl_percent: float, notes: str = None, close_source: str = 'local_market_close',
+                    close_time: str = None, close_fill_count: int = 0):
         """平仓"""
         conn = self._get_connection()
         cursor = conn.cursor()
@@ -464,12 +491,68 @@ class Database:
         cursor.execute("""
             UPDATE trades 
             SET exit_price = ?, pnl = ?, pnl_percent = ?, 
-                status = 'closed', close_time = CURRENT_TIMESTAMP, notes = ?
+                status = 'closed', close_time = COALESCE(?, CURRENT_TIMESTAMP), notes = ?,
+                close_source = ?, close_fill_count = ?
             WHERE id = ?
-        """, (exit_price, pnl, pnl_percent, notes, trade_id))
+        """, (exit_price, pnl, pnl_percent, close_time, notes, close_source, int(close_fill_count or 0), trade_id))
         
         conn.commit()
         conn.close()
+
+    def reconcile_trade_close(self, trade_id: int, summary: Dict, reason: str = None) -> bool:
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM trades WHERE id = ?", (trade_id,))
+        row = cursor.fetchone()
+        if not row:
+            conn.close()
+            return False
+        current = dict(row)
+        source = (summary or {}).get('source') or current.get('close_source') or 'reconcile_fallback'
+        fills = (summary or {}).get('fills') or []
+        fill_count = len(fills)
+        existing_notes = current.get('notes') or ''
+        extra_note = reason or ''
+        if source:
+            extra_note = f"{extra_note} | close_source={source}" if extra_note else f"close_source={source}"
+        final_notes = existing_notes
+        if extra_note:
+            final_notes = f"{existing_notes} | {extra_note}" if existing_notes else extra_note
+        close_time = (summary or {}).get('close_time') or current.get('close_time')
+        quantity = (summary or {}).get('quantity') or current.get('quantity')
+        coin_quantity = (summary or {}).get('coin_quantity') or current.get('coin_quantity')
+        contract_size = (summary or {}).get('contract_size') or current.get('contract_size') or 1.0
+        cursor.execute("""
+            UPDATE trades
+            SET status = 'closed',
+                exit_price = ?,
+                pnl = ?,
+                pnl_percent = ?,
+                quantity = ?,
+                coin_quantity = ?,
+                contract_size = ?,
+                close_time = COALESCE(?, close_time, CURRENT_TIMESTAMP),
+                notes = ?,
+                close_source = ?,
+                close_fill_count = ?
+            WHERE id = ?
+        """, (
+            (summary or {}).get('exit_price'),
+            (summary or {}).get('pnl'),
+            (summary or {}).get('pnl_percent'),
+            quantity,
+            coin_quantity,
+            contract_size,
+            close_time,
+            final_notes,
+            source,
+            fill_count,
+            trade_id,
+        ))
+        changed = cursor.rowcount > 0
+        conn.commit()
+        conn.close()
+        return changed
     
     def get_trades(self, symbol: str = None, status: str = None,
                    limit: int = 100) -> List[Dict]:
@@ -548,18 +631,9 @@ class Database:
         conn.close()
         return df.to_dict('records')
 
-    def mark_trade_stale_closed(self, trade_id: int, reason: str, close_price: float = None):
-        conn = self._get_connection()
-        cursor = conn.cursor()
-        note = f"自动收口: {reason}"
-        cursor.execute(
-            "UPDATE trades SET status = 'closed', exit_price = COALESCE(?, exit_price), close_time = CURRENT_TIMESTAMP, notes = CASE WHEN notes IS NULL OR notes = '' THEN ? ELSE notes || ' | ' || ? END WHERE id = ? AND status = 'open'",
-            (close_price, note, note, trade_id)
-        )
-        changed = cursor.rowcount
-        conn.commit()
-        conn.close()
-        return changed > 0
+    def mark_trade_stale_closed(self, trade_id: int, reason: str, close_price: float = None, close_source: str = 'reconcile_fallback'):
+        summary = {'exit_price': close_price, 'source': close_source, 'fills': []}
+        return self.reconcile_trade_close(trade_id, summary, reason=f"自动收口: {reason}")
     
     def get_trade_stats(self, days: int = 30) -> Dict:
         """获取交易统计"""

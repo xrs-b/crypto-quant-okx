@@ -106,6 +106,11 @@ class EntryDecider:
         # decision
         'allow_score_min': 68,
         'block_score_max': 35,
+        'single_strategy_block_max_strength': 24,
+        'single_strategy_block_max_score': 64,
+        'high_conflict_watch_score_min': 68,
+        'falling_knife_rsi_threshold': 30,
+        'falling_knife_block_max_score': 72,
         'sideways_mean_reversion_watch_max_score': 72,
         'sideways_ml_only_watch_max_score': 60,
     }
@@ -520,14 +525,54 @@ class EntryDecider:
             r.get('strategy') in trend_following_strategies for r in reasons
         )
         ml_only_with_bollinger = all(r.get('strategy') in {'ML', 'Bollinger'} for r in reasons) and len(reasons) <= 2
+        strategy_count = len(getattr(signal, 'strategies_triggered', []) or [])
 
-        # 7. 横盘内的抄底/摸顶单：默认保守处理，优先 watch/block
+        buy_rsi_values = [float(r.get('value') or 0) for r in reasons if r.get('strategy') == 'RSI' and r.get('action') == 'buy']
+        sell_rsi_values = [float(r.get('value') or 100) for r in reasons if r.get('strategy') == 'RSI' and r.get('action') == 'sell']
+        has_bollinger = any(r.get('strategy') == 'Bollinger' for r in reasons)
+        has_opposing_volume = any(r.get('strategy') == 'Volume' and r.get('action') != signal_type for r in reasons)
+        high_conflict = breakdown.signal_conflict_score >= int(self._cfg('max_conflict_ratio_allow', 0.35) * 100)
+        falling_knife_buy = (
+            signal_type == 'buy' and
+            trend in ['sideways', 'bearish'] and
+            has_bollinger and
+            any(val and val <= float(self._cfg('falling_knife_rsi_threshold', 30)) for val in buy_rsi_values)
+        )
+        falling_knife_sell = (
+            signal_type == 'sell' and
+            trend in ['sideways', 'bullish'] and
+            has_bollinger and
+            any(val and val >= (100 - float(self._cfg('falling_knife_rsi_threshold', 30))) for val in sell_rsi_values)
+        )
+
+        # 7. 极弱的一招鲜试单：直接拦，避免再被单策略假启动带走
+        if strategy_count <= 1 and getattr(signal, 'strength', 0) <= self._cfg('single_strategy_block_max_strength', 24) and total_score <= self._cfg('single_strategy_block_max_score', 64):
+            watch_reasons.append("单策略弱信号，缺少交叉确认")
+            return EntryDecision.BLOCK.value, watch_reasons
+
+        # 8. 横盘里信号链路互相打架，尤其伴随反向量能时，直接当坏单处理
+        if signal_type in ['buy', 'sell'] and trend == 'sideways' and high_conflict:
+            watch_reasons.append("横盘中多空信号打架")
+            if has_opposing_volume or total_score < self._cfg('high_conflict_watch_score_min', 68):
+                if has_opposing_volume:
+                    watch_reasons.append("量能方向与入场方向相反")
+                return EntryDecision.BLOCK.value, watch_reasons
+            return EntryDecision.WATCH.value, watch_reasons
+
+        # 9. 横盘/逆势里的严重超卖抄底（或严重超买摸顶）默认按飞刀处理
+        if falling_knife_buy or falling_knife_sell:
+            watch_reasons.append("疑似接飞刀/摸顶，等待止跌或顺势确认")
+            if has_opposing_volume or total_score <= self._cfg('falling_knife_block_max_score', 72):
+                return EntryDecision.BLOCK.value, watch_reasons
+            return EntryDecision.WATCH.value, watch_reasons
+
+        # 10. 横盘内的抄底/摸顶单：默认保守处理，优先 watch/block
         if signal_type in ['buy', 'sell'] and trend == 'sideways' and mean_reversion_only:
             watch_reasons.append("横盘中的抄底/摸顶信号，确认度不足")
             if total_score <= self._cfg('sideways_mean_reversion_watch_max_score', 72):
                 return EntryDecision.WATCH.value, watch_reasons
 
-        # 8. 仅 ML + Bollinger 的轻确认单更容易接飞刀
+        # 11. 仅 ML + Bollinger 的轻确认单更容易接飞刀
         if signal_type in ['buy', 'sell'] and trend == 'sideways' and ml_only_with_bollinger and total_score <= self._cfg('sideways_ml_only_watch_max_score', 60):
             watch_reasons.append("仅 ML + Bollinger 确认，缺少趋势/量能确认")
             return EntryDecision.WATCH.value, watch_reasons

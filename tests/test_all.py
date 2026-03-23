@@ -343,7 +343,7 @@ class TestEntryDecider(unittest.TestCase):
             strength=59,
             strategies_triggered=['RSI', 'Bollinger', 'Volume', 'ML'],
             reasons=[
-                {'strategy': 'RSI', 'action': 'buy', 'strength': 44.8, 'confidence': 0.95},
+                {'strategy': 'RSI', 'action': 'buy', 'strength': 44.8, 'confidence': 0.95, 'value': 28.9},
                 {'strategy': 'Bollinger', 'action': 'buy', 'strength': 16.8, 'confidence': 0.68},
                 {'strategy': 'Volume', 'action': 'sell', 'strength': 28.8, 'confidence': 0.72},
                 {'strategy': 'ML', 'action': 'buy', 'strength': 23.4, 'confidence': 0.66},
@@ -353,8 +353,48 @@ class TestEntryDecider(unittest.TestCase):
             regime_info={'regime': 'range', 'confidence': 0.7}
         )
         result = decider.decide(signal)
-        self.assertNotEqual(result.decision, 'allow')
+        self.assertEqual(result.decision, 'block')
         self.assertGreaterEqual(result.breakdown.signal_conflict_score, 34)
+
+    def test_single_strategy_weak_signal_gets_blocked(self):
+        decider = EntryDecider({})
+        signal = Signal(
+            symbol='BTC/USDT',
+            signal_type='buy',
+            price=84000,
+            strength=20,
+            strategies_triggered=['MACD'],
+            reasons=[
+                {'strategy': 'MACD', 'action': 'buy', 'strength': 20, 'confidence': 0.75},
+            ],
+            direction_score={'buy': 20.0, 'sell': 0.0, 'net': 20.0},
+            market_context={'trend': 'bullish', 'volatility': 0.012, 'atr_ratio': 0.012, 'volatility_too_low': False, 'volatility_too_high': False},
+            regime_info={'regime': 'trend', 'confidence': 0.7}
+        )
+        result = decider.decide(signal)
+        self.assertEqual(result.decision, 'block')
+        self.assertTrue(any('单策略弱信号' in reason for reason in result.watch_reasons))
+
+    def test_sideways_falling_knife_buy_gets_blocked(self):
+        decider = EntryDecider({})
+        signal = Signal(
+            symbol='XRP/USDT',
+            signal_type='buy',
+            price=1.48,
+            strength=80,
+            strategies_triggered=['RSI', 'Bollinger', 'ML'],
+            reasons=[
+                {'strategy': 'RSI', 'action': 'buy', 'strength': 44.8, 'confidence': 0.95, 'value': 27.0},
+                {'strategy': 'Bollinger', 'action': 'buy', 'strength': 16.8, 'confidence': 0.68},
+                {'strategy': 'ML', 'action': 'buy', 'strength': 30.6, 'confidence': 0.85},
+            ],
+            direction_score={'buy': 92.2, 'sell': 0.0, 'net': 92.2},
+            market_context={'trend': 'sideways', 'volatility': 0.012, 'atr_ratio': 0.012, 'volatility_too_low': False, 'volatility_too_high': False},
+            regime_info={'regime': 'range', 'confidence': 0.7}
+        )
+        result = decider.decide(signal)
+        self.assertEqual(result.decision, 'block')
+        self.assertTrue(any('接飞刀' in reason or '摸顶' in reason for reason in result.watch_reasons))
 
 
 class TestSignalValidatorRegimeFilter(unittest.TestCase):

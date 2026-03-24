@@ -266,7 +266,11 @@ class Exchange:
         pnl_percent = None
         leverage = self._safe_int((open_trade or {}).get('leverage') or self.leverage, self.leverage)
         entry_price = self._safe_float((open_trade or {}).get('entry_price'))
-        base_coin_qty = self._safe_float((open_trade or {}).get('coin_quantity')) or total_coin_qty
+        open_contract_size = self._safe_float((open_trade or {}).get('contract_size') or 1.0, 1.0)
+        open_contracts = self._safe_float((open_trade or {}).get('quantity') or 0)
+        expected_open_coin_qty = open_contracts * open_contract_size if open_contracts > 0 and open_contract_size > 0 else 0.0
+        open_trade_coin_qty = self._safe_float((open_trade or {}).get('coin_quantity'))
+        base_coin_qty = total_coin_qty or expected_open_coin_qty or open_trade_coin_qty
         if realized_pnl is None and entry_price > 0 and exit_price > 0 and base_coin_qty > 0 and open_trade:
             side = self.normalize_side((open_trade or {}).get('side'))
             direction = 1 if side == 'long' else -1
@@ -338,7 +342,7 @@ class Exchange:
         if summary and target_qty > 0 and summary.get('quantity') and summary['quantity'] > target_qty * 1.5:
             summary['quantity'] = target_qty
             contract_size = self._safe_float(summary.get('contract_size') or open_trade.get('contract_size') or 1.0, 1.0)
-            summary['coin_quantity'] = self._safe_float(open_trade.get('coin_quantity')) or target_qty * contract_size
+            summary['coin_quantity'] = target_qty * contract_size
             if summary.get('exit_price') and open_trade.get('entry_price'):
                 direction = 1 if side == 'long' else -1
                 summary['pnl'] = (summary['exit_price'] - self._safe_float(open_trade.get('entry_price'))) * summary['coin_quantity'] * direction

@@ -264,6 +264,7 @@ def build_exchange_smoke_plan(cfg: Config, exchange: Exchange, symbol: str = Non
 
 def backfill_closed_trades_from_exchange(exchange: Exchange, db: Database, limit: int = 50) -> dict:
     report = {'checked': 0, 'patched': 0, 'errors': []}
+    report['mapping_repair'] = db.repair_trade_quantity_mappings(symbols=['BTC/USDT', 'XRP/USDT'])
     for trade in db.get_trades_missing_close_details(limit=limit):
         report['checked'] += 1
         try:
@@ -296,6 +297,7 @@ def reconcile_exchange_positions(exchange: Exchange, db: Database) -> dict:
     report['history_backfill'] = backfill_closed_trades_from_exchange(exchange, db, limit=50)
     normalized_symbols = []
     normalized_keys = []
+    created_open_trades = []
     for pos in exchange_positions:
         normalized = pos if pos.get('contract_size') is not None else exchange.normalize_position(pos)
         if not normalized:
@@ -311,12 +313,26 @@ def reconcile_exchange_positions(exchange: Exchange, db: Database) -> dict:
         contract_size = float(normalized.get('contract_size') or 1)
         coin_quantity = float(normalized.get('coin_quantity') or contracts * contract_size)
         db.update_position(symbol, side, entry_price, contracts, leverage, current_price, contract_size=contract_size, coin_quantity=coin_quantity)
+        existing_open_trade = db.get_latest_open_trade(symbol, side)
+        if not existing_open_trade:
+            trade_id = db.record_trade(
+                symbol=symbol,
+                side=side,
+                entry_price=entry_price,
+                quantity=contracts,
+                leverage=leverage,
+                notes='对账补建 open trade（以交易所当前持仓为准）',
+                contract_size=contract_size,
+                coin_quantity=coin_quantity,
+            )
+            created_open_trades.append({'trade_id': trade_id, 'symbol': symbol, 'side': side, 'quantity': contracts, 'coin_quantity': coin_quantity})
         normalized_symbols.append(symbol)
         normalized_keys.append(f'{symbol}::{side}')
         report['exchange_positions'].append({'symbol': symbol, 'side': side, 'quantity': contracts, 'coin_quantity': coin_quantity, 'entry_price': entry_price, 'current_price': current_price, 'leverage': leverage, 'realized_pnl': normalized.get('realized_pnl')})
         report['synced'] += 1
     report['removed'] = db.remove_positions_not_in(normalized_symbols)
     report['local_after'] = db.get_positions()
+    report['local_open_trades'] = db.get_trades(status='open', limit=200)
 
     local_after = report['local_after']
     local_open_trades = report['local_open_trades']
@@ -360,6 +376,7 @@ def reconcile_exchange_positions(exchange: Exchange, db: Database) -> dict:
         'exchange_positions': len(report['exchange_positions']),
         'local_positions': len(local_after),
         'open_trades': len(local_open_trades),
+        'created_open_trades': len(created_open_trades),
         'exchange_missing_local_position': len(report['diff']['exchange_missing_local_position']),
         'local_position_missing_exchange': len(report['diff']['local_position_missing_exchange']),
         'open_trade_missing_exchange': len(report['diff']['open_trade_missing_exchange']),
@@ -368,6 +385,7 @@ def reconcile_exchange_positions(exchange: Exchange, db: Database) -> dict:
         'history_backfilled': int((report.get('history_backfill') or {}).get('patched', 0) or 0),
     }
     report['stale_closed'] = stale_closed
+    report['created_open_trades'] = created_open_trades
     return report
 
 

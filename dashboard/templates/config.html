@@ -513,14 +513,20 @@ const HIGH_RISK_FIELDS = [
     'trading.max_exposure',       // 最大风险敞口
     'trading.max_daily_drawdown', // 最大日回撤
     'trading.max_consecutive_losses', // 最大连亏
-    'trading.max_position_per_symbol' // 每币种最大仓位
+    'trading.max_position_per_symbol', // 每币种最大仓位
+    'trading.total_margin_cap_ratio',
+    'trading.total_margin_soft_cap_ratio',
+    'trading.symbol_margin_cap_ratio'
 ];
 
 // 中等风险字段
 const MEDIUM_RISK_FIELDS = [
     'trading.position_size',     // 仓位比例
     'trading.stop_loss',         // 止损比例
-    'trading.take_profit'        // 止盈比例
+    'trading.take_profit',       // 止盈比例
+    'trading.base_entry_margin_ratio',
+    'trading.min_entry_margin_ratio',
+    'trading.max_entry_margin_ratio'
 ];
 
 // 配置分层定义
@@ -529,13 +535,13 @@ const CONFIG_SECTIONS = {
         basic: ['trading.stop_loss', 'trading.take_profit', 'trading.trailing_stop', 'trading.trailing_activation', 
                 'trading.partial_tp_enabled', 'trading.partial_tp_threshold', 'trading.partial_tp_ratio',
                 'trading.partial_tp2_enabled', 'trading.partial_tp2_threshold', 'trading.partial_tp2_ratio'],
-        advanced: ['trading.position_size'],
-        danger: ['trading.leverage']
+        advanced: ['trading.position_size', 'trading.base_entry_margin_ratio', 'trading.min_entry_margin_ratio', 'trading.max_entry_margin_ratio', 'trading.quality_scaling_enabled', 'trading.high_quality_multiplier', 'trading.low_quality_multiplier', 'trading.add_position_enabled'],
+        danger: ['trading.leverage', 'trading.total_margin_cap_ratio', 'trading.total_margin_soft_cap_ratio', 'trading.symbol_margin_cap_ratio']
     },
     risk: {
         basic: ['trading.cooldown_minutes', 'trading.min_trade_interval', 'trading.max_trades_per_day'],
         advanced: [],
-        danger: ['trading.max_exposure', 'trading.max_daily_drawdown', 'trading.max_consecutive_losses', 'trading.max_position_per_symbol']
+        danger: ['trading.max_exposure', 'trading.max_daily_drawdown', 'trading.max_consecutive_losses', 'trading.max_position_per_symbol', 'trading.total_margin_cap_ratio', 'trading.total_margin_soft_cap_ratio', 'trading.symbol_margin_cap_ratio']
     },
     runtime: {
         basic: ['runtime.mode', 'runtime.interval_seconds'],

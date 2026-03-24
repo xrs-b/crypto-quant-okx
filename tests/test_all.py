@@ -24,6 +24,7 @@ from trading import TradingExecutor, RiskManager
 from strategies.strategy_library import StrategyManager
 from bot.run import build_exchange_diagnostics, build_exchange_smoke_plan, build_runtime_health_summary, maybe_send_daily_health_summary, execute_exchange_smoke, reconcile_exchange_positions
 from dashboard.api import app
+from core.risk_budget import get_risk_budget_config, compute_entry_plan
 
 
 class FakeExchange:
@@ -33,6 +34,9 @@ class FakeExchange:
 
     def fetch_ticker(self, symbol):
         return {'last': self.price}
+
+    def fetch_closed_trade_summary(self, trade, fallback_price=None):
+        return None
 
     def close_order(self, symbol, side, amount, posSide=None):
         self.closed_orders.append({
@@ -2206,6 +2210,36 @@ class TestTradingExecutor(unittest.TestCase):
         self.assertEqual(positions[0]['coin_quantity'], 5)
 
 
+
+class TestRiskBudgetSizing(unittest.TestCase):
+    def test_compute_entry_plan_respects_soft_cap_and_min_floor(self):
+        cfg = Config()
+        risk_budget = get_risk_budget_config(cfg)
+        plan = compute_entry_plan(
+            total_balance=1000,
+            free_balance=600,
+            current_total_margin=260,
+            current_symbol_margin=20,
+            risk_budget=risk_budget,
+        )
+        self.assertFalse(plan['blocked'])
+        self.assertAlmostEqual(plan['effective_entry_margin_ratio'], 0.04, places=4)
+        self.assertTrue(plan['soft_cap_reached'])
+
+    def test_compute_entry_plan_blocks_when_remaining_budget_below_min_entry(self):
+        cfg = Config()
+        risk_budget = get_risk_budget_config(cfg)
+        plan = compute_entry_plan(
+            total_balance=1000,
+            free_balance=500,
+            current_total_margin=290,
+            current_symbol_margin=20,
+            risk_budget=risk_budget,
+        )
+        self.assertTrue(plan['blocked'])
+        self.assertIn('最小开仓门槛', plan['block_reason'])
+
+
 class TestRiskManager(unittest.TestCase):
     """风险管理器测试"""
     
@@ -2239,6 +2273,43 @@ class TestRiskManager(unittest.TestCase):
         self.db.close_trade(trade_id=trade_id, exit_price=49000, pnl=-100, pnl_percent=-2, notes='unit-test')
         ratio = self.risk_mgr._get_daily_drawdown_ratio()
         self.assertGreater(ratio, 0)
+
+class TestRiskManagerBudgetDetails(unittest.TestCase):
+    def setUp(self):
+        self.config = Config()
+        self.db = Database('data/test_risk_budget_details.db')
+        self.risk_mgr = RiskManager(self.config, self.db)
+
+    def tearDown(self):
+        if os.path.exists('data/test_risk_budget_details.db'):
+            os.remove('data/test_risk_budget_details.db')
+
+    def test_can_open_position_returns_entry_plan(self):
+        can_open, reason, details = self.risk_mgr.can_open_position('BTC/USDT')
+        self.assertTrue(can_open)
+        self.assertIn('entry_plan', details['exposure_limit'])
+        self.assertIn('position_ratio', details['exposure_limit'])
+
+
+class TestDashboardRiskBudgetAPI(unittest.TestCase):
+    def setUp(self):
+        self.client = app.test_client()
+
+    def test_config_form_contains_risk_budget_fields(self):
+        resp = self.client.get('/api/config/form')
+        data = resp.get_json()
+        self.assertTrue(data['success'])
+        trading_fields = data['data']['trading']['fields']
+        self.assertIn('trading.total_margin_cap_ratio', trading_fields)
+        self.assertIn('trading.base_entry_margin_ratio', trading_fields)
+        self.assertIn('trading.add_position_enabled', trading_fields)
+
+    def test_sizing_preview_exposes_entry_plan(self):
+        resp = self.client.get('/api/risk/sizing-preview?symbol=BTC/USDT&side=long')
+        data = resp.get_json()
+        self.assertTrue(data['success'])
+        self.assertIn('entry_plan', data['data'])
+        self.assertIn('soft_exposure', data['data']['config'])
 
 
 class TestMFEAnalyzer(unittest.TestCase):

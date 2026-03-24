@@ -709,8 +709,9 @@ def get_positions():
     for p in positions:
         quantity = float(p.get('quantity') or 0)
         contract_size = float(p.get('contract_size') or 1)
-        # 直接用 quantity * contract_size 计算币数量（更可靠）
-        coin_qty = quantity * contract_size
+        stored_coin_qty = p.get('coin_quantity')
+        coin_qty = float(stored_coin_qty) if stored_coin_qty not in (None, '') and not (isinstance(stored_coin_qty, float) and math.isnan(stored_coin_qty)) else quantity * contract_size
+        p['coin_quantity'] = coin_qty
         # 处理 NaN 值
         current_price = p.get('current_price')
         entry_price = p.get('entry_price')

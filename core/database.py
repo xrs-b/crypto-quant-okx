@@ -27,6 +27,44 @@ class Database:
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         return conn
+
+    def _safe_float(self, value: Any, default: float = 0.0) -> float:
+        try:
+            if value in (None, ''):
+                return default
+            return float(value)
+        except Exception:
+            return default
+
+    def _normalize_contract_fields(self, row: Dict[str, Any]) -> Dict[str, Any]:
+        data = dict(row or {})
+        quantity = self._safe_float(data.get('quantity'))
+        contract_size = self._safe_float(data.get('contract_size'), 1.0) or 1.0
+        stored_coin = data.get('coin_quantity')
+        stored_coin = None if stored_coin in (None, '') or pd.isna(stored_coin) else self._safe_float(stored_coin)
+        expected_coin = quantity * contract_size if quantity > 0 and contract_size > 0 else stored_coin or 0.0
+        data['quantity'] = quantity
+        data['contract_size'] = contract_size
+        data['coin_quantity'] = expected_coin if expected_coin > 0 else (stored_coin or 0.0)
+        return data
+
+    def _recalculate_trade_metrics(self, row: Dict[str, Any]) -> Dict[str, Any]:
+        data = self._normalize_contract_fields(row)
+        entry_price = self._safe_float(data.get('entry_price'))
+        exit_price = self._safe_float(data.get('exit_price'))
+        leverage = max(1, int(self._safe_float(data.get('leverage'), 1)))
+        coin_quantity = self._safe_float(data.get('coin_quantity'))
+        pnl = data.get('pnl')
+        pnl = None if pnl in (None, '') or pd.isna(pnl) else self._safe_float(pnl)
+        if pnl is None and entry_price > 0 and exit_price > 0 and coin_quantity > 0:
+            direction = 1 if str(data.get('side') or '').lower() == 'long' else -1
+            pnl = (exit_price - entry_price) * coin_quantity * direction
+            data['pnl'] = pnl
+        margin = (entry_price * coin_quantity) / leverage if entry_price > 0 and coin_quantity > 0 and leverage > 0 else 0.0
+        data['margin'] = margin
+        data['notional_value'] = coin_quantity * (exit_price or entry_price or 0.0)
+        data['pnl_percent'] = (pnl / margin * 100) if pnl is not None and margin > 0 else None
+        return data
     
     def _init_db(self):
         """初始化数据库表"""
@@ -519,9 +557,22 @@ class Database:
         if extra_note:
             final_notes = f"{existing_notes} | {extra_note}" if existing_notes else extra_note
         close_time = (summary or {}).get('close_time') or current.get('close_time')
-        quantity = (summary or {}).get('quantity') or current.get('quantity')
-        coin_quantity = (summary or {}).get('coin_quantity') or current.get('coin_quantity')
-        contract_size = (summary or {}).get('contract_size') or current.get('contract_size') or 1.0
+        quantity = self._safe_float((summary or {}).get('quantity') or current.get('quantity'))
+        contract_size = self._safe_float((summary or {}).get('contract_size') or current.get('contract_size') or 1.0, 1.0) or 1.0
+        summary_coin_quantity = (summary or {}).get('coin_quantity')
+        if summary_coin_quantity in (None, ''):
+            coin_quantity = quantity * contract_size if quantity > 0 else self._safe_float(current.get('coin_quantity'))
+        else:
+            coin_quantity = self._safe_float(summary_coin_quantity)
+        pnl = (summary or {}).get('pnl')
+        pnl = None if pnl in (None, '') else self._safe_float(pnl)
+        pnl_percent = (summary or {}).get('pnl_percent')
+        pnl_percent = None if pnl_percent in (None, '') else self._safe_float(pnl_percent)
+        if pnl is not None and pnl_percent is None:
+            leverage = max(1, int(self._safe_float(current.get('leverage'), 1)))
+            entry_price = self._safe_float(current.get('entry_price'))
+            margin = (entry_price * coin_quantity) / leverage if entry_price > 0 and coin_quantity > 0 else 0.0
+            pnl_percent = (pnl / margin * 100) if margin > 0 else None
         cursor.execute("""
             UPDATE trades
             SET status = 'closed',
@@ -538,8 +589,8 @@ class Database:
             WHERE id = ?
         """, (
             (summary or {}).get('exit_price'),
-            (summary or {}).get('pnl'),
-            (summary or {}).get('pnl_percent'),
+            pnl,
+            pnl_percent,
             quantity,
             coin_quantity,
             contract_size,
@@ -578,14 +629,8 @@ class Database:
         
         df = pd.read_sql_query(query, conn, params=params)
         conn.close()
-        if not df.empty:
-            if 'contract_size' not in df.columns:
-                df['contract_size'] = 1.0
-            if 'coin_quantity' not in df.columns:
-                df['coin_quantity'] = df['quantity'] * df['contract_size']
-            else:
-                df['coin_quantity'] = df.apply(lambda r: r['coin_quantity'] if pd.notna(r['coin_quantity']) else r['quantity'] * (r['contract_size'] if pd.notna(r['contract_size']) else 1.0), axis=1)
-        return df.to_dict('records')
+        rows = df.to_dict('records')
+        return [self._recalculate_trade_metrics(row) for row in rows]
 
     def get_latest_open_trade(self, symbol: str, side: str = None) -> Optional[Dict]:
         """获取某币种最新未平仓交易"""
@@ -600,7 +645,7 @@ class Database:
         conn.close()
         if df.empty:
             return None
-        return df.iloc[0].to_dict()
+        return self._recalculate_trade_metrics(df.iloc[0].to_dict())
 
     def get_latest_trade_time(self, symbol: str = None) -> Optional[datetime]:
         conn = self._get_connection()
@@ -629,7 +674,8 @@ class Database:
         params.append(limit)
         df = pd.read_sql_query(query, conn, params=params)
         conn.close()
-        return df.to_dict('records')
+        rows = df.to_dict('records')
+        return [self._recalculate_trade_metrics(row) for row in rows]
 
     def mark_trade_stale_closed(self, trade_id: int, reason: str, close_price: float = None, close_source: str = 'reconcile_fallback'):
         summary = {'exit_price': close_price, 'source': close_source, 'fills': []}
@@ -722,14 +768,8 @@ class Database:
         conn = self._get_connection()
         df = pd.read_sql_query("SELECT * FROM positions", conn)
         conn.close()
-        if not df.empty:
-            if 'contract_size' not in df.columns:
-                df['contract_size'] = 1.0
-            if 'coin_quantity' not in df.columns:
-                df['coin_quantity'] = df['quantity'] * df['contract_size']
-            else:
-                df['coin_quantity'] = df.apply(lambda r: r['coin_quantity'] if pd.notna(r['coin_quantity']) else r['quantity'] * (r['contract_size'] if pd.notna(r['contract_size']) else 1.0), axis=1)
-        return df.to_dict('records')
+        rows = df.to_dict('records')
+        return [self._normalize_contract_fields(row) for row in rows]
     
     def close_position(self, symbol: str):
         """平仓(删除持仓记录)"""
@@ -738,6 +778,56 @@ class Database:
         cursor.execute("DELETE FROM positions WHERE symbol = ?", (symbol,))
         conn.commit()
         conn.close()
+
+    def repair_trade_quantity_mappings(self, symbols: List[str] = None, pnl_percent_abs_cap: float = 1000.0) -> Dict[str, Any]:
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        params = []
+        query = "SELECT * FROM trades"
+        if symbols:
+            placeholders = ','.join(['?'] * len(symbols))
+            query += f" WHERE symbol IN ({placeholders})"
+            params.extend(symbols)
+        updated = 0
+        checked = 0
+        samples = []
+        for row in cursor.execute(query, params).fetchall():
+            checked += 1
+            current = dict(row)
+            recalculated = self._recalculate_trade_metrics(current)
+            existing_coin = self._safe_float(current.get('coin_quantity'))
+            existing_pct = current.get('pnl_percent')
+            existing_pct = None if existing_pct in (None, '') else self._safe_float(existing_pct)
+            expected_coin = self._safe_float(recalculated.get('coin_quantity'))
+            expected_pct = recalculated.get('pnl_percent')
+            coin_mismatch = expected_coin > 0 and abs(existing_coin - expected_coin) > max(expected_coin * 0.001, 1e-8)
+            pct_outlier = existing_pct is not None and abs(existing_pct) > pnl_percent_abs_cap
+            pct_mismatch = expected_pct is not None and existing_pct is not None and abs(existing_pct - expected_pct) > 0.5
+            if not (coin_mismatch or pct_outlier or pct_mismatch):
+                continue
+            cursor.execute(
+                """
+                UPDATE trades
+                SET coin_quantity = ?,
+                    contract_size = ?,
+                    pnl_percent = ?
+                WHERE id = ?
+                """,
+                (expected_coin, self._safe_float(recalculated.get('contract_size'), 1.0), expected_pct, current['id'])
+            )
+            updated += 1
+            if len(samples) < 10:
+                samples.append({
+                    'id': current['id'],
+                    'symbol': current.get('symbol'),
+                    'coin_quantity_before': existing_coin,
+                    'coin_quantity_after': expected_coin,
+                    'pnl_percent_before': existing_pct,
+                    'pnl_percent_after': expected_pct,
+                })
+        conn.commit()
+        conn.close()
+        return {'checked': checked, 'updated': updated, 'samples': samples}
 
     def remove_positions_not_in(self, symbols: List[str]) -> int:
         """删除不在指定 symbol 集合内的本地持仓"""

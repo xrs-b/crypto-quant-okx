@@ -189,7 +189,7 @@ class Config:
     @property
     def leverage(self) -> int:
         """获取杠杆倍数"""
-        return self.get('trading.leverage', 10)
+        return self.get('trading.leverage', 3)
 
     @property
     def position_mode(self) -> str:

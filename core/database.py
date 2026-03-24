@@ -490,8 +490,13 @@ class Database:
         """记录交易"""
         conn = self._get_connection()
         cursor = conn.cursor()
+        quantity = self._safe_float(quantity)
+        contract_size = self._safe_float(contract_size, 1.0) or 1.0
+        leverage = max(1, int(self._safe_float(leverage, 1) or 1))
         if coin_quantity is None:
-            coin_quantity = float(quantity or 0) * float(contract_size or 1)
+            coin_quantity = quantity * contract_size
+        else:
+            coin_quantity = self._safe_float(coin_quantity)
         
         cursor.execute("""
             INSERT INTO trades (symbol, side, entry_price, quantity, contract_size, coin_quantity, leverage, signal_id, notes)
@@ -726,8 +731,15 @@ class Database:
         """更新持仓"""
         conn = self._get_connection()
         cursor = conn.cursor()
+        quantity = self._safe_float(quantity)
+        contract_size = self._safe_float(contract_size, 1.0) or 1.0
+        leverage = max(1, int(self._safe_float(leverage, 1) or 1))
+        entry_price = self._safe_float(entry_price)
+        current_price = self._safe_float(current_price, entry_price)
         if coin_quantity is None:
-            coin_quantity = float(quantity or 0) * float(contract_size or 1)
+            coin_quantity = quantity * contract_size
+        else:
+            coin_quantity = self._safe_float(coin_quantity)
         
         # 计算未实现盈亏（按折算币数量）
         if side == 'long':
@@ -828,6 +840,50 @@ class Database:
         conn.commit()
         conn.close()
         return {'checked': checked, 'updated': updated, 'samples': samples}
+
+    def sync_trade_with_exchange_snapshot(self, trade_id: int, *, quantity: float = None, contract_size: float = None, coin_quantity: float = None, leverage: int = None, entry_price: float = None, notes: str = None) -> bool:
+        """用交易所持仓快照回写 open trade 的关键字段，避免沿用旧的本地错误杠杆/数量。"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM trades WHERE id = ?", (trade_id,))
+        row = cursor.fetchone()
+        if not row:
+            conn.close()
+            return False
+        current = dict(row)
+        payload = {
+            'quantity': self._safe_float(quantity if quantity is not None else current.get('quantity')),
+            'contract_size': self._safe_float(contract_size if contract_size is not None else current.get('contract_size'), 1.0) or 1.0,
+            'coin_quantity': coin_quantity,
+            'leverage': max(1, int(self._safe_float(leverage if leverage is not None else current.get('leverage'), 1) or 1)),
+            'entry_price': self._safe_float(entry_price if entry_price is not None else current.get('entry_price')),
+        }
+        if coin_quantity is None:
+            payload['coin_quantity'] = payload['quantity'] * payload['contract_size']
+        else:
+            payload['coin_quantity'] = self._safe_float(coin_quantity)
+        existing_notes = current.get('notes') or ''
+        if notes:
+            payload['notes'] = f"{existing_notes} | {notes}" if existing_notes else notes
+        else:
+            payload['notes'] = existing_notes
+        cursor.execute(
+            """
+            UPDATE trades
+            SET entry_price = ?,
+                quantity = ?,
+                contract_size = ?,
+                coin_quantity = ?,
+                leverage = ?,
+                notes = ?
+            WHERE id = ? AND status = 'open'
+            """,
+            (payload['entry_price'], payload['quantity'], payload['contract_size'], payload['coin_quantity'], payload['leverage'], payload['notes'], trade_id)
+        )
+        changed = cursor.rowcount > 0
+        conn.commit()
+        conn.close()
+        return changed
 
     def remove_positions_not_in(self, symbols: List[str]) -> int:
         """删除不在指定 symbol 集合内的本地持仓"""

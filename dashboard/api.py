@@ -697,38 +697,74 @@ def config_page_view():
     return render_template('config.html', active_page='config')
 
 
+
+def _get_live_position_snapshot_map():
+    """尽量使用交易所实时持仓覆盖展示字段；失败时回退数据库。"""
+    try:
+        exchange = _get_exchange_client()
+        rows = exchange.fetch_positions() or []
+    except Exception:
+        return {}
+    result = {}
+    for row in rows:
+        normalized = row if row.get('contract_size') is not None else exchange.normalize_position(row)
+        if not normalized:
+            continue
+        key = (normalized.get('symbol'), normalized.get('side'))
+        result[key] = normalized
+    return result
+
+
+def _merge_position_with_exchange_snapshot(position: Dict[str, Any], snapshot: Dict[str, Any] = None) -> Dict[str, Any]:
+    data = dict(position or {})
+    if snapshot:
+        for field in ('entry_price', 'current_price', 'leverage', 'quantity', 'contracts', 'contract_size', 'coin_quantity', 'realized_pnl'):
+            value = snapshot.get(field)
+            if value not in (None, ''):
+                data[field] = value
+        data['sync_source'] = 'exchange'
+    else:
+        data['sync_source'] = data.get('sync_source') or 'database'
+
+    quantity = float(data.get('quantity') or data.get('contracts') or 0)
+    contract_size = float(data.get('contract_size') or 1)
+    stored_coin_qty = data.get('coin_quantity')
+    coin_qty = float(stored_coin_qty) if stored_coin_qty not in (None, '') and not (isinstance(stored_coin_qty, float) and math.isnan(stored_coin_qty)) else quantity * contract_size
+    data['quantity'] = quantity
+    data['contracts'] = quantity
+    data['contract_size'] = contract_size
+    data['coin_quantity'] = coin_qty
+
+    current_price = data.get('current_price')
+    entry_price = data.get('entry_price')
+    if current_price is None or (isinstance(current_price, float) and math.isnan(current_price)):
+        price = entry_price if entry_price else 0
+    else:
+        price = current_price
+    price = float(price) if price else 0
+    leverage = float(data.get('leverage') or 1)
+    data['notional_value'] = round(coin_qty * price, 2)
+    data['margin'] = round(data['notional_value'] / leverage, 2) if leverage > 0 else data['notional_value']
+    return data
+
+
 # ============================================================================
 # 交易数据API
 # ============================================================================
 
 @app.route('/api/positions')
 def get_positions():
-    """获取当前持仓"""
+    """获取当前持仓（展示优先使用交易所实时同步字段）"""
     positions = db.get_positions()
-    # 补充显示用字段：名义价值、估算保证金
+    live_map = _get_live_position_snapshot_map()
+    merged = []
     for p in positions:
-        quantity = float(p.get('quantity') or 0)
-        contract_size = float(p.get('contract_size') or 1)
-        stored_coin_qty = p.get('coin_quantity')
-        coin_qty = float(stored_coin_qty) if stored_coin_qty not in (None, '') and not (isinstance(stored_coin_qty, float) and math.isnan(stored_coin_qty)) else quantity * contract_size
-        p['coin_quantity'] = coin_qty
-        # 处理 NaN 值
-        current_price = p.get('current_price')
-        entry_price = p.get('entry_price')
-        if current_price is None or (isinstance(current_price, float) and math.isnan(current_price)):
-            price = entry_price if entry_price else 0
-        else:
-            price = current_price
-        price = float(price) if price else 0
-        leverage = float(p.get('leverage') or 1)
-        # 名义价值 = 币数量 × 当前价格
-        p['notional_value'] = round(coin_qty * price, 2)
-        # 估算保证金 = 名义价值 / 杠杆
-        p['margin'] = round(p['notional_value'] / leverage, 2) if leverage > 0 else p['notional_value']
+        snapshot = live_map.get((p.get('symbol'), p.get('side')))
+        merged.append(_merge_position_with_exchange_snapshot(p, snapshot))
     return jsonify({
         'success': True,
-        'data': positions,
-        'count': len(positions)
+        'data': merged,
+        'count': len(merged)
     })
 
 
@@ -740,15 +776,32 @@ def get_trades():
     limit = int(request.args.get('limit', 100))
     
     trades = db.get_trades(symbol=symbol, status=status, limit=limit)
-    # 补充显示用字段：名义价值、估算保证金
+    live_map = _get_live_position_snapshot_map()
+    # 补充显示用字段：名义价值、估算保证金；open trade 若仍有交易所持仓则优先展示交易所真实杠杆/数量
     for t in trades:
-        quantity = float(t.get('quantity') or 0)
+        snapshot = None
+        if str(t.get('status') or '').lower() == 'open':
+            snapshot = live_map.get((t.get('symbol'), t.get('side')))
+            if snapshot:
+                for field in ('leverage', 'quantity', 'contracts', 'contract_size', 'coin_quantity', 'entry_price', 'current_price'):
+                    value = snapshot.get(field)
+                    if value not in (None, ''):
+                        t[field] = value
+                t['sync_source'] = 'exchange'
+        if not t.get('sync_source'):
+            if t.get('close_source') and str(t.get('close_source')).startswith('exchange'):
+                t['sync_source'] = 'exchange_history'
+            elif t.get('close_source') == 'ticker_fallback':
+                t['sync_source'] = 'ticker_fallback'
+            else:
+                t['sync_source'] = 'database'
+        quantity = float(t.get('quantity') or t.get('contracts') or 0)
         contract_size = float(t.get('contract_size') or 1)
         stored_coin_qty = t.get('coin_quantity')
         coin_qty = float(stored_coin_qty) if stored_coin_qty not in (None, '') and not (isinstance(stored_coin_qty, float) and math.isnan(stored_coin_qty)) else quantity * contract_size
+        t['quantity'] = quantity
+        t['contracts'] = quantity
         t['coin_quantity'] = coin_qty
-        # 使用开仓价计算名义价值（已平仓用平仓价，持仓用开仓价）
-        # 处理 NaN 值
         exit_price = t.get('exit_price')
         entry_price = t.get('entry_price')
         if exit_price is None or (isinstance(exit_price, float) and math.isnan(exit_price)):
@@ -1875,7 +1928,7 @@ def get_risk_status():
         '单单保证金比例': float(trading_cfg.get('position_size', 0.1)),
         '总仓风险上限': float(trading_cfg.get('max_exposure', 0.3)),
         '单币种上限': float(trading_cfg.get('max_position_per_symbol', 0.15)),
-        '配置杠杆': int(trading_cfg.get('leverage', 10)),
+        '配置杠杆': int(trading_cfg.get('leverage', 3)),
     }
     
     return jsonify({
@@ -1917,7 +1970,7 @@ def get_risk_sizing_preview():
         position_ratio = float(trading_cfg.get('position_size', 0.1))
         max_exposure = float(trading_cfg.get('max_exposure', 0.3))
         max_per_symbol = float(trading_cfg.get('max_position_per_symbol', 0.15))
-        configured_leverage = int(trading_cfg.get('leverage', 10))
+        configured_leverage = int(trading_cfg.get('leverage', 3))
         
         # 获取余额计算计划保证金
         balance = risk_manager._get_balance_summary()

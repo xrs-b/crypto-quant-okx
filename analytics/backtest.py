@@ -142,7 +142,7 @@ class StrategyBacktester:
                     'entry_price': position.entry_price,
                     'current_price': current_price,
                     'quantity': 1.0,
-                    'leverage': self.config.get('trading', {}).get('leverage', 10),
+                    'leverage': self.config.get('trading', {}).get('leverage', 3),
                 }
 
             passed, _, _ = self.validator.validate(signal, current_positions=current_positions, tracking_data={})

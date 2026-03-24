@@ -13,7 +13,7 @@ class Exchange:
         self.config = config
         exchange_id = config.get('exchange', {}).get('name', 'okx')
         api_config = config.get('api', {})
-        self.leverage = config.get('trading', {}).get('leverage', 10)
+        self.leverage = config.get('trading', {}).get('leverage', 3)
 
         self.exchange = getattr(ccxt, exchange_id)({
             'apiKey': api_config.get('key', ''),
@@ -358,7 +358,7 @@ class Exchange:
     def fetch_ohlcv(self, symbol: str, timeframe: str = '1h', since: int = None, limit: int = 100) -> List:
         return self.exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=limit)
 
-    def set_leverage(self, symbol: str, leverage: int = 10):
+    def set_leverage(self, symbol: str, leverage: int = 3):
         market = self.get_market(symbol)
         if not market or not market.get('swap'):
             return

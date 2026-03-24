@@ -47,6 +47,7 @@ from core.database import Database
 from core.exchange import Exchange
 from core.presets import PresetManager
 from trading.executor import RiskManager
+from core.risk_budget import get_risk_budget_config, summarize_margin_usage, compute_entry_plan
 from signals.validator import SignalValidator
 from bot.run import execute_exchange_smoke, reconcile_exchange_positions, load_runtime_state
 from ml.engine import MLEngine
@@ -1925,9 +1926,13 @@ def get_risk_status():
     # 扩展返回：sizing 配置（便于前端展示 10%/30% 规则）
     trading_cfg = config.get('trading', {}) or {}
     risk_data['sizing_config'] = {
-        '单单保证金比例': float(trading_cfg.get('position_size', 0.1)),
-        '总仓风险上限': float(trading_cfg.get('max_exposure', 0.3)),
-        '单币种上限': float(trading_cfg.get('max_position_per_symbol', 0.15)),
+        '基础单笔目标': float(get_risk_budget_config(config).get('base_entry_margin_ratio', 0.08)),
+        '单笔最小保证金比例': float(get_risk_budget_config(config).get('min_entry_margin_ratio', 0.04)),
+        '单笔最大保证金比例': float(get_risk_budget_config(config).get('max_entry_margin_ratio', 0.10)),
+        '总保证金软上限': float(get_risk_budget_config(config).get('total_margin_soft_cap_ratio', 0.25)),
+        '总保证金硬上限': float(get_risk_budget_config(config).get('total_margin_cap_ratio', 0.30)),
+        '单币种上限': float(get_risk_budget_config(config).get('symbol_margin_cap_ratio', 0.12)),
+        '允许同向加仓': bool(get_risk_budget_config(config).get('add_position_enabled', False)),
         '配置杠杆': int(trading_cfg.get('leverage', 3)),
     }
     
@@ -1967,44 +1972,39 @@ def get_risk_sizing_preview():
         
         # 获取配置
         trading_cfg = config.get('trading', {}) or {}
-        position_ratio = float(trading_cfg.get('position_size', 0.1))
-        max_exposure = float(trading_cfg.get('max_exposure', 0.3))
-        max_per_symbol = float(trading_cfg.get('max_position_per_symbol', 0.15))
         configured_leverage = int(trading_cfg.get('leverage', 3))
-        
-        # 获取余额计算计划保证金
+        risk_budget = get_risk_budget_config(config, symbol)
+
         balance = risk_manager._get_balance_summary()
-        total_balance = balance.get('total', 0) or 1
+        total_balance = balance.get('total', 0) or 0
         free_balance = balance.get('free', 0)
-        planned_margin = total_balance * position_ratio
-        
-        # 计算当前 exposure（复用 risk_manager 的逻辑）
-        total_margin_used = 0.0
-        symbol_margin_used = 0.0
-        for p in positions:
-            qty = float(p.get('coin_quantity', 0) or 0)
-            px = float(p.get('current_price', 0) or p.get('entry_price', 0) or 0)
-            lev = max(1, int(p.get('leverage', 1) or 1))
-            margin = (qty * px) / lev if qty and px else 0.0
-            total_margin_used += margin
-            if p.get('symbol') == symbol:
-                symbol_margin_used += margin
-        
-        current_total_exposure = total_margin_used / total_balance if total_balance > 0 else 0.0
-        current_symbol_exposure = symbol_margin_used / total_balance if total_balance > 0 else 0.0
-        
-        # 计算开仓后
-        after_open_total = current_total_exposure + position_ratio
-        after_open_symbol = current_symbol_exposure + position_ratio
-        
-        # 检查规则
-        total_exposure_ok = after_open_total <= max_exposure
-        symbol_exposure_ok = after_open_symbol <= max_per_symbol
-        balance_ok = free_balance >= planned_margin
-        
-        will_pass = total_exposure_ok and symbol_exposure_ok and balance_ok
+        usage = summarize_margin_usage(positions, symbol)
+        entry_plan = compute_entry_plan(
+            total_balance=total_balance,
+            free_balance=free_balance,
+            current_total_margin=usage['current_total_margin'],
+            current_symbol_margin=usage['current_symbol_margin'],
+            risk_budget=risk_budget,
+        )
+        position_ratio = float(entry_plan.get('effective_entry_margin_ratio') or 0.0)
+        max_exposure = float(risk_budget.get('total_margin_cap_ratio', 0.3))
+        soft_exposure = float(risk_budget.get('total_margin_soft_cap_ratio', 0.25))
+        max_per_symbol = float(risk_budget.get('symbol_margin_cap_ratio', 0.12))
+        planned_margin = float(entry_plan.get('allowed_margin') or 0.0)
+        current_total_exposure = float(entry_plan.get('current_total_exposure_ratio') or 0.0)
+        current_symbol_exposure = float(entry_plan.get('current_symbol_exposure_ratio') or 0.0)
+        after_open_total = float(entry_plan.get('projected_total_exposure_ratio') or current_total_exposure)
+        after_open_symbol = float(entry_plan.get('projected_symbol_exposure_ratio') or current_symbol_exposure)
+
+        total_exposure_ok = (not entry_plan.get('blocked')) and after_open_total <= max_exposure
+        symbol_exposure_ok = (not entry_plan.get('blocked')) and after_open_symbol <= max_per_symbol
+        balance_ok = free_balance >= planned_margin and planned_margin > 0
+
+        will_pass = total_exposure_ok and symbol_exposure_ok and balance_ok and not entry_plan.get('blocked')
         block_reason = None
-        if not total_exposure_ok:
+        if entry_plan.get('blocked'):
+            block_reason = entry_plan.get('block_reason')
+        elif not total_exposure_ok:
             block_reason = f'总风险占用超限 ({after_open_total*100:.1f}% > {max_exposure*100:.0f}%)'
         elif not symbol_exposure_ok:
             block_reason = f'单币种占用超限 ({after_open_symbol*100:.1f}% > {max_per_symbol*100:.0f}%)'
@@ -2019,15 +2019,21 @@ def get_risk_sizing_preview():
             # 配置信息
             'config': {
                 'position_ratio': position_ratio,
+                'base_entry_margin_ratio': float(risk_budget.get('base_entry_margin_ratio', 0.08)),
+                'min_entry_margin_ratio': float(risk_budget.get('min_entry_margin_ratio', 0.04)),
+                'max_entry_margin_ratio': float(risk_budget.get('max_entry_margin_ratio', 0.10)),
                 'max_exposure': max_exposure,
+                'soft_exposure': soft_exposure,
                 'max_per_symbol': max_per_symbol,
                 'configured_leverage': configured_leverage,
+                'add_position_enabled': bool(risk_budget.get('add_position_enabled', False)),
             },
             # 余额与计划保证金
             'balance': {
                 'total': balance.get('total', 0),
                 'free': balance.get('free', 0),
                 'planned_margin': round(planned_margin, 2),
+                'target_margin': round(float(entry_plan.get('target_margin') or 0), 2),
             },
             # 杠杆
             'leverage': {
@@ -2040,13 +2046,16 @@ def get_risk_sizing_preview():
                 'after_open_total': round(after_open_total, 4),
                 'current_symbol': round(current_symbol_exposure, 4),
                 'after_open_symbol': round(after_open_symbol, 4),
+                'soft_cap': round(soft_exposure, 4),
             },
             # 规则校验
             'rules_check': {
                 'total_exposure_ok': total_exposure_ok,
                 'symbol_exposure_ok': symbol_exposure_ok,
                 'balance_ok': balance_ok,
+                'entry_plan_ok': not entry_plan.get('blocked'),
             },
+            'entry_plan': entry_plan,
             # 规则解释（中文化）
             'rules_summary': _build_sizing_summary(
                 will_pass, block_reason, 
@@ -2721,6 +2730,90 @@ FIELD_DEFINITIONS = {
                 'description': '每次开仓使用的资金比例 (0.01-1.0)',
                 'recommended': [0.05, 0.1, 0.15, 0.2]
             },
+            'trading.total_margin_cap_ratio': {
+                'label': '总保证金硬上限',
+                'type': 'float',
+                'min': 0.05,
+                'max': 0.8,
+                'default': 0.30,
+                'description': '所有持仓合计保证金占总资产的硬上限',
+                'recommended': [0.2, 0.25, 0.3, 0.35]
+            },
+            'trading.total_margin_soft_cap_ratio': {
+                'label': '总保证金软警戒',
+                'type': 'float',
+                'min': 0.05,
+                'max': 0.8,
+                'default': 0.25,
+                'description': '接近该比例时系统会自动收缩单笔开仓',
+                'recommended': [0.2, 0.24, 0.25, 0.27]
+            },
+            'trading.symbol_margin_cap_ratio': {
+                'label': '单币种保证金上限',
+                'type': 'float',
+                'min': 0.02,
+                'max': 0.5,
+                'default': 0.12,
+                'description': '单一币种累计保证金占总资产上限',
+                'recommended': [0.08, 0.1, 0.12, 0.15]
+            },
+            'trading.base_entry_margin_ratio': {
+                'label': '基础单笔目标',
+                'type': 'float',
+                'min': 0.01,
+                'max': 0.3,
+                'default': 0.08,
+                'description': '默认目标开仓保证金比例（风险预算逻辑会在范围内动态收缩）',
+                'recommended': [0.05, 0.08, 0.1]
+            },
+            'trading.min_entry_margin_ratio': {
+                'label': '最小单笔保证金比例',
+                'type': 'float',
+                'min': 0.01,
+                'max': 0.2,
+                'default': 0.04,
+                'description': '剩余预算不足该比例时直接拒绝新开仓',
+                'recommended': [0.03, 0.04, 0.05]
+            },
+            'trading.max_entry_margin_ratio': {
+                'label': '最大单笔保证金比例',
+                'type': 'float',
+                'min': 0.02,
+                'max': 0.3,
+                'default': 0.10,
+                'description': '单笔开仓的动态上限，避免过大仓位',
+                'recommended': [0.08, 0.1, 0.12]
+            },
+            'trading.add_position_enabled': {
+                'label': '允许同向加仓',
+                'type': 'bool',
+                'default': False,
+                'description': '默认关闭；开启后才允许同币种同方向继续加仓'
+            },
+            'trading.quality_scaling_enabled': {
+                'label': '启用质量缩放',
+                'type': 'bool',
+                'default': False,
+                'description': '按信号质量在 min/max 单笔范围内做温和放大或缩小'
+            },
+            'trading.high_quality_multiplier': {
+                'label': '高质量倍率',
+                'type': 'float',
+                'min': 1.0,
+                'max': 2.0,
+                'default': 1.15,
+                'description': '高质量信号时乘上的温和放大倍率',
+                'recommended': [1.05, 1.15, 1.25]
+            },
+            'trading.low_quality_multiplier': {
+                'label': '低质量倍率',
+                'type': 'float',
+                'min': 0.3,
+                'max': 1.0,
+                'default': 0.75,
+                'description': '低质量信号时乘上的保守缩小倍率',
+                'recommended': [0.6, 0.75, 0.85]
+            },
             'trading.stop_loss': {
                 'label': '止损比例',
                 'type': 'float',
@@ -2816,7 +2909,7 @@ FIELD_DEFINITIONS = {
                 'min': 0.01,
                 'max': 1.0,
                 'default': 0.3,
-                'description': '总仓位价值占账户比例的上限',
+                'description': '兼容旧字段：总保证金硬上限（建议优先看风险预算字段）',
                 'recommended': [0.2, 0.3, 0.5, 0.7]
             },
             'trading.max_daily_drawdown': {
@@ -2842,8 +2935,8 @@ FIELD_DEFINITIONS = {
                 'type': 'float',
                 'min': 0.01,
                 'max': 1.0,
-                'default': 0.15,
-                'description': '单币种最大持仓比例上限',
+                'default': 0.12,
+                'description': '兼容旧字段：单币种保证金上限（建议优先看风险预算字段）',
                 'recommended': [0.1, 0.15, 0.2, 0.3]
             },
             'trading.cooldown_minutes': {

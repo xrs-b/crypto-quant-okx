@@ -10,6 +10,7 @@ from core.exchange import Exchange
 from core.database import Database
 from core.logger import trade_logger
 from analytics.recommendation import get_recommendation_provider
+from core.risk_budget import get_risk_budget_config, summarize_margin_usage, compute_entry_plan
 
 
 class TradingExecutor:
@@ -77,41 +78,14 @@ class TradingExecutor:
         if total_balance <= 0 and free_balance > 0:
             total_balance = free_balance
 
-        current_symbol_margin = 0.0
-        current_total_margin = 0.0
-        same_side_positions = []
-        normalized_positions = []
-
-        for pos in positions or []:
-            pos_symbol = pos.get('symbol')
-            pos_side = str(pos.get('side') or '').lower()
-            if pos_side in {'buy', 'long'}:
-                pos_side = 'long'
-            elif pos_side in {'sell', 'short'}:
-                pos_side = 'short'
-            qty = float(pos.get('coin_quantity', 0) or 0)
-            if qty <= 0:
-                contracts = float(pos.get('quantity') or pos.get('contracts') or 0)
-                contract_size = float(pos.get('contract_size', 1) or 1)
-                qty = contracts * contract_size
-            px = float(pos.get('current_price') or pos.get('entry_price') or current_price or 0)
-            lev = max(1, int(float(pos.get('leverage', 1) or 1)))
-            margin_used = (qty * px) / lev if qty and px else 0.0
-            row = {
-                'symbol': pos_symbol,
-                'side': pos_side,
-                'coin_quantity': qty,
-                'price': px,
-                'leverage': lev,
-                'margin_used': margin_used,
-            }
-            normalized_positions.append(row)
-            current_total_margin += margin_used
-            if pos_symbol == symbol:
-                current_symbol_margin += margin_used
-                if pos_side == side and margin_used > 0:
-                    same_side_positions.append(row)
-
+        usage = summarize_margin_usage(positions or [], symbol, mark_price=current_price)
+        normalized_positions = usage['positions']
+        same_side_positions = [
+            row for row in normalized_positions
+            if row.get('symbol') == symbol and row.get('side') == side and row.get('margin_used', 0) > 0
+        ]
+        current_total_margin = float(usage['current_total_margin'])
+        current_symbol_margin = float(usage['current_symbol_margin'])
         total_exposure_ratio = current_total_margin / total_balance if total_balance > 0 else 0.0
         symbol_exposure_ratio = current_symbol_margin / total_balance if total_balance > 0 else 0.0
 
@@ -129,16 +103,24 @@ class TradingExecutor:
 
     def _execution_time_risk_guard(self, symbol: str, side: str, current_price: float, available_hint: float = None) -> tuple:
         snapshot = self._build_latest_risk_snapshot(symbol, side, current_price=current_price, available_hint=available_hint)
-        position_ratio = float(self.trading_config.get('position_size', 0.1) or 0.1)
-        max_exposure = float(self.trading_config.get('max_exposure', 0.3) or 0.3)
-        max_symbol_exposure = float(self.trading_config.get('max_position_per_symbol', 0.15) or 0.15)
+        risk_budget = get_risk_budget_config(self.config, symbol)
         total_balance = float(snapshot.get('balance_total') or 0)
         free_balance = float(snapshot.get('balance_free') or 0)
-        planned_margin = max(0.0, free_balance * position_ratio)
-        current_total_ratio = float(snapshot.get('current_total_exposure_ratio') or 0)
-        current_symbol_ratio = float(snapshot.get('current_symbol_exposure_ratio') or 0)
-        projected_total_ratio = ((snapshot.get('current_total_margin') or 0.0) + planned_margin) / total_balance if total_balance > 0 else current_total_ratio
-        projected_symbol_ratio = ((snapshot.get('current_symbol_margin') or 0.0) + planned_margin) / total_balance if total_balance > 0 else current_symbol_ratio
+        entry_plan = compute_entry_plan(
+            total_balance=total_balance,
+            free_balance=free_balance,
+            current_total_margin=float(snapshot.get('current_total_margin') or 0.0),
+            current_symbol_margin=float(snapshot.get('current_symbol_margin') or 0.0),
+            risk_budget=risk_budget,
+        )
+        planned_margin = float(entry_plan.get('allowed_margin') or 0.0)
+        current_total_ratio = float(entry_plan.get('current_total_exposure_ratio') or 0)
+        current_symbol_ratio = float(entry_plan.get('current_symbol_exposure_ratio') or 0)
+        projected_total_ratio = float(entry_plan.get('projected_total_exposure_ratio') or current_total_ratio)
+        projected_symbol_ratio = float(entry_plan.get('projected_symbol_exposure_ratio') or current_symbol_ratio)
+        max_exposure = float(risk_budget.get('total_margin_cap_ratio', 0.3) or 0.3)
+        max_symbol_exposure = float(risk_budget.get('symbol_margin_cap_ratio', 0.15) or 0.15)
+        add_position_enabled = bool(risk_budget.get('add_position_enabled', False))
         duplicate_same_side = bool(snapshot.get('same_side_positions'))
 
         details = {
@@ -154,10 +136,12 @@ class TradingExecutor:
             'max_symbol_exposure': max_symbol_exposure,
             'duplicate_same_side': duplicate_same_side,
             'same_side_count': len(snapshot.get('same_side_positions') or []),
+            'add_position_enabled': add_position_enabled,
+            'entry_plan': entry_plan,
             'guard_stage': 'execution_time',
         }
 
-        if duplicate_same_side:
+        if duplicate_same_side and not add_position_enabled:
             reason = 'execution-time guard: 最新持仓已存在同币种同方向仓位，阻止重复放大'
             details['reason'] = reason
             return False, reason, details
@@ -167,13 +151,8 @@ class TradingExecutor:
             details['reason'] = reason
             return False, reason, details
 
-        if planned_margin <= 0:
-            reason = 'execution-time guard: 最新可用余额不足，无法生成有效保证金'
-            details['reason'] = reason
-            return False, reason, details
-
-        if position_ratio > max_symbol_exposure and not isclose(position_ratio, max_symbol_exposure):
-            reason = 'execution-time guard: 单仓目标已高于单币种上限配置'
+        if entry_plan.get('blocked') or planned_margin <= 0:
+            reason = f"execution-time guard: {entry_plan.get('block_reason') or '最新可用余额不足，无法生成有效保证金'}"
             details['reason'] = reason
             return False, reason, details
 
@@ -233,8 +212,17 @@ class TradingExecutor:
         # 步骤3: 按目标保证金计算名义价值
         # 目标: 10% 保证金 = available * position_ratio
         # 名义价值 = 保证金 * 实际杠杆
-        position_ratio = self.trading_config.get('position_size', 0.1)
-        target_margin = available * position_ratio  # 目标保证金 (e.g., 1000 USDT)
+        risk_budget = get_risk_budget_config(self.config, symbol)
+        latest_snapshot = self._build_latest_risk_snapshot(symbol, side, current_price=current_price, available_hint=available)
+        entry_plan = compute_entry_plan(
+            total_balance=float(latest_snapshot.get('balance_total') or available),
+            free_balance=float(latest_snapshot.get('balance_free') or available),
+            current_total_margin=float(latest_snapshot.get('current_total_margin') or 0.0),
+            current_symbol_margin=float(latest_snapshot.get('current_symbol_margin') or 0.0),
+            risk_budget=risk_budget,
+        )
+        position_ratio = float(entry_plan.get('effective_entry_margin_ratio') or 0.0)
+        target_margin = float(entry_plan.get('allowed_margin') or 0.0)
         desired_notional = target_margin * effective_leverage  # 名义价值 (e.g., 1000 * 10 = 10000 USDT)
         
         # 可观察性日志
@@ -641,8 +629,8 @@ class TradingExecutor:
             if partial_tp2:
                 # 第二止盈层也触发（在同一周期内不可能，因为会先平第一层）
                 return True
-            # 第一止盈层已执行，但未触发第二止盈层，检查是否继续给 trailing/full TP 机会
-            # 返回 False 让调用方继续检查其他退出条件
+            # 第一止盈层已执行，本周期返回 True，避免调用方继续把剩余仓位当作整仓处理
+            return True
         
         # 检查部分止盈（第二止盈层）- 只有第一止盈层已执行或未配置时才检查
         partial_tp2 = self._check_partial_take_profit2(symbol, leveraged_pnl, current_price)
@@ -1129,53 +1117,65 @@ class RiskManager:
             'max': max_daily_drawdown
         }
 
-        max_exposure = float(self.trading_config.get('max_exposure', 0.3))
-        position_ratio = float(self.trading_config.get('position_size', 0.1))
+        risk_budget = get_risk_budget_config(self.config, symbol)
         configured_leverage = int(self.trading_config.get('leverage', 10))
-        
-        # 获取实际杠杆用于更准确的预估
+
         effective_leverage = configured_leverage
         if self._exchange:
             try:
                 effective_leverage = self._exchange.get_actual_leverage(symbol) if hasattr(self._exchange, 'get_actual_leverage') else configured_leverage
             except Exception:
                 pass
-        
-        current_exposure = self._get_current_exposure()
-        
-        # 使用实际杠杆预估新仓位的保证金占用
-        # 目标保证金 = available * position_ratio
-        # 这与 executor.py 中的逻辑保持一致
-        projected_margin_ratio = position_ratio  # 实际保证金占比就是 position_ratio
-        
-        projected_exposure = current_exposure + projected_margin_ratio
-        
-        # 可观察性
+
+        balance = self._get_balance_summary()
+        total_balance = float(balance.get('total', 0) or 0)
+        free_balance = float(balance.get('free', 0) or 0)
+        positions_usage = summarize_margin_usage(self.db.get_positions(), symbol)
+        entry_plan = compute_entry_plan(
+            total_balance=total_balance,
+            free_balance=free_balance,
+            current_total_margin=float(positions_usage.get('current_total_margin') or 0.0),
+            current_symbol_margin=float(positions_usage.get('current_symbol_margin') or 0.0),
+            risk_budget=risk_budget,
+        )
+        current_exposure = float(entry_plan.get('current_total_exposure_ratio') or 0.0)
+        projected_exposure = float(entry_plan.get('projected_total_exposure_ratio') or current_exposure)
+        projected_symbol = float(entry_plan.get('projected_symbol_exposure_ratio') or 0.0)
+        position_ratio = float(entry_plan.get('effective_entry_margin_ratio') or 0.0)
+        max_exposure = float(risk_budget.get('total_margin_cap_ratio', 0.3))
+        max_symbol = float(risk_budget.get('symbol_margin_cap_ratio', 0.15))
+
         trade_logger.info(
             f"风控检查 {symbol}: 当前暴露:{current_exposure*100:.1f}%, "
-            f"计划仓位:{position_ratio*100:.0f}%, 配置杠杆:{configured_leverage}x, 实际杠杆:{effective_leverage}x, "
+            f"计划仓位:{position_ratio*100:.1f}%, 配置杠杆:{configured_leverage}x, 实际杠杆:{effective_leverage}x, "
             f"预计总暴露:{projected_exposure*100:.1f}%, 上限:{max_exposure*100:.0f}%"
         )
-        
-        if projected_exposure > max_exposure:
+
+        if entry_plan.get('blocked'):
             details['exposure_limit'] = {
                 'passed': False,
                 'current': round(current_exposure, 4),
                 'projected': round(projected_exposure, 4),
+                'projected_symbol': round(projected_symbol, 4),
                 'max': max_exposure,
+                'max_symbol': max_symbol,
                 'planned_leverage': configured_leverage,
                 'effective_leverage': effective_leverage,
-                'position_ratio': position_ratio
+                'position_ratio': position_ratio,
+                'entry_plan': entry_plan,
             }
-            return False, f"开仓后将超过最大持仓比例({projected_exposure*100:.0f}%)", details
+            return False, entry_plan.get('block_reason') or '风险预算不足', details
         details['exposure_limit'] = {
             'passed': True,
             'current': round(current_exposure, 4),
             'projected': round(projected_exposure, 4),
+            'projected_symbol': round(projected_symbol, 4),
             'max': max_exposure,
+            'max_symbol': max_symbol,
             'planned_leverage': configured_leverage,
             'effective_leverage': effective_leverage,
-            'position_ratio': position_ratio
+            'position_ratio': position_ratio,
+            'entry_plan': entry_plan,
         }
 
         return True, None, details
@@ -1188,12 +1188,22 @@ class RiskManager:
         loss_guard = self._sync_loss_streak_guard()
         consecutive_losses = int(loss_guard.get('current_streak', 0) or 0)
         status = 'locked' if loss_guard.get('lock_active') else ('guarded' if (daily_drawdown > 0 or consecutive_losses > 0) else 'normal')
+        risk_budget = get_risk_budget_config(self.config)
+        positions_usage = summarize_margin_usage(self.db.get_positions(), symbol='__portfolio__')
+        portfolio_entry_plan = compute_entry_plan(
+            total_balance=float(balance.get('total', 0) or 0),
+            free_balance=float(balance.get('free', 0) or 0),
+            current_total_margin=float(positions_usage.get('current_total_margin') or 0.0),
+            current_symbol_margin=0.0,
+            risk_budget=risk_budget,
+        )
         return {
             'today_trades': self._get_today_trade_count(),
             'last_trade_time': self._get_last_trade_time().isoformat() if self._get_last_trade_time() else None,
             'current_exposure': round(current_exposure, 4),
-            'max_exposure': float(self.trading_config.get('max_exposure', 0.3)),
-            'position_size': float(self.trading_config.get('position_size', 0.1)),
+            'max_exposure': float(risk_budget.get('total_margin_cap_ratio', 0.3)),
+            'soft_exposure': float(risk_budget.get('total_margin_soft_cap_ratio', 0.25)),
+            'position_size': float(risk_budget.get('base_entry_margin_ratio', 0.08)),
             'daily_drawdown': round(daily_drawdown, 4),
             'max_daily_drawdown': float(self.trading_config.get('max_daily_drawdown', 0.03)),
             'consecutive_losses': consecutive_losses,
@@ -1204,7 +1214,9 @@ class RiskManager:
             'loss_streak_recover_at': loss_guard.get('lock_until'),
             'loss_streak_triggered_at': loss_guard.get('triggered_at'),
             'balance': balance,
-            'status': status
+            'status': status,
+            'risk_budget': risk_budget,
+            'portfolio_entry_plan': portfolio_entry_plan,
         }
 
     def _get_balance_summary(self) -> Dict[str, float]:

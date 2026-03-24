@@ -6,6 +6,7 @@ from typing import Dict, List
 from datetime import datetime, timedelta
 from core.config import Config
 from core.exchange import Exchange
+from core.risk_budget import get_risk_budget_config, summarize_margin_usage, compute_entry_plan
 
 
 class SignalValidator:
@@ -13,7 +14,7 @@ class SignalValidator:
 
     FILTER_META = {
         'NO_DIRECTION': {'group': 'signal', 'action_hint': '先观察方向分数与触发策略，当前未形成可执行方向'},
-        'EXISTING_SAME_SIDE_POSITION': {'group': 'position', 'action_hint': '已有同向持仓，优先等平仓或切换币种'},
+        'EXISTING_SAME_SIDE_POSITION': {'group': 'position', 'action_hint': '默认禁用同向加仓；如确需加仓，请先确认 add_position_enabled 配置'},
         'COOLDOWN_ACTIVE': {'group': 'risk', 'action_hint': '冷却期未结束，等剩余时间归零后再观察'},
         'LOW_BALANCE': {'group': 'risk', 'action_hint': '先补足可用余额，或者下调仓位比例'},
         'MAX_EXPOSURE': {'group': 'risk', 'action_hint': '总风险占用已高，建议降低 position_size 或等待仓位释放'},
@@ -91,16 +92,24 @@ class SignalValidator:
 
         side = 'long' if signal.signal_type == 'buy' else 'short'
 
-        # 1. 已有同方向持仓
+        # 1. 已有同方向持仓（默认禁用同向加仓）
+        risk_budget = get_risk_budget_config(self.config, signal.symbol)
         existing = latest_positions.get(signal.symbol)
-        if existing and existing.get('side') == side:
+        add_position_enabled = bool(risk_budget.get('add_position_enabled', False))
+        if existing and existing.get('side') == side and not add_position_enabled:
             details['position_check'] = {
                 'passed': False,
                 'reason': f"已有相同方向持仓: {existing.get('side')}",
-                'existing_position': existing
+                'existing_position': existing,
+                'add_position_enabled': add_position_enabled,
             }
             return self._failure('EXISTING_SAME_SIDE_POSITION', f"已有相同方向持仓: {existing.get('side')}", details, 'position_check')
-        details['position_check'] = {'passed': True, 'reason': '无冲突持仓', 'latest_snapshot_source': 'exchange' if used_exchange_positions else 'input'}
+        details['position_check'] = {
+            'passed': True,
+            'reason': '无冲突持仓' if not existing else '允许同向加仓',
+            'latest_snapshot_source': 'exchange' if used_exchange_positions else 'input',
+            'add_position_enabled': add_position_enabled,
+        }
 
         # 2. 冷却时间
         cooldown = self._cfg(signal.symbol, 'trading.cooldown_minutes', 15)
@@ -118,31 +127,30 @@ class SignalValidator:
                     return self._failure('COOLDOWN_ACTIVE', f"冷却期内({diff_minutes:.1f}分钟)", details, 'cooldown_check')
         details['cooldown_check'] = {'passed': True, 'reason': '冷却时间已过'}
 
-        # 3. 资金与风险占比（用比例，不再错误地用绝对市值对 0.3 比较）
-        position_ratio = float(self._cfg(signal.symbol, 'trading.position_size', 0.1))
-        max_exposure = float(self._cfg(signal.symbol, 'trading.max_exposure', 0.3))
-        max_per_symbol = float(self._cfg(signal.symbol, 'trading.max_position_per_symbol', 0.15))
-
+        # 3. 风险预算型仓位控制（总仓/单币种/单笔目标统一收敛）
         available_usdt = None
         current_exposure_ratio = 0.0
         symbol_exposure_ratio = 0.0
+        entry_plan = None
+        total_usdt = 0.0
 
         if self.exchange:
             balance_info = self.exchange.fetch_balance()
             free = balance_info.get('free', {})
             total = balance_info.get('total', {})
             available_usdt = float(free.get('USDT', 0) or 0)
-            total_usdt = float(total.get('USDT', available_usdt) or available_usdt or 1)
-
-            for _, pos in latest_positions.items():
-                entry = float(pos.get('entry_price', 0) or 0)
-                qty = float(pos.get('coin_quantity', pos.get('quantity', 0)) or 0)
-                lev = max(1, int(pos.get('leverage', 1) or 1))
-                margin_used = (entry * qty) / lev if entry and qty else 0
-                ratio = margin_used / total_usdt if total_usdt > 0 else 0
-                current_exposure_ratio += ratio
-                if pos.get('symbol') == signal.symbol:
-                    symbol_exposure_ratio += ratio
+            total_usdt = float(total.get('USDT', available_usdt) or available_usdt or 0)
+            usage = summarize_margin_usage(list(latest_positions.values()), signal.symbol)
+            entry_plan = compute_entry_plan(
+                total_balance=total_usdt,
+                free_balance=available_usdt,
+                current_total_margin=usage['current_total_margin'],
+                current_symbol_margin=usage['current_symbol_margin'],
+                risk_budget=risk_budget,
+                signal=signal,
+            )
+            current_exposure_ratio = entry_plan['current_total_exposure_ratio']
+            symbol_exposure_ratio = entry_plan['current_symbol_exposure_ratio']
 
             if available_usdt < 100:
                 details['balance_check'] = {
@@ -155,12 +163,24 @@ class SignalValidator:
             details['balance_check'] = {
                 'passed': True,
                 'reason': '余额充足',
-                'available': round(available_usdt, 2)
+                'available': round(available_usdt, 2),
+                'total_balance': round(total_usdt, 2),
             }
         else:
             details['balance_check'] = {'passed': True, 'reason': '跳过(无exchange)'}
+            entry_plan = compute_entry_plan(
+                total_balance=1.0,
+                free_balance=1.0,
+                current_total_margin=0.0,
+                current_symbol_margin=0.0,
+                risk_budget=risk_budget,
+                signal=signal,
+            )
 
-        new_total_exposure = current_exposure_ratio + position_ratio
+        new_total_exposure = entry_plan['projected_total_exposure_ratio']
+        max_exposure = float(risk_budget['total_margin_cap_ratio'])
+        max_per_symbol = float(risk_budget['symbol_margin_cap_ratio'])
+        position_ratio = float(entry_plan['effective_entry_margin_ratio'])
         # 获取杠杆信息用于日志
         configured_leverage = int(self.trading_config.get('leverage', 10))
         effective_leverage = configured_leverage
@@ -170,17 +190,33 @@ class SignalValidator:
             except Exception:
                 pass
         
+        if entry_plan.get('blocked'):
+            details['exposure_check'] = {
+                'passed': False,
+                'reason': entry_plan.get('block_reason') or '风险预算不足',
+                'current_exposure': round(current_exposure_ratio, 4),
+                'new_position_ratio': position_ratio,
+                'entry_plan': entry_plan,
+                'max_exposure': max_exposure,
+                'planned_leverage': configured_leverage,
+                'effective_leverage': effective_leverage,
+                'latest_snapshot_source': 'exchange' if used_exchange_positions else 'input',
+                'refreshed_exposure': True,
+            }
+            return self._failure('MAX_EXPOSURE', entry_plan.get('block_reason') or '风险预算不足', details, 'exposure_check')
+
         if new_total_exposure > max_exposure:
             details['exposure_check'] = {
                 'passed': False,
                 'reason': f"超过最大持仓比例({new_total_exposure:.2f}>{max_exposure:.2f})",
                 'current_exposure': round(current_exposure_ratio, 4),
                 'new_position_ratio': position_ratio,
+                'entry_plan': entry_plan,
                 'max_exposure': max_exposure,
                 'planned_leverage': configured_leverage,
                 'effective_leverage': effective_leverage,
                 'latest_snapshot_source': 'exchange' if used_exchange_positions else 'input',
-                'refreshed_exposure': True
+                'refreshed_exposure': True,
             }
             return self._failure('MAX_EXPOSURE', '超过最大持仓比例', details, 'exposure_check')
         details['exposure_check'] = {
@@ -191,16 +227,18 @@ class SignalValidator:
             'planned_leverage': configured_leverage,
             'effective_leverage': effective_leverage,
             'latest_snapshot_source': 'exchange' if used_exchange_positions else 'input',
-            'refreshed_exposure': True
+            'refreshed_exposure': True,
+            'entry_plan': entry_plan,
         }
 
-        new_symbol_exposure = symbol_exposure_ratio + position_ratio
+        new_symbol_exposure = entry_plan['projected_symbol_exposure_ratio']
         if new_symbol_exposure > max_per_symbol:
             details['symbol_exposure_check'] = {
                 'passed': False,
                 'reason': f"单币种持仓超过限制({new_symbol_exposure:.2f}>{max_per_symbol:.2f})",
                 'latest_snapshot_source': 'exchange' if used_exchange_positions else 'input',
-                'refreshed_exposure': True
+                'refreshed_exposure': True,
+                'entry_plan': entry_plan,
             }
             return self._failure('MAX_SYMBOL_EXPOSURE', '单币种持仓超过限制', details, 'symbol_exposure_check')
         details['symbol_exposure_check'] = {
@@ -208,7 +246,8 @@ class SignalValidator:
             'reason': '单币种风险正常',
             'after_open': round(new_symbol_exposure, 4),
             'latest_snapshot_source': 'exchange' if used_exchange_positions else 'input',
-            'refreshed_exposure': True
+            'refreshed_exposure': True,
+            'entry_plan': entry_plan,
         }
 
         # 4. 市场环境过滤（趋势 / 波动率）

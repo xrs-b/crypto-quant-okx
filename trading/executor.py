@@ -683,37 +683,78 @@ class TradingExecutor:
         return False
     
     def update_positions(self) -> Dict[str, Any]:
-        """更新所有持仓状态"""
+        """更新所有持仓状态（优先使用交易所真实持仓字段）"""
         positions = self.db.get_positions()
         updated = {}
-        
+
+        exchange_positions = {}
+        try:
+            for pos in self.exchange.fetch_positions() or []:
+                normalized = pos if pos.get('contract_size') is not None else self.exchange.normalize_position(pos)
+                if not normalized:
+                    continue
+                key = (normalized.get('symbol'), normalized.get('side'))
+                exchange_positions[key] = normalized
+        except Exception as e:
+            trade_logger.warning(f"拉取交易所持仓失败，回退本地价格刷新: {e}")
+
         for position in positions:
             symbol = position['symbol']
+            side = position['side']
             try:
-                ticker = self.exchange.fetch_ticker(symbol)
-                current_price = ticker['last']
-                
-                # 更新持仓
+                normalized = exchange_positions.get((symbol, side))
+                if normalized:
+                    entry_price = float(normalized.get('entry_price') or position.get('entry_price') or 0)
+                    current_price = float(normalized.get('current_price') or entry_price or position.get('current_price') or 0)
+                    quantity = float(normalized.get('quantity') or normalized.get('contracts') or position.get('quantity') or 0)
+                    contract_size = float(normalized.get('contract_size') or position.get('contract_size') or 1)
+                    coin_quantity = float(normalized.get('coin_quantity') or quantity * contract_size)
+                    leverage = int(float(normalized.get('leverage') or position.get('leverage') or 1))
+                else:
+                    ticker = self.exchange.fetch_ticker(symbol)
+                    current_price = ticker['last']
+                    entry_price = position['entry_price']
+                    quantity = position['quantity']
+                    contract_size = position.get('contract_size', 1)
+                    coin_quantity = position.get('coin_quantity')
+                    leverage = position['leverage']
+
                 self.db.update_position(
                     symbol=symbol,
-                    side=position['side'],
-                    entry_price=position['entry_price'],
-                    quantity=position['quantity'],
-                    contract_size=position.get('contract_size', 1),
-                    coin_quantity=position.get('coin_quantity'),
-                    leverage=position['leverage'],
+                    side=side,
+                    entry_price=entry_price,
+                    quantity=quantity,
+                    contract_size=contract_size,
+                    coin_quantity=coin_quantity,
+                    leverage=leverage,
                     current_price=current_price
                 )
-                
+
+                trade = self.db.get_latest_open_trade(symbol, side)
+                if trade and normalized:
+                    self.db.sync_trade_with_exchange_snapshot(
+                        trade['id'],
+                        quantity=quantity,
+                        contract_size=contract_size,
+                        coin_quantity=coin_quantity,
+                        leverage=leverage,
+                        entry_price=entry_price,
+                        notes='持仓刷新同步交易所字段',
+                    )
+
                 updated[symbol] = {
                     'current_price': current_price,
+                    'quantity': quantity,
+                    'coin_quantity': coin_quantity,
+                    'leverage': leverage,
+                    'source': 'exchange' if normalized else 'ticker',
                     'updated': True
                 }
-                
+
             except Exception as e:
                 trade_logger.error(f"更新{symbol}持仓失败: {e}")
                 updated[symbol] = {'error': str(e)}
-        
+
         return updated
     
     def get_portfolio_status(self) -> Dict[str, Any]:

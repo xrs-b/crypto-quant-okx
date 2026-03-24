@@ -325,7 +325,17 @@ def reconcile_exchange_positions(exchange: Exchange, db: Database) -> dict:
                 contract_size=contract_size,
                 coin_quantity=coin_quantity,
             )
-            created_open_trades.append({'trade_id': trade_id, 'symbol': symbol, 'side': side, 'quantity': contracts, 'coin_quantity': coin_quantity})
+            created_open_trades.append({'trade_id': trade_id, 'symbol': symbol, 'side': side, 'quantity': contracts, 'coin_quantity': coin_quantity, 'leverage': leverage})
+        else:
+            db.sync_trade_with_exchange_snapshot(
+                existing_open_trade['id'],
+                quantity=contracts,
+                contract_size=contract_size,
+                coin_quantity=coin_quantity,
+                leverage=leverage,
+                entry_price=entry_price,
+                notes='交易所持仓对账同步',
+            )
         normalized_symbols.append(symbol)
         normalized_keys.append(f'{symbol}::{side}')
         report['exchange_positions'].append({'symbol': symbol, 'side': side, 'quantity': contracts, 'coin_quantity': coin_quantity, 'entry_price': entry_price, 'current_price': current_price, 'leverage': leverage, 'realized_pnl': normalized.get('realized_pnl')})

@@ -572,7 +572,8 @@ class TradingBot:
                 if 'MACD' in indicators:
                     print(f"   MACD: {indicators.get('MACD', 'N/A')}")
                 
-                # 获取当前持仓
+                # 获取当前持仓（每个 symbol 都重新读取，避免沿用本轮旧快照）
+                positions = self.db.get_positions()
                 current_positions = {p['symbol']: p for p in positions}
                 
                 # ===== Entry Decision Layer MVP =====
@@ -648,6 +649,7 @@ class TradingBot:
                         trade_id = self.executor.open_position(
                             symbol, side, current_price, signal_id
                         )
+                        positions = self.db.get_positions()
                         
                         if trade_id:
                             summary['opened'] += 1

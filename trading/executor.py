@@ -2,6 +2,7 @@
 交易执行模块 - 增强版
 """
 import time
+from math import isclose
 from typing import Dict, List, Optional, Any
 from datetime import datetime, timedelta
 from core.config import Config
@@ -51,6 +52,143 @@ class TradingExecutor:
         trade_logger.warning(f"{symbol}: 检测到交易所已无对应仓位，自动收口本地持仓/交易")
         return True
     
+    def _build_latest_risk_snapshot(self, symbol: str, side: str, current_price: float = None, available_hint: float = None) -> Dict[str, Any]:
+        positions = []
+        source = 'database'
+        try:
+            exchange_positions = self.exchange.fetch_positions()
+            if exchange_positions:
+                positions = exchange_positions
+                source = 'exchange'
+        except Exception as e:
+            trade_logger.warning(f"{symbol}: 拉取交易所持仓失败，回退本地 DB 快照 - {e}")
+        if not positions:
+            positions = self.db.get_positions()
+
+        try:
+            balance = self.exchange.fetch_balance()
+            total_balance = float((balance.get('total') or {}).get('USDT', 0) or 0)
+            free_balance = float((balance.get('free') or {}).get('USDT', 0) or 0)
+        except Exception as e:
+            trade_logger.warning(f"{symbol}: 拉取最新余额失败，回退本地估算 - {e}")
+            total_balance = 0.0
+            free_balance = float(available_hint or 0)
+
+        if total_balance <= 0 and free_balance > 0:
+            total_balance = free_balance
+
+        current_symbol_margin = 0.0
+        current_total_margin = 0.0
+        same_side_positions = []
+        normalized_positions = []
+
+        for pos in positions or []:
+            pos_symbol = pos.get('symbol')
+            pos_side = str(pos.get('side') or '').lower()
+            if pos_side in {'buy', 'long'}:
+                pos_side = 'long'
+            elif pos_side in {'sell', 'short'}:
+                pos_side = 'short'
+            qty = float(pos.get('coin_quantity', 0) or 0)
+            if qty <= 0:
+                contracts = float(pos.get('quantity') or pos.get('contracts') or 0)
+                contract_size = float(pos.get('contract_size', 1) or 1)
+                qty = contracts * contract_size
+            px = float(pos.get('current_price') or pos.get('entry_price') or current_price or 0)
+            lev = max(1, int(float(pos.get('leverage', 1) or 1)))
+            margin_used = (qty * px) / lev if qty and px else 0.0
+            row = {
+                'symbol': pos_symbol,
+                'side': pos_side,
+                'coin_quantity': qty,
+                'price': px,
+                'leverage': lev,
+                'margin_used': margin_used,
+            }
+            normalized_positions.append(row)
+            current_total_margin += margin_used
+            if pos_symbol == symbol:
+                current_symbol_margin += margin_used
+                if pos_side == side and margin_used > 0:
+                    same_side_positions.append(row)
+
+        total_exposure_ratio = current_total_margin / total_balance if total_balance > 0 else 0.0
+        symbol_exposure_ratio = current_symbol_margin / total_balance if total_balance > 0 else 0.0
+
+        return {
+            'source': source,
+            'positions': normalized_positions,
+            'balance_total': total_balance,
+            'balance_free': free_balance,
+            'current_total_margin': current_total_margin,
+            'current_symbol_margin': current_symbol_margin,
+            'current_total_exposure_ratio': total_exposure_ratio,
+            'current_symbol_exposure_ratio': symbol_exposure_ratio,
+            'same_side_positions': same_side_positions,
+        }
+
+    def _execution_time_risk_guard(self, symbol: str, side: str, current_price: float, available_hint: float = None) -> tuple:
+        snapshot = self._build_latest_risk_snapshot(symbol, side, current_price=current_price, available_hint=available_hint)
+        position_ratio = float(self.trading_config.get('position_size', 0.1) or 0.1)
+        max_exposure = float(self.trading_config.get('max_exposure', 0.3) or 0.3)
+        max_symbol_exposure = float(self.trading_config.get('max_position_per_symbol', 0.15) or 0.15)
+        total_balance = float(snapshot.get('balance_total') or 0)
+        free_balance = float(snapshot.get('balance_free') or 0)
+        planned_margin = max(0.0, free_balance * position_ratio)
+        current_total_ratio = float(snapshot.get('current_total_exposure_ratio') or 0)
+        current_symbol_ratio = float(snapshot.get('current_symbol_exposure_ratio') or 0)
+        projected_total_ratio = ((snapshot.get('current_total_margin') or 0.0) + planned_margin) / total_balance if total_balance > 0 else current_total_ratio
+        projected_symbol_ratio = ((snapshot.get('current_symbol_margin') or 0.0) + planned_margin) / total_balance if total_balance > 0 else current_symbol_ratio
+        duplicate_same_side = bool(snapshot.get('same_side_positions'))
+
+        details = {
+            'source': snapshot.get('source'),
+            'balance_total': round(total_balance, 4),
+            'balance_free': round(free_balance, 4),
+            'planned_margin': round(planned_margin, 4),
+            'current_total_exposure': round(current_total_ratio, 4),
+            'projected_total_exposure': round(projected_total_ratio, 4),
+            'max_total_exposure': max_exposure,
+            'current_symbol_exposure': round(current_symbol_ratio, 4),
+            'projected_symbol_exposure': round(projected_symbol_ratio, 4),
+            'max_symbol_exposure': max_symbol_exposure,
+            'duplicate_same_side': duplicate_same_side,
+            'same_side_count': len(snapshot.get('same_side_positions') or []),
+            'guard_stage': 'execution_time',
+        }
+
+        if duplicate_same_side:
+            reason = 'execution-time guard: 最新持仓已存在同币种同方向仓位，阻止重复放大'
+            details['reason'] = reason
+            return False, reason, details
+
+        if total_balance <= 0:
+            reason = 'execution-time guard: 最新总余额不可用，拒绝盲目开仓'
+            details['reason'] = reason
+            return False, reason, details
+
+        if planned_margin <= 0:
+            reason = 'execution-time guard: 最新可用余额不足，无法生成有效保证金'
+            details['reason'] = reason
+            return False, reason, details
+
+        if position_ratio > max_symbol_exposure and not isclose(position_ratio, max_symbol_exposure):
+            reason = 'execution-time guard: 单仓目标已高于单币种上限配置'
+            details['reason'] = reason
+            return False, reason, details
+
+        if projected_total_ratio > max_exposure and not isclose(projected_total_ratio, max_exposure):
+            reason = 'execution-time guard: 基于最新占用刷新后，总仓上限将被突破'
+            details['reason'] = reason
+            return False, reason, details
+
+        if projected_symbol_ratio > max_symbol_exposure and not isclose(projected_symbol_ratio, max_symbol_exposure):
+            reason = 'execution-time guard: 基于最新占用刷新后，单币种上限将被突破'
+            details['reason'] = reason
+            return False, reason, details
+
+        return True, None, details
+
     def open_position(self, symbol: str, side: str, 
                     current_price: float, signal_id: int = None) -> Optional[int]:
         """开仓"""
@@ -71,6 +209,14 @@ class TradingExecutor:
         if available < 100:
             trade_logger.warning(f"余额不足: {available}")
             return None
+
+        guard_passed, guard_reason, guard_details = self._execution_time_risk_guard(
+            symbol, side, current_price, available_hint=available
+        )
+        if not guard_passed:
+            trade_logger.warning(f"{symbol}: {guard_reason} | details={guard_details}")
+            return None
+        trade_logger.info(f"{symbol}: execution-time risk guard 通过 | details={guard_details}")
         
         # 计算开仓数量 - 修复：基于实际杠杆计算，确保保证金占比准确
         # 步骤1: 先设置杠杆到交易所（确保一致）

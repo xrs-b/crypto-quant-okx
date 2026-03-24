@@ -58,12 +58,31 @@ class SignalValidator:
         }
         return False, reason, details
 
+    def _get_latest_positions_view(self, current_positions: Dict = None) -> Dict:
+        latest_positions = {}
+        used_exchange = False
+        if self.exchange:
+            try:
+                for pos in self.exchange.fetch_positions() or []:
+                    symbol = pos.get('symbol')
+                    if not symbol:
+                        continue
+                    latest_positions[symbol] = pos
+                if latest_positions:
+                    used_exchange = True
+            except Exception:
+                latest_positions = {}
+        if not latest_positions:
+            latest_positions = current_positions or {}
+        return latest_positions, used_exchange
+
     def validate(self, signal, current_positions: Dict = None,
                  tracking_data: Dict = None) -> tuple:
         """验证信号，返回 (passed, reason, details)"""
         current_positions = current_positions or {}
         tracking_data = tracking_data or {}
         details = {}
+        latest_positions, used_exchange_positions = self._get_latest_positions_view(current_positions)
 
         # 0. 先过滤非方向性信号
         if signal.signal_type not in ['buy', 'sell']:
@@ -73,7 +92,7 @@ class SignalValidator:
         side = 'long' if signal.signal_type == 'buy' else 'short'
 
         # 1. 已有同方向持仓
-        existing = current_positions.get(signal.symbol)
+        existing = latest_positions.get(signal.symbol)
         if existing and existing.get('side') == side:
             details['position_check'] = {
                 'passed': False,
@@ -81,7 +100,7 @@ class SignalValidator:
                 'existing_position': existing
             }
             return self._failure('EXISTING_SAME_SIDE_POSITION', f"已有相同方向持仓: {existing.get('side')}", details, 'position_check')
-        details['position_check'] = {'passed': True, 'reason': '无冲突持仓'}
+        details['position_check'] = {'passed': True, 'reason': '无冲突持仓', 'latest_snapshot_source': 'exchange' if used_exchange_positions else 'input'}
 
         # 2. 冷却时间
         cooldown = self._cfg(signal.symbol, 'trading.cooldown_minutes', 15)
@@ -115,7 +134,7 @@ class SignalValidator:
             available_usdt = float(free.get('USDT', 0) or 0)
             total_usdt = float(total.get('USDT', available_usdt) or available_usdt or 1)
 
-            for _, pos in current_positions.items():
+            for _, pos in latest_positions.items():
                 entry = float(pos.get('entry_price', 0) or 0)
                 qty = float(pos.get('coin_quantity', pos.get('quantity', 0)) or 0)
                 lev = max(1, int(pos.get('leverage', 1) or 1))
@@ -159,7 +178,9 @@ class SignalValidator:
                 'new_position_ratio': position_ratio,
                 'max_exposure': max_exposure,
                 'planned_leverage': configured_leverage,
-                'effective_leverage': effective_leverage
+                'effective_leverage': effective_leverage,
+                'latest_snapshot_source': 'exchange' if used_exchange_positions else 'input',
+                'refreshed_exposure': True
             }
             return self._failure('MAX_EXPOSURE', '超过最大持仓比例', details, 'exposure_check')
         details['exposure_check'] = {
@@ -168,7 +189,9 @@ class SignalValidator:
             'current_exposure': round(current_exposure_ratio, 4),
             'after_open': round(new_total_exposure, 4),
             'planned_leverage': configured_leverage,
-            'effective_leverage': effective_leverage
+            'effective_leverage': effective_leverage,
+            'latest_snapshot_source': 'exchange' if used_exchange_positions else 'input',
+            'refreshed_exposure': True
         }
 
         new_symbol_exposure = symbol_exposure_ratio + position_ratio
@@ -176,12 +199,16 @@ class SignalValidator:
             details['symbol_exposure_check'] = {
                 'passed': False,
                 'reason': f"单币种持仓超过限制({new_symbol_exposure:.2f}>{max_per_symbol:.2f})",
+                'latest_snapshot_source': 'exchange' if used_exchange_positions else 'input',
+                'refreshed_exposure': True
             }
             return self._failure('MAX_SYMBOL_EXPOSURE', '单币种持仓超过限制', details, 'symbol_exposure_check')
         details['symbol_exposure_check'] = {
             'passed': True,
             'reason': '单币种风险正常',
-            'after_open': round(new_symbol_exposure, 4)
+            'after_open': round(new_symbol_exposure, 4),
+            'latest_snapshot_source': 'exchange' if used_exchange_positions else 'input',
+            'refreshed_exposure': True
         }
 
         # 4. 市场环境过滤（趋势 / 波动率）

@@ -2349,10 +2349,41 @@ class TestLayerPlanAndIntents(unittest.TestCase):
         report = self.db.cleanup_orphan_execution_state(stale_after_minutes=15)
         self.assertEqual(len(report['removed_intents']), 1)
         self.assertEqual(len(report['removed_locks']), 1)
+        self.assertEqual(len(report['plan_resets']), 1)
         state = self.db.get_layer_plan_state('BTC/USDT', 'long')
         self.assertEqual(state['status'], 'idle')
         self.assertEqual(state['plan_data']['filled_layers'], [])
         self.assertEqual(state['plan_data']['pending_layers'], [])
+
+    def test_cleanup_orphan_execution_state_heals_stale_intent_when_position_exists(self):
+        self.db.record_trade('BTC/USDT', 'long', 50000, 2, leverage=3, signal_id=2101, layer_no=1, root_signal_id=2101)
+        self.db.update_position('BTC/USDT', 'long', 50000, 2, leverage=3, current_price=50100)
+        self.db.create_open_intent(symbol='BTC/USDT', side='long', signal_id=2102, root_signal_id=2101, planned_margin=60, leverage=3, layer_no=2, status='submitted')
+        conn = self.db._get_connection()
+        conn.execute("UPDATE open_intents SET updated_at = datetime('now', '-30 minutes')")
+        conn.commit()
+        conn.close()
+        report = self.db.cleanup_orphan_execution_state(stale_after_minutes=15)
+        self.assertEqual(len(report['removed_intents']), 0)
+        self.assertEqual(len(report['healed_intents']), 1)
+        self.assertEqual(self.db.get_active_open_intents('BTC/USDT', 'long'), [])
+        state = self.db.get_layer_plan_state('BTC/USDT', 'long')
+        self.assertEqual(state['status'], 'active')
+        self.assertEqual(state['plan_data']['filled_layers'], [1])
+        self.assertEqual(state['plan_data']['pending_layers'], [])
+
+    def test_cleanup_orphan_execution_state_heals_stale_lock_after_fill(self):
+        self.db.record_trade('BTC/USDT', 'long', 50000, 2, leverage=3, signal_id=2201, layer_no=1, root_signal_id=2201)
+        self.db.update_position('BTC/USDT', 'long', 50000, 2, leverage=3, current_price=50200)
+        self.db.acquire_direction_lock('BTC/USDT', 'long', owner='stale-owner')
+        conn = self.db._get_connection()
+        conn.execute("UPDATE direction_locks SET updated_at = datetime('now', '-30 minutes')")
+        conn.commit()
+        conn.close()
+        report = self.db.cleanup_orphan_execution_state(stale_after_minutes=15)
+        self.assertEqual(len(report['removed_locks']), 0)
+        self.assertEqual(len(report['healed_locks']), 1)
+        self.assertIsNone(self.db.get_direction_lock('BTC/USDT', 'long'))
 
 class TestDashboardRiskBudgetAPI(unittest.TestCase):
     def setUp(self):

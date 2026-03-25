@@ -448,7 +448,10 @@ def reconcile_exchange_positions(exchange: Exchange, db: Database) -> dict:
         'history_backfilled': int((report.get('history_backfill') or {}).get('patched', 0) or 0),
         'layer_states_synced': len(report['layer_state_sync']),
         'orphan_intents_cleaned': len((report.get('orphan_cleanup') or {}).get('removed_intents', [])),
+        'orphan_intents_healed': len((report.get('orphan_cleanup') or {}).get('healed_intents', [])),
         'orphan_locks_cleaned': len((report.get('orphan_cleanup') or {}).get('removed_locks', [])),
+        'orphan_locks_healed': len((report.get('orphan_cleanup') or {}).get('healed_locks', [])),
+        'layer_plan_resets': len((report.get('orphan_cleanup') or {}).get('plan_resets', [])),
     }
     report['stale_closed'] = stale_closed
     report['created_open_trades'] = created_open_trades

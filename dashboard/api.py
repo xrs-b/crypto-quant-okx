@@ -2905,6 +2905,20 @@ FIELD_DEFINITIONS = {
                 'description': '第二层止盈平仓的仓位占比',
                 'recommended': [0.3, 0.5, 0.7]
             }
+            ,
+            'trading.layering.layer_count': {'label': '分仓层数', 'type': 'int', 'min': 1, 'max': 10, 'default': 3, 'description': '分仓计划总层数'},
+            'trading.layering.layer_ratios': {'label': '各层保证金比例', 'type': 'list', 'default': [0.06, 0.06, 0.04], 'description': '例如 [0.06,0.06,0.04]'},
+            'trading.layering.layer_max_total_ratio': {'label': '分仓累计上限', 'type': 'float', 'min': 0.01, 'max': 1.0, 'default': 0.16, 'description': '分仓累计保证金比例上限'},
+            'trading.layering.min_add_interval_seconds': {'label': '最小加仓间隔(秒)', 'type': 'int', 'min': 0, 'max': 86400, 'default': 0, 'description': '两次加仓的最小时间间隔'},
+            'trading.layering.profit_only_add': {'label': '仅浮盈时加仓', 'type': 'bool', 'default': False, 'description': '开启后仅在浮盈状态允许继续加仓'},
+            'trading.layering.disallow_skip_layers': {'label': '禁止跳层', 'type': 'bool', 'default': True, 'description': '开启后必须按层顺序加仓'},
+            'trading.layering.direction_lock_enabled': {'label': '方向锁启用', 'type': 'bool', 'default': True, 'description': '防止并发重复开仓/加仓'},
+            'trading.layering.direction_lock_scope': {'label': '方向锁范围', 'type': 'select', 'options': ['symbol_side', 'symbol'], 'default': 'symbol_side', 'description': 'symbol_side=币种+方向，symbol=币种级别'},
+            'trading.layering.direction_lock_release_on_flat': {'label': '平仓归零时释放方向锁', 'type': 'bool', 'default': True, 'description': '当前实现默认随 intent/仓位收口释放'},
+            'trading.layering.signal_idempotency_enabled': {'label': 'signal 幂等保护', 'type': 'bool', 'default': True, 'description': '同一 signal_id 不重复执行'},
+            'trading.layering.signal_idempotency_ttl_seconds': {'label': 'signal 幂等TTL(秒)', 'type': 'int', 'min': 0, 'max': 604800, 'default': 3600, 'description': '当前为最小可用保留字段'},
+            'trading.layering.max_layers_per_signal': {'label': '单个Signal最大层数', 'type': 'int', 'min': 1, 'max': 10, 'default': 3, 'description': '限制单次信号可触发的分仓层数'},
+            'trading.layering.allow_same_bar_multiple_adds': {'label': '允许同一Bar多次加仓', 'type': 'bool', 'default': False, 'description': '关闭时会阻止同一bar重复加仓'}
         }
     },
     'risk': {

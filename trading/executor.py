@@ -6,7 +6,7 @@ import time
 from math import isclose
 from typing import Dict, List, Optional, Any
 from datetime import datetime, timedelta
-from core.config import Config
+from core.config import Config, DEFAULT_LAYERING_CONFIG
 from core.exchange import Exchange
 from core.database import Database
 from core.logger import trade_logger
@@ -22,6 +22,7 @@ class TradingExecutor:
         self.exchange = exchange
         self.db = db
         self.trading_config = config.get('trading', {})
+        self.layering_config = config.get_layering_config() if hasattr(config, 'get_layering_config') else dict(DEFAULT_LAYERING_CONFIG)
         self._trade_cache = {}  # 交易缓存
         # MFE/MAE 建议提供者
         self._recommendation_provider = get_recommendation_provider(db, config)
@@ -211,31 +212,102 @@ class TradingExecutor:
         suffix = signal_id if signal_id is not None else int(time.time() * 1000)
         return f"executor:{symbol}:{side}:{suffix}"
 
-    def _get_layer_plan(self, symbol: str, side: str, signal_id: int = None, root_signal_id: int = None) -> Dict[str, Any]:
+
+    def _get_layering_config(self, symbol: str = None) -> Dict[str, Any]:
+        if hasattr(self.config, 'get_layering_config'):
+            return self.config.get_layering_config(symbol)
+        return dict(DEFAULT_LAYERING_CONFIG)
+
+    def _get_direction_lock_scope_key(self, symbol: str, side: str) -> tuple:
+        layering = self._get_layering_config(symbol)
+        if layering.get('direction_lock_enabled', True) and layering.get('direction_lock_scope') == 'symbol':
+            return symbol, '*'
+        return symbol, side
+
+    def _get_signal_bar_marker(self, signal_id: int = None, plan_context: Dict[str, Any] = None) -> Optional[str]:
+        if isinstance(plan_context, dict):
+            for key in ('signal_bar_marker', 'bar_marker', 'candle_key', 'bar_time', 'signal_time'):
+                value = plan_context.get(key)
+                if value not in (None, ''):
+                    return str(value)
+        return str(signal_id) if signal_id is not None else None
+
+    def _check_layering_runtime_guards(self, symbol: str, side: str, signal_id: int = None, plan_context: Dict[str, Any] = None) -> tuple:
+        layering = self._get_layering_config(symbol)
         state = self.db.get_layer_plan_state(symbol, side)
         plan_data = dict(state.get('plan_data') or {})
-        layer_ratios = plan_data.get('layer_ratios') or [0.06, 0.06, 0.04]
+        filled_layers = sorted(int(x) for x in (plan_data.get('filled_layers') or []))
+        last_filled_at = plan_data.get('last_filled_at')
+
+        if layering.get('signal_idempotency_enabled', True) and signal_id is not None:
+            existing_trade = self.db.get_trade_by_signal_id(signal_id)
+            if existing_trade:
+                return False, 'signal_id 已存在成交记录，跳过重复开仓', {'stage': 'signal_idempotency', 'trade_id': existing_trade.get('id')}
+            existing_intent = self.db.get_open_intent_by_signal_id(signal_id)
+            if existing_intent:
+                return False, 'signal_id 已存在进行中的开仓 intent', {'stage': 'signal_idempotency', 'intent_id': existing_intent.get('id')}
+
+        if layering.get('profit_only_add') and filled_layers:
+            latest_trade = self.db.get_latest_open_trade(symbol, side)
+            current_price = float((plan_context or {}).get('current_price') or 0)
+            entry_price = float((latest_trade or {}).get('entry_price') or 0)
+            if entry_price > 0 and current_price > 0:
+                profitable = current_price >= entry_price if side == 'long' else current_price <= entry_price
+                if not profitable:
+                    return False, 'profit_only_add 已开启，当前未处于浮盈，禁止加仓', {'stage': 'profit_only_add'}
+
+        if filled_layers and layering.get('min_add_interval_seconds', 0) > 0 and last_filled_at:
+            try:
+                last_dt = datetime.fromisoformat(str(last_filled_at))
+            except Exception:
+                last_dt = None
+            if last_dt is not None:
+                elapsed = (datetime.utcnow() - last_dt).total_seconds()
+                if elapsed < layering['min_add_interval_seconds']:
+                    return False, '未达到最小加仓时间间隔', {'stage': 'min_add_interval_seconds', 'remaining_seconds': int(layering['min_add_interval_seconds'] - elapsed)}
+
+        if signal_id is not None:
+            signal_counts = dict(plan_data.get('signal_layer_counts') or {})
+            count_for_signal = int(signal_counts.get(str(signal_id), 0) or 0)
+            if count_for_signal >= int(layering.get('max_layers_per_signal') or layering.get('layer_count') or 1):
+                return False, '单个 signal 已达到最大允许分仓层数', {'stage': 'max_layers_per_signal', 'count_for_signal': count_for_signal}
+            if not layering.get('allow_same_bar_multiple_adds', False):
+                marker = self._get_signal_bar_marker(signal_id=signal_id, plan_context=plan_context)
+                markers = dict(plan_data.get('signal_bar_markers') or {})
+                if marker and markers.get(marker):
+                    return False, '同一 bar 已执行过加仓，禁止重复加仓', {'stage': 'allow_same_bar_multiple_adds', 'signal_bar_marker': marker}
+
+        return True, None, {'stage': 'layering_guard', 'layering': layering}
+
+
+    def _get_layer_plan(self, symbol: str, side: str, signal_id: int = None, root_signal_id: int = None) -> Dict[str, Any]:
+        layering = self._get_layering_config(symbol)
+        state = self.db.get_layer_plan_state(symbol, side)
+        plan_data = dict(state.get('plan_data') or {})
+        layer_ratios = plan_data.get('layer_ratios') or layering.get('layer_ratios') or [0.06, 0.06, 0.04]
+        layer_count = int(layering.get('layer_count') or len(layer_ratios))
+        layer_ratios = [float(x) for x in layer_ratios[:layer_count]]
         filled_layers = sorted(int(x) for x in (plan_data.get('filled_layers') or []))
         pending_layers = sorted(int(x) for x in (plan_data.get('pending_layers') or []))
         consumed = set(filled_layers) | set(pending_layers)
         next_layer = 1
         while next_layer in consumed:
             next_layer += 1
-        if next_layer > len(layer_ratios):
+        if next_layer > layer_count:
             return {'eligible': False, 'reason': '分仓计划已达最大层数', 'state': state, 'plan_data': plan_data}
         expected = len(consumed) + 1
-        if next_layer != expected:
+        if layering.get('disallow_skip_layers', True) and next_layer != expected:
             return {'eligible': False, 'reason': '检测到分仓层级断档，禁止跳层', 'state': state, 'plan_data': plan_data}
-        layer_ratio = float(layer_ratios[next_layer - 1])
         return {
             'eligible': True,
             'layer_no': next_layer,
-            'layer_ratio': layer_ratio,
+            'layer_ratio': float(layer_ratios[next_layer - 1]),
             'root_signal_id': root_signal_id or state.get('root_signal_id') or signal_id,
             'state': state,
             'plan_data': plan_data,
+            'layer_count': layer_count,
             'layer_ratios': layer_ratios,
-            'max_total_ratio': float(plan_data.get('max_total_ratio') or sum(layer_ratios) or 0.16),
+            'max_total_ratio': float(plan_data.get('max_total_ratio') or layering.get('layer_max_total_ratio') or sum(layer_ratios) or 0.16),
         }
 
     def _reserve_layer(self, symbol: str, side: str, layer_plan: Dict[str, Any]):
@@ -247,6 +319,8 @@ class TradingExecutor:
             pending_layers.append(layer_no)
         plan_data['pending_layers'] = sorted(pending_layers)
         plan_data.setdefault('filled_layers', plan_data.get('filled_layers') or [])
+        plan_data.setdefault('signal_layer_counts', plan_data.get('signal_layer_counts') or {})
+        plan_data.setdefault('signal_bar_markers', plan_data.get('signal_bar_markers') or {})
         plan_data['layer_ratios'] = layer_plan.get('layer_ratios') or plan_data.get('layer_ratios') or [0.06, 0.06, 0.04]
         plan_data['max_total_ratio'] = float(layer_plan.get('max_total_ratio') or plan_data.get('max_total_ratio') or 0.16)
         self.db.save_layer_plan_state(symbol, side, status='pending', current_layer=max(plan_data.get('filled_layers') or [0]), root_signal_id=layer_plan.get('root_signal_id'), plan_data=plan_data)
@@ -261,6 +335,18 @@ class TradingExecutor:
             pending_layers.remove(layer_no)
         if success and layer_no and layer_no not in filled_layers:
             filled_layers.append(layer_no)
+            signal_id = (layer_plan or {}).get('signal_id')
+            if signal_id is not None:
+                signal_counts = dict(plan_data.get('signal_layer_counts') or {})
+                signal_counts[str(signal_id)] = int(signal_counts.get(str(signal_id), 0) or 0) + 1
+                plan_data['signal_layer_counts'] = signal_counts
+            marker = self._get_signal_bar_marker(signal_id=signal_id, plan_context=layer_plan or {})
+            if marker:
+                markers = dict(plan_data.get('signal_bar_markers') or {})
+                markers[marker] = datetime.utcnow().isoformat()
+                plan_data['signal_bar_markers'] = markers
+            plan_data['last_filled_at'] = datetime.utcnow().isoformat()
+            plan_data['last_signal_id'] = signal_id
         plan_data['filled_layers'] = sorted(filled_layers)
         plan_data['pending_layers'] = sorted(pending_layers)
         plan_data['layer_ratios'] = (layer_plan or {}).get('layer_ratios') or plan_data.get('layer_ratios') or [0.06, 0.06, 0.04]
@@ -269,17 +355,14 @@ class TradingExecutor:
         self.db.save_layer_plan_state(symbol, side, status=status, current_layer=max(filled_layers or [0]), root_signal_id=(layer_plan or {}).get('root_signal_id') or state.get('root_signal_id'), plan_data=plan_data)
 
     def _prepare_open_execution(self, symbol: str, side: str, current_price: float, signal_id: int = None, plan_context: Dict[str, Any] = None, root_signal_id: int = None) -> tuple:
-        if signal_id is not None:
-            existing_trade = self.db.get_trade_by_signal_id(signal_id)
-            if existing_trade:
-                return False, 'signal_id 已存在成交记录，跳过重复开仓', {'stage': 'hard_intercept', 'existing_trade_id': existing_trade.get('id')}
-            existing_intent = self.db.get_open_intent_by_signal_id(signal_id)
-            if existing_intent:
-                return False, 'signal_id 已存在进行中的开仓 intent', {'stage': 'hard_intercept', 'intent_id': existing_intent.get('id')}
+        runtime_ok, runtime_reason, runtime_details = self._check_layering_runtime_guards(symbol, side, signal_id=signal_id, plan_context={'current_price': current_price, **(plan_context or {})})
+        if not runtime_ok:
+            return False, runtime_reason, runtime_details
 
-        lock = self.db.get_direction_lock(symbol, side)
+        lock_symbol, lock_side = self._get_direction_lock_scope_key(symbol, side)
+        lock = self.db.get_direction_lock(lock_symbol, lock_side)
         if lock:
-            return False, 'symbol+side 方向锁已被占用', {'stage': 'hard_intercept', 'lock': lock}
+            return False, 'symbol+side 方向锁已被占用', {'stage': 'hard_intercept', 'lock': lock, 'lock_scope': {'symbol': lock_symbol, 'side': lock_side}}
 
         layer_plan = plan_context or self._get_layer_plan(symbol, side, signal_id=signal_id, root_signal_id=root_signal_id)
         if not layer_plan.get('eligible', True):
@@ -300,6 +383,8 @@ class TradingExecutor:
             return False, entry_plan.get('block_reason') or '风险预算不足', {'stage': 'risk_budget', 'entry_plan': entry_plan, 'layer_plan': layer_plan}
 
         merged = dict(layer_plan)
+        merged['signal_id'] = signal_id
+        merged['current_price'] = current_price
         merged['entry_plan'] = entry_plan
         merged['planned_margin'] = float(entry_plan.get('allowed_margin') or 0.0)
         return True, None, {'stage': 'approved', 'plan_context': merged}
@@ -334,8 +419,9 @@ class TradingExecutor:
         plan_context = dict((approve_details or {}).get('plan_context') or {})
         if layer_no is not None:
             plan_context['layer_no'] = layer_no
+        lock_symbol, lock_side = self._get_direction_lock_scope_key(symbol, side)
         lock_owner = self._build_lock_owner(symbol, side, signal_id=signal_id)
-        if not self.db.acquire_direction_lock(symbol, side, owner=lock_owner):
+        if not self.db.acquire_direction_lock(lock_symbol, lock_side, owner=lock_owner):
             trade_logger.warning(f"{symbol}: 获取方向锁失败，疑似并发重复开仓")
             return None
         intent_id = None
@@ -354,7 +440,7 @@ class TradingExecutor:
                 status='pending',
             )
         except Exception:
-            self.db.release_direction_lock(symbol, side, owner=lock_owner)
+            self.db.release_direction_lock(lock_symbol, lock_side, owner=lock_owner)
             raise
 
         trade_logger.info(f"{symbol}: executor 最终放行通过 | plan_context={plan_context}")
@@ -408,7 +494,7 @@ class TradingExecutor:
             if 'plan_context' in locals():
                 self._finalize_layer(symbol, side, plan_context, success=False)
             if 'lock_owner' in locals():
-                self.db.release_direction_lock(symbol, side, owner=lock_owner)
+                self.db.release_direction_lock(lock_symbol, lock_side, owner=lock_owner)
             return None
         
         # 重试机制
@@ -465,7 +551,7 @@ class TradingExecutor:
                     self.db.delete_open_intent(intent_id)
                     intent_id = None
                 self._finalize_layer(symbol, side, plan_context, success=True)
-                self.db.release_direction_lock(symbol, side, owner=lock_owner)
+                self.db.release_direction_lock(lock_symbol, lock_side, owner=lock_owner)
                 trade_logger.trade(
                     symbol, side, current_price, amount, trade_id
                 )
@@ -487,7 +573,7 @@ class TradingExecutor:
                             self.db.delete_open_intent(intent_id)
                             intent_id = None
                         self._finalize_layer(symbol, side, plan_context, success=True)
-                        self.db.release_direction_lock(symbol, side, owner=lock_owner)
+                        self.db.release_direction_lock(lock_symbol, lock_side, owner=lock_owner)
                         self._update_cooldown(symbol)
                         self._seed_trailing_anchor(symbol, side, current_price)
                         trade_logger.warning(f"{symbol}: 开仓后本地处理异常，但已按交易所持仓恢复成功 - {err_text}")
@@ -506,7 +592,7 @@ class TradingExecutor:
                         self.db.delete_open_intent(intent_id)
                         intent_id = None
                     self._finalize_layer(symbol, side, plan_context, success=False)
-                    self.db.release_direction_lock(symbol, side, owner=lock_owner)
+                    self.db.release_direction_lock(lock_symbol, lock_side, owner=lock_owner)
                     return None
     
     def close_position(self, symbol: str, reason: str = 'manual',
@@ -1156,6 +1242,7 @@ class RiskManager:
         self.config = config
         self.db = db
         self.trading_config = config.get('trading', {})
+        self.layering_config = config.get_layering_config() if hasattr(config, 'get_layering_config') else dict(DEFAULT_LAYERING_CONFIG)
         self._exchange = None
 
     def _loss_guard_enabled(self) -> bool:
@@ -1260,21 +1347,18 @@ class RiskManager:
         details = {}
         normalized_side = side or 'long'
 
-        if signal_id is not None:
-            existing_trade = self.db.get_trade_by_signal_id(signal_id)
-            if existing_trade:
-                details['hard_intercept'] = {'passed': False, 'reason': 'signal_id 已存在成交记录', 'trade_id': existing_trade.get('id')}
-                return False, 'signal_id 已存在成交记录', details
-            existing_intent = self.db.get_open_intent_by_signal_id(signal_id)
-            if existing_intent:
-                details['hard_intercept'] = {'passed': False, 'reason': 'signal_id 已存在进行中的开仓 intent', 'intent_id': existing_intent.get('id')}
-                return False, 'signal_id 已存在进行中的开仓 intent', details
+        executor_probe = TradingExecutor(self.config, None, self.db)
+        runtime_ok, runtime_reason, runtime_details = executor_probe._check_layering_runtime_guards(symbol, normalized_side, signal_id=signal_id, plan_context=plan_context or {})
+        if not runtime_ok:
+            details['hard_intercept'] = {'passed': False, 'reason': runtime_reason, 'details': runtime_details}
+            return False, runtime_reason, details
 
-        direction_lock = self.db.get_direction_lock(symbol, normalized_side)
+        lock_symbol, lock_side = executor_probe._get_direction_lock_scope_key(symbol, normalized_side)
+        direction_lock = self.db.get_direction_lock(lock_symbol, lock_side)
         if direction_lock:
             details['hard_intercept'] = {'passed': False, 'reason': '方向锁占用中', 'lock': direction_lock}
             return False, '方向锁占用中', details
-        details['hard_intercept'] = {'passed': True}
+        details['hard_intercept'] = {'passed': True, 'lock_scope': {'symbol': lock_symbol, 'side': lock_side}}
 
         max_trades = int(self.trading_config.get('max_trades_per_day', 10))
         today_trades = self._get_today_trade_count()
@@ -1350,16 +1434,18 @@ class RiskManager:
         free_balance = float(balance.get('free', 0) or 0)
         pending_intents = self.db.get_active_open_intents()
         positions_usage = summarize_margin_usage(self.db.get_positions(), symbol, pending_intents=pending_intents)
+        layering = self.config.get_layering_config(symbol) if hasattr(self.config, 'get_layering_config') else dict(DEFAULT_LAYERING_CONFIG)
+        default_ratios = layering.get('layer_ratios') or [0.06, 0.06, 0.04]
         layer_plan = plan_context or {
             'eligible': True,
             'layer_no': 1,
-            'layer_ratio': 0.06,
+            'layer_ratio': float(default_ratios[0]),
             'root_signal_id': signal_id,
         }
         if plan_context is None:
             state = self.db.get_layer_plan_state(symbol, normalized_side)
             plan_data = dict(state.get('plan_data') or {})
-            layer_ratios = plan_data.get('layer_ratios') or [0.06, 0.06, 0.04]
+            layer_ratios = plan_data.get('layer_ratios') or layering.get('layer_ratios') or [0.06, 0.06, 0.04]
             filled = sorted(int(x) for x in (plan_data.get('filled_layers') or []))
             pending = sorted(int(x) for x in (plan_data.get('pending_layers') or []))
             consumed = set(filled) | set(pending)

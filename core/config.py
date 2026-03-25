@@ -11,6 +11,23 @@ from pathlib import Path
 _MISSING = object()
 
 
+DEFAULT_LAYERING_CONFIG = {
+    'layer_count': 3,
+    'layer_ratios': [0.06, 0.06, 0.04],
+    'layer_max_total_ratio': 0.16,
+    'min_add_interval_seconds': 0,
+    'profit_only_add': False,
+    'disallow_skip_layers': True,
+    'direction_lock_enabled': True,
+    'direction_lock_scope': 'symbol_side',
+    'direction_lock_release_on_flat': True,
+    'signal_idempotency_enabled': True,
+    'signal_idempotency_ttl_seconds': 3600,
+    'max_layers_per_signal': 3,
+    'allow_same_bar_multiple_adds': False,
+}
+
+
 class Config:
     """配置管理类"""
     
@@ -48,6 +65,8 @@ class Config:
                 self._config = self._deep_merge(self._config, local_config)
 
         self._config = self._resolve_env_placeholders(self._config)
+        self._normalize_legacy_layering_config()
+        self._validate()
 
     def _resolve_env_placeholders(self, value: Any) -> Any:
         """递归解析 ${VAR} / ${VAR:-default} 环境变量占位符"""
@@ -72,6 +91,84 @@ class Config:
             return default_value
         return ''
     
+
+    def _normalize_legacy_layering_config(self):
+        trading = self._config.setdefault('trading', {})
+        layering = trading.get('layering') or {}
+        if not isinstance(layering, dict):
+            raise ValueError('trading.layering 必须是对象')
+        normalized = dict(DEFAULT_LAYERING_CONFIG)
+        normalized.update(layering)
+        if not layering.get('layer_count'):
+            if isinstance(normalized.get('layer_ratios'), list) and normalized.get('layer_ratios'):
+                normalized['layer_count'] = len(normalized['layer_ratios'])
+        trading['layering'] = normalized
+
+    def _validate(self):
+        self._validate_layering_config()
+
+    def _validate_layering_config(self):
+        trading = self.get('trading', {}) or {}
+        layering = trading.get('layering') or {}
+        if not isinstance(layering, dict):
+            raise ValueError('trading.layering 必须是对象')
+
+        layer_count = int(layering.get('layer_count', DEFAULT_LAYERING_CONFIG['layer_count']) or 0)
+        layer_ratios = layering.get('layer_ratios', DEFAULT_LAYERING_CONFIG['layer_ratios'])
+        if not isinstance(layer_ratios, list) or not layer_ratios:
+            raise ValueError('trading.layering.layer_ratios 必须是非空数组')
+        try:
+            layer_ratios = [float(x) for x in layer_ratios]
+        except Exception as exc:
+            raise ValueError('trading.layering.layer_ratios 必须全部为数字') from exc
+        if any(x <= 0 for x in layer_ratios):
+            raise ValueError('trading.layering.layer_ratios 必须全部 > 0')
+        if layer_count <= 0:
+            raise ValueError('trading.layering.layer_count 必须 > 0')
+        if len(layer_ratios) != layer_count:
+            raise ValueError('trading.layering.layer_count 必须与 layer_ratios 长度一致')
+        max_total_ratio = float(layering.get('layer_max_total_ratio', DEFAULT_LAYERING_CONFIG['layer_max_total_ratio']) or 0)
+        if max_total_ratio <= 0:
+            raise ValueError('trading.layering.layer_max_total_ratio 必须 > 0')
+        if sum(layer_ratios) - max_total_ratio > 1e-9:
+            raise ValueError('trading.layering.layer_max_total_ratio 不能小于 layer_ratios 总和')
+        min_add_interval = int(layering.get('min_add_interval_seconds', DEFAULT_LAYERING_CONFIG['min_add_interval_seconds']) or 0)
+        if min_add_interval < 0:
+            raise ValueError('trading.layering.min_add_interval_seconds 不能 < 0')
+        ttl_seconds = int(layering.get('signal_idempotency_ttl_seconds', DEFAULT_LAYERING_CONFIG['signal_idempotency_ttl_seconds']) or 0)
+        if ttl_seconds < 0:
+            raise ValueError('trading.layering.signal_idempotency_ttl_seconds 不能 < 0')
+        max_layers_per_signal = int(layering.get('max_layers_per_signal', layer_count) or 0)
+        if max_layers_per_signal <= 0:
+            raise ValueError('trading.layering.max_layers_per_signal 必须 > 0')
+        if max_layers_per_signal > layer_count:
+            raise ValueError('trading.layering.max_layers_per_signal 不能大于 layer_count')
+        scope = str(layering.get('direction_lock_scope', DEFAULT_LAYERING_CONFIG['direction_lock_scope']) or '').strip()
+        if scope not in {'symbol_side', 'symbol'}:
+            raise ValueError('trading.layering.direction_lock_scope 仅支持 symbol_side / symbol')
+        layering['layer_count'] = layer_count
+        layering['layer_ratios'] = layer_ratios
+        layering['layer_max_total_ratio'] = max_total_ratio
+        layering['min_add_interval_seconds'] = min_add_interval
+        layering['signal_idempotency_ttl_seconds'] = ttl_seconds
+        layering['max_layers_per_signal'] = max_layers_per_signal
+        layering['direction_lock_scope'] = scope
+
+    def get_layering_config(self, symbol: str = None) -> Dict[str, Any]:
+        trading = self.get_symbol_section(symbol, 'trading') if symbol else (self.get('trading', {}) or {})
+        layering = dict(DEFAULT_LAYERING_CONFIG)
+        layering.update((trading.get('layering') or {}))
+        layering['layer_count'] = int(layering.get('layer_count') or len(layering.get('layer_ratios') or DEFAULT_LAYERING_CONFIG['layer_ratios']))
+        layering['layer_ratios'] = [float(x) for x in (layering.get('layer_ratios') or DEFAULT_LAYERING_CONFIG['layer_ratios'])]
+        layering['layer_max_total_ratio'] = float(layering.get('layer_max_total_ratio') or sum(layering['layer_ratios']) or DEFAULT_LAYERING_CONFIG['layer_max_total_ratio'])
+        layering['min_add_interval_seconds'] = int(layering.get('min_add_interval_seconds') or 0)
+        layering['signal_idempotency_ttl_seconds'] = int(layering.get('signal_idempotency_ttl_seconds') or 0)
+        layering['max_layers_per_signal'] = int(layering.get('max_layers_per_signal') or layering['layer_count'])
+        layering['direction_lock_scope'] = str(layering.get('direction_lock_scope') or 'symbol_side')
+        for key in ('profit_only_add', 'disallow_skip_layers', 'direction_lock_enabled', 'direction_lock_release_on_flat', 'signal_idempotency_enabled', 'allow_same_bar_multiple_adds'):
+            layering[key] = bool(layering.get(key, DEFAULT_LAYERING_CONFIG[key]))
+        return layering
+
     def _deep_merge(self, base: Dict, override: Dict) -> Dict:
         """深度合并配置"""
         result = dict(base)
@@ -114,6 +211,7 @@ class Config:
                 'partial_tp2_enabled': False,
                 'partial_tp2_threshold': 0.03,
                 'partial_tp2_ratio': 0.3,
+                'layering': dict(DEFAULT_LAYERING_CONFIG),
             },
             'strategies': {
                 'rsi': {'enabled': True, 'period': 14, 'oversold': 35, 'overbought': 65},

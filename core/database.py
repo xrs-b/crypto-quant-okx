@@ -1598,7 +1598,7 @@ class Database:
                 'status': 'idle',
                 'current_layer': 0,
                 'root_signal_id': None,
-                'plan_data': {'filled_layers': [], 'pending_layers': [], 'layer_ratios': [0.06, 0.06, 0.04], 'max_total_ratio': 0.16},
+                'plan_data': {'filled_layers': [], 'pending_layers': [], 'layer_ratios': [0.06, 0.06, 0.04], 'max_total_ratio': 0.16, 'last_filled_at': None, 'last_signal_id': None, 'signal_layer_counts': {}, 'signal_bar_markers': {}},
             }
         row = df.iloc[0].to_dict()
         row['plan_data'] = json.loads(row['plan_data']) if row.get('plan_data') else {}

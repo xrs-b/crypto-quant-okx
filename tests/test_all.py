@@ -2603,3 +2603,56 @@ def run_tests():
 if __name__ == '__main__':
     success = run_tests()
     sys.exit(0 if success else 1)
+
+
+
+class TestLayeringConfig(unittest.TestCase):
+    def test_default_layering_is_backward_compatible(self):
+        cfg = Config()
+        layering = cfg.get_layering_config()
+        self.assertEqual(layering['layer_count'], 3)
+        self.assertEqual(layering['layer_ratios'], [0.06, 0.06, 0.04])
+        self.assertEqual(layering['layer_max_total_ratio'], 0.16)
+
+    def test_invalid_layering_config_raises(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg_path = os.path.join(tmpdir, 'config.yaml')
+            with open(cfg_path, 'w', encoding='utf-8') as f:
+                f.write("""trading:
+  layering:
+    layer_count: 2
+    layer_ratios: [0.06, 0.06, 0.04]
+""")
+            with self.assertRaises(ValueError):
+                Config(cfg_path)
+
+
+class TestLayeringBehavior(unittest.TestCase):
+    def setUp(self):
+        self.cfg = Config()
+        self.db = Database('data/test_layering_behavior.db')
+        self.cfg._config.setdefault('trading', {}).setdefault('layering', {})
+        self.cfg._config['trading']['layering'].update({
+            'profit_only_add': True,
+            'min_add_interval_seconds': 60,
+            'max_layers_per_signal': 1,
+            'allow_same_bar_multiple_adds': False,
+        })
+        self.executor = TradingExecutor(self.cfg, None, self.db)
+
+    def tearDown(self):
+        if os.path.exists('data/test_layering_behavior.db'):
+            os.remove('data/test_layering_behavior.db')
+
+    def test_profit_only_add_blocks_when_not_in_profit(self):
+        self.db.record_trade('BTC/USDT', 'long', 100, 1, leverage=1, signal_id=1, layer_no=1, root_signal_id=1)
+        self.db.save_layer_plan_state('BTC/USDT', 'long', status='active', current_layer=1, root_signal_id=1, plan_data={'filled_layers':[1], 'pending_layers':[], 'layer_ratios':[0.06,0.06,0.04], 'max_total_ratio':0.16})
+        ok, reason, _ = self.executor._check_layering_runtime_guards('BTC/USDT', 'long', signal_id=2, plan_context={'current_price': 99})
+        self.assertFalse(ok)
+        self.assertIn('浮盈', reason)
+
+    def test_same_bar_multiple_adds_blocked(self):
+        self.db.save_layer_plan_state('BTC/USDT', 'long', status='active', current_layer=1, root_signal_id=1, plan_data={'filled_layers':[1], 'pending_layers':[], 'layer_ratios':[0.06,0.06,0.04], 'max_total_ratio':0.16, 'signal_bar_markers': {'bar-1': 'ts'}})
+        ok, reason, _ = self.executor._check_layering_runtime_guards('BTC/USDT', 'long', signal_id=2, plan_context={'signal_bar_marker': 'bar-1'})
+        self.assertFalse(ok)
+        self.assertIn('同一 bar', reason)

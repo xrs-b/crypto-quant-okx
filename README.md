@@ -131,7 +131,7 @@ python3 bot/run.py --exchange-smoke --symbol BTC/USDT --side long
 python3 bot/run.py --exchange-smoke --symbol BTC/USDT --side long --execute
 
 # 启动 dashboard
-python3 bot/run.py --dashboard --port 8050
+./.venv/bin/flask --app dashboard.api:app run --host 0.0.0.0 --port 5555
 ```
 
 ## ⚙️ 配置说明

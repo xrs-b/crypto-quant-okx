@@ -3,8 +3,10 @@
 
 # 配置
 PROJECT_DIR="/Volumes/MacHD/Projects/crypto-quant-okx"
-PYTHON_BIN="/usr/bin/python3"
-LOG_FILE="$PROJECT_DIR/logs/bot.log"
+VENV_PYTHON="$PROJECT_DIR/.venv/bin/python3"
+VENV_FLASK="$PROJECT_DIR/.venv/bin/flask"
+BOT_LOG_FILE="$PROJECT_DIR/logs/bot.log"
+DASHBOARD_LOG_FILE="$PROJECT_DIR/logs/dashboard.log"
 PID_FILE="$PROJECT_DIR/bot.pid"
 
 # 颜色
@@ -15,16 +17,16 @@ NC='\033[0m'
 
 # 检查Python环境
 check_python() {
-    if ! command -v $PYTHON_BIN &> /dev/null; then
+    if ! test -x "$VENV_PYTHON" &> /dev/null; then
         echo -e "${RED}错误: Python3 未安装${NC}"
         exit 1
     fi
     
     # 检查依赖
-    cd $PROJECT_DIR
-    if ! $PYTHON_BIN -c "import ccxt, pandas, yaml" 2>/dev/null; then
-        echo -e "${YELLOW}警告: 正在安装依赖...${NC}"
-        $PYTHON_BIN -m pip install -r requirements.txt
+    cd "$PROJECT_DIR"
+    if ! "$VENV_PYTHON" -c "import ccxt, pandas, yaml" 2>/dev/null; then
+        echo -e "${RED}错误: 项目虚拟环境缺少依赖，请先执行 .venv/bin/pip install -r requirements.txt${NC}"
+        exit 1
     fi
 }
 
@@ -32,7 +34,7 @@ check_python() {
 start_daemon() {
     check_python
     
-    cd $PROJECT_DIR
+    cd "$PROJECT_DIR"
     
     # 创建日志目录
     mkdir -p logs
@@ -45,38 +47,24 @@ start_daemon() {
     
     echo "🔄 守护进程模式启动，间隔: ${INTERVAL}秒"
     
-    # 写入Python脚本
-    cat > /tmp/okx_daemon.py << 'PYEOF'
-import time, sys
-sys.path.insert(0, '/Volumes/MacHD/Projects/crypto-quant-okx')
-while True:
-    try:
-        from bot.run import TradingBot
-        bot = TradingBot()
-        bot.run()
-    except Exception as e:
-        print(f'Error: {e}')
-    time.sleep(300)
-PYEOF
-    
     # 后台启动
-    nohup $PYTHON_BIN /tmp/okx_daemon.py >> $LOG_FILE 2>&1 &
+    nohup "$VENV_PYTHON" "$PROJECT_DIR/bot/run.py" --daemon >> "$BOT_LOG_FILE" 2>&1 &
     
-    echo $! > $PID_FILE
+    echo $! > "$PID_FILE"
     echo -e "${GREEN}✅ 守护进程已启动 (间隔: ${INTERVAL}秒)${NC}"
-    echo "日志文件: $LOG_FILE"
+    echo "日志文件: $BOT_LOG_FILE"
 }
 
 # 停止交易机器人
 stop_bot() {
-    if [ -f $PID_FILE ]; then
-        PID=$(cat $PID_FILE)
+    if [ -f "$PID_FILE" ]; then
+        PID=$(cat "$PID_FILE")
         if ps -p $PID > /dev/null 2>&1; then
             kill $PID
-            rm -f $PID_FILE
+            rm -f "$PID_FILE"
             echo -e "${GREEN}✅ 交易机器人已停止${NC}"
         else
-            rm -f $PID_FILE
+            rm -f "$PID_FILE"
             echo -e "${YELLOW}进程不存在，已清理${NC}"
         fi
     else
@@ -93,8 +81,8 @@ restart() {
 
 # 查看状态
 status() {
-    if [ -f $PID_FILE ]; then
-        PID=$(cat $PID_FILE)
+    if [ -f "$PID_FILE" ]; then
+        PID=$(cat "$PID_FILE")
         if ps -p $PID > /dev/null 2>&1; then
             echo -e "${GREEN}🟢 交易机器人运行中 (PID: $PID)${NC}"
         else
@@ -107,8 +95,8 @@ status() {
 
 # 查看日志
 logs() {
-    if [ -f $LOG_FILE ]; then
-        tail -50 $LOG_FILE
+    if [ -f "$BOT_LOG_FILE" ]; then
+        tail -50 "$BOT_LOG_FILE"
     else
         echo "暂无日志"
     fi
@@ -118,21 +106,21 @@ logs() {
 start_relay() {
     check_python
 
-    cd $PROJECT_DIR
+    cd "$PROJECT_DIR"
 
     mkdir -p logs
 
-    nohup $PYTHON_BIN bot/run.py --relay-outbox >> $LOG_FILE 2>&1 &
-    echo $! > $PROJECT_DIR/relay.pid
+    nohup "$VENV_PYTHON" "$PROJECT_DIR/bot/run.py" --relay-outbox >> "$BOT_LOG_FILE" 2>&1 &
+    echo $! > "$PROJECT_DIR/relay.pid"
 
-    echo -e "${GREEN}✅ 通知 relay 已启动 (PID: $(cat $PROJECT_DIR/relay.pid))${NC}"
+    echo -e "${GREEN}✅ 通知 relay 已启动 (PID: $(cat "$PROJECT_DIR/relay.pid"))${NC}"
 }
 
 # 停止通知 relay
 stop_relay() {
-    if [ -f $PROJECT_DIR/relay.pid ]; then
-        kill $(cat $PROJECT_DIR/relay.pid) 2>/dev/null
-        rm -f $PROJECT_DIR/relay.pid
+    if [ -f "$PROJECT_DIR/relay.pid" ]; then
+        kill $(cat "$PROJECT_DIR/relay.pid") 2>/dev/null
+        rm -f "$PROJECT_DIR/relay.pid"
         echo -e "${GREEN}✅ 通知 relay 已停止${NC}"
     fi
 }
@@ -141,24 +129,25 @@ stop_relay() {
 start_dashboard() {
     check_python
     
-    cd $PROJECT_DIR
+    cd "$PROJECT_DIR"
     
     mkdir -p logs
     
-    nohup $PYTHON_BIN bot/run.py --dashboard >> $LOG_FILE 2>&1 &
-    echo $! > $PROJECT_DIR/dashboard.pid
+    nohup "$VENV_FLASK" --app dashboard.api:app run --host 0.0.0.0 --port 5555 >> "$DASHBOARD_LOG_FILE" 2>&1 &
+    echo $! > "$PROJECT_DIR/dashboard.pid"
     
-    echo -e "${GREEN}✅ 仪表盘已启动 (PID: $(cat $PROJECT_DIR/dashboard.pid))${NC}"
-    echo "访问: http://localhost:8050"
+    echo -e "${GREEN}✅ 仪表盘已启动 (PID: $(cat "$PROJECT_DIR/dashboard.pid"))${NC}"
+    echo "访问: http://localhost:5555"
 }
 
 # 停止仪表盘
 stop_dashboard() {
-    if [ -f $PROJECT_DIR/dashboard.pid ]; then
-        kill $(cat $PROJECT_DIR/dashboard.pid) 2>/dev/null
-        rm -f $PROJECT_DIR/dashboard.pid
-        echo -e "${GREEN}✅ 仪表盘已停止${NC}"
+    if [ -f "$PROJECT_DIR/dashboard.pid" ]; then
+        kill $(cat "$PROJECT_DIR/dashboard.pid") 2>/dev/null || true
+        rm -f "$PROJECT_DIR/dashboard.pid"
     fi
+    pkill -f "flask --app dashboard.api:app run --host 0.0.0.0 --port 5555" 2>/dev/null || true
+    echo -e "${GREEN}✅ 仪表盘已停止${NC}"
 }
 
 # 主菜单

@@ -14,6 +14,36 @@ from analytics.recommendation import get_recommendation_provider
 from core.risk_budget import get_risk_budget_config, summarize_margin_usage, compute_entry_plan
 
 
+def build_observability_context(*, symbol: str = None, side: str = None, signal_id: int = None, root_signal_id: int = None, layer_no: int = None, deny_reason: str = None, current_symbol_exposure: float = None, projected_symbol_exposure: float = None, current_total_exposure: float = None, projected_total_exposure: float = None, extra: Dict[str, Any] = None) -> Dict[str, Any]:
+    context = {
+        'symbol': symbol,
+        'side': side,
+        'signal_id': signal_id,
+        'root_signal_id': root_signal_id,
+        'layer_no': layer_no,
+        'deny_reason': deny_reason,
+        'current_symbol_exposure': round(float(current_symbol_exposure or 0.0), 6),
+        'projected_symbol_exposure': round(float(projected_symbol_exposure if projected_symbol_exposure is not None else current_symbol_exposure or 0.0), 6),
+        'current_total_exposure': round(float(current_total_exposure or 0.0), 6),
+        'projected_total_exposure': round(float(projected_total_exposure if projected_total_exposure is not None else current_total_exposure or 0.0), 6),
+    }
+    if extra:
+        context.update(extra)
+    return context
+
+
+def merge_observability_details(details: Dict[str, Any] = None, context: Dict[str, Any] = None) -> Dict[str, Any]:
+    merged = dict(details or {})
+    merged['observability'] = dict(context or {})
+    return merged
+
+
+def observability_log_text(context: Dict[str, Any]) -> str:
+    if not context:
+        return '{}'
+    return json.dumps(context, ensure_ascii=False, sort_keys=True)
+
+
 class TradingExecutor:
     """交易执行器 - 增强版"""
     
@@ -242,10 +272,10 @@ class TradingExecutor:
         if layering.get('signal_idempotency_enabled', True) and signal_id is not None:
             existing_trade = self.db.get_trade_by_signal_id(signal_id)
             if existing_trade:
-                return False, 'signal_id 已存在成交记录，跳过重复开仓', {'stage': 'signal_idempotency', 'trade_id': existing_trade.get('id')}
+                return False, 'signal_id 已存在成交记录，跳过重复开仓', merge_observability_details({'stage': 'signal_idempotency', 'trade_id': existing_trade.get('id')}, build_observability_context(symbol=symbol, side=side, signal_id=signal_id, root_signal_id=state.get('root_signal_id') or signal_id, layer_no=(max(filled_layers) + 1) if filled_layers else 1, deny_reason='signal_idempotency'))
             existing_intent = self.db.get_open_intent_by_signal_id(signal_id)
             if existing_intent:
-                return False, 'signal_id 已存在进行中的开仓 intent', {'stage': 'signal_idempotency', 'intent_id': existing_intent.get('id')}
+                return False, 'signal_id 已存在进行中的开仓 intent', merge_observability_details({'stage': 'signal_idempotency', 'intent_id': existing_intent.get('id')}, build_observability_context(symbol=symbol, side=side, signal_id=signal_id, root_signal_id=existing_intent.get('root_signal_id') or state.get('root_signal_id') or signal_id, layer_no=existing_intent.get('layer_no') or ((max(filled_layers) + 1) if filled_layers else 1), deny_reason='signal_idempotency'))
 
         if layering.get('profit_only_add') and filled_layers:
             latest_trade = self.db.get_latest_open_trade(symbol, side)
@@ -254,7 +284,7 @@ class TradingExecutor:
             if entry_price > 0 and current_price > 0:
                 profitable = current_price >= entry_price if side == 'long' else current_price <= entry_price
                 if not profitable:
-                    return False, 'profit_only_add 已开启，当前未处于浮盈，禁止加仓', {'stage': 'profit_only_add'}
+                    return False, 'profit_only_add 已开启，当前未处于浮盈，禁止加仓', merge_observability_details({'stage': 'profit_only_add'}, build_observability_context(symbol=symbol, side=side, signal_id=signal_id, root_signal_id=state.get('root_signal_id') or signal_id, layer_no=(max(filled_layers) + 1) if filled_layers else 1, deny_reason='profit_only_add'))
 
         if filled_layers and layering.get('min_add_interval_seconds', 0) > 0 and last_filled_at:
             try:
@@ -264,20 +294,20 @@ class TradingExecutor:
             if last_dt is not None:
                 elapsed = (datetime.utcnow() - last_dt).total_seconds()
                 if elapsed < layering['min_add_interval_seconds']:
-                    return False, '未达到最小加仓时间间隔', {'stage': 'min_add_interval_seconds', 'remaining_seconds': int(layering['min_add_interval_seconds'] - elapsed)}
+                    return False, '未达到最小加仓时间间隔', merge_observability_details({'stage': 'min_add_interval_seconds', 'remaining_seconds': int(layering['min_add_interval_seconds'] - elapsed)}, build_observability_context(symbol=symbol, side=side, signal_id=signal_id, root_signal_id=state.get('root_signal_id') or signal_id, layer_no=(max(filled_layers) + 1) if filled_layers else 1, deny_reason='min_add_interval_seconds'))
 
         if signal_id is not None:
             signal_counts = dict(plan_data.get('signal_layer_counts') or {})
             count_for_signal = int(signal_counts.get(str(signal_id), 0) or 0)
             if count_for_signal >= int(layering.get('max_layers_per_signal') or layering.get('layer_count') or 1):
-                return False, '单个 signal 已达到最大允许分仓层数', {'stage': 'max_layers_per_signal', 'count_for_signal': count_for_signal}
+                return False, '单个 signal 已达到最大允许分仓层数', merge_observability_details({'stage': 'max_layers_per_signal', 'count_for_signal': count_for_signal}, build_observability_context(symbol=symbol, side=side, signal_id=signal_id, root_signal_id=state.get('root_signal_id') or signal_id, layer_no=(max(filled_layers) + 1) if filled_layers else 1, deny_reason='max_layers_per_signal'))
             if not layering.get('allow_same_bar_multiple_adds', False):
                 marker = self._get_signal_bar_marker(signal_id=signal_id, plan_context=plan_context)
                 markers = dict(plan_data.get('signal_bar_markers') or {})
                 if marker and markers.get(marker):
-                    return False, '同一 bar 已执行过加仓，禁止重复加仓', {'stage': 'allow_same_bar_multiple_adds', 'signal_bar_marker': marker}
+                    return False, '同一 bar 已执行过加仓，禁止重复加仓', merge_observability_details({'stage': 'allow_same_bar_multiple_adds', 'signal_bar_marker': marker}, build_observability_context(symbol=symbol, side=side, signal_id=signal_id, root_signal_id=state.get('root_signal_id') or signal_id, layer_no=(max(filled_layers) + 1) if filled_layers else 1, deny_reason='allow_same_bar_multiple_adds'))
 
-        return True, None, {'stage': 'layering_guard', 'layering': layering}
+        return True, None, merge_observability_details({'stage': 'layering_guard', 'layering': layering}, build_observability_context(symbol=symbol, side=side, signal_id=signal_id, root_signal_id=state.get('root_signal_id') or signal_id, layer_no=(max(filled_layers) + 1) if filled_layers else 1))
 
 
     def _get_layer_plan(self, symbol: str, side: str, signal_id: int = None, root_signal_id: int = None) -> Dict[str, Any]:
@@ -362,11 +392,11 @@ class TradingExecutor:
         lock_symbol, lock_side = self._get_direction_lock_scope_key(symbol, side)
         lock = self.db.get_direction_lock(lock_symbol, lock_side)
         if lock:
-            return False, 'symbol+side 方向锁已被占用', {'stage': 'hard_intercept', 'lock': lock, 'lock_scope': {'symbol': lock_symbol, 'side': lock_side}}
+            return False, 'symbol+side 方向锁已被占用', merge_observability_details({'stage': 'hard_intercept', 'lock': lock, 'lock_scope': {'symbol': lock_symbol, 'side': lock_side}}, build_observability_context(symbol=symbol, side=side, signal_id=signal_id, root_signal_id=root_signal_id or signal_id, deny_reason='direction_lock'))
 
         layer_plan = plan_context or self._get_layer_plan(symbol, side, signal_id=signal_id, root_signal_id=root_signal_id)
         if not layer_plan.get('eligible', True):
-            return False, layer_plan.get('reason') or '分层资格不通过', {'stage': 'layer_eligibility', 'layer_plan': layer_plan}
+            return False, layer_plan.get('reason') or '分层资格不通过', merge_observability_details({'stage': 'layer_eligibility', 'layer_plan': layer_plan}, build_observability_context(symbol=symbol, side=side, signal_id=signal_id, root_signal_id=layer_plan.get('root_signal_id') or root_signal_id or signal_id, layer_no=layer_plan.get('layer_no'), deny_reason='layer_eligibility'))
 
         snapshot = self._build_latest_risk_snapshot(symbol, side, current_price=current_price)
         risk_budget = get_risk_budget_config(self.config, symbol)
@@ -380,14 +410,16 @@ class TradingExecutor:
             strict_requested_ratio=True,
         )
         if entry_plan.get('blocked'):
-            return False, entry_plan.get('block_reason') or '风险预算不足', {'stage': 'risk_budget', 'entry_plan': entry_plan, 'layer_plan': layer_plan}
+            return False, entry_plan.get('block_reason') or '风险预算不足', merge_observability_details({'stage': 'risk_budget', 'entry_plan': entry_plan, 'layer_plan': layer_plan}, build_observability_context(symbol=symbol, side=side, signal_id=signal_id, root_signal_id=layer_plan.get('root_signal_id') or root_signal_id or signal_id, layer_no=layer_plan.get('layer_no'), deny_reason=entry_plan.get('block_reason') or 'risk_budget', current_symbol_exposure=entry_plan.get('current_symbol_exposure_ratio'), projected_symbol_exposure=entry_plan.get('projected_symbol_exposure_ratio'), current_total_exposure=entry_plan.get('current_total_exposure_ratio'), projected_total_exposure=entry_plan.get('projected_total_exposure_ratio')))
 
         merged = dict(layer_plan)
         merged['signal_id'] = signal_id
         merged['current_price'] = current_price
         merged['entry_plan'] = entry_plan
         merged['planned_margin'] = float(entry_plan.get('allowed_margin') or 0.0)
-        return True, None, {'stage': 'approved', 'plan_context': merged}
+        approved_context = build_observability_context(symbol=symbol, side=side, signal_id=signal_id, root_signal_id=merged.get('root_signal_id') or root_signal_id or signal_id, layer_no=merged.get('layer_no'), current_symbol_exposure=entry_plan.get('current_symbol_exposure_ratio'), projected_symbol_exposure=entry_plan.get('projected_symbol_exposure_ratio'), current_total_exposure=entry_plan.get('current_total_exposure_ratio'), projected_total_exposure=entry_plan.get('projected_total_exposure_ratio'))
+        merged['observability'] = approved_context
+        return True, None, merge_observability_details({'stage': 'approved', 'plan_context': merged}, approved_context)
 
     def open_position(self, symbol: str, side: str, 
                     current_price: float, signal_id: int = None, plan_context: Dict[str, Any] = None, layer_no: int = None, root_signal_id: int = None) -> Optional[int]:
@@ -414,7 +446,7 @@ class TradingExecutor:
             symbol, side, current_price, signal_id=signal_id, plan_context=plan_context, root_signal_id=root_signal_id
         )
         if not approved:
-            trade_logger.warning(f"{symbol}: {approve_reason} | details={approve_details}")
+            trade_logger.warning(f"{symbol}: {approve_reason} | details={approve_details} | obs={observability_log_text((approve_details or {}).get('observability'))}")
             return None
         plan_context = dict((approve_details or {}).get('plan_context') or {})
         if layer_no is not None:
@@ -443,7 +475,7 @@ class TradingExecutor:
             self.db.release_direction_lock(lock_symbol, lock_side, owner=lock_owner)
             raise
 
-        trade_logger.info(f"{symbol}: executor 最终放行通过 | plan_context={plan_context}")
+        trade_logger.info(f"{symbol}: executor 最终放行通过 | plan_context={plan_context} | obs={observability_log_text(plan_context.get('observability'))}")
         
         # 计算开仓数量 - 修复：基于实际杠杆计算，确保保证金占比准确
         # 步骤1: 先设置杠杆到交易所（确保一致）
@@ -555,6 +587,7 @@ class TradingExecutor:
                 trade_logger.trade(
                     symbol, side, current_price, amount, trade_id
                 )
+                trade_logger.info(f"{symbol}: 开仓执行完成 | obs={observability_log_text(plan_context.get('observability'))}")
                 
                 return trade_id
                 
@@ -1351,12 +1384,14 @@ class RiskManager:
         runtime_ok, runtime_reason, runtime_details = executor_probe._check_layering_runtime_guards(symbol, normalized_side, signal_id=signal_id, plan_context=plan_context or {})
         if not runtime_ok:
             details['hard_intercept'] = {'passed': False, 'reason': runtime_reason, 'details': runtime_details}
+            details['observability'] = dict((runtime_details or {}).get('observability') or {})
             return False, runtime_reason, details
 
         lock_symbol, lock_side = executor_probe._get_direction_lock_scope_key(symbol, normalized_side)
         direction_lock = self.db.get_direction_lock(lock_symbol, lock_side)
         if direction_lock:
             details['hard_intercept'] = {'passed': False, 'reason': '方向锁占用中', 'lock': direction_lock}
+            details['observability'] = build_observability_context(symbol=symbol, side=normalized_side, signal_id=signal_id, root_signal_id=signal_id, deny_reason='direction_lock')
             return False, '方向锁占用中', details
         details['hard_intercept'] = {'passed': True, 'lock_scope': {'symbol': lock_symbol, 'side': lock_side}}
 
@@ -1454,10 +1489,12 @@ class RiskManager:
                 next_layer += 1
             if next_layer > len(layer_ratios):
                 details['layer_eligibility'] = {'passed': False, 'reason': '分仓计划已达最大层数', 'state': state}
+                details['observability'] = build_observability_context(symbol=symbol, side=normalized_side, signal_id=signal_id, root_signal_id=state.get('root_signal_id') or signal_id, deny_reason='layer_limit')
                 return False, '分仓计划已达最大层数', details
             expected = len(consumed) + 1
             if next_layer != expected:
                 details['layer_eligibility'] = {'passed': False, 'reason': '检测到分仓层级断档，禁止跳层', 'state': state}
+                details['observability'] = build_observability_context(symbol=symbol, side=normalized_side, signal_id=signal_id, root_signal_id=state.get('root_signal_id') or signal_id, deny_reason='layer_gap')
                 return False, '检测到分仓层级断档，禁止跳层', details
             layer_plan = {
                 'eligible': True,
@@ -1485,13 +1522,26 @@ class RiskManager:
         max_exposure = float(risk_budget.get('total_margin_cap_ratio', 0.3))
         max_symbol = float(risk_budget.get('symbol_margin_cap_ratio', 0.15))
 
+        observability = build_observability_context(
+            symbol=symbol,
+            side=normalized_side,
+            signal_id=signal_id,
+            root_signal_id=layer_plan.get('root_signal_id') or signal_id,
+            layer_no=layer_plan.get('layer_no'),
+            current_symbol_exposure=entry_plan.get('current_symbol_exposure_ratio'),
+            projected_symbol_exposure=entry_plan.get('projected_symbol_exposure_ratio'),
+            current_total_exposure=entry_plan.get('current_total_exposure_ratio'),
+            projected_total_exposure=entry_plan.get('projected_total_exposure_ratio'),
+        )
+        details['observability'] = observability
         trade_logger.info(
             f"风控检查 {symbol}: 当前暴露:{current_exposure*100:.1f}%, "
             f"计划仓位:{position_ratio*100:.1f}%, 配置杠杆:{configured_leverage}x, 实际杠杆:{effective_leverage}x, "
-            f"预计总暴露:{projected_exposure*100:.1f}%, 上限:{max_exposure*100:.0f}%"
+            f"预计总暴露:{projected_exposure*100:.1f}%, 上限:{max_exposure*100:.0f}% | obs={observability_log_text(observability)}"
         )
 
         if entry_plan.get('blocked'):
+            details['observability'] = build_observability_context(symbol=symbol, side=normalized_side, signal_id=signal_id, root_signal_id=layer_plan.get('root_signal_id') or signal_id, layer_no=layer_plan.get('layer_no'), deny_reason=entry_plan.get('block_reason') or 'risk_budget', current_symbol_exposure=entry_plan.get('current_symbol_exposure_ratio'), projected_symbol_exposure=entry_plan.get('projected_symbol_exposure_ratio'), current_total_exposure=entry_plan.get('current_total_exposure_ratio'), projected_total_exposure=entry_plan.get('projected_total_exposure_ratio'))
             details['exposure_limit'] = {
                 'passed': False,
                 'current': round(current_exposure, 4),

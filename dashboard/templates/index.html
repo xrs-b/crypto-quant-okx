@@ -488,6 +488,9 @@
                                 <div class="summary-strip" id="overviewSmokeRisk"></div>
                                 <div class="summary-strip" id="overviewReconcileRisk"></div>
                                 <div class="summary-strip" id="overviewRuntimeState"></div>
+                                <div class="summary-strip" id="overviewExecutionSummary"></div>
+                                <div class="summary-strip" id="overviewExecutionExposure"></div>
+                                <div class="list" id="overviewExecutionWatch"></div>
                                 <div class="summary-strip" id="overviewRuntimeSummary"></div>
                                 <div class="summary-strip" id="overviewRunContinuity"></div>
                                 <div class="summary-strip" id="overviewRunTrend"></div>
@@ -2358,6 +2361,9 @@
             const riskHost = document.getElementById('overviewSmokeRisk');
             const reconcileHost = document.getElementById('overviewReconcileRisk');
             const runtimeHost = document.getElementById('overviewRuntimeState');
+            const executionSummaryHost = document.getElementById('overviewExecutionSummary');
+            const executionExposureHost = document.getElementById('overviewExecutionExposure');
+            const executionWatchHost = document.getElementById('overviewExecutionWatch');
             const runtimeSummaryHost = document.getElementById('overviewRuntimeSummary');
             const runtimeContinuityHost = document.getElementById('overviewRunContinuity');
             const runtimeTrendHost = document.getElementById('overviewRunTrend');
@@ -2425,6 +2431,43 @@
             for (const item of runtimeHistory) {
                 if (item.type === 'error') errorStreak += 1;
                 else break;
+            }
+            const executionState = status.execution || {};
+            const executionSummary = executionState.summary || {};
+            const executionExposure = executionState.exposure || {};
+            const executionSignals = Array.isArray(executionState.signal_decisions) ? executionState.signal_decisions : [];
+            const layerPlans = Array.isArray(executionState.layer_plans) ? executionState.layer_plans : [];
+            const activeIntents = Array.isArray(executionState.active_intents) ? executionState.active_intents : [];
+            const directionLocks = Array.isArray(executionState.direction_locks) ? executionState.direction_locks : [];
+            const hotPlans = layerPlans.filter(plan => plan.status !== 'idle');
+            const topExposure = (executionExposure.by_symbol || []).slice(0, 3).map(row => `${row.symbol} ${pct((row.projected_margin || 0) / Math.max(status.portfolio.balance_total || 1, 1))}`).join(' ｜ ');
+            if (executionSummaryHost) {
+                executionSummaryHost.innerHTML = `
+                    <div class="summary-pill"><div class="k">分仓计划</div><div class="v">${hotPlans.length}/${layerPlans.length}</div><div class="s">active intents ${executionSummary.active_intents ?? 0} ｜ direction locks ${executionSummary.direction_locks ?? 0}</div></div>
+                    <div class="summary-pill"><div class="k">当前持仓 / 预计占用</div><div class="v">${money(executionExposure.current_total_margin || 0)} → ${money(executionExposure.projected_total_margin || 0)}</div><div class="s">待提交保证金 ${money(executionExposure.pending_total_margin || 0)}</div></div>
+                    <div class="summary-pill"><div class="k">最近决策样本</div><div class="v">${executionSignals.length}</div><div class="s">${executionSignals.filter(row => row.executed).length} 已执行 ｜ ${executionSignals.filter(row => row.filtered).length} 被拦截</div></div>
+                    <div class="summary-pill"><div class="k">Top Symbol Exposure</div><div class="v">${topExposure || '--'}</div><div class="s">按持仓 + intent 预计占用排序</div></div>`;
+            }
+            if (executionExposureHost) {
+                executionExposureHost.innerHTML = (executionExposure.by_symbol || []).length ? executionExposure.by_symbol.slice(0, 4).map(row => `
+                    <div class="summary-pill"><div class="k">${row.symbol}</div><div class="v">${money(row.current_margin || 0)} → ${money(row.projected_margin || 0)}</div><div class="s">当前 ${pct((row.current_margin || 0) / Math.max(status.portfolio.balance_total || 1, 1))} ｜ 预计 ${pct((row.projected_margin || 0) / Math.max(status.portfolio.balance_total || 1, 1))}</div></div>`).join('') : '<div class="summary-pill"><div class="k">Symbol Exposure</div><div class="v">--</div><div class="s">当前无持仓 / intent</div></div>';
+            }
+            if (executionWatchHost) {
+                const watchRows = [];
+                hotPlans.slice(0, 4).forEach(plan => {
+                    const planData = plan.plan_data || {};
+                    watchRows.push(`<div class="item"><strong>📚 ${plan.symbol} ${plan.side === 'long' ? '开多' : '开空'} layer plan</strong><div class="muted">status=${plan.status} ｜ current=${plan.current_layer || 0} ｜ filled=${(planData.filled_layers || []).join(',') || '--'} ｜ pending=${(planData.pending_layers || []).join(',') || '--'} ｜ root_signal=${plan.root_signal_id || '--'}</div></div>`);
+                });
+                activeIntents.slice(0, 4).forEach(intent => {
+                    watchRows.push(`<div class="item"><strong>🧾 intent #${intent.id}</strong><div class="muted">${intent.symbol} ｜ ${intent.side === 'long' ? '开多' : '开空'} ｜ layer=${intent.layer_no || '--'} ｜ signal=${intent.signal_id || '--'} ｜ planned ${money(intent.planned_margin || 0)} ｜ ${intent.status}</div></div>`);
+                });
+                directionLocks.slice(0, 4).forEach(lock => {
+                    watchRows.push(`<div class="item"><strong>🔒 direction lock</strong><div class="muted">${lock.symbol} ｜ side=${lock.side} ｜ owner=${lock.owner || '--'} ｜ updated=${lock.updated_at || lock.created_at || '--'}</div></div>`);
+                });
+                executionSignals.slice(0, 6).forEach(row => {
+                    watchRows.push(`<div class="item"><strong>${row.executed ? '✅' : (row.filtered ? '⛔' : '👀')} ${row.symbol} #${row.signal_id || row.id}</strong><div class="muted">${row.signal_type} ｜ layer=${row.layer_no || '--'} ｜ deny=${row.deny_reason || '放行'} ｜ symbol ${pct(row.current_symbol_exposure || 0)} → ${pct(row.projected_symbol_exposure || row.current_symbol_exposure || 0)} ｜ total ${pct(row.current_total_exposure || 0)} → ${pct(row.projected_total_exposure || row.current_total_exposure || 0)}</div></div>`);
+                });
+                executionWatchHost.innerHTML = watchRows.length ? watchRows.join('') : '<div class="empty-state"><div class="icon">🧭</div><div>当前无分仓在线状态</div></div>';
             }
             const reconcileSummary = reconcileReport?.summary || {};
             const reconcileRiskCount = Number(reconcileSummary.exchange_missing_local_position || 0) + Number(reconcileSummary.local_position_missing_exchange || 0) + Number(reconcileSummary.open_trade_missing_exchange || 0) + Number(reconcileSummary.exchange_missing_open_trade || 0);
@@ -3191,7 +3234,11 @@
                 document.getElementById('signalsTable').innerHTML = safeRows.length ? safeRows.map(s => {
                     const codeText = s.filter_code ? ` [${s.filter_code}]` : '';
                     const hintText = s.action_hint ? `<div class="muted" style="margin-top:6px;">${s.filter_group || '--'} ｜ ${s.action_hint}</div>` : '';
-                    return `<tr><td>${s.created_at}</td><td>${s.symbol}</td><td>${badge(s.signal_type, s.signal_type === 'buy' ? 'buy' : s.signal_type === 'sell' ? 'sell' : 'hold')}</td><td>${s.strength}%</td><td>${(s.strategies_triggered || []).join(', ') || '--'}</td><td>${filteredTag(s)}</td><td>${s.filter_reason || '--'}${codeText}${hintText}</td></tr>`;
+                    const obs = s.filter_details?.observability || {};
+                    const obsText = (obs.signal_id || obs.layer_no || obs.deny_reason || obs.projected_total_exposure)
+                        ? `<div class="muted" style="margin-top:6px;">signal=${obs.signal_id || s.id || '--'} ｜ root=${obs.root_signal_id || '--'} ｜ layer=${obs.layer_no || '--'} ｜ deny=${obs.deny_reason || '放行'} ｜ total ${pct(obs.current_total_exposure || 0)}→${pct(obs.projected_total_exposure || obs.current_total_exposure || 0)}</div>`
+                        : '';
+                    return `<tr><td>${s.created_at}</td><td>${s.symbol}</td><td>${badge(s.signal_type, s.signal_type === 'buy' ? 'buy' : s.signal_type === 'sell' ? 'sell' : 'hold')}</td><td>${s.strength}%</td><td>${(s.strategies_triggered || []).join(', ') || '--'}</td><td>${filteredTag(s)}</td><td>${s.filter_reason || '--'}${codeText}${hintText}${obsText}</td></tr>`;
                 }).join('') : '<tr><td colspan="7" class="muted">暂无信号记录</td></tr>';
                 document.getElementById('filterReasonTable').innerHTML = safeReasons.length ? safeReasons.map(r => `<tr><td>${r.reason}</td><td>${r.count}</td></tr>`).join('') : '<tr><td colspan="2" class="muted">暂无过滤数据</td></tr>';
                 const effectivenessSummaryHost = document.getElementById('filterEffectivenessSummary');

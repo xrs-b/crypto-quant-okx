@@ -299,7 +299,24 @@ def reconcile_exchange_positions(exchange: Exchange, db: Database) -> dict:
     normalized_keys = []
     created_open_trades = []
     for pos in exchange_positions:
-        normalized = pos if pos.get('contract_size') is not None else exchange.normalize_position(pos)
+        if pos.get('contract_size') is not None:
+            normalized = pos
+        elif hasattr(exchange, 'normalize_position'):
+            normalized = exchange.normalize_position(pos)
+        else:
+            raw_symbol = pos.get('symbol')
+            normalized = {
+                'symbol': raw_symbol.split(':')[0] if isinstance(raw_symbol, str) and ':' in raw_symbol else raw_symbol,
+                'side': pos.get('side'),
+                'quantity': pos.get('quantity', pos.get('contracts', 0)),
+                'contracts': pos.get('contracts', pos.get('quantity', 0)),
+                'entry_price': pos.get('entry_price', pos.get('entryPrice', 0)),
+                'current_price': pos.get('current_price', pos.get('markPrice', pos.get('entryPrice', 0))),
+                'leverage': pos.get('leverage', 1),
+                'contract_size': pos.get('contract_size', 1),
+                'coin_quantity': pos.get('coin_quantity', (pos.get('contracts', pos.get('quantity', 0)) or 0) * (pos.get('contract_size', 1) or 1)),
+                'realized_pnl': pos.get('realized_pnl'),
+            }
         if not normalized:
             continue
         symbol = normalized['symbol']
@@ -408,6 +425,15 @@ def reconcile_exchange_positions(exchange: Exchange, db: Database) -> dict:
         open_trade_keys = {f"{t.get('symbol')}::{t.get('side')}" for t in local_open_trades}
         report['diff']['open_trade_missing_exchange'] = [row for row in local_open_trades if f"{row.get('symbol')}::{row.get('side')}" not in exchange_key_set]
         report['diff']['exchange_missing_open_trade'] = [row for row in report['exchange_positions'] if f"{row['symbol']}::{row['side']}" not in open_trade_keys]
+    touched_pairs = {(row.get('symbol'), row.get('side')) for row in report['exchange_positions'] if row.get('symbol') and row.get('side')}
+    touched_pairs.update((row.get('symbol'), row.get('side')) for row in stale_closed if row.get('symbol') and row.get('side'))
+    touched_pairs.update((row.get('symbol'), row.get('side')) for row in created_open_trades if row.get('symbol') and row.get('side'))
+    touched_pairs.update((row.get('symbol'), row.get('side')) for row in healed_open_trades if row.get('symbol') and row.get('side'))
+    if not touched_pairs:
+        touched_pairs.update((row.get('symbol'), row.get('side')) for row in report.get('local_before', []) if row.get('symbol') and row.get('side'))
+    report['layer_state_sync'] = [db.sync_layer_plan_state(symbol, side, reset_if_flat=True) for symbol, side in sorted(touched_pairs)]
+    report['orphan_cleanup'] = db.cleanup_orphan_execution_state(stale_after_minutes=15)
+
     report['summary'] = {
         'exchange_positions': len(report['exchange_positions']),
         'local_positions': len(local_after),
@@ -420,6 +446,9 @@ def reconcile_exchange_positions(exchange: Exchange, db: Database) -> dict:
         'exchange_missing_open_trade': len(report['diff']['exchange_missing_open_trade']),
         'stale_open_trades_closed': len(stale_closed),
         'history_backfilled': int((report.get('history_backfill') or {}).get('patched', 0) or 0),
+        'layer_states_synced': len(report['layer_state_sync']),
+        'orphan_intents_cleaned': len((report.get('orphan_cleanup') or {}).get('removed_intents', [])),
+        'orphan_locks_cleaned': len((report.get('orphan_cleanup') or {}).get('removed_locks', [])),
     }
     report['stale_closed'] = stale_closed
     report['created_open_trades'] = created_open_trades

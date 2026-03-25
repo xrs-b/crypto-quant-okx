@@ -1903,9 +1903,16 @@ def get_system_status():
                 'executed_today': executed_today,
                 'execution_rate': round(executed_today / max(today_signals, 1) * 100, 2)
             },
-            'risk': risk
+            'risk': risk,
+            'execution': db.get_execution_state_snapshot()
         }
     })
+
+
+@app.route('/api/system/execution-state')
+def get_execution_state():
+    """最小执行态观察接口：layer plan / active intents / direction locks"""
+    return jsonify({'success': True, 'data': db.get_execution_state_snapshot()})
 
 
 @app.route('/api/system/checklist')

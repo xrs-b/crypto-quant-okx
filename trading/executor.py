@@ -51,6 +51,8 @@ class TradingExecutor:
         if trade_id:
             self.db.mark_trade_stale_closed(trade_id, reason, close_price=close_price)
         self.db.close_position(symbol)
+        self.db.sync_layer_plan_state(symbol, side, reset_if_flat=True)
+        self.db.cleanup_orphan_execution_state(stale_after_minutes=1)
         trade_logger.warning(f"{symbol}: 检测到交易所已无对应仓位，自动收口本地持仓/交易")
         return True
     
@@ -79,6 +81,7 @@ class TradingExecutor:
                 signal_id=signal_id, notes=note or '交易所持仓恢复 open trade', contract_size=contract_size, coin_quantity=coin_quantity
             )
             self.db.update_position(symbol=symbol, side=side, entry_price=entry_price, quantity=quantity, leverage=leverage, current_price=float(normalized.get('current_price') or entry_price), contract_size=contract_size, coin_quantity=coin_quantity)
+            self.db.sync_layer_plan_state(symbol, side, root_signal_id=signal_id, reset_if_flat=False)
             return trade_id
         return None
 
@@ -622,9 +625,12 @@ class TradingExecutor:
                         contract_size=contract_size,
                         coin_quantity=remaining_coin_quantity
                     )
+                    self.db.sync_layer_plan_state(symbol, side, reset_if_flat=False)
                     trade_logger.info(f"{symbol}: 部分平仓完成，剩余{(position['quantity'] - close_quantity):.4f}张")
                 else:
                     self.db.close_position(symbol)
+                    self.db.sync_layer_plan_state(symbol, side, reset_if_flat=True)
+                    self.db.cleanup_orphan_execution_state(stale_after_minutes=1)
                     # 只有全部平仓才清除缓存
                     self._update_cooldown(symbol)
                     self._clear_trade_cache(symbol)

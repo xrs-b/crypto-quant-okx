@@ -16,3 +16,21 @@ notification:
     channel_id: your_real_discord_channel_id
     webhook_url: https://discord.com/api/webhooks/xxx/yyy
     bot_token: your_real_discord_bot_token
+
+trading:
+  layering:
+    layer_count: 3
+    layer_ratios: [0.06, 0.06, 0.04]
+    layer_max_total_ratio: 0.16
+    min_add_interval_seconds: 300
+    profit_only_add: false
+    disallow_skip_layers: true
+    signal_idempotency_enabled: true
+    signal_idempotency_ttl_seconds: 600
+    direction_lock_enabled: true
+    direction_lock_scope: symbol
+    direction_lock_release_on_flat: true
+    require_position_exists: true
+    allow_same_bar_multiple_adds: false
+    max_layers_per_signal: 1
+    strict_ratio_sum_check: false

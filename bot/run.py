@@ -387,6 +387,7 @@ def reconcile_exchange_positions(exchange: Exchange, db: Database) -> dict:
         'local_positions': len(local_after),
         'open_trades': len(local_open_trades),
         'created_open_trades': len(created_open_trades),
+        'healed_open_trades': len(healed_open_trades),
         'exchange_missing_local_position': len(report['diff']['exchange_missing_local_position']),
         'local_position_missing_exchange': len(report['diff']['local_position_missing_exchange']),
         'open_trade_missing_exchange': len(report['diff']['open_trade_missing_exchange']),
@@ -396,6 +397,7 @@ def reconcile_exchange_positions(exchange: Exchange, db: Database) -> dict:
     }
     report['stale_closed'] = stale_closed
     report['created_open_trades'] = created_open_trades
+    report['healed_open_trades'] = healed_open_trades
     return report
 
 
@@ -1082,3 +1084,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+

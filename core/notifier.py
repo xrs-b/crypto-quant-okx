@@ -422,7 +422,10 @@ class NotificationManager:
             f'openTrade 缺失：{summary.get("exchange_missing_open_trade", 0)}',
             f'openTrade 脏记录：{summary.get("open_trade_missing_exchange", 0)}',
         ]
-        return self.send('error', '⚠️ 持仓对账异常', lines, 'warning', report)
+        healed = int(summary.get('healed_open_trades', 0) or 0)
+        if healed > 0:
+            lines.extend(['---', '【自动修复】', f'已自动补建 open trades：{healed}'])
+        return self.send('reconcile', '⚠️ 持仓对账异常', lines, 'warning', report, priority='high')
 
     def notify_error(self, title: str, message: str, details: Dict = None) -> Dict:
         priority = 'urgent'

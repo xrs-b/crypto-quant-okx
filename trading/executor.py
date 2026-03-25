@@ -255,6 +255,7 @@ class TradingExecutor:
         retry_delay = 2
         
         for attempt in range(max_retries):
+            order = None
             try:
                 # 开仓
                 order = self.exchange.create_order(
@@ -300,8 +301,21 @@ class TradingExecutor:
                 return trade_id
                 
             except Exception as e:
-                trade_logger.error(f"开仓失败 (尝试 {attempt + 1}/{max_retries}): {e}")
-                if '51202' in str(e):
+                err_text = str(e)
+                if order is not None or self._exchange_has_position(symbol, side):
+                    recovered_trade_id = self._recover_open_trade_from_exchange(
+                        symbol,
+                        side,
+                        signal_id=signal_id,
+                        note=f"开仓后本地补记恢复（attempt={attempt + 1}, error={err_text}）"
+                    )
+                    if recovered_trade_id:
+                        self._update_cooldown(symbol)
+                        self._seed_trailing_anchor(symbol, side, current_price)
+                        trade_logger.warning(f"{symbol}: 开仓后本地处理异常，但已按交易所持仓恢复成功 - {err_text}")
+                        return recovered_trade_id
+                trade_logger.error(f"开仓失败 (尝试 {attempt + 1}/{max_retries}): {err_text}")
+                if '51202' in err_text:
                     amount = round(amount * 0.5, 8)
                     trade_logger.warning(f"{symbol}: 市价单数量超过上限，自动缩量后重试 -> {amount}")
                     if amount <= 0:

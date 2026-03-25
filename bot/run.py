@@ -356,6 +356,32 @@ def reconcile_exchange_positions(exchange: Exchange, db: Database) -> dict:
         'open_trade_missing_exchange': [row for row in local_open_trades if f"{row.get('symbol')}::{row.get('side')}" not in exchange_key_set],
         'exchange_missing_open_trade': [row for row in report['exchange_positions'] if f"{row['symbol']}::{row['side']}" not in open_trade_keys],
     }
+    healed_open_trades = []
+    for row in list(report['diff']['exchange_missing_open_trade']):
+        symbol = row.get('symbol')
+        side = row.get('side')
+        if not symbol or not side:
+            continue
+        if db.get_latest_open_trade(symbol, side):
+            continue
+        matched_local = next((p for p in local_after if p.get('symbol') == symbol and p.get('side') == side), None)
+        base_row = matched_local or row
+        trade_id = db.record_trade(
+            symbol=symbol,
+            side=side,
+            entry_price=float(base_row.get('entry_price') or 0),
+            quantity=float(base_row.get('quantity') or 0),
+            leverage=int(float(base_row.get('leverage') or 1)),
+            notes='对账自愈补建 open trade（exchange/local snapshot fallback）',
+            contract_size=float(base_row.get('contract_size') or 1),
+            coin_quantity=float(base_row.get('coin_quantity') or 0),
+        )
+        healed_open_trades.append({'trade_id': trade_id, 'symbol': symbol, 'side': side})
+    if healed_open_trades:
+        report['local_open_trades'] = db.get_trades(status='open', limit=200)
+        local_open_trades = report['local_open_trades']
+        open_trade_keys = {f"{t.get('symbol')}::{t.get('side')}" for t in local_open_trades}
+        report['diff']['exchange_missing_open_trade'] = [row for row in report['exchange_positions'] if f"{row['symbol']}::{row['side']}" not in open_trade_keys]
     stale_closed = []
     for row in report['diff']['open_trade_missing_exchange']:
         trade_id = row.get('id')

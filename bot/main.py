@@ -148,6 +148,18 @@ def main():
             
             # 记录信号
             signal_id = recorder.record(signal, (passed, reason, details))
+            merged_filter_details = dict(signal.filter_details or {})
+            merged_filter_details['observability'] = {
+                'signal_id': signal_id,
+                'root_signal_id': signal_id,
+                'layer_no': None,
+                'deny_reason': reason if not passed else None,
+                'current_symbol_exposure': 0.0,
+                'projected_symbol_exposure': 0.0,
+                'current_total_exposure': 0.0,
+                'projected_total_exposure': 0.0,
+            }
+            db.update_signal(signal_id, filter_details=json.dumps(merged_filter_details, ensure_ascii=False))
             
             if not passed:
                 print(f"❌ 信号被过滤: {reason}")
@@ -157,6 +169,16 @@ def main():
             if signal.signal_type in ['buy', 'sell']:
                 side = 'long' if signal.signal_type == 'buy' else 'short'
                 
+                risk_mgr = RiskManager(config, db)
+                can_open, risk_reason, risk_details = risk_mgr.can_open_position(symbol, side=side, signal_id=signal_id)
+                risk_obs = dict((risk_details or {}).get('observability') or {})
+                if risk_obs:
+                    merged_filter_details = dict(signal.filter_details or {})
+                    merged_filter_details['observability'] = {**dict(merged_filter_details.get('observability') or {}), **risk_obs, 'deny_reason': None if can_open else (risk_reason or risk_obs.get('deny_reason'))}
+                    db.update_signal(signal_id, filter_details=json.dumps(merged_filter_details, ensure_ascii=False), filter_reason=(None if can_open else risk_reason))
+                if not can_open:
+                    print(f"⏸️ 风险检查阻止: {risk_reason}")
+                    continue
                 trade_id = executor.open_position(
                     symbol, side, current_price, signal_id, root_signal_id=signal_id
                 )

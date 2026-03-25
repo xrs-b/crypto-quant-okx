@@ -684,11 +684,29 @@ class TradingBot:
                 
                 # 记录信号
                 signal_id = self.recorder.record(signal, (passed, reason, details))
+                base_obs = {
+                    'signal_id': signal_id,
+                    'root_signal_id': signal_id,
+                    'layer_no': None,
+                    'deny_reason': reason if not passed else None,
+                    'current_symbol_exposure': 0.0,
+                    'projected_symbol_exposure': 0.0,
+                    'current_total_exposure': 0.0,
+                    'projected_total_exposure': 0.0,
+                }
+                merged_filter_details = dict(signal.filter_details or {})
+                merged_filter_details['observability'] = {**base_obs, **dict(merged_filter_details.get('observability') or {})}
+                self.db.update_signal(signal_id, filter_details=json.dumps(merged_filter_details, ensure_ascii=False))
                 
                 # 如果信号通过且可以开仓
                 if passed and signal.signal_type in ['buy', 'sell']:
                     # 风险检查
                     can_open, risk_reason, risk_details = self.risk_mgr.can_open_position(symbol, side='long' if signal.signal_type == 'buy' else 'short', signal_id=signal_id)
+                    risk_obs = dict((risk_details or {}).get('observability') or {})
+                    if risk_obs:
+                        merged_filter_details = dict(signal.filter_details or {})
+                        merged_filter_details['observability'] = {**dict(merged_filter_details.get('observability') or {}), **risk_obs, 'deny_reason': None if can_open else (risk_reason or risk_obs.get('deny_reason'))}
+                        self.db.update_signal(signal_id, filter_details=json.dumps(merged_filter_details, ensure_ascii=False), filter_reason=(None if can_open else risk_reason))
                     self.notifier.notify_decision(signal, can_open, risk_reason, risk_details)
                     lock_info = (risk_details or {}).get('loss_streak_limit', {}) if isinstance(risk_details, dict) else {}
                     if lock_info.get('just_triggered'):

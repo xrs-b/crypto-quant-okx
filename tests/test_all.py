@@ -21,6 +21,7 @@ from core.exchange import Exchange
 from core.notifier import NotificationManager
 from signals import Signal, SignalDetector, SignalValidator, SignalRecorder, EntryDecider
 from trading import TradingExecutor, RiskManager
+from trading.executor import build_observability_context
 from strategies.strategy_library import StrategyManager
 from bot.run import build_exchange_diagnostics, build_exchange_smoke_plan, build_runtime_health_summary, maybe_send_daily_health_summary, execute_exchange_smoke, reconcile_exchange_positions
 from dashboard.api import app
@@ -2656,3 +2657,31 @@ class TestLayeringBehavior(unittest.TestCase):
         ok, reason, _ = self.executor._check_layering_runtime_guards('BTC/USDT', 'long', signal_id=2, plan_context={'signal_bar_marker': 'bar-1'})
         self.assertFalse(ok)
         self.assertIn('同一 bar', reason)
+
+
+class TestExecutionObservability(unittest.TestCase):
+    def test_build_observability_context_rounds_expected_fields(self):
+        ctx = build_observability_context(
+            symbol='BTC/USDT:USDT', side='long', signal_id=12, root_signal_id=10, layer_no=2,
+            deny_reason='risk_budget', current_symbol_exposure=0.0612345, projected_symbol_exposure=0.1212345,
+            current_total_exposure=0.0912345, projected_total_exposure=0.1512345,
+        )
+        self.assertEqual(ctx['signal_id'], 12)
+        self.assertEqual(ctx['root_signal_id'], 10)
+        self.assertEqual(ctx['layer_no'], 2)
+        self.assertEqual(ctx['deny_reason'], 'risk_budget')
+        self.assertEqual(ctx['current_symbol_exposure'], 0.061234)
+        self.assertEqual(ctx['projected_total_exposure'], 0.151234)
+
+    def test_execution_state_snapshot_contains_exposure_and_signal_digest(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(os.path.join(tmpdir, 'test.db'))
+            db.update_position(symbol='BTC/USDT:USDT', side='long', entry_price=50000, quantity=10, contract_size=0.01, coin_quantity=0.1, leverage=10, current_price=51000)
+            signal_id = db.record_signal(symbol='BTC/USDT:USDT', signal_type='buy', price=50000, strength=80, reasons=[], strategies_triggered=[])
+            db.update_signal(signal_id, filter_details=json.dumps({'observability': {'signal_id': signal_id, 'root_signal_id': signal_id, 'layer_no': 1, 'deny_reason': 'direction_lock', 'current_symbol_exposure': 0.05, 'projected_symbol_exposure': 0.11, 'current_total_exposure': 0.05, 'projected_total_exposure': 0.11}}, ensure_ascii=False), filtered=1, filter_reason='方向锁占用中')
+            db.create_open_intent(symbol='BTC/USDT:USDT', side='long', signal_id=signal_id, root_signal_id=signal_id, planned_margin=60, leverage=10, layer_no=1, plan_context={'foo': 'bar'})
+            snapshot = db.get_execution_state_snapshot()
+            self.assertIn('exposure', snapshot)
+            self.assertGreater(snapshot['exposure']['projected_total_margin'], snapshot['exposure']['current_total_margin'])
+            self.assertTrue(snapshot['signal_decisions'])
+            self.assertEqual(snapshot['signal_decisions'][0]['deny_reason'], 'direction_lock')

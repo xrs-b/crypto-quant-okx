@@ -1734,24 +1734,108 @@ class Database:
         synced = [self.sync_layer_plan_state(symbol, side, reset_if_flat=True) for symbol, side in sorted(touched_keys)]
         return {'removed_intents': removed_intents, 'removed_locks': removed_locks, 'synced_states': synced}
 
+    def _safe_json_dict(self, value: Any) -> Dict[str, Any]:
+        if isinstance(value, dict):
+            return dict(value)
+        if value in (None, ''):
+            return {}
+        try:
+            parsed = json.loads(value) if isinstance(value, str) else value
+        except Exception:
+            return {}
+        return dict(parsed) if isinstance(parsed, dict) else {}
+
+    def _build_execution_exposure_summary(self, positions: List[Dict[str, Any]], intents: List[Dict[str, Any]]) -> Dict[str, Any]:
+        symbol_rows: Dict[str, Dict[str, float]] = {}
+        current_total = 0.0
+        projected_total = 0.0
+        for row in positions or []:
+            symbol = row.get('symbol') or '--'
+            qty = self._safe_float(row.get('coin_quantity') or 0.0)
+            px = self._safe_float(row.get('current_price') or row.get('entry_price') or 0.0)
+            lev = max(1.0, self._safe_float(row.get('leverage') or 1.0))
+            margin = (qty * px / lev) if qty > 0 and px > 0 else 0.0
+            current_total += margin
+            projected_total += margin
+            bucket = symbol_rows.setdefault(symbol, {'symbol': symbol, 'current_margin': 0.0, 'projected_margin': 0.0})
+            bucket['current_margin'] += margin
+            bucket['projected_margin'] += margin
+        for intent in intents or []:
+            symbol = intent.get('symbol') or '--'
+            planned = self._safe_float(intent.get('planned_margin') or intent.get('margin_used') or 0.0)
+            projected_total += planned
+            bucket = symbol_rows.setdefault(symbol, {'symbol': symbol, 'current_margin': 0.0, 'projected_margin': 0.0})
+            bucket['projected_margin'] += planned
+        symbol_rows_list = []
+        for row in symbol_rows.values():
+            row['current_margin'] = round(row['current_margin'], 4)
+            row['projected_margin'] = round(row['projected_margin'], 4)
+            row['pending_margin'] = round(max(0.0, row['projected_margin'] - row['current_margin']), 4)
+            symbol_rows_list.append(row)
+        symbol_rows_list.sort(key=lambda item: (-item['projected_margin'], item['symbol']))
+        return {
+            'current_total_margin': round(current_total, 4),
+            'projected_total_margin': round(projected_total, 4),
+            'pending_total_margin': round(max(0.0, projected_total - current_total), 4),
+            'by_symbol': symbol_rows_list,
+        }
+
+    def _build_signal_decision_digest(self, limit: int = 8) -> List[Dict[str, Any]]:
+        rows = self.get_signals(limit=limit)
+        digest = []
+        for row in rows:
+            fd = self._safe_json_dict(row.get('filter_details'))
+            obs = self._safe_json_dict(fd.get('observability'))
+            entry_decision = self._safe_json_dict(fd.get('entry_decision'))
+            digest.append({
+                'id': row.get('id'),
+                'created_at': row.get('created_at'),
+                'symbol': row.get('symbol'),
+                'signal_type': row.get('signal_type'),
+                'executed': bool(row.get('executed')),
+                'filtered': bool(row.get('filtered')),
+                'decision': entry_decision.get('decision') or ('executed' if row.get('executed') else ('blocked' if row.get('filtered') else 'watch')),
+                'decision_reason': row.get('filter_reason') or entry_decision.get('reason_summary') or '--',
+                'signal_score': entry_decision.get('score'),
+                'signal_id': obs.get('signal_id') or row.get('id'),
+                'root_signal_id': obs.get('root_signal_id'),
+                'layer_no': obs.get('layer_no'),
+                'deny_reason': obs.get('deny_reason') or row.get('filter_reason'),
+                'current_symbol_exposure': obs.get('current_symbol_exposure'),
+                'projected_symbol_exposure': obs.get('projected_symbol_exposure'),
+                'current_total_exposure': obs.get('current_total_exposure'),
+                'projected_total_exposure': obs.get('projected_total_exposure'),
+            })
+        return digest
+
     def get_execution_state_snapshot(self) -> Dict:
         intents = self.get_active_open_intents()
+        positions = self.get_positions()
         conn = self._get_connection()
         locks_df = pd.read_sql_query("SELECT * FROM direction_locks ORDER BY updated_at DESC, created_at DESC", conn)
         plans_df = pd.read_sql_query("SELECT * FROM layer_plan_states ORDER BY symbol ASC, side ASC", conn)
         conn.close()
         locks = locks_df.to_dict('records') if not locks_df.empty else []
         plans = plans_df.to_dict('records') if not plans_df.empty else []
+        for row in intents:
+            row['plan_context'] = self._safe_json_dict(row.get('plan_context'))
         for row in plans:
-            row['plan_data'] = json.loads(row['plan_data']) if row.get('plan_data') else {}
+            row['plan_data'] = self._safe_json_dict(row.get('plan_data'))
+        exposure = self._build_execution_exposure_summary(positions, intents)
+        signal_digest = self._build_signal_decision_digest()
         return {
             'active_intents': intents,
             'direction_locks': locks,
             'layer_plans': plans,
+            'positions': positions,
+            'exposure': exposure,
+            'signal_decisions': signal_digest,
             'summary': {
                 'active_intents': len(intents),
                 'direction_locks': len(locks),
                 'active_layer_plans': sum(1 for row in plans if row.get('status') != 'idle'),
+                'open_positions': len(positions),
+                'signals_with_decision': len(signal_digest),
             }
         }
 

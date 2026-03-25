@@ -56,11 +56,11 @@ def get_risk_budget_config(config: Any, symbol: Optional[str] = None) -> Dict[st
     return merged
 
 
-def summarize_margin_usage(positions: List[Dict[str, Any]], symbol: str, mark_price: Optional[float] = None) -> Dict[str, Any]:
+def summarize_margin_usage(positions: List[Dict[str, Any]], symbol: str, mark_price: Optional[float] = None, pending_intents: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
     total_margin = 0.0
     symbol_margin = 0.0
-    same_side_positions: List[Dict[str, Any]] = []
     normalized_positions: List[Dict[str, Any]] = []
+    normalized_intents: List[Dict[str, Any]] = []
 
     for pos in positions or []:
         pos_symbol = pos.get('symbol')
@@ -89,8 +89,31 @@ def summarize_margin_usage(positions: List[Dict[str, Any]], symbol: str, mark_pr
         total_margin += margin_used
         if pos_symbol == symbol:
             symbol_margin += margin_used
+
+    for intent in pending_intents or []:
+        intent_symbol = intent.get('symbol')
+        intent_side = str(intent.get('side') or '').lower()
+        if intent_side in {'buy', 'long'}:
+            intent_side = 'long'
+        elif intent_side in {'sell', 'short'}:
+            intent_side = 'short'
+        margin_used = float(intent.get('planned_margin') or intent.get('margin_used') or 0)
+        row = {
+            'symbol': intent_symbol,
+            'side': intent_side,
+            'coin_quantity': float(intent.get('coin_quantity') or 0),
+            'price': float(intent.get('current_price') or mark_price or 0),
+            'leverage': max(1, int(float(intent.get('leverage', 1) or 1))),
+            'margin_used': margin_used,
+            'kind': 'intent',
+        }
+        normalized_intents.append(row)
+        total_margin += margin_used
+        if intent_symbol == symbol:
+            symbol_margin += margin_used
     return {
         'positions': normalized_positions,
+        'pending_intents': normalized_intents,
         'current_total_margin': total_margin,
         'current_symbol_margin': symbol_margin,
     }
@@ -107,7 +130,7 @@ def derive_quality_bucket(signal: Any = None) -> str:
 
 
 def compute_entry_plan(*, total_balance: float, free_balance: float, current_total_margin: float, current_symbol_margin: float,
-                       risk_budget: Dict[str, Any], signal: Any = None) -> Dict[str, Any]:
+                       risk_budget: Dict[str, Any], signal: Any = None, requested_entry_ratio: Optional[float] = None, strict_requested_ratio: bool = False) -> Dict[str, Any]:
     total_balance = float(total_balance or 0)
     free_balance = max(0.0, float(free_balance or 0))
     current_total_margin = max(0.0, float(current_total_margin or 0))
@@ -121,7 +144,7 @@ def compute_entry_plan(*, total_balance: float, free_balance: float, current_tot
     remaining_total_cap = max(0.0, total_cap - current_total_margin)
     remaining_symbol_cap = max(0.0, symbol_cap - current_symbol_margin)
 
-    entry_ratio = rb['base_entry_margin_ratio']
+    entry_ratio = float(requested_entry_ratio) if requested_entry_ratio is not None else rb['base_entry_margin_ratio']
     quality_bucket = derive_quality_bucket(signal)
     quality_multiplier = 1.0
     if rb['quality_scaling_enabled']:
@@ -159,6 +182,9 @@ def compute_entry_plan(*, total_balance: float, free_balance: float, current_tot
     elif allowed_margin <= 0 or effective_entry_ratio <= 0:
         blocked = True
         block_reason = '当前剩余预算不足以开新仓'
+    elif strict_requested_ratio and target_margin > 0 and allowed_margin + 1e-9 < target_margin:
+        blocked = True
+        block_reason = '剩余风险预算不足以执行计划层仓位'
     elif effective_entry_ratio + 1e-9 < rb['min_entry_margin_ratio']:
         blocked = True
         block_reason = '剩余风险预算低于最小开仓门槛'

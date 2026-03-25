@@ -114,6 +114,9 @@ class Database:
                 notes TEXT,
                 close_source TEXT,
                 close_fill_count INTEGER DEFAULT 0,
+                layer_no INTEGER,
+                root_signal_id INTEGER,
+                plan_context TEXT,
                 FOREIGN KEY (signal_id) REFERENCES signals(id)
             )
         """)
@@ -333,6 +336,53 @@ class Database:
             )
         """)
 
+        # 开仓 intent（下单前先写入，完成后回收）
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS open_intents (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                signal_id INTEGER,
+                root_signal_id INTEGER,
+                symbol TEXT NOT NULL,
+                side TEXT NOT NULL,
+                status TEXT DEFAULT 'pending',
+                planned_margin REAL DEFAULT 0,
+                leverage INTEGER DEFAULT 1,
+                layer_no INTEGER,
+                plan_context TEXT,
+                notes TEXT,
+                trade_id INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        # symbol+side 方向锁
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS direction_locks (
+                lock_key TEXT PRIMARY KEY,
+                symbol TEXT NOT NULL,
+                side TEXT NOT NULL,
+                owner TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        # 分仓计划状态
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS layer_plan_states (
+                plan_key TEXT PRIMARY KEY,
+                symbol TEXT NOT NULL,
+                side TEXT NOT NULL,
+                status TEXT DEFAULT 'idle',
+                current_layer INTEGER DEFAULT 0,
+                root_signal_id INTEGER,
+                plan_data TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
         # 兼容旧库：补充信号诊断字段
         cursor.execute("PRAGMA table_info(signals)")
         signal_columns = {row[1] for row in cursor.fetchall()}
@@ -356,6 +406,12 @@ class Database:
             cursor.execute("ALTER TABLE trades ADD COLUMN close_source TEXT")
         if 'close_fill_count' not in trade_columns:
             cursor.execute("ALTER TABLE trades ADD COLUMN close_fill_count INTEGER DEFAULT 0")
+        if 'layer_no' not in trade_columns:
+            cursor.execute("ALTER TABLE trades ADD COLUMN layer_no INTEGER")
+        if 'root_signal_id' not in trade_columns:
+            cursor.execute("ALTER TABLE trades ADD COLUMN root_signal_id INTEGER")
+        if 'plan_context' not in trade_columns:
+            cursor.execute("ALTER TABLE trades ADD COLUMN plan_context TEXT")
 
         cursor.execute("PRAGMA table_info(positions)")
         position_columns = {row[1] for row in cursor.fetchall()}
@@ -380,6 +436,9 @@ class Database:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_notification_outbox_created ON notification_outbox(created_at)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_partial_tp_history_symbol ON partial_tp_history(symbol)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_partial_tp_history_created ON partial_tp_history(created_at)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_open_intents_symbol_side_status ON open_intents(symbol, side, status)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_open_intents_signal_id ON open_intents(signal_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_layer_plan_states_symbol_side ON layer_plan_states(symbol, side)")
         
         conn.commit()
         conn.close()
@@ -486,7 +545,8 @@ class Database:
     def record_trade(self, symbol: str, side: str, entry_price: float,
                      quantity: float, leverage: int = 1,
                      signal_id: int = None, notes: str = None,
-                     contract_size: float = 1.0, coin_quantity: float = None) -> int:
+                     contract_size: float = 1.0, coin_quantity: float = None,
+                     layer_no: int = None, root_signal_id: int = None, plan_context: Dict = None) -> int:
         """记录交易"""
         conn = self._get_connection()
         cursor = conn.cursor()
@@ -499,9 +559,9 @@ class Database:
             coin_quantity = self._safe_float(coin_quantity)
         
         cursor.execute("""
-            INSERT INTO trades (symbol, side, entry_price, quantity, contract_size, coin_quantity, leverage, signal_id, notes)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (symbol, side, entry_price, quantity, contract_size, coin_quantity, leverage, signal_id, notes))
+            INSERT INTO trades (symbol, side, entry_price, quantity, contract_size, coin_quantity, leverage, signal_id, notes, layer_no, root_signal_id, plan_context)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (symbol, side, entry_price, quantity, contract_size, coin_quantity, leverage, signal_id, notes, layer_no, root_signal_id, json.dumps(plan_context, ensure_ascii=False) if plan_context is not None else None))
         
         trade_id = cursor.lastrowid
         conn.commit()
@@ -1396,6 +1456,168 @@ class Database:
         df = pd.read_sql_query(query, conn, params=params)
         conn.close()
         return df.to_dict('records')
+
+    # =========================================================================
+    # 开仓 intent / 方向锁 / 分仓计划
+    # =========================================================================
+
+    def get_trade_by_signal_id(self, signal_id: int) -> Optional[Dict]:
+        conn = self._get_connection()
+        df = pd.read_sql_query("SELECT * FROM trades WHERE signal_id = ? ORDER BY id DESC LIMIT 1", conn, params=(signal_id,))
+        conn.close()
+        if df.empty:
+            return None
+        row = df.iloc[0].to_dict()
+        if row.get('plan_context'):
+            try:
+                row['plan_context'] = json.loads(row['plan_context'])
+            except Exception:
+                pass
+        return self._recalculate_trade_metrics(row)
+
+    def create_open_intent(self, *, symbol: str, side: str, signal_id: int = None, root_signal_id: int = None,
+                           planned_margin: float = 0.0, leverage: int = 1, layer_no: int = None,
+                           plan_context: Dict = None, notes: str = None, status: str = 'pending') -> int:
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO open_intents (signal_id, root_signal_id, symbol, side, status, planned_margin, leverage, layer_no, plan_context, notes, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """,
+            (signal_id, root_signal_id, symbol, side, status, planned_margin, leverage, layer_no,
+             json.dumps(plan_context, ensure_ascii=False) if plan_context is not None else None, notes)
+        )
+        row_id = cursor.lastrowid
+        conn.commit()
+        conn.close()
+        return row_id
+
+    def update_open_intent(self, intent_id: int, **kwargs):
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        fields = []
+        values = []
+        for k, v in kwargs.items():
+            if k == 'plan_context' and v is not None:
+                v = json.dumps(v, ensure_ascii=False)
+            fields.append(f"{k} = ?")
+            values.append(v)
+        fields.append("updated_at = CURRENT_TIMESTAMP")
+        values.append(intent_id)
+        cursor.execute(f"UPDATE open_intents SET {', '.join(fields)} WHERE id = ?", values)
+        conn.commit()
+        conn.close()
+
+    def delete_open_intent(self, intent_id: int):
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM open_intents WHERE id = ?", (intent_id,))
+        conn.commit()
+        conn.close()
+
+    def get_open_intent_by_signal_id(self, signal_id: int, active_only: bool = True) -> Optional[Dict]:
+        if signal_id is None:
+            return None
+        conn = self._get_connection()
+        query = "SELECT * FROM open_intents WHERE signal_id = ?"
+        params = [signal_id]
+        if active_only:
+            query += " AND status IN ('pending','submitted')"
+        query += " ORDER BY id DESC LIMIT 1"
+        df = pd.read_sql_query(query, conn, params=params)
+        conn.close()
+        if df.empty:
+            return None
+        row = df.iloc[0].to_dict()
+        if row.get('plan_context'):
+            row['plan_context'] = json.loads(row['plan_context'])
+        return row
+
+    def get_active_open_intents(self, symbol: str = None, side: str = None) -> List[Dict]:
+        conn = self._get_connection()
+        query = "SELECT * FROM open_intents WHERE status IN ('pending','submitted')"
+        params = []
+        if symbol:
+            query += " AND symbol = ?"
+            params.append(symbol)
+        if side:
+            query += " AND side = ?"
+            params.append(side)
+        query += " ORDER BY created_at ASC, id ASC"
+        df = pd.read_sql_query(query, conn, params=params)
+        conn.close()
+        if not df.empty and 'plan_context' in df.columns:
+            df['plan_context'] = df['plan_context'].apply(lambda x: json.loads(x) if x else {})
+        return df.to_dict('records')
+
+    def get_direction_lock(self, symbol: str, side: str) -> Optional[Dict]:
+        conn = self._get_connection()
+        key = f"{symbol}::{side}"
+        df = pd.read_sql_query("SELECT * FROM direction_locks WHERE lock_key = ? LIMIT 1", conn, params=(key,))
+        conn.close()
+        return None if df.empty else df.iloc[0].to_dict()
+
+    def acquire_direction_lock(self, symbol: str, side: str, owner: str = None) -> bool:
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        key = f"{symbol}::{side}"
+        try:
+            cursor.execute(
+                "INSERT INTO direction_locks (lock_key, symbol, side, owner, updated_at) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)",
+                (key, symbol, side, owner)
+            )
+            conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            return False
+        finally:
+            conn.close()
+
+    def release_direction_lock(self, symbol: str, side: str, owner: str = None):
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        key = f"{symbol}::{side}"
+        if owner:
+            cursor.execute("DELETE FROM direction_locks WHERE lock_key = ? AND (owner = ? OR owner IS NULL)", (key, owner))
+        else:
+            cursor.execute("DELETE FROM direction_locks WHERE lock_key = ?", (key,))
+        conn.commit()
+        conn.close()
+
+    def get_layer_plan_state(self, symbol: str, side: str) -> Dict:
+        conn = self._get_connection()
+        key = f"{symbol}::{side}"
+        df = pd.read_sql_query("SELECT * FROM layer_plan_states WHERE plan_key = ? LIMIT 1", conn, params=(key,))
+        conn.close()
+        if df.empty:
+            return {
+                'plan_key': key,
+                'symbol': symbol,
+                'side': side,
+                'status': 'idle',
+                'current_layer': 0,
+                'root_signal_id': None,
+                'plan_data': {'filled_layers': [], 'pending_layers': [], 'layer_ratios': [0.06, 0.06, 0.04], 'max_total_ratio': 0.16},
+            }
+        row = df.iloc[0].to_dict()
+        row['plan_data'] = json.loads(row['plan_data']) if row.get('plan_data') else {}
+        return row
+
+    def save_layer_plan_state(self, symbol: str, side: str, *, status: str = 'idle', current_layer: int = 0,
+                              root_signal_id: int = None, plan_data: Dict = None):
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        key = f"{symbol}::{side}"
+        cursor.execute(
+            """
+            INSERT OR REPLACE INTO layer_plan_states (plan_key, symbol, side, status, current_layer, root_signal_id, plan_data, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM layer_plan_states WHERE plan_key = ?), CURRENT_TIMESTAMP), CURRENT_TIMESTAMP)
+            """,
+            (key, symbol, side, status, current_layer, root_signal_id, json.dumps(plan_data or {}, ensure_ascii=False), key)
+        )
+        conn.commit()
+        conn.close()
 
     # =========================================================================
     # 清理操作

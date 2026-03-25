@@ -659,7 +659,7 @@ class TradingBot:
                 # 如果信号通过且可以开仓
                 if passed and signal.signal_type in ['buy', 'sell']:
                     # 风险检查
-                    can_open, risk_reason, risk_details = self.risk_mgr.can_open_position(symbol)
+                    can_open, risk_reason, risk_details = self.risk_mgr.can_open_position(symbol, side='long' if signal.signal_type == 'buy' else 'short', signal_id=signal_id)
                     self.notifier.notify_decision(signal, can_open, risk_reason, risk_details)
                     lock_info = (risk_details or {}).get('loss_streak_limit', {}) if isinstance(risk_details, dict) else {}
                     if lock_info.get('just_triggered'):
@@ -675,7 +675,9 @@ class TradingBot:
                         
                         # 开仓
                         trade_id = self.executor.open_position(
-                            symbol, side, current_price, signal_id
+                            symbol, side, current_price, signal_id,
+                            plan_context=(risk_details or {}).get('exposure_limit', {}).get('layer_plan') or (risk_details or {}).get('layer_eligibility', {}).get('layer_plan'),
+                            root_signal_id=signal_id
                         )
                         positions = self.db.get_positions()
                         

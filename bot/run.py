@@ -1,8 +1,8 @@
 """
 OKX量化交易机器人 - 主程序入口
 使用方法:
-    python bot/run.py                 # 运行交易
-    python bot/run.py --dashboard     # 运行仪表盘
+    .venv/bin/python3 bot/run.py                 # 运行交易
+    .venv/bin/flask --app dashboard.api:app run --host 0.0.0.0 --port 5555  # 运行仪表盘
     python bot/run.py --train         # 训练模型
     python bot/run.py --collect        # 收集数据
 """

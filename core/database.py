@@ -1619,6 +1619,142 @@ class Database:
         conn.commit()
         conn.close()
 
+    def sync_layer_plan_state(self, symbol: str, side: str, *, root_signal_id: int = None, reset_if_flat: bool = False) -> Dict:
+        """根据当前 open trades / intents / positions 回写 layer plan 状态。"""
+        conn = self._get_connection()
+        df_trades = pd.read_sql_query(
+            "SELECT id, signal_id, root_signal_id, layer_no, plan_context FROM trades WHERE status = 'open' AND symbol = ? AND side = ? ORDER BY id ASC",
+            conn, params=(symbol, side)
+        )
+        df_intents = pd.read_sql_query(
+            "SELECT id, signal_id, root_signal_id, layer_no, plan_context FROM open_intents WHERE status IN ('pending','submitted') AND symbol = ? AND side = ? ORDER BY id ASC",
+            conn, params=(symbol, side)
+        )
+        df_positions = pd.read_sql_query(
+            "SELECT symbol FROM positions WHERE symbol = ? AND side = ? LIMIT 1",
+            conn, params=(symbol, side)
+        )
+        conn.close()
+
+        state = self.get_layer_plan_state(symbol, side)
+        plan_data = dict(state.get('plan_data') or {})
+        existing_ratios = plan_data.get('layer_ratios') or [0.06, 0.06, 0.04]
+        existing_cap = float(plan_data.get('max_total_ratio') or sum(existing_ratios) or 0.16)
+
+        filled_layers = sorted({int(x) for x in df_trades['layer_no'].tolist() if pd.notna(x) and int(x) > 0}) if not df_trades.empty else []
+        pending_layers = sorted({int(x) for x in df_intents['layer_no'].tolist() if pd.notna(x) and int(x) > 0}) if not df_intents.empty else []
+        pending_layers = [x for x in pending_layers if x not in filled_layers]
+        has_position = not df_positions.empty
+
+        inferred_root_signal_id = root_signal_id
+        if inferred_root_signal_id is None:
+            for frame in (df_trades, df_intents):
+                if frame.empty:
+                    continue
+                for col in ('root_signal_id', 'signal_id'):
+                    if col in frame.columns:
+                        values = [int(v) for v in frame[col].tolist() if pd.notna(v)]
+                        if values:
+                            inferred_root_signal_id = values[-1]
+                            break
+                if inferred_root_signal_id is not None:
+                    break
+        if inferred_root_signal_id is None:
+            inferred_root_signal_id = state.get('root_signal_id')
+
+        if reset_if_flat and not filled_layers and not pending_layers and not has_position:
+            plan_data = {
+                'filled_layers': [],
+                'pending_layers': [],
+                'layer_ratios': existing_ratios,
+                'max_total_ratio': existing_cap,
+                'last_reset_at': datetime.now().isoformat(timespec='seconds'),
+            }
+            self.save_layer_plan_state(symbol, side, status='idle', current_layer=0, root_signal_id=None, plan_data=plan_data)
+            return self.get_layer_plan_state(symbol, side)
+
+        plan_data['filled_layers'] = filled_layers
+        plan_data['pending_layers'] = pending_layers
+        plan_data['layer_ratios'] = existing_ratios
+        plan_data['max_total_ratio'] = existing_cap
+        plan_data['has_position'] = bool(has_position)
+        status = 'active' if filled_layers or has_position else ('pending' if pending_layers else 'idle')
+        current_layer = max(filled_layers or [0])
+        self.save_layer_plan_state(symbol, side, status=status, current_layer=current_layer, root_signal_id=inferred_root_signal_id, plan_data=plan_data)
+        return self.get_layer_plan_state(symbol, side)
+
+    def cleanup_orphan_execution_state(self, stale_after_minutes: int = 15) -> Dict:
+        """保守清理：仅移除没有持仓/没有 open trade 的过期 intent 与方向锁。"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        stale_expr = f"-{int(max(1, stale_after_minutes))} minutes"
+        stale_intents = cursor.execute(
+            """
+            SELECT id, symbol, side FROM open_intents
+            WHERE status IN ('pending','submitted')
+              AND updated_at < datetime('now', ?)
+            """,
+            (stale_expr,)
+        ).fetchall()
+        removed_intents = []
+        removed_locks = []
+        touched_keys = set()
+        for row in stale_intents:
+            symbol = row['symbol']
+            side = row['side']
+            has_trade = cursor.execute("SELECT 1 FROM trades WHERE status = 'open' AND symbol = ? AND side = ? LIMIT 1", (symbol, side)).fetchone()
+            has_pos = cursor.execute("SELECT 1 FROM positions WHERE symbol = ? AND side = ? LIMIT 1", (symbol, side)).fetchone()
+            if has_trade or has_pos:
+                continue
+            cursor.execute("DELETE FROM open_intents WHERE id = ?", (row['id'],))
+            removed_intents.append({'id': row['id'], 'symbol': symbol, 'side': side})
+            touched_keys.add((symbol, side))
+
+        stale_locks = cursor.execute(
+            """
+            SELECT lock_key, symbol, side, owner FROM direction_locks
+            WHERE updated_at < datetime('now', ?)
+            """,
+            (stale_expr,)
+        ).fetchall()
+        for row in stale_locks:
+            symbol = row['symbol']
+            side = row['side']
+            has_trade = cursor.execute("SELECT 1 FROM trades WHERE status = 'open' AND symbol = ? AND side = ? LIMIT 1", (symbol, side)).fetchone()
+            has_pos = cursor.execute("SELECT 1 FROM positions WHERE symbol = ? AND side = ? LIMIT 1", (symbol, side)).fetchone()
+            has_intent = cursor.execute("SELECT 1 FROM open_intents WHERE status IN ('pending','submitted') AND symbol = ? AND side = ? LIMIT 1", (symbol, side)).fetchone()
+            if has_trade or has_pos or has_intent:
+                continue
+            cursor.execute("DELETE FROM direction_locks WHERE lock_key = ?", (row['lock_key'],))
+            removed_locks.append({'lock_key': row['lock_key'], 'symbol': symbol, 'side': side, 'owner': row['owner']})
+            touched_keys.add((symbol, side))
+
+        conn.commit()
+        conn.close()
+        synced = [self.sync_layer_plan_state(symbol, side, reset_if_flat=True) for symbol, side in sorted(touched_keys)]
+        return {'removed_intents': removed_intents, 'removed_locks': removed_locks, 'synced_states': synced}
+
+    def get_execution_state_snapshot(self) -> Dict:
+        intents = self.get_active_open_intents()
+        conn = self._get_connection()
+        locks_df = pd.read_sql_query("SELECT * FROM direction_locks ORDER BY updated_at DESC, created_at DESC", conn)
+        plans_df = pd.read_sql_query("SELECT * FROM layer_plan_states ORDER BY symbol ASC, side ASC", conn)
+        conn.close()
+        locks = locks_df.to_dict('records') if not locks_df.empty else []
+        plans = plans_df.to_dict('records') if not plans_df.empty else []
+        for row in plans:
+            row['plan_data'] = json.loads(row['plan_data']) if row.get('plan_data') else {}
+        return {
+            'active_intents': intents,
+            'direction_locks': locks,
+            'layer_plans': plans,
+            'summary': {
+                'active_intents': len(intents),
+                'direction_locks': len(locks),
+                'active_layer_plans': sum(1 for row in plans if row.get('status') != 'idle'),
+            }
+        }
+
     # =========================================================================
     # 清理操作
     # =========================================================================

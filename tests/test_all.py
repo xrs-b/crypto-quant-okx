@@ -2326,6 +2326,33 @@ class TestLayerPlanAndIntents(unittest.TestCase):
         self.assertEqual(details['layer_eligibility']['layer_plan']['layer_no'], 2)
         self.assertAlmostEqual(details['layer_eligibility']['layer_plan']['layer_ratio'], 0.06, places=4)
 
+    def test_sync_layer_plan_state_from_open_trade_and_intent(self):
+        self.db.record_trade('BTC/USDT', 'long', 50000, 2, leverage=3, signal_id=1001, layer_no=1, root_signal_id=1001)
+        self.db.create_open_intent(symbol='BTC/USDT', side='long', signal_id=1002, root_signal_id=1001, planned_margin=60, leverage=3, layer_no=2, status='pending')
+        state = self.db.sync_layer_plan_state('BTC/USDT', 'long')
+        self.assertEqual(state['status'], 'active')
+        self.assertEqual(state['current_layer'], 1)
+        self.assertEqual(state['plan_data']['filled_layers'], [1])
+        self.assertEqual(state['plan_data']['pending_layers'], [2])
+        self.assertEqual(state['root_signal_id'], 1001)
+
+    def test_cleanup_orphan_execution_state_resets_flat_plan(self):
+        self.db.create_open_intent(symbol='BTC/USDT', side='long', signal_id=2001, planned_margin=60, leverage=3, layer_no=1, status='pending')
+        self.db.acquire_direction_lock('BTC/USDT', 'long', owner='test-lock')
+        self.db.save_layer_plan_state('BTC/USDT', 'long', status='pending', current_layer=0, root_signal_id=2001, plan_data={'filled_layers': [], 'pending_layers': [1], 'layer_ratios': [0.06, 0.06, 0.04], 'max_total_ratio': 0.16})
+        conn = self.db._get_connection()
+        conn.execute("UPDATE open_intents SET updated_at = datetime('now', '-30 minutes')")
+        conn.execute("UPDATE direction_locks SET updated_at = datetime('now', '-30 minutes')")
+        conn.commit()
+        conn.close()
+        report = self.db.cleanup_orphan_execution_state(stale_after_minutes=15)
+        self.assertEqual(len(report['removed_intents']), 1)
+        self.assertEqual(len(report['removed_locks']), 1)
+        state = self.db.get_layer_plan_state('BTC/USDT', 'long')
+        self.assertEqual(state['status'], 'idle')
+        self.assertEqual(state['plan_data']['filled_layers'], [])
+        self.assertEqual(state['plan_data']['pending_layers'], [])
+
 class TestDashboardRiskBudgetAPI(unittest.TestCase):
     def setUp(self):
         self.client = app.test_client()
@@ -2345,6 +2372,15 @@ class TestDashboardRiskBudgetAPI(unittest.TestCase):
         self.assertTrue(data['success'])
         self.assertIn('entry_plan', data['data'])
         self.assertIn('soft_exposure', data['data']['config'])
+
+    def test_execution_state_endpoint_exposes_observability(self):
+        resp = self.client.get('/api/system/execution-state')
+        data = resp.get_json()
+        self.assertTrue(data['success'])
+        self.assertIn('active_intents', data['data'])
+        self.assertIn('direction_locks', data['data'])
+        self.assertIn('layer_plans', data['data'])
+        self.assertIn('summary', data['data'])
 
 
 class TestMFEAnalyzer(unittest.TestCase):

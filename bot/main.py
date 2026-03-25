@@ -158,7 +158,7 @@ def main():
                 side = 'long' if signal.signal_type == 'buy' else 'short'
                 
                 trade_id = executor.open_position(
-                    symbol, side, current_price, signal_id
+                    symbol, side, current_price, signal_id, root_signal_id=signal_id
                 )
                 
                 if trade_id:

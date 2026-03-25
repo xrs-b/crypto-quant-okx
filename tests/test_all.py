@@ -24,7 +24,7 @@ from trading import TradingExecutor, RiskManager
 from strategies.strategy_library import StrategyManager
 from bot.run import build_exchange_diagnostics, build_exchange_smoke_plan, build_runtime_health_summary, maybe_send_daily_health_summary, execute_exchange_smoke, reconcile_exchange_positions
 from dashboard.api import app
-from core.risk_budget import get_risk_budget_config, compute_entry_plan
+from core.risk_budget import get_risk_budget_config, compute_entry_plan, summarize_margin_usage
 
 
 class FakeExchange:
@@ -2290,6 +2290,41 @@ class TestRiskManagerBudgetDetails(unittest.TestCase):
         self.assertIn('entry_plan', details['exposure_limit'])
         self.assertIn('position_ratio', details['exposure_limit'])
 
+
+
+class TestLayerPlanAndIntents(unittest.TestCase):
+    def setUp(self):
+        self.config = Config()
+        self.db = Database('data/test_layer_plan.db')
+        self.risk_mgr = RiskManager(self.config, self.db)
+
+    def tearDown(self):
+        if os.path.exists('data/test_layer_plan.db'):
+            os.remove('data/test_layer_plan.db')
+
+    def test_open_intents_are_counted_in_margin_usage(self):
+        self.db.create_open_intent(symbol='BTC/USDT', side='long', signal_id=101, planned_margin=60, leverage=3)
+        usage = summarize_margin_usage([], 'BTC/USDT', pending_intents=self.db.get_active_open_intents())
+        self.assertEqual(usage['current_total_margin'], 60)
+        self.assertEqual(usage['current_symbol_margin'], 60)
+
+    def test_can_open_position_blocks_duplicate_signal_id(self):
+        self.db.create_open_intent(symbol='BTC/USDT', side='long', signal_id=999, planned_margin=60, leverage=3)
+        can_open, reason, details = self.risk_mgr.can_open_position('BTC/USDT', side='long', signal_id=999)
+        self.assertFalse(can_open)
+        self.assertIn('signal_id', reason)
+        self.assertFalse(details['hard_intercept']['passed'])
+
+    def test_layer_plan_progresses_to_second_layer(self):
+        self.db.save_layer_plan_state(
+            'BTC/USDT', 'long', status='active', current_layer=1, root_signal_id=1,
+            plan_data={'filled_layers': [1], 'pending_layers': [], 'layer_ratios': [0.06, 0.06, 0.04], 'max_total_ratio': 0.16}
+        )
+        with patch.object(RiskManager, '_get_balance_summary', return_value={'total': 1000.0, 'free': 1000.0, 'used': 0.0}):
+            can_open, reason, details = self.risk_mgr.can_open_position('BTC/USDT', side='long', signal_id=2)
+        self.assertTrue(can_open)
+        self.assertEqual(details['layer_eligibility']['layer_plan']['layer_no'], 2)
+        self.assertAlmostEqual(details['layer_eligibility']['layer_plan']['layer_ratio'], 0.06, places=4)
 
 class TestDashboardRiskBudgetAPI(unittest.TestCase):
     def setUp(self):

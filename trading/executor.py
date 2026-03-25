@@ -1,6 +1,7 @@
 """
 交易执行模块 - 增强版
 """
+import json
 import time
 from math import isclose
 from typing import Dict, List, Optional, Any
@@ -53,6 +54,34 @@ class TradingExecutor:
         trade_logger.warning(f"{symbol}: 检测到交易所已无对应仓位，自动收口本地持仓/交易")
         return True
     
+    def _recover_open_trade_from_exchange(self, symbol: str, side: str, signal_id: int = None, note: str = None) -> Optional[int]:
+        try:
+            positions = self.exchange.fetch_positions() or []
+        except Exception:
+            return None
+        for pos in positions:
+            normalized = pos if pos.get('contract_size') is not None else (self.exchange.normalize_position(pos) if hasattr(self.exchange, 'normalize_position') else pos)
+            if not normalized:
+                continue
+            pos_symbol = normalized.get('symbol')
+            pos_side = str(normalized.get('side') or '').lower()
+            if pos_symbol != symbol or pos_side != side:
+                continue
+            quantity = float(normalized.get('quantity') or normalized.get('contracts') or 0)
+            if quantity <= 0:
+                continue
+            contract_size = float(normalized.get('contract_size') or 1)
+            coin_quantity = float(normalized.get('coin_quantity') or quantity * contract_size)
+            leverage = int(float(normalized.get('leverage') or self.trading_config.get('leverage', 10) or 10))
+            entry_price = float(normalized.get('entry_price') or normalized.get('current_price') or 0)
+            trade_id = self.db.record_trade(
+                symbol=symbol, side=side, entry_price=entry_price, quantity=quantity, leverage=leverage,
+                signal_id=signal_id, notes=note or '交易所持仓恢复 open trade', contract_size=contract_size, coin_quantity=coin_quantity
+            )
+            self.db.update_position(symbol=symbol, side=side, entry_price=entry_price, quantity=quantity, leverage=leverage, current_price=float(normalized.get('current_price') or entry_price), contract_size=contract_size, coin_quantity=coin_quantity)
+            return trade_id
+        return None
+
     def _build_latest_risk_snapshot(self, symbol: str, side: str, current_price: float = None, available_hint: float = None) -> Dict[str, Any]:
         positions = []
         source = 'database'
@@ -78,7 +107,8 @@ class TradingExecutor:
         if total_balance <= 0 and free_balance > 0:
             total_balance = free_balance
 
-        usage = summarize_margin_usage(positions or [], symbol, mark_price=current_price)
+        intents = self.db.get_active_open_intents() if self.db else []
+        usage = summarize_margin_usage(positions or [], symbol, mark_price=current_price, pending_intents=intents)
         normalized_positions = usage['positions']
         same_side_positions = [
             row for row in normalized_positions
@@ -104,6 +134,10 @@ class TradingExecutor:
     def _execution_time_risk_guard(self, symbol: str, side: str, current_price: float, available_hint: float = None) -> tuple:
         snapshot = self._build_latest_risk_snapshot(symbol, side, current_price=current_price, available_hint=available_hint)
         risk_budget = get_risk_budget_config(self.config, symbol)
+        add_position_enabled = bool(risk_budget.get('add_position_enabled', False))
+        if not add_position_enabled and (self.db.get_latest_open_trade(symbol, normalized_side) or any(p.get('symbol') == symbol and str(p.get('side')).lower() == normalized_side for p in self.db.get_positions())):
+            details['hard_intercept'] = {'passed': False, 'reason': '已有同币种同方向仓位，默认禁止重复开仓', 'add_position_enabled': add_position_enabled}
+            return False, '已有同币种同方向仓位，默认禁止重复开仓', details
         total_balance = float(snapshot.get('balance_total') or 0)
         free_balance = float(snapshot.get('balance_free') or 0)
         entry_plan = compute_entry_plan(
@@ -138,6 +172,8 @@ class TradingExecutor:
             'same_side_count': len(snapshot.get('same_side_positions') or []),
             'add_position_enabled': add_position_enabled,
             'entry_plan': entry_plan,
+            'pending_intents': pending_intents,
+            'layer_plan': layer_plan,
             'guard_stage': 'execution_time',
         }
 
@@ -168,8 +204,105 @@ class TradingExecutor:
 
         return True, None, details
 
+    def _build_lock_owner(self, symbol: str, side: str, signal_id: int = None) -> str:
+        suffix = signal_id if signal_id is not None else int(time.time() * 1000)
+        return f"executor:{symbol}:{side}:{suffix}"
+
+    def _get_layer_plan(self, symbol: str, side: str, signal_id: int = None, root_signal_id: int = None) -> Dict[str, Any]:
+        state = self.db.get_layer_plan_state(symbol, side)
+        plan_data = dict(state.get('plan_data') or {})
+        layer_ratios = plan_data.get('layer_ratios') or [0.06, 0.06, 0.04]
+        filled_layers = sorted(int(x) for x in (plan_data.get('filled_layers') or []))
+        pending_layers = sorted(int(x) for x in (plan_data.get('pending_layers') or []))
+        consumed = set(filled_layers) | set(pending_layers)
+        next_layer = 1
+        while next_layer in consumed:
+            next_layer += 1
+        if next_layer > len(layer_ratios):
+            return {'eligible': False, 'reason': '分仓计划已达最大层数', 'state': state, 'plan_data': plan_data}
+        expected = len(consumed) + 1
+        if next_layer != expected:
+            return {'eligible': False, 'reason': '检测到分仓层级断档，禁止跳层', 'state': state, 'plan_data': plan_data}
+        layer_ratio = float(layer_ratios[next_layer - 1])
+        return {
+            'eligible': True,
+            'layer_no': next_layer,
+            'layer_ratio': layer_ratio,
+            'root_signal_id': root_signal_id or state.get('root_signal_id') or signal_id,
+            'state': state,
+            'plan_data': plan_data,
+            'layer_ratios': layer_ratios,
+            'max_total_ratio': float(plan_data.get('max_total_ratio') or sum(layer_ratios) or 0.16),
+        }
+
+    def _reserve_layer(self, symbol: str, side: str, layer_plan: Dict[str, Any]):
+        state = layer_plan.get('state') or self.db.get_layer_plan_state(symbol, side)
+        plan_data = dict(state.get('plan_data') or {})
+        pending_layers = sorted(set(int(x) for x in (plan_data.get('pending_layers') or [])))
+        layer_no = int(layer_plan.get('layer_no') or 0)
+        if layer_no and layer_no not in pending_layers:
+            pending_layers.append(layer_no)
+        plan_data['pending_layers'] = sorted(pending_layers)
+        plan_data.setdefault('filled_layers', plan_data.get('filled_layers') or [])
+        plan_data['layer_ratios'] = layer_plan.get('layer_ratios') or plan_data.get('layer_ratios') or [0.06, 0.06, 0.04]
+        plan_data['max_total_ratio'] = float(layer_plan.get('max_total_ratio') or plan_data.get('max_total_ratio') or 0.16)
+        self.db.save_layer_plan_state(symbol, side, status='pending', current_layer=max(plan_data.get('filled_layers') or [0]), root_signal_id=layer_plan.get('root_signal_id'), plan_data=plan_data)
+
+    def _finalize_layer(self, symbol: str, side: str, layer_plan: Dict[str, Any], success: bool):
+        state = self.db.get_layer_plan_state(symbol, side)
+        plan_data = dict(state.get('plan_data') or {})
+        filled_layers = sorted(set(int(x) for x in (plan_data.get('filled_layers') or [])))
+        pending_layers = sorted(set(int(x) for x in (plan_data.get('pending_layers') or [])))
+        layer_no = int((layer_plan or {}).get('layer_no') or 0)
+        if layer_no in pending_layers:
+            pending_layers.remove(layer_no)
+        if success and layer_no and layer_no not in filled_layers:
+            filled_layers.append(layer_no)
+        plan_data['filled_layers'] = sorted(filled_layers)
+        plan_data['pending_layers'] = sorted(pending_layers)
+        plan_data['layer_ratios'] = (layer_plan or {}).get('layer_ratios') or plan_data.get('layer_ratios') or [0.06, 0.06, 0.04]
+        plan_data['max_total_ratio'] = float((layer_plan or {}).get('max_total_ratio') or plan_data.get('max_total_ratio') or 0.16)
+        status = 'active' if filled_layers or pending_layers else 'idle'
+        self.db.save_layer_plan_state(symbol, side, status=status, current_layer=max(filled_layers or [0]), root_signal_id=(layer_plan or {}).get('root_signal_id') or state.get('root_signal_id'), plan_data=plan_data)
+
+    def _prepare_open_execution(self, symbol: str, side: str, current_price: float, signal_id: int = None, plan_context: Dict[str, Any] = None, root_signal_id: int = None) -> tuple:
+        if signal_id is not None:
+            existing_trade = self.db.get_trade_by_signal_id(signal_id)
+            if existing_trade:
+                return False, 'signal_id 已存在成交记录，跳过重复开仓', {'stage': 'hard_intercept', 'existing_trade_id': existing_trade.get('id')}
+            existing_intent = self.db.get_open_intent_by_signal_id(signal_id)
+            if existing_intent:
+                return False, 'signal_id 已存在进行中的开仓 intent', {'stage': 'hard_intercept', 'intent_id': existing_intent.get('id')}
+
+        lock = self.db.get_direction_lock(symbol, side)
+        if lock:
+            return False, 'symbol+side 方向锁已被占用', {'stage': 'hard_intercept', 'lock': lock}
+
+        layer_plan = plan_context or self._get_layer_plan(symbol, side, signal_id=signal_id, root_signal_id=root_signal_id)
+        if not layer_plan.get('eligible', True):
+            return False, layer_plan.get('reason') or '分层资格不通过', {'stage': 'layer_eligibility', 'layer_plan': layer_plan}
+
+        snapshot = self._build_latest_risk_snapshot(symbol, side, current_price=current_price)
+        risk_budget = get_risk_budget_config(self.config, symbol)
+        entry_plan = compute_entry_plan(
+            total_balance=float(snapshot.get('balance_total') or 0.0),
+            free_balance=float(snapshot.get('balance_free') or 0.0),
+            current_total_margin=float(snapshot.get('current_total_margin') or 0.0),
+            current_symbol_margin=float(snapshot.get('current_symbol_margin') or 0.0),
+            risk_budget=risk_budget,
+            requested_entry_ratio=float(layer_plan.get('layer_ratio') or 0.0),
+            strict_requested_ratio=True,
+        )
+        if entry_plan.get('blocked'):
+            return False, entry_plan.get('block_reason') or '风险预算不足', {'stage': 'risk_budget', 'entry_plan': entry_plan, 'layer_plan': layer_plan}
+
+        merged = dict(layer_plan)
+        merged['entry_plan'] = entry_plan
+        merged['planned_margin'] = float(entry_plan.get('allowed_margin') or 0.0)
+        return True, None, {'stage': 'approved', 'plan_context': merged}
+
     def open_position(self, symbol: str, side: str, 
-                    current_price: float, signal_id: int = None) -> Optional[int]:
+                    current_price: float, signal_id: int = None, plan_context: Dict[str, Any] = None, layer_no: int = None, root_signal_id: int = None) -> Optional[int]:
         """开仓"""
         
         # 检查交易冷却
@@ -184,18 +317,44 @@ class TradingExecutor:
         except Exception as e:
             trade_logger.error(f"获取余额失败: {e}")
             return None
-        
+
         if available < 100:
             trade_logger.warning(f"余额不足: {available}")
             return None
 
-        guard_passed, guard_reason, guard_details = self._execution_time_risk_guard(
-            symbol, side, current_price, available_hint=available
+        approved, approve_reason, approve_details = self._prepare_open_execution(
+            symbol, side, current_price, signal_id=signal_id, plan_context=plan_context, root_signal_id=root_signal_id
         )
-        if not guard_passed:
-            trade_logger.warning(f"{symbol}: {guard_reason} | details={guard_details}")
+        if not approved:
+            trade_logger.warning(f"{symbol}: {approve_reason} | details={approve_details}")
             return None
-        trade_logger.info(f"{symbol}: execution-time risk guard 通过 | details={guard_details}")
+        plan_context = dict((approve_details or {}).get('plan_context') or {})
+        if layer_no is not None:
+            plan_context['layer_no'] = layer_no
+        lock_owner = self._build_lock_owner(symbol, side, signal_id=signal_id)
+        if not self.db.acquire_direction_lock(symbol, side, owner=lock_owner):
+            trade_logger.warning(f"{symbol}: 获取方向锁失败，疑似并发重复开仓")
+            return None
+        intent_id = None
+        try:
+            self._reserve_layer(symbol, side, plan_context)
+            intent_id = self.db.create_open_intent(
+                symbol=symbol,
+                side=side,
+                signal_id=signal_id,
+                root_signal_id=root_signal_id or plan_context.get('root_signal_id') or signal_id,
+                planned_margin=float(plan_context.get('planned_margin') or 0.0),
+                leverage=int(self.trading_config.get('leverage', 10) or 10),
+                layer_no=plan_context.get('layer_no'),
+                plan_context=plan_context,
+                notes='pre-submit intent',
+                status='pending',
+            )
+        except Exception:
+            self.db.release_direction_lock(symbol, side, owner=lock_owner)
+            raise
+
+        trade_logger.info(f"{symbol}: executor 最终放行通过 | plan_context={plan_context}")
         
         # 计算开仓数量 - 修复：基于实际杠杆计算，确保保证金占比准确
         # 步骤1: 先设置杠杆到交易所（确保一致）
@@ -212,17 +371,9 @@ class TradingExecutor:
         # 步骤3: 按目标保证金计算名义价值
         # 目标: 10% 保证金 = available * position_ratio
         # 名义价值 = 保证金 * 实际杠杆
-        risk_budget = get_risk_budget_config(self.config, symbol)
-        latest_snapshot = self._build_latest_risk_snapshot(symbol, side, current_price=current_price, available_hint=available)
-        entry_plan = compute_entry_plan(
-            total_balance=float(latest_snapshot.get('balance_total') or available),
-            free_balance=float(latest_snapshot.get('balance_free') or available),
-            current_total_margin=float(latest_snapshot.get('current_total_margin') or 0.0),
-            current_symbol_margin=float(latest_snapshot.get('current_symbol_margin') or 0.0),
-            risk_budget=risk_budget,
-        )
-        position_ratio = float(entry_plan.get('effective_entry_margin_ratio') or 0.0)
-        target_margin = float(entry_plan.get('allowed_margin') or 0.0)
+        entry_plan = dict(plan_context.get('entry_plan') or {})
+        position_ratio = float(plan_context.get('layer_ratio') or entry_plan.get('effective_entry_margin_ratio') or 0.0)
+        target_margin = float(plan_context.get('planned_margin') or entry_plan.get('allowed_margin') or 0.0)
         desired_notional = target_margin * effective_leverage  # 名义价值 (e.g., 1000 * 10 = 10000 USDT)
         
         # 可观察性日志
@@ -248,6 +399,13 @@ class TradingExecutor:
             )
         except Exception as e:
             trade_logger.error(f"计算下单数量失败: {e}")
+            if 'intent_id' in locals() and intent_id:
+                self.db.update_open_intent(intent_id, status='failed', notes=str(e))
+                self.db.delete_open_intent(intent_id)
+            if 'plan_context' in locals():
+                self._finalize_layer(symbol, side, plan_context, success=False)
+            if 'lock_owner' in locals():
+                self.db.release_direction_lock(symbol, side, owner=lock_owner)
             return None
         
         # 重试机制
@@ -258,6 +416,8 @@ class TradingExecutor:
             order = None
             try:
                 # 开仓
+                if intent_id:
+                    self.db.update_open_intent(intent_id, status='submitted', notes=f'order submit attempt #{attempt + 1}')
                 order = self.exchange.create_order(
                     symbol, 
                     'buy' if side == 'long' else 'sell', 
@@ -275,7 +435,10 @@ class TradingExecutor:
                     coin_quantity=coin_quantity,
                     leverage=effective_leverage,
                     signal_id=signal_id,
-                    notes=f"开仓尝试 #{attempt + 1}"
+                    notes=f"开仓尝试 #{attempt + 1}",
+                    layer_no=plan_context.get('layer_no'),
+                    root_signal_id=root_signal_id or plan_context.get('root_signal_id') or signal_id,
+                    plan_context=plan_context
                 )
                 
                 # 更新持仓
@@ -294,6 +457,12 @@ class TradingExecutor:
                 self._update_cooldown(symbol)
                 self._seed_trailing_anchor(symbol, side, current_price)
                 
+                if intent_id:
+                    self.db.update_open_intent(intent_id, status='filled', trade_id=trade_id, notes='filled')
+                    self.db.delete_open_intent(intent_id)
+                    intent_id = None
+                self._finalize_layer(symbol, side, plan_context, success=True)
+                self.db.release_direction_lock(symbol, side, owner=lock_owner)
                 trade_logger.trade(
                     symbol, side, current_price, amount, trade_id
                 )
@@ -310,6 +479,12 @@ class TradingExecutor:
                         note=f"开仓后本地补记恢复（attempt={attempt + 1}, error={err_text}）"
                     )
                     if recovered_trade_id:
+                        if intent_id:
+                            self.db.update_open_intent(intent_id, status='filled', trade_id=recovered_trade_id, notes='recovered_from_exchange')
+                            self.db.delete_open_intent(intent_id)
+                            intent_id = None
+                        self._finalize_layer(symbol, side, plan_context, success=True)
+                        self.db.release_direction_lock(symbol, side, owner=lock_owner)
                         self._update_cooldown(symbol)
                         self._seed_trailing_anchor(symbol, side, current_price)
                         trade_logger.warning(f"{symbol}: 开仓后本地处理异常，但已按交易所持仓恢复成功 - {err_text}")
@@ -323,6 +498,12 @@ class TradingExecutor:
                 if attempt < max_retries - 1:
                     time.sleep(retry_delay)
                 else:
+                    if intent_id:
+                        self.db.update_open_intent(intent_id, status='failed', notes=err_text)
+                        self.db.delete_open_intent(intent_id)
+                        intent_id = None
+                    self._finalize_layer(symbol, side, plan_context, success=False)
+                    self.db.release_direction_lock(symbol, side, owner=lock_owner)
                     return None
     
     def close_position(self, symbol: str, reason: str = 'manual',
@@ -1068,9 +1249,26 @@ class RiskManager:
             'action': 'reset'
         }
 
-    def can_open_position(self, symbol: str) -> tuple:
+    def can_open_position(self, symbol: str, side: str = None, signal_id: int = None, plan_context: Dict[str, Any] = None) -> tuple:
         """检查是否可以开仓"""
         details = {}
+        normalized_side = side or 'long'
+
+        if signal_id is not None:
+            existing_trade = self.db.get_trade_by_signal_id(signal_id)
+            if existing_trade:
+                details['hard_intercept'] = {'passed': False, 'reason': 'signal_id 已存在成交记录', 'trade_id': existing_trade.get('id')}
+                return False, 'signal_id 已存在成交记录', details
+            existing_intent = self.db.get_open_intent_by_signal_id(signal_id)
+            if existing_intent:
+                details['hard_intercept'] = {'passed': False, 'reason': 'signal_id 已存在进行中的开仓 intent', 'intent_id': existing_intent.get('id')}
+                return False, 'signal_id 已存在进行中的开仓 intent', details
+
+        direction_lock = self.db.get_direction_lock(symbol, normalized_side)
+        if direction_lock:
+            details['hard_intercept'] = {'passed': False, 'reason': '方向锁占用中', 'lock': direction_lock}
+            return False, '方向锁占用中', details
+        details['hard_intercept'] = {'passed': True}
 
         max_trades = int(self.trading_config.get('max_trades_per_day', 10))
         today_trades = self._get_today_trade_count()
@@ -1144,13 +1342,49 @@ class RiskManager:
         balance = self._get_balance_summary()
         total_balance = float(balance.get('total', 0) or 0)
         free_balance = float(balance.get('free', 0) or 0)
-        positions_usage = summarize_margin_usage(self.db.get_positions(), symbol)
+        pending_intents = self.db.get_active_open_intents()
+        positions_usage = summarize_margin_usage(self.db.get_positions(), symbol, pending_intents=pending_intents)
+        layer_plan = plan_context or {
+            'eligible': True,
+            'layer_no': 1,
+            'layer_ratio': 0.06,
+            'root_signal_id': signal_id,
+        }
+        if plan_context is None:
+            state = self.db.get_layer_plan_state(symbol, normalized_side)
+            plan_data = dict(state.get('plan_data') or {})
+            layer_ratios = plan_data.get('layer_ratios') or [0.06, 0.06, 0.04]
+            filled = sorted(int(x) for x in (plan_data.get('filled_layers') or []))
+            pending = sorted(int(x) for x in (plan_data.get('pending_layers') or []))
+            consumed = set(filled) | set(pending)
+            next_layer = 1
+            while next_layer in consumed:
+                next_layer += 1
+            if next_layer > len(layer_ratios):
+                details['layer_eligibility'] = {'passed': False, 'reason': '分仓计划已达最大层数', 'state': state}
+                return False, '分仓计划已达最大层数', details
+            expected = len(consumed) + 1
+            if next_layer != expected:
+                details['layer_eligibility'] = {'passed': False, 'reason': '检测到分仓层级断档，禁止跳层', 'state': state}
+                return False, '检测到分仓层级断档，禁止跳层', details
+            layer_plan = {
+                'eligible': True,
+                'layer_no': next_layer,
+                'layer_ratio': float(layer_ratios[next_layer - 1]),
+                'root_signal_id': state.get('root_signal_id') or signal_id,
+                'layer_ratios': layer_ratios,
+                'max_total_ratio': float(plan_data.get('max_total_ratio') or sum(layer_ratios) or 0.16),
+                'state': state,
+            }
+        details['layer_eligibility'] = {'passed': True, 'layer_plan': layer_plan}
         entry_plan = compute_entry_plan(
             total_balance=total_balance,
             free_balance=free_balance,
             current_total_margin=float(positions_usage.get('current_total_margin') or 0.0),
             current_symbol_margin=float(positions_usage.get('current_symbol_margin') or 0.0),
             risk_budget=risk_budget,
+            requested_entry_ratio=float(layer_plan.get('layer_ratio') or 0.0),
+            strict_requested_ratio=True,
         )
         current_exposure = float(entry_plan.get('current_total_exposure_ratio') or 0.0)
         projected_exposure = float(entry_plan.get('projected_total_exposure_ratio') or current_exposure)

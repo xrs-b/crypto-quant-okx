@@ -1684,30 +1684,41 @@ class Database:
         return self.get_layer_plan_state(symbol, side)
 
     def cleanup_orphan_execution_state(self, stale_after_minutes: int = 15) -> Dict:
-        """保守清理：仅移除没有持仓/没有 open trade 的过期 intent 与方向锁。"""
+        """自愈执行态：清理孤儿 intent、陈旧方向锁，并把 layer plan 回写到真实仓位快照。"""
         conn = self._get_connection()
         cursor = conn.cursor()
         stale_expr = f"-{int(max(1, stale_after_minutes))} minutes"
         stale_intents = cursor.execute(
             """
-            SELECT id, symbol, side FROM open_intents
+            SELECT id, symbol, side, signal_id, root_signal_id, layer_no, notes FROM open_intents
             WHERE status IN ('pending','submitted')
               AND updated_at < datetime('now', ?)
             """,
             (stale_expr,)
         ).fetchall()
         removed_intents = []
+        healed_intents = []
         removed_locks = []
+        healed_locks = []
+        plan_resets = []
         touched_keys = set()
+
         for row in stale_intents:
             symbol = row['symbol']
             side = row['side']
             has_trade = cursor.execute("SELECT 1 FROM trades WHERE status = 'open' AND symbol = ? AND side = ? LIMIT 1", (symbol, side)).fetchone()
             has_pos = cursor.execute("SELECT 1 FROM positions WHERE symbol = ? AND side = ? LIMIT 1", (symbol, side)).fetchone()
             if has_trade or has_pos:
+                cursor.execute("DELETE FROM open_intents WHERE id = ?", (row['id'],))
+                healed_intents.append({
+                    'id': row['id'], 'symbol': symbol, 'side': side,
+                    'signal_id': row['signal_id'], 'root_signal_id': row['root_signal_id'], 'layer_no': row['layer_no'],
+                    'healed_by': 'live_position_or_trade', 'notes': row['notes'],
+                })
+                touched_keys.add((symbol, side))
                 continue
             cursor.execute("DELETE FROM open_intents WHERE id = ?", (row['id'],))
-            removed_intents.append({'id': row['id'], 'symbol': symbol, 'side': side})
+            removed_intents.append({'id': row['id'], 'symbol': symbol, 'side': side, 'signal_id': row['signal_id'], 'root_signal_id': row['root_signal_id'], 'layer_no': row['layer_no']})
             touched_keys.add((symbol, side))
 
         stale_locks = cursor.execute(
@@ -1723,16 +1734,60 @@ class Database:
             has_trade = cursor.execute("SELECT 1 FROM trades WHERE status = 'open' AND symbol = ? AND side = ? LIMIT 1", (symbol, side)).fetchone()
             has_pos = cursor.execute("SELECT 1 FROM positions WHERE symbol = ? AND side = ? LIMIT 1", (symbol, side)).fetchone()
             has_intent = cursor.execute("SELECT 1 FROM open_intents WHERE status IN ('pending','submitted') AND symbol = ? AND side = ? LIMIT 1", (symbol, side)).fetchone()
-            if has_trade or has_pos or has_intent:
+            if has_intent:
                 continue
             cursor.execute("DELETE FROM direction_locks WHERE lock_key = ?", (row['lock_key'],))
-            removed_locks.append({'lock_key': row['lock_key'], 'symbol': symbol, 'side': side, 'owner': row['owner']})
+            record = {'lock_key': row['lock_key'], 'symbol': symbol, 'side': side, 'owner': row['owner']}
+            if has_trade or has_pos:
+                record['healed_by'] = 'stale_lock_without_active_intent'
+                healed_locks.append(record)
+            else:
+                removed_locks.append(record)
+            touched_keys.add((symbol, side))
+
+        candidate_states = cursor.execute(
+            """
+            SELECT plan_key, symbol, side, status, current_layer, root_signal_id, plan_data
+            FROM layer_plan_states
+            WHERE updated_at < datetime('now', ?)
+               OR status != 'idle'
+               OR current_layer != 0
+            """,
+            (stale_expr,)
+        ).fetchall()
+        for row in candidate_states:
+            symbol = row['symbol']
+            side = row['side']
+            has_trade = cursor.execute("SELECT 1 FROM trades WHERE status = 'open' AND symbol = ? AND side = ? LIMIT 1", (symbol, side)).fetchone()
+            has_pos = cursor.execute("SELECT 1 FROM positions WHERE symbol = ? AND side = ? LIMIT 1", (symbol, side)).fetchone()
+            has_intent = cursor.execute("SELECT 1 FROM open_intents WHERE status IN ('pending','submitted') AND symbol = ? AND side = ? LIMIT 1", (symbol, side)).fetchone()
+            if has_trade or has_pos or has_intent:
+                touched_keys.add((symbol, side))
+                continue
+            try:
+                plan_data = json.loads(row['plan_data']) if row['plan_data'] else {}
+            except Exception:
+                plan_data = {}
+            if row['status'] == 'idle' and int(row['current_layer'] or 0) == 0 and not plan_data.get('filled_layers') and not plan_data.get('pending_layers'):
+                continue
+            plan_resets.append({
+                'plan_key': row['plan_key'], 'symbol': symbol, 'side': side,
+                'previous_status': row['status'], 'previous_current_layer': int(row['current_layer'] or 0),
+                'previous_root_signal_id': row['root_signal_id'],
+            })
             touched_keys.add((symbol, side))
 
         conn.commit()
         conn.close()
         synced = [self.sync_layer_plan_state(symbol, side, reset_if_flat=True) for symbol, side in sorted(touched_keys)]
-        return {'removed_intents': removed_intents, 'removed_locks': removed_locks, 'synced_states': synced}
+        return {
+            'removed_intents': removed_intents,
+            'healed_intents': healed_intents,
+            'removed_locks': removed_locks,
+            'healed_locks': healed_locks,
+            'plan_resets': plan_resets,
+            'synced_states': synced,
+        }
 
     def _safe_json_dict(self, value: Any) -> Dict[str, Any]:
         if isinstance(value, dict):

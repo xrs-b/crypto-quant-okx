@@ -232,6 +232,13 @@ trading:
   # partial_tp_ratio: 0.5
 
   # 分层加仓（layering）
+  # 建议理解：
+  # - layer_ratios: 每层目标保证金占比；默认 6% / 6% / 4%
+  # - layer_max_total_ratio: 本轮分仓累计上限；通常应 >= layer_ratios 总和
+  # - min_add_interval_seconds: 两层之间最短等待时间
+  # - max_layers_per_signal: 单一 root signal 最多允许成交几层；设 1 代表同一 signal 只开一层
+  # - direction_lock_scope: symbol 更适合当前项目，避免同币并发撕裂；symbol_side 更宽松
+  # - allow_same_bar_multiple_adds: 是否允许同一 bar 连续补多层，默认 false 更稳
   layering:
     layer_count: 3
     layer_ratios: [0.06, 0.06, 0.04]

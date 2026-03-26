@@ -895,7 +895,14 @@ symbol_override.adaptive_regime
 - 才允许让外围 execution guardrails 小范围真生效
 - 真生效范围优先限于：`leverage_cap / layer_max_total_ratio / max_layers_per_signal / min_add_interval_seconds / profit_only_add`
 
-### 后续步骤（guarded layering / exit hints）
+### Step 3（guarded layering profile）
+
+- 先把 layering baseline / effective / live profile 审计补齐
+- `layer_max_total_ratio / max_layers_per_signal / min_add_interval_seconds / profit_only_add` 继续作为最小 live layering 包
+- `layer_ratios` 继续默认 hints-only，等第二批 rollout 才进入 live layer plan
+- 详细实施拆分见：[`docs/adaptive-market-regime-m4-step3-implementation.md`](./adaptive-market-regime-m4-step3-implementation.md)
+
+### 后续步骤（guarded layering deeper rollout / exit hints）
 
 - `layer_ratios` 真生效、deep layering profile 收紧继续后置
 - trailing / partial TP 先 hints-only，再视样本讨论 enforcement

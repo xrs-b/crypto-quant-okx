@@ -73,7 +73,8 @@
 | AR-M3-04 | 灰度 symbol rollout 与回滚机制 | M3 | P1 | 是 | 上线治理 |
 | AR-M4-01 | execution profile 支持 regime layer ratio override | M4 | P0 | 是 | execution |
 | AR-M4-02 | executor 落地 effective execution profile 追踪 | M4 | P0 | 是 | execution observability |
-| AR-M4-03 | trailing / partial TP regime profile 化（可选） | M4 | P2 | 是 | execution |
+| AR-M4-03 | guarded layering profile（Step 3） | M4 | P0 | 是 | layering / execution |
+| AR-M4-04 | trailing / partial TP regime profile 化（可选） | M4 | P2 | 是 | execution |
 | AR-M5-01 | strategy × regime 离线分析报告 | M5 | P1 | 否 | 校准闭环 |
 | AR-M5-02 | policy version 比较与建议生成 | M5 | P1 | 否 | 版本治理 |
 | AR-M5-03 | regime detector / policy calibration playbook | M5 | P2 | 否 | 运维与迭代 |
@@ -482,7 +483,30 @@
 - **风险 / 回滚点**：若 rollout 样本不足或 observability 解释不清，应立即关闭 `execution_profile_enforcement_enabled` 回退到 hints-only
 - **Notes**：M4 Step 2 已落地最小可控 enforcement：仅当 `execution_profile_enforcement_enabled=true` + rollout symbol 命中 + `mode in {guarded_execute, full}` 时，executor 才真正采用 `enforced_profile`。当前真实生效字段仅限 guardrails：`layer_max_total_ratio`、`max_layers_per_signal`、`min_add_interval_seconds`、`profit_only_add`、`allow_same_bar_multiple_adds`、`leverage_cap`；`layer_ratios` 继续默认 hints-only，除非显式开启 `layering_profile_enforcement_enabled`。同时 observability 已补齐 `baseline / effective / enforced_profile / enforced_fields / execution_profile_really_enforced / field_decisions`。详细说明见：[`docs/adaptive-market-regime-m4-step2-implementation.md`](./adaptive-market-regime-m4-step2-implementation.md)
 
-### AR-M4-03｜trailing / partial TP regime profile 化（可选增强）
+### AR-M4-03｜guarded layering profile（Step 3）
+
+- **阶段 / 优先级**：M4 / P0
+- **生效范围**：开始影响 `layering profile`，但仍坚持 conservative-only 与分层开关
+- **目标**：在 Step 2 execution guardrails 已稳定前提下，把 layering baseline / effective / live profile 审计补齐，并先让 guardrail-like layering 字段进入最小 live；`layer_ratios` 默认继续 hints-only，后置到第二批 rollout
+- **涉及模块**：`core/regime_policy.py`、`trading/executor.py`、`tests/`、配置层、execution observability / dashboard 摘要链路
+- **输入**：policy execution/layering overrides、baseline layering config、当前 layer plan、regime snapshot、rollout gating
+- **输出**：`adaptive_layering_snapshot`、`baseline/effective/live layer plan audit`、`enforced_fields / hinted_only_fields / plan_shape_really_enforced`
+- **配置变更**：建议新增/明确 `layering_profile_hints_enabled`、`layering_profile_enforcement_enabled`、`layering_plan_shape_enforcement_enabled`
+- **可观测性要求**：至少能回答 baseline / effective / live layering profile 是什么，哪些字段真生效，`layer_ratios` 是否仍只是 hints-only
+- **测试 / 验收**：
+  - `layer_ratios` 在 `layering_plan_shape_enforcement_enabled=false` 时不得进入 live layer plan
+  - `layer_max_total_ratio / max_layers_per_signal / min_add_interval_seconds / profit_only_add` 可继续作为最小 live layering 包
+  - rollout miss 必须回退 baseline
+  - 不允许破坏 layer plan reset / direction lock / open intents / reconcile / self-heal
+- **依赖关系**：AR-M4-01, AR-M4-02
+- **风险 / 回滚点**：`layer_ratios` 最容易污染当前 layering 主链路验收，任何异常优先关闭 `layering_plan_shape_enforcement_enabled` 再视情况关闭 `layering_profile_enforcement_enabled`
+- **实施拆分（2026-03-26 / M4 Step 3）**：
+  - Step 3 文档已明确：先上 layering audit 与最小 live guardrails，再后置 `layer_ratios` 真生效
+  - 第一批 live 字段：`layer_max_total_ratio`、`max_layers_per_signal`、`min_add_interval_seconds`、`profit_only_add`（`allow_same_bar_multiple_adds` 作为附属节奏 guardrail）
+  - `layer_ratios` 默认继续 hints-only，等第二批 rollout 才允许进入 live layer plan
+  - 详细实施拆分见：[`docs/adaptive-market-regime-m4-step3-implementation.md`](./adaptive-market-regime-m4-step3-implementation.md)
+
+### AR-M4-04｜trailing / partial TP regime profile 化（可选增强）
 
 - **阶段 / 优先级**：M4 / P2
 - **生效范围**：开始影响 execution

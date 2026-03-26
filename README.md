@@ -21,6 +21,7 @@
 
 - [`docs/PUBLIC-MAINLINE-WORKFLOW.md`](docs/PUBLIC-MAINLINE-WORKFLOW.md)
 - [`docs/GITHUB-PUBLIC-REPO-COPY.md`](docs/GITHUB-PUBLIC-REPO-COPY.md)
+- [`docs/adaptive-market-regime-framework-plan.md`](docs/adaptive-market-regime-framework-plan.md)
 - [`PUBLIC-REPO-MANIFEST.md`](PUBLIC-REPO-MANIFEST.md)
 
 ---

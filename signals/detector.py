@@ -8,7 +8,8 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime
 
 from core.config import Config
-from core.regime import detect_regime, Regime
+from core.regime import detect_regime, normalize_regime_snapshot
+from core.regime_policy import resolve_regime_policy
 
 
 @dataclass
@@ -37,7 +38,9 @@ class Signal:
     indicators: Dict = field(default_factory=dict)  # 实时指标值
     direction_score: Dict = field(default_factory=dict)
     market_context: Dict = field(default_factory=dict)
-    regime_info: Dict = field(default_factory=dict)  # Regime Layer v1
+    regime_info: Dict = field(default_factory=dict)  # Regime Layer v1 (legacy)
+    regime_snapshot: Dict = field(default_factory=dict)
+    adaptive_policy_snapshot: Dict = field(default_factory=dict)
 
     def to_dict(self) -> Dict:
         return asdict(self)
@@ -75,13 +78,26 @@ class SignalDetector:
         )
         signal.market_context = self._analyze_market_context(df, current_price, symbol)
 
-        # Regime Layer v1: 检测市场状态并添加到上下文
+        # Regime / adaptive policy snapshots (M0 Step 2 observe-only)
         regime_result = detect_regime(df, current_price)
-        signal.regime_info = regime_result.to_dict()
-        # 同步到 market_context 供后续使用
-        signal.market_context['regime'] = regime_result.regime.value
-        signal.market_context['regime_confidence'] = regime_result.confidence
-        signal.market_context['regime_details'] = regime_result.details
+        signal.regime_snapshot = normalize_regime_snapshot(regime_result.to_dict())
+        signal.regime_info = dict(signal.regime_snapshot)
+        signal.adaptive_policy_snapshot = resolve_regime_policy(self._config_helper, symbol, signal.regime_snapshot)
+        # 同步到 market_context 供后续使用（兼容旧字段）
+        signal.market_context['regime_snapshot'] = dict(signal.regime_snapshot)
+        signal.market_context['adaptive_policy_snapshot'] = dict(signal.adaptive_policy_snapshot)
+        signal.market_context['regime'] = signal.regime_snapshot['regime']
+        signal.market_context['regime_name'] = signal.regime_snapshot['name']
+        signal.market_context['regime_confidence'] = signal.regime_snapshot['confidence']
+        signal.market_context['regime_details'] = signal.regime_snapshot['details']
+        signal.market_context['regime_family'] = signal.regime_snapshot['family']
+        signal.market_context['regime_direction'] = signal.regime_snapshot['direction']
+        signal.market_context['regime_stability_score'] = signal.regime_snapshot['stability_score']
+        signal.market_context['regime_transition_risk'] = signal.regime_snapshot['transition_risk']
+        signal.market_context['regime_detected_at'] = signal.regime_snapshot['detected_at']
+        signal.market_context['regime_detector_version'] = signal.regime_snapshot['detector_version']
+        signal.market_context['regime_indicators'] = dict(signal.regime_snapshot.get('indicators') or {})
+        signal.market_context['regime_features'] = dict(signal.regime_snapshot.get('features') or {})
 
         triggered_strategies = []
 

@@ -23,6 +23,8 @@ class BacktestPosition:
     highest_price: float
     lowest_price: float
     signal_strength: int
+    regime_snapshot: Optional[Dict] = None
+    adaptive_policy_snapshot: Optional[Dict] = None
 
 
 class MarketDataLoader:
@@ -179,6 +181,12 @@ class StrategyBacktester:
                         'exit_price': current_price,
                         'return_pct': round(pnl * 100, 4),
                         'reason': exit_reason,
+                        'regime_tag': ((position.regime_snapshot or {}).get('name') if position.regime_snapshot else None),
+                        'policy_tag': ((position.adaptive_policy_snapshot or {}).get('policy_version') if position.adaptive_policy_snapshot else None),
+                        'observe_only_tags': {
+                            'regime_snapshot': position.regime_snapshot or {},
+                            'adaptive_policy_snapshot': position.adaptive_policy_snapshot or {},
+                        },
                     })
                     position = None
                     continue
@@ -192,6 +200,8 @@ class StrategyBacktester:
                     highest_price=current_price,
                     lowest_price=current_price,
                     signal_strength=signal.strength,
+                    regime_snapshot=dict(getattr(signal, 'regime_snapshot', {}) or getattr(signal, 'regime_info', {}) or {}),
+                    adaptive_policy_snapshot=dict(getattr(signal, 'adaptive_policy_snapshot', {}) or {}),
                 )
 
         if position:
@@ -207,6 +217,12 @@ class StrategyBacktester:
                 'exit_price': last_price,
                 'return_pct': round(pnl * 100, 4),
                 'reason': 'end_of_backtest',
+                'regime_tag': ((position.regime_snapshot or {}).get('name') if position.regime_snapshot else None),
+                'policy_tag': ((position.adaptive_policy_snapshot or {}).get('policy_version') if position.adaptive_policy_snapshot else None),
+                'observe_only_tags': {
+                    'regime_snapshot': position.regime_snapshot or {},
+                    'adaptive_policy_snapshot': position.adaptive_policy_snapshot or {},
+                },
             })
 
         total_return = sum(t['return_pct'] for t in trades)
@@ -220,6 +236,8 @@ class StrategyBacktester:
             peak = max(peak, equity)
             max_drawdown = min(max_drawdown, equity - peak)
 
+        regime_tags = sorted({t.get('regime_tag') for t in trades if t.get('regime_tag')})
+        policy_tags = sorted({t.get('policy_tag') for t in trades if t.get('policy_tag')})
         return {
             'symbol': symbol,
             'trades': len(trades),
@@ -230,6 +248,8 @@ class StrategyBacktester:
             'avg_return_pct': round((total_return / len(trades)), 4) if trades else 0.0,
             'max_drawdown_pct': round(max_drawdown, 4),
             'recent_trades': trades[-10:],
+            'regime_tags': regime_tags,
+            'policy_tags': policy_tags,
         }
 
     def _aggregate_results(self, symbol_results: List[Dict]) -> Dict:

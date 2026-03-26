@@ -6,6 +6,36 @@
 
 ---
 
+## 0. 当前实现状态（2026-03-26 更新）
+
+### M0 Step 2 已完成（observe-only 接入）
+
+已把统一 `regime_snapshot` / `adaptive_policy_snapshot` 以 **observe-only** 方式接入：
+
+- `signals/detector.py`
+  - 输出统一 `signal.regime_snapshot`
+  - 兼容保留 `signal.regime_info`
+  - 同步挂到 `signal.market_context`
+  - 生成 `signal.adaptive_policy_snapshot`
+- `signals/entry_decider.py`
+  - 在 `EntryDecisionResult` 中透传 regime / policy snapshot
+  - 仅供观测，不改变现有打分和 allow/watch/block 规则
+- `signals/validator.py`
+  - 在 `details/filter_details` 中写入 observe-only snapshot
+  - 不改变现有过滤条件
+- `trading/executor.py`
+  - 在 risk/execution observability 中透传 snapshot
+  - 不改变 execute / deny 结果
+- `analytics/backtest.py`
+  - 为交易结果预留 `regime_tags` / `policy_tags` / `observe_only_tags`
+  - 不破坏原有回测输出字段
+
+### 本步边界
+
+- **没有启用 adaptive policy 生效逻辑**
+- **没有改动真实交易 allow/block/execute 判定**
+- 所有新字段都只用于透传、埋点、后续观测与回测标签
+
 ## 1. 这份文档解决什么问题
 
 主计划与 backlog 已经把方向讲清楚，但 M0 仍然偏“设计项”。

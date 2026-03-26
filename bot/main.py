@@ -170,7 +170,7 @@ def main():
                 side = 'long' if signal.signal_type == 'buy' else 'short'
                 
                 risk_mgr = RiskManager(config, db)
-                can_open, risk_reason, risk_details = risk_mgr.can_open_position(symbol, side=side, signal_id=signal_id)
+                can_open, risk_reason, risk_details = risk_mgr.can_open_position(symbol, side=side, signal_id=signal_id, plan_context={'regime_snapshot': getattr(signal, 'regime_snapshot', {}) or getattr(signal, 'regime_info', {}) or {}, 'adaptive_policy_snapshot': getattr(signal, 'adaptive_policy_snapshot', {}) or {}})
                 risk_obs = dict((risk_details or {}).get('observability') or {})
                 if risk_obs:
                     merged_filter_details = dict(signal.filter_details or {})
@@ -180,7 +180,7 @@ def main():
                     print(f"⏸️ 风险检查阻止: {risk_reason}")
                     continue
                 trade_id = executor.open_position(
-                    symbol, side, current_price, signal_id, root_signal_id=signal_id
+                    symbol, side, current_price, signal_id, plan_context={'regime_snapshot': getattr(signal, 'regime_snapshot', {}) or getattr(signal, 'regime_info', {}) or {}, 'adaptive_policy_snapshot': getattr(signal, 'adaptive_policy_snapshot', {}) or {}}, root_signal_id=signal_id
                 )
                 
                 if trade_id:

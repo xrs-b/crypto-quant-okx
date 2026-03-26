@@ -24,6 +24,7 @@ from core.notifier import NotificationManager
 from signals import Signal, SignalDetector, SignalValidator, SignalRecorder, EntryDecider
 from trading import TradingExecutor, RiskManager
 from trading.executor import build_observability_context
+from analytics.backtest import StrategyBacktester
 from strategies.strategy_library import StrategyManager
 from bot.run import build_exchange_diagnostics, build_exchange_smoke_plan, build_runtime_health_summary, maybe_send_daily_health_summary, execute_exchange_smoke, reconcile_exchange_positions
 from dashboard.api import app
@@ -453,7 +454,7 @@ class TestSignalValidator(unittest.TestCase):
         cfg = Config()
         cfg._config.setdefault('strategies', {}).setdefault('composite', {})['min_strength'] = 28
         cfg._config.setdefault('symbol_overrides', {})['XRP/USDT'] = {
-            'strategies': {'composite': {'min_strength': 20}}
+            'strategies': {'composite': {'min_strength': 20, 'min_strategy_count': 1}}
         }
         validator = SignalValidator(cfg, None)
         signal = Signal(symbol='XRP/USDT', signal_type='buy', price=1.0, strength=24, strategies_triggered=['RSI'])
@@ -461,6 +462,21 @@ class TestSignalValidator(unittest.TestCase):
         self.assertTrue(passed)
         self.assertIsNone(reason)
         self.assertTrue(details['strength_check']['passed'])
+
+    def test_validator_includes_observe_only_regime_and_policy_snapshots(self):
+        cfg = Config()
+        validator = SignalValidator(cfg, None)
+        signal = Signal(
+            symbol='BTC/USDT', signal_type='buy', price=50000, strength=50, strategies_triggered=['RSI', 'MACD'],
+            regime_snapshot=build_regime_snapshot('trend', 0.8, {'ema_gap': 0.03, 'ema_direction': 1, 'volatility': 0.01}, '趋势上涨'),
+            adaptive_policy_snapshot=resolve_regime_policy(cfg, 'BTC/USDT', build_regime_snapshot('trend', 0.8, {'ema_gap': 0.03, 'ema_direction': 1, 'volatility': 0.01}, '趋势上涨')),
+            market_context={'trend': 'bullish', 'volatility': 0.01, 'atr_ratio': 0.01, 'volatility_too_low': False, 'volatility_too_high': False, 'regime': 'trend', 'regime_confidence': 0.8, 'regime_details': '趋势上涨'}
+        )
+        passed, reason, details = validator.validate(signal)
+        self.assertTrue(passed)
+        self.assertTrue(details['observe_only'])
+        self.assertEqual(details['regime_snapshot']['regime'], 'trend')
+        self.assertEqual(details['adaptive_policy_snapshot']['mode'], 'observe_only')
 
 
 class TestEntryDecider(unittest.TestCase):
@@ -546,6 +562,30 @@ class TestEntryDecider(unittest.TestCase):
         result = decider.decide(signal)
         self.assertEqual(result.decision, 'block')
         self.assertTrue(any('接飞刀' in reason or '摸顶' in reason for reason in result.watch_reasons))
+
+    def test_entry_decider_returns_observe_only_snapshots_without_affecting_decision_shape(self):
+        decider = EntryDecider({})
+        signal = Signal(
+            symbol='BTC/USDT',
+            signal_type='buy',
+            price=50000,
+            strength=72,
+            strategies_triggered=['MACD', 'Volume'],
+            reasons=[
+                {'strategy': 'MACD', 'action': 'buy', 'strength': 30, 'confidence': 0.8},
+                {'strategy': 'Volume', 'action': 'buy', 'strength': 20, 'confidence': 0.7},
+            ],
+            direction_score={'buy': 38.0, 'sell': 0.0, 'net': 38.0},
+            market_context={'trend': 'bullish', 'volatility': 0.012, 'atr_ratio': 0.012, 'volatility_too_low': False, 'volatility_too_high': False},
+            regime_info={'regime': 'trend', 'confidence': 0.7}
+        )
+        result = decider.decide(signal)
+        payload = result.to_dict()
+        self.assertTrue(payload['observe_only'])
+        self.assertIn('regime_snapshot', payload)
+        self.assertIn('adaptive_policy_snapshot', payload)
+        self.assertEqual(payload['adaptive_policy_snapshot']['mode'], 'observe_only')
+    
 
 
 class TestSignalValidatorRegimeFilter(unittest.TestCase):
@@ -952,6 +992,14 @@ class TestSignalDetector(unittest.TestCase):
         # regime 应该是有效值之一
         valid_regimes = ['trend', 'range', 'high_vol', 'low_vol', 'risk_anomaly', 'unknown']
         self.assertIn(signal.market_context['regime'], valid_regimes)
+
+    def test_detector_attaches_unified_observe_only_snapshots(self):
+        current_price = self.df[4].iloc[-1]
+        signal = self.detector.analyze('BTC/USDT', self.df, current_price, None)
+        self.assertEqual(signal.regime_snapshot['regime'], signal.regime_info['regime'])
+        self.assertEqual(signal.market_context['regime_snapshot']['regime'], signal.regime_snapshot['regime'])
+        self.assertEqual(signal.market_context['adaptive_policy_snapshot']['mode'], 'observe_only')
+        self.assertFalse(signal.adaptive_policy_snapshot['is_effective'])
 
 
 class TestStrategies(unittest.TestCase):
@@ -2377,6 +2425,18 @@ class TestTradingExecutor(unittest.TestCase):
         self.assertEqual(positions[0]['quantity'], 5)
         self.assertEqual(positions[0]['coin_quantity'], 5)
 
+    def test_risk_manager_observability_passes_through_observe_only_snapshots(self):
+        regime_snapshot = build_regime_snapshot('trend', 0.8, {'ema_gap': 0.02, 'ema_direction': 1, 'volatility': 0.01}, '趋势上涨')
+        policy_snapshot = resolve_regime_policy(self.config, 'BTC/USDT', regime_snapshot)
+        can_open, reason, details = RiskManager(self.config, self.db).can_open_position(
+            'BTC/USDT',
+            side='long',
+            signal_id=123,
+            plan_context={'regime_snapshot': regime_snapshot, 'adaptive_policy_snapshot': policy_snapshot}
+        )
+        self.assertTrue(can_open)
+        self.assertEqual(details['observability']['regime_snapshot']['regime'], 'trend')
+        self.assertEqual(details['observability']['adaptive_policy_snapshot']['mode'], 'observe_only')
 
 
 class TestRiskBudgetSizing(unittest.TestCase):
@@ -2762,6 +2822,29 @@ class TestRecommendationProvider(unittest.TestCase):
         
         # 验证 recommendation provider 已初始化
         self.assertIsNotNone(executor._recommendation_provider)
+
+
+class TestBacktestObserveOnlyTags(unittest.TestCase):
+    def test_backtest_result_reserves_regime_and_policy_tag_outputs(self):
+        cfg = Config()
+        backtester = StrategyBacktester(cfg)
+        data = pd.DataFrame({
+            'timestamp': list(range(180)),
+            'datetime': pd.date_range('2024-01-01', periods=180, freq='1h'),
+            'open': np.linspace(100, 140, 180),
+            'high': np.linspace(101, 141, 180),
+            'low': np.linspace(99, 139, 180),
+            'close': np.linspace(100, 140, 180) + np.sin(np.linspace(0, 10, 180)),
+            'volume': np.linspace(1000, 2000, 180),
+        })
+        result = backtester._run_symbol('BTC/USDT', data)
+        self.assertIn('regime_tags', result)
+        self.assertIn('policy_tags', result)
+        if result['recent_trades']:
+            trade = result['recent_trades'][-1]
+            self.assertIn('observe_only_tags', trade)
+            self.assertIn('regime_snapshot', trade['observe_only_tags'])
+            self.assertIn('adaptive_policy_snapshot', trade['observe_only_tags'])
 
 
 def run_tests():

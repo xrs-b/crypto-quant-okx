@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from core.config import Config
 from core.exchange import Exchange
 from core.risk_budget import get_risk_budget_config, summarize_margin_usage, compute_entry_plan
+from core.regime_policy import build_observe_only_payload
 
 
 class SignalValidator:
@@ -83,6 +84,8 @@ class SignalValidator:
         current_positions = current_positions or {}
         tracking_data = tracking_data or {}
         details = {}
+        observe_only_payload = build_observe_only_payload(self.config, getattr(signal, 'symbol', None), signal=signal)
+        details.update(observe_only_payload)
         latest_positions, used_exchange_positions = self._get_latest_positions_view(current_positions)
 
         # 0. 先过滤非方向性信号

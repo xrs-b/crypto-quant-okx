@@ -12,6 +12,7 @@ from core.database import Database
 from core.logger import trade_logger
 from analytics.recommendation import get_recommendation_provider
 from core.risk_budget import get_risk_budget_config, summarize_margin_usage, compute_entry_plan
+from core.regime_policy import build_observe_only_payload
 
 
 def build_observability_context(*, symbol: str = None, side: str = None, signal_id: int = None, root_signal_id: int = None, layer_no: int = None, deny_reason: str = None, current_symbol_exposure: float = None, projected_symbol_exposure: float = None, current_total_exposure: float = None, projected_total_exposure: float = None, extra: Dict[str, Any] = None) -> Dict[str, Any]:
@@ -42,6 +43,20 @@ def observability_log_text(context: Dict[str, Any]) -> str:
     if not context:
         return '{}'
     return json.dumps(context, ensure_ascii=False, sort_keys=True)
+
+
+def enrich_observability_with_snapshots(config_helper: Any, symbol: Optional[str], context: Dict[str, Any] = None, *, signal: Any = None, plan_context: Dict[str, Any] = None, regime_snapshot: Optional[Dict[str, Any]] = None, adaptive_policy_snapshot: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    enriched = dict(context or {})
+    source_plan = dict(plan_context or {})
+    payload = build_observe_only_payload(
+        config_helper,
+        symbol,
+        signal=signal,
+        regime_snapshot=regime_snapshot or source_plan.get('regime_snapshot'),
+        policy_snapshot=adaptive_policy_snapshot or source_plan.get('adaptive_policy_snapshot'),
+    )
+    enriched.update(payload)
+    return enriched
 
 
 class TradingExecutor:
@@ -418,7 +433,7 @@ class TradingExecutor:
         merged['entry_plan'] = entry_plan
         merged['planned_margin'] = float(entry_plan.get('allowed_margin') or 0.0)
         approved_context = build_observability_context(symbol=symbol, side=side, signal_id=signal_id, root_signal_id=merged.get('root_signal_id') or root_signal_id or signal_id, layer_no=merged.get('layer_no'), current_symbol_exposure=entry_plan.get('current_symbol_exposure_ratio'), projected_symbol_exposure=entry_plan.get('projected_symbol_exposure_ratio'), current_total_exposure=entry_plan.get('current_total_exposure_ratio'), projected_total_exposure=entry_plan.get('projected_total_exposure_ratio'))
-        merged['observability'] = approved_context
+        merged['observability'] = enrich_observability_with_snapshots(self.config, symbol, approved_context, plan_context=merged)
         return True, None, merge_observability_details({'stage': 'approved', 'plan_context': merged}, approved_context)
 
     def open_position(self, symbol: str, side: str, 
@@ -1391,7 +1406,7 @@ class RiskManager:
         direction_lock = self.db.get_direction_lock(lock_symbol, lock_side)
         if direction_lock:
             details['hard_intercept'] = {'passed': False, 'reason': '方向锁占用中', 'lock': direction_lock}
-            details['observability'] = build_observability_context(symbol=symbol, side=normalized_side, signal_id=signal_id, root_signal_id=signal_id, deny_reason='direction_lock')
+            details['observability'] = enrich_observability_with_snapshots(self.config, symbol, build_observability_context(symbol=symbol, side=normalized_side, signal_id=signal_id, root_signal_id=signal_id, deny_reason='direction_lock'), plan_context=plan_context)
             return False, '方向锁占用中', details
         details['hard_intercept'] = {'passed': True, 'lock_scope': {'symbol': lock_symbol, 'side': lock_side}}
 
@@ -1489,12 +1504,12 @@ class RiskManager:
                 next_layer += 1
             if next_layer > len(layer_ratios):
                 details['layer_eligibility'] = {'passed': False, 'reason': '分仓计划已达最大层数', 'state': state}
-                details['observability'] = build_observability_context(symbol=symbol, side=normalized_side, signal_id=signal_id, root_signal_id=state.get('root_signal_id') or signal_id, deny_reason='layer_limit')
+                details['observability'] = enrich_observability_with_snapshots(self.config, symbol, build_observability_context(symbol=symbol, side=normalized_side, signal_id=signal_id, root_signal_id=state.get('root_signal_id') or signal_id, deny_reason='layer_limit'), plan_context=plan_context)
                 return False, '分仓计划已达最大层数', details
             expected = len(consumed) + 1
             if next_layer != expected:
                 details['layer_eligibility'] = {'passed': False, 'reason': '检测到分仓层级断档，禁止跳层', 'state': state}
-                details['observability'] = build_observability_context(symbol=symbol, side=normalized_side, signal_id=signal_id, root_signal_id=state.get('root_signal_id') or signal_id, deny_reason='layer_gap')
+                details['observability'] = enrich_observability_with_snapshots(self.config, symbol, build_observability_context(symbol=symbol, side=normalized_side, signal_id=signal_id, root_signal_id=state.get('root_signal_id') or signal_id, deny_reason='layer_gap'), plan_context=plan_context)
                 return False, '检测到分仓层级断档，禁止跳层', details
             layer_plan = {
                 'eligible': True,
@@ -1533,7 +1548,7 @@ class RiskManager:
             current_total_exposure=entry_plan.get('current_total_exposure_ratio'),
             projected_total_exposure=entry_plan.get('projected_total_exposure_ratio'),
         )
-        details['observability'] = observability
+        details['observability'] = enrich_observability_with_snapshots(self.config, symbol, observability, plan_context=plan_context)
         trade_logger.info(
             f"风控检查 {symbol}: 当前暴露:{current_exposure*100:.1f}%, "
             f"计划仓位:{position_ratio*100:.1f}%, 配置杠杆:{configured_leverage}x, 实际杠杆:{effective_leverage}x, "
@@ -1541,7 +1556,7 @@ class RiskManager:
         )
 
         if entry_plan.get('blocked'):
-            details['observability'] = build_observability_context(symbol=symbol, side=normalized_side, signal_id=signal_id, root_signal_id=layer_plan.get('root_signal_id') or signal_id, layer_no=layer_plan.get('layer_no'), deny_reason=entry_plan.get('block_reason') or 'risk_budget', current_symbol_exposure=entry_plan.get('current_symbol_exposure_ratio'), projected_symbol_exposure=entry_plan.get('projected_symbol_exposure_ratio'), current_total_exposure=entry_plan.get('current_total_exposure_ratio'), projected_total_exposure=entry_plan.get('projected_total_exposure_ratio'))
+            details['observability'] = enrich_observability_with_snapshots(self.config, symbol, build_observability_context(symbol=symbol, side=normalized_side, signal_id=signal_id, root_signal_id=layer_plan.get('root_signal_id') or signal_id, layer_no=layer_plan.get('layer_no'), deny_reason=entry_plan.get('block_reason') or 'risk_budget', current_symbol_exposure=entry_plan.get('current_symbol_exposure_ratio'), projected_symbol_exposure=entry_plan.get('projected_symbol_exposure_ratio'), current_total_exposure=entry_plan.get('current_total_exposure_ratio'), projected_total_exposure=entry_plan.get('projected_total_exposure_ratio')), plan_context=plan_context)
             details['exposure_limit'] = {
                 'passed': False,
                 'current': round(current_exposure, 4),

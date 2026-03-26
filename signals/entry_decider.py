@@ -15,6 +15,8 @@ Entry Decision Layer (MVP) - 开单决策层
 """
 from dataclasses import dataclass, field, asdict
 from typing import Dict, Optional, List
+
+from core.regime_policy import build_observe_only_payload
 from enum import Enum
 
 
@@ -57,6 +59,9 @@ class EntryDecisionResult:
     breakdown: DecisionBreakdown = field(default_factory=DecisionBreakdown)
     reason_summary: str = ""           # 中文解释
     watch_reasons: List[str] = field(default_factory=list)  # 需要观望的原因
+    regime_snapshot: Dict = field(default_factory=dict)
+    adaptive_policy_snapshot: Dict = field(default_factory=dict)
+    observe_only: bool = True
     
     def to_dict(self) -> Dict:
         return {
@@ -64,7 +69,10 @@ class EntryDecisionResult:
             'score': self.score,
             'breakdown': asdict(self.breakdown),
             'reason_summary': self.reason_summary,
-            'watch_reasons': self.watch_reasons
+            'watch_reasons': self.watch_reasons,
+            'regime_snapshot': self.regime_snapshot,
+            'adaptive_policy_snapshot': self.adaptive_policy_snapshot,
+            'observe_only': self.observe_only
         }
 
 
@@ -142,6 +150,15 @@ class EntryDecider:
         
         result = EntryDecisionResult()
         breakdown = DecisionBreakdown()
+        observe_only_payload = build_observe_only_payload(
+            self,
+            getattr(signal, 'symbol', None),
+            signal=signal,
+        )
+        result.regime_snapshot = observe_only_payload['regime_snapshot']
+        result.adaptive_policy_snapshot = observe_only_payload['adaptive_policy_snapshot']
+        setattr(signal, 'regime_snapshot', result.regime_snapshot)
+        setattr(signal, 'adaptive_policy_snapshot', result.adaptive_policy_snapshot)
         
         # 1. Signal Strength Score
         signal_strength_score, signal_strength_reason = self._eval_signal_strength(signal)

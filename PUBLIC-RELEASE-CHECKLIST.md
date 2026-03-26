@@ -61,9 +61,9 @@
 - 或支持 `PROJECT_DIR` 环境变量覆盖
 
 ### 5. 统一 Dashboard 端口与启动方式
-- [ ] 决定默认端口（建议统一成一个，例如 `5555`）
-- [ ] README、配置样例、脚本、Dashboard 文案全部统一
-- [ ] 确保 `python3 bot/run.py --dashboard --port 5555` 可工作
+- [x] 默认端口统一为 `5555`
+- [x] README、配置样例、脚本、Dashboard 文案全部统一到 `5555`
+- [x] 确保 `python3 bot/run.py --dashboard --port 5555` 为公开版默认启动方式
 
 ### 6. 补齐最小可运行路径
 朋友第一次部署，至少要能完成以下动作：

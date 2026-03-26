@@ -3739,7 +3739,7 @@ def get_exit_strategy_status():
 # 启动
 # ============================================================================
 
-def run_dashboard(host: str = '0.0.0.0', port: int = 8050, debug: bool = False):
+def run_dashboard(host: str = '0.0.0.0', port: int = 5555, debug: bool = False):
     """运行仪表盘"""
     dashboard_cfg = config.dashboard_config
     host = dashboard_cfg.get('host', host)

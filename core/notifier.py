@@ -464,7 +464,7 @@ class NotificationManager:
         else:
             dashboard_cfg = self.config.get('dashboard', {})
         dashboard_host = dashboard_cfg.get('host', '0.0.0.0')
-        dashboard_port = dashboard_cfg.get('port', 8050)
+        dashboard_port = dashboard_cfg.get('port', 5555)
         # Use localhost for local access, or bind address for remote
         dashboard_url = f'http://localhost:{dashboard_port}' if dashboard_host in ('0.0.0.0', '127.0.0.1') else f'http://{dashboard_host}:{dashboard_port}'
         

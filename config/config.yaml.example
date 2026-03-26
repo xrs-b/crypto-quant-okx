@@ -6,6 +6,10 @@
 # 2. 再复制：cp config/config.local.yaml.example config/config.local.yaml
 # 3. 把真实 secret 只写进 config.local.yaml，或者改用环境变量
 # 4. config.yaml / config.local.yaml 都不会上传到 GitHub
+# 5. 默认只会自动合并项目内 config/config.local.yaml
+#    ~/.crypto-quant-okx.local.yaml 已降级为兼容后门：只有显式设置
+#    CRYPTO_QUANT_OKX_ENABLE_HOME_LOCAL=1 或
+#    CRYPTO_QUANT_OKX_HOME_LOCAL_CONFIG=/path/to/file 才会加载
 #
 # 环境变量写法示例：
 #   key: ${OKX_API_KEY}

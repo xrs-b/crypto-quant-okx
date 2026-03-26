@@ -41,7 +41,11 @@ cp config/config.local.yaml.example config/config.local.yaml
 - `.env`：环境变量与 secret
 - `config/config.yaml`：公开参数、策略参数、风控参数
 - `config/presets/*.yaml`：只放公开策略参数与 notification 开关，不放 bot token / webhook / channel/chat id
-- `config/config.local.yaml`：本机私密覆盖（如你不想把 secret 放进 `.env`）
+- `config/config.local.yaml`：默认推荐的本机私密覆盖（如你不想把 secret 放进 `.env`）
+
+默认加载顺序：`config/config.yaml` → `config/config.local.yaml` → 环境变量占位符解析。
+
+`~/.crypto-quant-okx.local.yaml` 已降级为兼容入口，默认不会自动加载；只有显式设置 `CRYPTO_QUANT_OKX_ENABLE_HOME_LOCAL=1` 或 `CRYPTO_QUANT_OKX_HOME_LOCAL_CONFIG=/path/to/file` 才会启用。
 
 ## 5. 填入最小必要配置
 
@@ -77,7 +81,7 @@ source .env
 set +a
 ```
 
-### 方案 B：把 secret 放进 `config/config.local.yaml`
+### 方案 B：把 secret 放进 `config/config.local.yaml`（当前主推荐）
 
 如果你不想依赖环境变量，也可以只改 `config/config.local.yaml`：
 
@@ -93,6 +97,20 @@ notification:
 ```
 
 > `config/presets/*.yaml` 不应再写 notification secret；preset apply 后，Config 仍会继续把 `config.local.yaml` 覆盖合并回来。
+
+### 方案 C：历史 home 文件兼容模式（仅迁移期需要）
+
+如果你历史上使用的是 `~/.crypto-quant-okx.local.yaml`，建议把 secret 迁回项目内 `config/config.local.yaml`。
+
+只有在你明确需要保留旧路径时，才启用兼容模式：
+
+```bash
+export CRYPTO_QUANT_OKX_ENABLE_HOME_LOCAL=1
+# 或显式指定旧文件路径
+export CRYPTO_QUANT_OKX_HOME_LOCAL_CONFIG="$HOME/.crypto-quant-okx.local.yaml"
+```
+
+不建议长期同时维护 `config/config.local.yaml` 与 home 文件，否则仍然容易产生“以为改了 A，实际被 B 覆盖”的问题。
 
 Dashboard 建议仍走环境变量：
 

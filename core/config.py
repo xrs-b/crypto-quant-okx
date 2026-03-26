@@ -42,7 +42,7 @@ class Config:
         self._load()
     
     def _load(self):
-        """加载配置文件，支持 config.local.yaml 本地覆盖"""
+        """加载配置文件，默认只合并项目内 config.local.yaml。"""
         if os.path.exists(self.config_path):
             with open(self.config_path, 'r', encoding='utf-8') as f:
                 self._config = yaml.safe_load(f) or {}
@@ -54,11 +54,7 @@ class Config:
             else:
                 self._config = self._get_default()
 
-        local_candidates = [
-            Path(self.config_path).with_name('config.local.yaml'),
-            Path.home() / '.crypto-quant-okx.local.yaml',
-        ]
-        for local_path in local_candidates:
+        for local_path in self._get_local_override_paths():
             if os.path.exists(local_path):
                 with open(local_path, 'r', encoding='utf-8') as f:
                     local_config = yaml.safe_load(f) or {}
@@ -67,6 +63,29 @@ class Config:
         self._config = self._resolve_env_placeholders(self._config)
         self._normalize_legacy_layering_config()
         self._validate()
+
+    def _get_local_override_paths(self) -> List[Path]:
+        """返回按优先级生效的本地覆盖文件路径列表。"""
+        local_candidates = [Path(self.config_path).with_name('config.local.yaml')]
+
+        explicit_home_path = (os.getenv('CRYPTO_QUANT_OKX_HOME_LOCAL_CONFIG') or '').strip()
+        enable_home_local = (os.getenv('CRYPTO_QUANT_OKX_ENABLE_HOME_LOCAL') or '').strip().lower()
+        home_local_enabled = enable_home_local in {'1', 'true', 'yes', 'on'}
+
+        if explicit_home_path:
+            local_candidates.append(Path(explicit_home_path).expanduser())
+        elif home_local_enabled:
+            local_candidates.append(Path.home() / '.crypto-quant-okx.local.yaml')
+
+        deduped_paths: List[Path] = []
+        seen = set()
+        for path in local_candidates:
+            normalized = str(path)
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            deduped_paths.append(path)
+        return deduped_paths
 
     def _resolve_env_placeholders(self, value: Any) -> Any:
         """递归解析 ${VAR} / ${VAR:-default} 环境变量占位符"""

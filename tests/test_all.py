@@ -342,6 +342,65 @@ class TestConfig(unittest.TestCase):
         else:
             os.environ['DISCORD_BOT_TOKEN'] = old_bot_token
 
+    def test_home_local_override_is_disabled_by_default(self):
+        old_enable = os.environ.pop('CRYPTO_QUANT_OKX_ENABLE_HOME_LOCAL', None)
+        old_path = os.environ.pop('CRYPTO_QUANT_OKX_HOME_LOCAL_CONFIG', None)
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                cfg_path = os.path.join(tmpdir, 'config.yaml')
+                with open(cfg_path, 'w', encoding='utf-8') as f:
+                    f.write(
+                        "notification:\n"
+                        "  discord:\n"
+                        "    channel_id: project-channel\n"
+                    )
+                home_local_path = Path(tmpdir) / '.crypto-quant-okx.local.yaml'
+                home_local_path.write_text(
+                    "notification:\n"
+                    "  discord:\n"
+                    "    channel_id: legacy-home-channel\n",
+                    encoding='utf-8'
+                )
+                with patch('pathlib.Path.home', return_value=Path(tmpdir)):
+                    cfg = Config(cfg_path)
+                self.assertEqual(cfg.get('notification.discord.channel_id'), 'project-channel')
+        finally:
+            if old_enable is not None:
+                os.environ['CRYPTO_QUANT_OKX_ENABLE_HOME_LOCAL'] = old_enable
+            if old_path is not None:
+                os.environ['CRYPTO_QUANT_OKX_HOME_LOCAL_CONFIG'] = old_path
+
+    def test_home_local_override_can_be_enabled_explicitly(self):
+        old_enable = os.environ.get('CRYPTO_QUANT_OKX_ENABLE_HOME_LOCAL')
+        old_path = os.environ.pop('CRYPTO_QUANT_OKX_HOME_LOCAL_CONFIG', None)
+        os.environ['CRYPTO_QUANT_OKX_ENABLE_HOME_LOCAL'] = '1'
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                cfg_path = os.path.join(tmpdir, 'config.yaml')
+                with open(cfg_path, 'w', encoding='utf-8') as f:
+                    f.write(
+                        "notification:\n"
+                        "  discord:\n"
+                        "    channel_id: project-channel\n"
+                    )
+                home_local_path = Path(tmpdir) / '.crypto-quant-okx.local.yaml'
+                home_local_path.write_text(
+                    "notification:\n"
+                    "  discord:\n"
+                    "    channel_id: legacy-home-channel\n",
+                    encoding='utf-8'
+                )
+                with patch('pathlib.Path.home', return_value=Path(tmpdir)):
+                    cfg = Config(cfg_path)
+                self.assertEqual(cfg.get('notification.discord.channel_id'), 'legacy-home-channel')
+        finally:
+            if old_enable is None:
+                os.environ.pop('CRYPTO_QUANT_OKX_ENABLE_HOME_LOCAL', None)
+            else:
+                os.environ['CRYPTO_QUANT_OKX_ENABLE_HOME_LOCAL'] = old_enable
+            if old_path is not None:
+                os.environ['CRYPTO_QUANT_OKX_HOME_LOCAL_CONFIG'] = old_path
+
 
 class TestSignalValidator(unittest.TestCase):
     def test_validate_returns_standardized_filter_meta_for_hold_signal(self):

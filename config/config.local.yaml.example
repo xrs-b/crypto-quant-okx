@@ -5,6 +5,8 @@
 # 这里只放真实 secret / 私有 channel / 私有 webhook 等内容。
 # presets 不应承载 notification secret；需要覆盖时统一写在这里或 .env。
 # Config 会在读取 config.yaml 后，再自动合并本文件覆盖。
+# 这是当前唯一默认推荐的本地私密配置来源。
+# ~/.crypto-quant-okx.local.yaml 不再默认自动加载；仅兼容显式启用场景。
 # ============================================================================
 
 api:

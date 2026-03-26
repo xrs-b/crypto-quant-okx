@@ -3,6 +3,8 @@
 面向准备把本项目作为 **public repo** 分享时的保留/排除约定。
 
 > 维护策略：**公共仓库是唯一长期代码主线；私人环境只保留 config / secret / logs / db / runtime state 等运行态内容。**
+>
+> 本地 secret 来源策略：默认推荐且默认自动加载的只有 `config/config.local.yaml`；`~/.crypto-quant-okx.local.yaml` 仅作为显式启用的兼容入口保留，不再默认参与覆盖。
 
 ## 公开仓库应保留
 

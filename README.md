@@ -180,7 +180,14 @@ cp config/config.local.yaml.example config/config.local.yaml
 
 - `config/config.yaml`：公开参数、策略参数、风控参数、watch list
 - `config/presets/*.yaml`：只放可公开的策略/开关，不放 Discord / Telegram secret
-- `config/config.local.yaml`：只放私密参数，例如 API Key / webhook / bot token / chat id / channel id
+- `config/config.local.yaml`：默认且唯一推荐的本地私密配置来源，只放 API Key / webhook / bot token / chat id / channel id
+
+> 当前默认加载顺序：`config/config.yaml` → `config/config.local.yaml` → 环境变量占位符解析。
+>
+> `~/.crypto-quant-okx.local.yaml` 已降级为**兼容后门**，默认**不会自动加载**；只有显式设置以下任一环境变量才会启用：
+>
+> - `CRYPTO_QUANT_OKX_ENABLE_HOME_LOCAL=1`
+> - `CRYPTO_QUANT_OKX_HOME_LOCAL_CONFIG=/absolute/path/to/legacy-home-local.yaml`
 
 如果你喜欢走环境变量，也可以直接用：
 
@@ -360,7 +367,8 @@ PROJECT_DIR="$PWD" scripts/start.public.sh dashboard
 | `config/config.yaml.example` | 可公开提交的完整示例 |
 | `config/config.local.yaml.example` | 私密配置模板 |
 | `config/config.yaml` | 本地主配置 |
-| `config/config.local.yaml` | 本地私密覆盖 |
+| `config/config.local.yaml` | 默认推荐的本地私密覆盖 |
+| `~/.crypto-quant-okx.local.yaml` | 旧兼容入口；仅在显式环境变量开启时才加载 |
 
 ### 适合放在 `config.yaml` 的内容
 - `exchange.mode`
@@ -380,6 +388,22 @@ PROJECT_DIR="$PWD" scripts/start.public.sh dashboard
 - `notification.discord.webhook_url`
 - `notification.discord.channel_id`
 - 任何 Email / Telegram 等真实凭证
+
+### 旧的 home 覆盖文件策略
+
+如果你历史上一直把 secret 放在 `~/.crypto-quant-okx.local.yaml`：
+
+1. **现在推荐迁移到** `config/config.local.yaml`
+2. 默认情况下，程序**不会再自动读取** home 文件，避免和项目内 `config/config.local.yaml` 双重覆盖造成混乱
+3. 如你暂时未迁移，可显式启用兼容模式：
+
+```bash
+export CRYPTO_QUANT_OKX_ENABLE_HOME_LOCAL=1
+# 或显式指定路径
+export CRYPTO_QUANT_OKX_HOME_LOCAL_CONFIG="$HOME/.crypto-quant-okx.local.yaml"
+```
+
+建议只把这种兼容模式当作短期迁移手段，而不是长期主路径。
 
 ### Layering 默认示例
 ### Public presets（公开版只保留两个）

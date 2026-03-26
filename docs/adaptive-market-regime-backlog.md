@@ -454,6 +454,11 @@
   - 同一笔单的 effective execution profile 可被完整追溯
 - **依赖关系**：M3 稳定后再做
 - **风险 / 回滚点**：执行参数覆盖最容易把 layering 搞乱；任何异常优先回退到 M3
+- **实施拆分（2026-03-26 / M4 Step 1）**：
+  - Step 1 先做 `execution profile hints + effective snapshot + observability`，默认保持 `execution_profile_enforcement_enabled=false`，不直接改变 live execution profile
+  - Step 2 才进入 `guarded execution profile enforcement`，并要求 rollout symbol、conservative-only、防呆与回滚开关齐全
+  - `layer_ratios` 真生效、deep layering enforcement、partial TP / trailing hints/enforcement 继续后置，不混入 Step 1
+  - 详细任务拆分见：[`docs/adaptive-market-regime-m4-step1-implementation.md`](./adaptive-market-regime-m4-step1-implementation.md)
 
 ### AR-M4-02｜executor 落地 effective execution profile 追踪
 

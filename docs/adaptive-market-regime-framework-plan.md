@@ -875,19 +875,43 @@ symbol_override.adaptive_regime
 ## M4：Execution Parameter Adaptation（轻度执行参数自适应）
 
 > M4 执行边界、禁区、最小生效包、灰度/回滚策略详见：[`docs/adaptive-market-regime-m4-boundary-plan.md`](./adaptive-market-regime-m4-boundary-plan.md)
+>
+> M4 Step 1 可直接开工的实施拆分详见：[`docs/adaptive-market-regime-m4-step1-implementation.md`](./adaptive-market-regime-m4-step1-implementation.md)
 
 ### 目标
 
-在风险受控前提下，让 layer ratios / trailing / partial TP 轻量自适应。
+在风险受控前提下，让 execution 层先建立单一事实来源，再按顺序进入外围 execution guardrail、guarded layering，最后才讨论 exit profile。
+
+### Step 1（execution profile hints / effective snapshot / observability）
+
+- 先产出 executor `baseline vs effective` execution snapshot
+- 先补 `applied / ignored / rollout_match / effective_state / hint_codes`
+- 默认不直接改变 live execution profile / layer plan / order params
+- 先证明 M4 execution guardrail 的可解释性，再进入 enforcement
+
+### Step 2（guarded execution profile enforcement）
+
+- 在 rollout symbol + conservative-only + 回滚开关齐全后
+- 才允许让外围 execution guardrails 小范围真生效
+- 真生效范围优先限于：`leverage_cap / layer_max_total_ratio / max_layers_per_signal / min_add_interval_seconds / profit_only_add`
+
+### 后续步骤（guarded layering / exit hints）
+
+- `layer_ratios` 真生效、deep layering profile 收紧继续后置
+- trailing / partial TP 先 hints-only，再视样本讨论 enforcement
 
 ### 工作项
 
-- layer ratios 按 regime 动态覆盖
-- trailing / partial TP 允许 regime profile 化
+- execution profile hints / effective snapshot / observability
+- guarded execution profile enforcement（后续步骤）
+- guarded layering profile enforcement（后续步骤）
+- trailing / partial TP hints / enforcement（最后段增强项）
 - 加强 dashboard 的 effective execution profile 展示
 
 ### 验收
 
+- Step 1 默认不改变 live execution profile
+- execution profile enforcement 与 layering profile enforcement 边界清晰
 - 参数变化可观测、可解释、可回滚
 - 不出现“同一笔单到底按哪套规则执行”说不清的情况
 

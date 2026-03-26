@@ -3,15 +3,22 @@ __pycache__/
 .venv/
 *.log
 /tmp/
-*.json
 .DS_Store
+
+# Local/private config
+.env
 config/config.yaml
 config/config.local.yaml
-bot.pid
-dashboard.pid
-relay.pid
+config/backups/
+
+# Runtime state / process artifacts
+*.pid
 logs/
+data/runtime_state.json
+data/config_audit.json
 data/trading.db
+dashboard/data/
+
+# Local ML/runtime outputs
 ml/data/
 ml/models/
-config/backups/

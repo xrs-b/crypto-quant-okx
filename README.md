@@ -306,7 +306,13 @@ python3 bot/run.py --relay-outbox --once
 - `scripts/start.public.sh`
 - `scripts/keep_dashboard_alive.sh`
 - `scripts/okx-trading.service`
+- `scripts/com.oink.crypto-quant-okx.dashboard-keepalive.plist`
 - `scripts/candidate-review.cron.example`
+
+说明：
+- `start.sh` / `start.public.sh` / `keep_dashboard_alive.sh` 可直接作为通用脚本参考
+- `okx-trading.service`、`*.plist`、`*.cron.example` 属于 **模板文件**，公开仓库会保留，但你需要改成自己机器的用户、路径、端口与调度方式
+- 公开仓库保留/排除规则见：[`PUBLIC-REPO-MANIFEST.md`](PUBLIC-REPO-MANIFEST.md)
 
 这些脚本已经支持：
 

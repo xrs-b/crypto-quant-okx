@@ -6,12 +6,16 @@
 
 这些内容适合留在公开仓库，方便别人 clone 后理解、安装、测试：
 
+> preset 策略已刻意收窄：公开首版只保留 `btc-focused` 与 `safe-mode`，避免候选型 preset 造成误用或误解。
+
 - 核心代码：`bot/` `core/` `signals/` `strategies/` `trading/` `analytics/` `dashboard/`
+- 开源许可：`LICENSE`（MIT）
 - 可公开样例配置：
   - `.env.example`
   - `config/config.yaml.example`
   - `config/config.local.yaml.example`
-  - `config/presets/*.yaml`
+  - `config/presets/btc-focused.yaml`
+  - `config/presets/safe-mode.yaml`
 - 部署与使用文档：
   - `README.md`
   - `docs/DEPLOYMENT.md`

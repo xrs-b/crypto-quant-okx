@@ -2,6 +2,8 @@
 
 一个面向 **OKX U 本位合约** 的量化交易系统，支持 **信号检测、进场审批、风险控制、分层开仓（layering）、持仓对账、通知推送、Dashboard 观察、回测与参数分析**。
 
+许可证：**MIT**。选择 MIT 的原因很简单：对朋友分享和二次改造阻力最低、保留署名要求、同时配合 MIT 的免责条款，比较符合这个“学习 / 研究 / 自行承担交易风险”的公开版定位。
+
 > 这个项目更适合有一定 Python / 量化 / 交易所 API 使用经验的开发者或朋友交流学习。  
 > **不建议零基础用户直接上实盘。**
 
@@ -360,6 +362,19 @@ PROJECT_DIR="$PWD" scripts/start.public.sh dashboard
 - 任何 Email / Telegram 等真实凭证
 
 ### Layering 默认示例
+### Public presets（公开版只保留两个）
+
+为了让朋友第一次上手时更不容易误配，公开仓库只保留两个 preset：
+
+- `btc-focused.yaml`：默认示例，单一主观察币种，适合作为 README / testnet 演练起点
+- `safe-mode.yaml`：更保守的降级示例，适合先验证链路、降低第一次误操作风险
+
+这次**不再公开** `xrp-candidate`、`btc-grid-candidate` 一类候选 preset，原因是它们更像作者阶段性实验/候选方向，朋友拿到后容易误会成“现成推荐配置”。首版公开先把选择收窄，后续如真有长期维护价值，再单独补回。
+
+更多发布边界与首版计划见：
+- `docs/FINAL-RELEASE-REVIEW.md`
+- `docs/FIRST-PUBLIC-RELEASE-PLAN.md`
+
 来自 `config/config.yaml.example`：
 
 ```yaml

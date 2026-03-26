@@ -16,7 +16,8 @@
 - [ ] 用 `gitleaks` / 手工 grep 再扫一次
 
 重点检查：
-- [ ] `config/presets/*.yaml`
+- [ ] `config/presets/btc-focused.yaml`
+- [ ] `config/presets/safe-mode.yaml`
 - [ ] `config/config.local.yaml`
 - [ ] `config/backups/`
 - [ ] 历史 commit
@@ -35,6 +36,9 @@
 - [ ] 检查 Git 历史里有没有提交过以上内容
 
 ### 3. 所有示例配置必须可直接复制使用
+
+公开首版建议只保留两个 preset：`btc-focused`（标准 testnet 起点）与 `safe-mode`（更保守的降级示例）。
+
 - [ ] `config/config.yaml.example` 保持完整、可运行、无真实凭证
 - [ ] `config/config.local.yaml.example` 只保留模板值
 - [ ] 任何 preset 不得包含真实 token
@@ -88,6 +92,8 @@
 - [ ] `README.md`
 - [ ] `PUBLIC-RELEASE-CHECKLIST.md`
 - [ ] `LICENSE`
+- [ ] `docs/FINAL-RELEASE-REVIEW.md`
+- [ ] `docs/FIRST-PUBLIC-RELEASE-PLAN.md`
 - [ ] `.env.example`（如决定采用环境变量）
 - [ ] `scripts/start.sh` 的公开模板版
 - [ ] `scripts/okx-trading.service` 的模板版

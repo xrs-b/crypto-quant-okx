@@ -44,6 +44,16 @@ cp config/config.local.yaml.example config/config.local.yaml
 
 ## 5. 填入最小必要配置
 
+### 公开版 preset 选择建议
+
+公开仓库默认只保留两个 preset：
+
+- `config/presets/btc-focused.yaml`：标准 testnet 起点
+- `config/presets/safe-mode.yaml`：更保守的演练 / 降级起点
+
+建议第一次部署先参考 `btc-focused` 的字段结构；如果你想先把风险收得更紧，再看 `safe-mode`。
+
+
 ### 方案 A：推荐，用 `.env`
 
 至少填这些：

@@ -94,17 +94,22 @@ def enrich_observability_with_snapshots(config_helper: Any, symbol: Optional[str
         'effective_state': execution_snapshot.get('effective_state', 'disabled'),
         'baseline': dict(execution_snapshot.get('baseline') or {}),
         'effective_hint': dict(execution_snapshot.get('effective') or {}),
+        'live': dict(execution_snapshot.get('live') or execution_snapshot.get('enforced_profile') or execution_snapshot.get('baseline') or {}),
         'enforced_profile': dict(execution_snapshot.get('enforced_profile') or execution_snapshot.get('baseline') or {}),
         'applied': list((execution_snapshot.get('applied_overrides') or {}).keys()),
         'ignored': list(execution_snapshot.get('ignored_overrides') or []),
         'enforced_fields': list(execution_snapshot.get('enforced_fields') or []),
+        'hinted_only_fields': list(execution_snapshot.get('hinted_only_fields') or []),
+        'layering_enforced_fields': list(execution_snapshot.get('layering_enforced_fields') or []),
         'execution_profile_really_enforced': bool(execution_snapshot.get('execution_profile_really_enforced', False)),
+        'layering_profile_really_enforced': bool(execution_snapshot.get('layering_profile_really_enforced', False)),
+        'plan_shape_really_enforced': bool(execution_snapshot.get('plan_shape_really_enforced', False)),
         'rollout_match': bool(execution_snapshot.get('rollout_match', True)),
         'would_change_execution_profile': bool(execution_snapshot.get('would_tighten')),
         'would_tighten_fields': list(execution_snapshot.get('would_tighten_fields') or []),
         'hint_codes': list(execution_snapshot.get('hint_codes') or []),
         'ignored_reasons': list({str(item.get('reason')) for item in (execution_snapshot.get('ignored_overrides') or []) if item.get('reason')}),
-        'notes': ['step2 enforces only conservative execution guardrails when rollout/enforcement is enabled', 'layer_ratios remains hints-only unless layering_profile_enforcement_enabled=true'],
+        'notes': ['step3 live scope only enforces conservative layering guardrails when rollout/enforcement is enabled', 'layer_ratios remains hints-only unless layering_plan_shape_enforcement_enabled=true'],
         'field_decisions': list(execution_snapshot.get('field_decisions') or []),
     }
     return enriched
@@ -326,7 +331,7 @@ class TradingExecutor:
         return {
             'baseline': baseline,
             'effective': dict(execution_snapshot.get('effective') or baseline),
-            'live': enforced_profile,
+            'live': dict(execution_snapshot.get('live') or enforced_profile),
             'snapshot': execution_snapshot,
         }
 
@@ -390,7 +395,7 @@ class TradingExecutor:
                 if marker and markers.get(marker):
                     return False, '同一 bar 已执行过加仓，禁止重复加仓', merge_observability_details({'stage': 'allow_same_bar_multiple_adds', 'signal_bar_marker': marker}, build_observability_context(symbol=symbol, side=side, signal_id=signal_id, root_signal_id=state.get('root_signal_id') or signal_id, layer_no=(max(filled_layers) + 1) if filled_layers else 1, deny_reason='allow_same_bar_multiple_adds'))
 
-        return True, None, merge_observability_details({'stage': 'layering_guard', 'layering': layering, 'baseline_layering': execution_profile['baseline'], 'effective_layering': execution_profile['effective'], 'execution_profile_really_enforced': bool((execution_profile.get('snapshot') or {}).get('execution_profile_really_enforced'))}, build_observability_context(symbol=symbol, side=side, signal_id=signal_id, root_signal_id=state.get('root_signal_id') or signal_id, layer_no=(max(filled_layers) + 1) if filled_layers else 1))
+        return True, None, merge_observability_details({'stage': 'layering_guard', 'layering': layering, 'baseline_layering': execution_profile['baseline'], 'effective_layering': execution_profile['effective'], 'live_layering': execution_profile['live'], 'execution_profile_really_enforced': bool((execution_profile.get('snapshot') or {}).get('execution_profile_really_enforced')), 'layering_profile_really_enforced': bool((execution_profile.get('snapshot') or {}).get('layering_profile_really_enforced')), 'plan_shape_really_enforced': bool((execution_profile.get('snapshot') or {}).get('plan_shape_really_enforced')), 'field_decisions': list(((execution_profile.get('snapshot') or {}).get('field_decisions') or []))}, build_observability_context(symbol=symbol, side=side, signal_id=signal_id, root_signal_id=state.get('root_signal_id') or signal_id, layer_no=(max(filled_layers) + 1) if filled_layers else 1))
 
 
     def _get_layer_plan(self, symbol: str, side: str, signal_id: int = None, root_signal_id: int = None, plan_context: Dict[str, Any] = None) -> Dict[str, Any]:

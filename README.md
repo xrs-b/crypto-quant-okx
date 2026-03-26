@@ -28,6 +28,8 @@
 - [`docs/adaptive-market-regime-m4-step1-implementation.md`](docs/adaptive-market-regime-m4-step1-implementation.md)
 - [`docs/adaptive-market-regime-m4-step2-implementation.md`](docs/adaptive-market-regime-m4-step2-implementation.md)
 - [`docs/adaptive-market-regime-m4-step3-implementation.md`](docs/adaptive-market-regime-m4-step3-implementation.md)
+
+M4 Step 3 status: guarded layering profile 第一批已落地，当前 live 只放行 conservative guardrail-like layering 字段；`layer_ratios` 继续 hints-only，除非显式开启 `layering_plan_shape_enforcement_enabled`。
 - [`docs/adaptive-market-regime-m3-step1-implementation.md`](docs/adaptive-market-regime-m3-step1-implementation.md)
 - [`docs/adaptive-market-regime-m0-implementation.md`](docs/adaptive-market-regime-m0-implementation.md)
 - [`PUBLIC-REPO-MANIFEST.md`](PUBLIC-REPO-MANIFEST.md)

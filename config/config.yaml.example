@@ -260,3 +260,30 @@ trading:
     allow_same_bar_multiple_adds: false
     max_layers_per_signal: 1
     strict_ratio_sum_check: false
+
+
+# Adaptive regime / guarded execute（M4 Step 3 第一批）
+adaptive_regime:
+  enabled: false
+  mode: observe_only  # observe_only / decision_only / guarded_execute / full
+  guarded_execute:
+    execution_profile_hints_enabled: true
+    execution_profile_enforcement_enabled: true
+    layering_profile_hints_enabled: true
+    layering_profile_enforcement_enabled: false
+    layering_plan_shape_enforcement_enabled: false
+    risk_hints_enabled: false
+    risk_enforcement_enabled: false
+    conservative_only: true
+    rollout_symbols: ["BTC/USDT"]
+  defaults:
+    policy_version: adaptive_policy_v1_m4_step3
+  regimes:
+    high_vol:
+      execution_overrides:
+        layer_max_total_ratio: 0.12
+        max_layers_per_signal: 1
+        min_add_interval_seconds: 600
+        profit_only_add: true
+        allow_same_bar_multiple_adds: false
+        layer_ratios: [0.05, 0.04, 0.03]  # Step 3 第一批仍 hints-only，需 layering_plan_shape_enforcement_enabled=true 才 live

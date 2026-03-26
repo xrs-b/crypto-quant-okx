@@ -10,6 +10,26 @@ from core.risk_budget import DEFAULT_RISK_BUDGET, get_risk_budget_config
 ADAPTIVE_POLICY_VERSION = "adaptive_policy_v1_m1"
 
 
+EXECUTION_PROFILE_FIELDS = [
+    "layer_ratios",
+    "layer_max_total_ratio",
+    "max_layers_per_signal",
+    "min_add_interval_seconds",
+    "profit_only_add",
+    "allow_same_bar_multiple_adds",
+    "leverage_cap",
+]
+
+LAYERING_GUARDRAIL_FIELDS = [
+    "layer_max_total_ratio",
+    "max_layers_per_signal",
+    "min_add_interval_seconds",
+    "profit_only_add",
+    "allow_same_bar_multiple_adds",
+]
+
+
+
 def _slug(value: Any) -> str:
     text = str(value or "unknown").strip().lower().replace(' ', '_')
     return text or 'unknown'
@@ -545,7 +565,9 @@ def build_execution_effective_snapshot(config_helper: Any, symbol: Optional[str]
     conservative_only = bool(guarded_cfg.get('conservative_only', guarded_cfg.get('enforce_conservative_only', True)))
     hints_enabled = bool(guarded_cfg.get('execution_profile_hints_enabled', False))
     enforcement_enabled = bool(guarded_cfg.get('execution_profile_enforcement_enabled', False))
+    layering_hints_enabled = bool(guarded_cfg.get('layering_profile_hints_enabled', hints_enabled))
     layering_enforcement_enabled = bool(guarded_cfg.get('layering_profile_enforcement_enabled', False))
+    layering_plan_shape_enforcement_enabled = bool(guarded_cfg.get('layering_plan_shape_enforcement_enabled', False))
     rollout_symbols = list(guarded_cfg.get('rollout_symbols') or [])
     rollout_match = (not rollout_symbols) or (symbol in rollout_symbols)
     mode = str(normalized_policy.get('mode') or adaptive_cfg.get('mode') or 'observe_only')
@@ -567,7 +589,10 @@ def build_execution_effective_snapshot(config_helper: Any, symbol: Optional[str]
 
     applied_keys = list((merged.get('applied_overrides') or {}).keys())
     enforced_effective = dict(baseline)
+    live_effective = dict(baseline)
     enforced_fields: List[str] = []
+    layering_enforced_fields: List[str] = []
+    hinted_only_fields: List[str] = []
     hint_codes: List[str] = []
     field_decisions: List[Dict[str, Any]] = []
     code_map = {
@@ -579,39 +604,71 @@ def build_execution_effective_snapshot(config_helper: Any, symbol: Optional[str]
         'allow_same_bar_multiple_adds': 'WOULD_DISABLE_SAME_BAR_MULTIPLE_ADDS',
         'leverage_cap': 'WOULD_REDUCE_LEVERAGE_CAP',
     }
-    for field in ['layer_ratios', 'layer_max_total_ratio', 'max_layers_per_signal', 'min_add_interval_seconds', 'profit_only_add', 'allow_same_bar_multiple_adds', 'leverage_cap']:
+    for field in EXECUTION_PROFILE_FIELDS:
         applied = field in applied_keys
-        enforced = effective_state == 'effective' and (field not in {'layer_ratios'} or layering_enforcement_enabled)
         baseline_value = baseline.get(field)
         effective_value = merged['effective'].get(field)
+        is_layer_ratio = field == 'layer_ratios'
+        is_layering_guardrail = field in LAYERING_GUARDRAIL_FIELDS
+        enforce_via_execution = effective_state == 'effective' and applied and field == 'leverage_cap'
+        enforce_via_layering = effective_state == 'effective' and applied and layering_enforcement_enabled and is_layering_guardrail
+        enforce_plan_shape = effective_state == 'effective' and applied and layering_enforcement_enabled and layering_plan_shape_enforcement_enabled and is_layer_ratio
+        enforced = bool(enforce_via_execution or enforce_via_layering or enforce_plan_shape)
         live_value = baseline_value
         reason = 'no_change'
         decision = 'unchanged'
-        if applied and effective_state != 'effective':
-            reason = 'execution_enforcement_disabled'
-            decision = 'applied_candidate'
-        elif applied and field == 'layer_ratios' and not layering_enforcement_enabled:
-            reason = 'layering_enforcement_disabled'
-            decision = 'applied_candidate'
-        elif applied and enforced:
+        ignored = not applied
+
+        if enforced:
             live_value = effective_value
+            live_effective[field] = effective_value
             enforced_effective[field] = effective_value
             enforced_fields.append(field)
+            if is_layering_guardrail:
+                layering_enforced_fields.append(field)
             reason = 'conservative_tighten_enforced'
             decision = 'enforced'
+            ignored = False
+        elif applied and effective_state != 'effective':
+            hinted_only_fields.append(field)
+            reason = 'execution_enforcement_disabled'
+            decision = 'applied_candidate'
+            ignored = False
+        elif applied and is_layer_ratio and not layering_enforcement_enabled:
+            hinted_only_fields.append(field)
+            reason = 'layering_profile_enforcement_disabled'
+            decision = 'hints_only'
+            ignored = False
+        elif applied and is_layer_ratio and not layering_plan_shape_enforcement_enabled:
+            hinted_only_fields.append(field)
+            reason = 'layering_plan_shape_enforcement_disabled'
+            decision = 'hints_only'
+            ignored = False
+        elif applied and is_layering_guardrail and not layering_enforcement_enabled:
+            hinted_only_fields.append(field)
+            reason = 'layering_profile_enforcement_disabled'
+            decision = 'hints_only'
+            ignored = False
         elif applied:
+            hinted_only_fields.append(field)
             reason = 'field_not_live'
             decision = 'applied_candidate'
+            ignored = False
+
         field_decisions.append({
             'field': field,
             'baseline': baseline_value,
             'effective': effective_value,
+            'enforced_value': effective_value if enforced else baseline_value,
             'live': live_value,
             'applied': applied,
-            'ignored': not applied,
+            'ignored': ignored,
             'enforced': enforced,
             'decision': decision,
             'reason': reason,
+            'hint_only': (field in hinted_only_fields),
+            'plan_shape': is_layer_ratio,
+            'guardrail': is_layering_guardrail,
         })
         if applied and code_map.get(field) and code_map[field] not in hint_codes:
             hint_codes.append(code_map[field])
@@ -625,9 +682,14 @@ def build_execution_effective_snapshot(config_helper: Any, symbol: Optional[str]
         'baseline': baseline,
         'effective': merged['effective'],
         'effective_candidate': merged['effective'],
+        'live': live_effective,
         'enforced_profile': enforced_effective,
         'enforced_fields': enforced_fields,
+        'hinted_only_fields': hinted_only_fields,
+        'layering_enforced_fields': layering_enforced_fields,
         'execution_profile_really_enforced': bool(enforced_fields),
+        'layering_profile_really_enforced': bool(layering_enforced_fields),
+        'plan_shape_really_enforced': 'layer_ratios' in enforced_fields,
         'effective_state': effective_state,
         'policy_mode': mode,
         'policy_version': normalized_policy.get('policy_version') or ADAPTIVE_POLICY_VERSION,
@@ -641,7 +703,9 @@ def build_execution_effective_snapshot(config_helper: Any, symbol: Optional[str]
         'observe_only': effective_state != 'effective',
         'hints_enabled': hints_enabled,
         'enforcement_enabled': enforcement_enabled,
+        'layering_hints_enabled': layering_hints_enabled,
         'layering_enforcement_enabled': layering_enforcement_enabled,
+        'layering_plan_shape_enforcement_enabled': layering_plan_shape_enforcement_enabled,
         'conservative_only': conservative_only,
         'rollout_symbols': rollout_symbols,
         'rollout_match': rollout_match,

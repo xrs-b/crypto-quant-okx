@@ -861,3 +861,5 @@ M4 验收不要只看“代码能跑”，而要看是否守住边界。
 - Layering 验收清单：[`docs/layering-acceptance-checklist.md`](./layering-acceptance-checklist.md)
 
 > 这份文档的作用，不是替代主计划，而是把 **“M4 到底能碰什么、不能碰什么、先后顺序怎样、失败了怎么退”** 讲清楚，等真正开做 execution adaptation 时，大家唔使边写边猜。
+
+> 2026-03-26 implementation status：M4 Step 3 第一批已落地 guarded layering live；默认仍安全关闭，只有 `layering_profile_enforcement_enabled=true` 且 rollout 命中时才 live guardrail-like layering 字段，`layer_ratios` 继续 hints-only，需独立 `layering_plan_shape_enforcement_enabled=true` 才允许进入 live plan shape。

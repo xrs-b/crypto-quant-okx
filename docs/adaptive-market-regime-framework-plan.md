@@ -1198,3 +1198,6 @@ adaptive_regime:
 > - `docs/adaptive-market-regime-backlog.md` 作为 **可执行 backlog / 阶段追踪清单**
 >
 > 后续设计变更、阶段完成记录、风险备注，优先写进这两份文档或配套 issue/checklist，而唔好散落喺聊天记录度。
+
+
+> 2026-03-26 implementation status：M4 Step 3 第一批已落地 guarded layering live；默认仍安全关闭，只有 `layering_profile_enforcement_enabled=true` 且 rollout 命中时才 live guardrail-like layering 字段，`layer_ratios` 继续 hints-only，需独立 `layering_plan_shape_enforcement_enabled=true` 才允许进入 live plan shape。

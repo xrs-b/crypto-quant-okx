@@ -356,7 +356,7 @@ class TestExecutionEffectiveSnapshotStep1(unittest.TestCase):
             'guarded_execute': {
                 'execution_profile_hints_enabled': True,
                 'execution_profile_enforcement_enabled': True,
-                'layering_profile_enforcement_enabled': False,
+                'layering_profile_enforcement_enabled': True,
                 'enforce_conservative_only': True,
                 'rollout_symbols': ['BTC/USDT'],
             },
@@ -383,6 +383,99 @@ class TestExecutionEffectiveSnapshotStep1(unittest.TestCase):
         self.assertEqual(snapshot['enforced_profile']['layer_ratios'], snapshot['baseline']['layer_ratios'])
         self.assertNotIn('layer_ratios', snapshot['enforced_fields'])
         self.assertTrue(snapshot['execution_profile_really_enforced'])
+
+    def test_execution_snapshot_step3_default_safe_keeps_guarded_layering_disabled(self):
+        cfg = Config()
+        cfg._config['adaptive_regime'] = {
+            'enabled': True,
+            'mode': 'guarded_execute',
+            'guarded_execute': {
+                'execution_profile_hints_enabled': True,
+                'execution_profile_enforcement_enabled': True,
+                'layering_profile_hints_enabled': True,
+                'layering_profile_enforcement_enabled': False,
+                'layering_plan_shape_enforcement_enabled': False,
+                'rollout_symbols': ['BTC/USDT'],
+            },
+            'regimes': {
+                'high_vol': {
+                    'execution_overrides': {
+                        'layer_max_total_ratio': 0.13,
+                        'min_add_interval_seconds': 600,
+                        'profit_only_add': True,
+                    }
+                }
+            }
+        }
+        snapshot = build_execution_effective_snapshot(
+            cfg, 'BTC/USDT', regime_snapshot=build_regime_snapshot('high_vol', 0.9, {'volatility': 0.05}, '高波动')
+        )
+        self.assertEqual(snapshot['effective_state'], 'effective')
+        self.assertFalse(snapshot['layering_profile_really_enforced'])
+        self.assertFalse(snapshot['plan_shape_really_enforced'])
+        self.assertEqual(snapshot['live'], snapshot['baseline'])
+        self.assertIn('layer_max_total_ratio', snapshot['hinted_only_fields'])
+
+    def test_execution_snapshot_step3_enforces_guardrail_fields_without_layer_ratios(self):
+        cfg = Config()
+        cfg._config['adaptive_regime'] = {
+            'enabled': True,
+            'mode': 'guarded_execute',
+            'guarded_execute': {
+                'execution_profile_hints_enabled': True,
+                'execution_profile_enforcement_enabled': True,
+                'layering_profile_hints_enabled': True,
+                'layering_profile_enforcement_enabled': True,
+                'layering_plan_shape_enforcement_enabled': False,
+                'rollout_symbols': ['BTC/USDT'],
+            },
+            'regimes': {
+                'high_vol': {
+                    'execution_overrides': {
+                        'layer_ratios': [0.05, 0.05, 0.03],
+                        'layer_max_total_ratio': 0.13,
+                        'max_layers_per_signal': 1,
+                        'min_add_interval_seconds': 600,
+                        'profit_only_add': True,
+                    }
+                }
+            }
+        }
+        snapshot = build_execution_effective_snapshot(
+            cfg, 'BTC/USDT', regime_snapshot=build_regime_snapshot('high_vol', 0.9, {'volatility': 0.05}, '高波动')
+        )
+        self.assertTrue(snapshot['layering_profile_really_enforced'])
+        self.assertFalse(snapshot['plan_shape_really_enforced'])
+        self.assertEqual(snapshot['live']['layer_max_total_ratio'], 0.13)
+        self.assertEqual(snapshot['live']['min_add_interval_seconds'], 600)
+        self.assertTrue(snapshot['live']['profit_only_add'])
+        self.assertEqual(snapshot['live']['layer_ratios'], snapshot['baseline']['layer_ratios'])
+        self.assertIn('layer_ratios', snapshot['hinted_only_fields'])
+        layer_ratio = next(item for item in snapshot['field_decisions'] if item['field'] == 'layer_ratios')
+        self.assertEqual(layer_ratio['reason'], 'layering_plan_shape_enforcement_disabled')
+
+    def test_execution_snapshot_step3_never_live_layer_ratios_without_shape_switch(self):
+        cfg = Config()
+        cfg._config['adaptive_regime'] = {
+            'enabled': True,
+            'mode': 'guarded_execute',
+            'guarded_execute': {
+                'execution_profile_hints_enabled': True,
+                'execution_profile_enforcement_enabled': True,
+                'layering_profile_enforcement_enabled': True,
+                'layering_plan_shape_enforcement_enabled': False,
+                'rollout_symbols': ['BTC/USDT'],
+            },
+            'regimes': {
+                'high_vol': {'execution_overrides': {'layer_ratios': [0.05, 0.05, 0.03]}}
+            }
+        }
+        snapshot = build_execution_effective_snapshot(
+            cfg, 'BTC/USDT', regime_snapshot=build_regime_snapshot('high_vol', 0.9, {'volatility': 0.05}, '高波动')
+        )
+        self.assertEqual(snapshot['effective']['layer_ratios'], [0.05, 0.05, 0.03])
+        self.assertEqual(snapshot['live']['layer_ratios'], snapshot['baseline']['layer_ratios'])
+        self.assertFalse(snapshot['plan_shape_really_enforced'])
 
     def test_execution_snapshot_step2_never_loosens_baseline_and_exposes_live_field_decisions(self):
         cfg = Config()

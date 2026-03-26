@@ -505,6 +505,7 @@
   - 第一批 live 字段：`layer_max_total_ratio`、`max_layers_per_signal`、`min_add_interval_seconds`、`profit_only_add`（`allow_same_bar_multiple_adds` 作为附属节奏 guardrail）
   - `layer_ratios` 默认继续 hints-only，等第二批 rollout 才允许进入 live layer plan
   - 详细实施拆分见：[`docs/adaptive-market-regime-m4-step3-implementation.md`](./adaptive-market-regime-m4-step3-implementation.md)
+  - 2026-03-26 update：第一批 guarded layering live 已接入 execution/layering 路径；`layer_max_total_ratio`、`max_layers_per_signal`、`min_add_interval_seconds`、`profit_only_add`、`allow_same_bar_multiple_adds` 可在 `layering_profile_enforcement_enabled=true` + rollout 命中时真生效，`layer_ratios` 仍只做 hints / audit。
 
 ### AR-M4-04｜trailing / partial TP regime profile 化（可选增强）
 

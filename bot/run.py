@@ -100,6 +100,10 @@ def build_runtime_health_summary(cfg: Config, db: Database) -> dict:
         })
 
     last_summary = runtime.get('last_summary') or {}
+    adaptive_cfg = cfg.get_adaptive_regime_config() if hasattr(cfg, 'get_adaptive_regime_config') else (cfg.get('adaptive_regime', {}) or {})
+    adaptive_defaults = adaptive_cfg.get('defaults', {}) if isinstance(adaptive_cfg, dict) else {}
+    adaptive_mode = adaptive_cfg.get('mode', 'observe_only') if isinstance(adaptive_cfg, dict) else 'observe_only'
+    adaptive_enabled = bool(adaptive_cfg.get('enabled', False)) if isinstance(adaptive_cfg, dict) else False
     lines = [
         f'环境：{cfg.exchange_mode}',
         f'监听币种：{", ".join(cfg.symbols) or "--"}',
@@ -110,6 +114,9 @@ def build_runtime_health_summary(cfg: Config, db: Database) -> dict:
         f'最近一轮：signals {last_summary.get("signals", 0)} ｜ passed {last_summary.get("passed", 0)} ｜ opened {last_summary.get("opened", 0)} ｜ errors {last_summary.get("errors", 0)}',
         f'风险状态：{risk.get("status") or "--"} ｜ 暴露 {risk.get("current_exposure", 0)} / {risk.get("max_exposure", 0)}',
         f'余额：total {round(float(balance.get("total", 0) or 0), 2)} ｜ free {round(float(balance.get("free", 0) or 0), 2)}',
+        '---',
+        f'Adaptive Regime：mode={adaptive_mode} ｜ enabled={"yes" if adaptive_enabled else "no"} ｜ policy={adaptive_defaults.get("policy_version") or "--"}',
+        '说明：当前仍为 observe-only 展示层，不改真实交易行为。',
     ]
     if risk.get('loss_streak_locked'):
         lines.extend(['---', f'连亏熔断：{risk.get("consecutive_losses", 0)}/{risk.get("max_consecutive_losses", 0)} ｜ 自动恢复 {risk.get("loss_streak_recover_at") or "--"}'])

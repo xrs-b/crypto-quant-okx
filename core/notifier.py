@@ -239,6 +239,73 @@ class NotificationManager:
             pairs.append(f'{key}={value}')
         return ' | '.join(pairs) if pairs else '--'
 
+    def _extract_observe_only_context(self, signal=None, details: Dict = None) -> Dict:
+        details = details or {}
+        observe = details.get('adaptive_regime_observe_only') if isinstance(details.get('adaptive_regime_observe_only'), dict) else {}
+        entry_decision = details.get('entry_decision') if isinstance(details.get('entry_decision'), dict) else {}
+        breakdown = entry_decision.get('breakdown') if isinstance(entry_decision.get('breakdown'), dict) else {}
+        policy_snapshot = details.get('adaptive_policy_snapshot') if isinstance(details.get('adaptive_policy_snapshot'), dict) else {}
+        regime_snapshot = details.get('regime_snapshot') if isinstance(details.get('regime_snapshot'), dict) else {}
+
+        if signal is not None:
+            if not regime_snapshot:
+                regime_snapshot = getattr(signal, 'regime_snapshot', None) or getattr(signal, 'regime_info', None) or {}
+            if not policy_snapshot:
+                policy_snapshot = getattr(signal, 'adaptive_policy_snapshot', None) or {}
+
+        tags = list(observe.get('tags') or breakdown.get('observe_only_tags') or policy_snapshot.get('tags') or [])
+        summary = (
+            observe.get('summary')
+            or breakdown.get('observe_only_summary')
+            or policy_snapshot.get('summary')
+            or '--'
+        )
+        phase = (
+            observe.get('phase')
+            or breakdown.get('observe_only_phase')
+            or policy_snapshot.get('phase')
+            or '--'
+        )
+        state = (
+            observe.get('state')
+            or breakdown.get('observe_only_state')
+            or policy_snapshot.get('state')
+            or '--'
+        )
+        regime_name = regime_snapshot.get('name') or regime_snapshot.get('regime') or policy_snapshot.get('regime_name') or '--'
+        confidence = regime_snapshot.get('confidence', policy_snapshot.get('regime_confidence'))
+        confidence_text = '--'
+        try:
+            if confidence is not None:
+                confidence_text = f"{float(confidence):.0%}"
+        except Exception:
+            confidence_text = str(confidence)
+        mode = policy_snapshot.get('mode') or ('observe_only' if 'observe_only' in tags else '--')
+        return {
+            'summary': summary,
+            'phase': phase,
+            'state': state,
+            'tags': tags,
+            'regime_name': regime_name,
+            'confidence_text': confidence_text,
+            'mode': mode,
+        }
+
+    def _build_observe_only_lines(self, signal=None, details: Dict = None, limit: int = 4) -> List[str]:
+        ctx = self._extract_observe_only_context(signal, details)
+        if not ctx['summary'] or ctx['summary'] == '--':
+            return []
+        tags = ' / '.join(ctx['tags'][:limit]) if ctx['tags'] else '--'
+        return [
+            '---',
+            '【Adaptive Regime（Observe-only）】',
+            f"Regime：{ctx['regime_name']} ｜ 置信度：{ctx['confidence_text']}",
+            f"Policy：{ctx['mode']} ｜ Phase/State：{ctx['phase']} / {ctx['state']}",
+            f"摘要：{ctx['summary']}",
+            f"标签：{tags}",
+            '说明：只增强观察与汇总展示，不改变真实交易执行。',
+        ]
+
     def send(self, event_type: str, title: str, lines: List[str], level: str = 'info', details: Dict = None, priority: str = 'normal', components: List[Dict] = None) -> Dict:
         body = self._render_message(title, lines)
         suppressed, message_key, aggregate_summary = self._should_suppress(event_type, body)
@@ -281,6 +348,7 @@ class NotificationManager:
         direction = '🟢 做多' if signal_type == 'buy' else '🔴 做空'
         priority = 'high' if passed else 'normal'
         pmeta = self._priority_meta(priority)
+        payload = {'signal': signal.to_dict() if hasattr(signal, 'to_dict') else {}, 'details': details or {}}
         lines = [
             '【信号概览】',
             f'通知等级：{pmeta["emoji"]} {pmeta["label"]}',
@@ -297,7 +365,8 @@ class NotificationManager:
             '【时间信息】',
             f'触发时间：{self._format_time(getattr(signal, "timestamp", None))}',
         ]
-        return self.send('signal', title, lines, 'info', {'signal': signal.to_dict() if hasattr(signal, 'to_dict') else {}, 'details': details or {}}, priority=priority)
+        lines.extend(self._build_observe_only_lines(signal, details))
+        return self.send('signal', title, lines, 'info', payload, priority=priority)
 
     def notify_decision(self, signal, allowed: bool, reason: str = None, details: Dict = None) -> Dict:
         title = '🤖 机器人决策：通过' if allowed else '🛑 机器人决策：拒绝'
@@ -321,6 +390,7 @@ class NotificationManager:
         failed_checks = [f"{k}: {v.get('reason', '未通过')}" for k, v in details.items() if isinstance(v, dict) and not v.get('passed', True)]
         if failed_checks:
             lines.extend(['---', '【风控拦截】', f'拒绝明细：{" | ".join(failed_checks[:3])}'])
+        lines.extend(self._build_observe_only_lines(signal, details))
         return self.send('decision', title, lines, 'info' if allowed else 'warning', {'signal': signal.to_dict() if hasattr(signal, 'to_dict') else {}, 'details': details}, priority=priority)
 
     def notify_trade_open(self, symbol: str, side: str, price: float, quantity: float, trade_id: int = None, signal=None, quantity_details: Dict = None) -> Dict:
@@ -351,6 +421,7 @@ class NotificationManager:
             f'触发策略：{self._format_strategies(getattr(signal, "strategies_triggered", []) or [])}',
             f'建议动作：观察止盈止损是否按预期挂单/触发',
         ])
+        lines.extend(self._build_observe_only_lines(signal))
         return self.send('trade', '✅ 开仓执行成功', lines, 'info', {'trade_id': trade_id, 'symbol': symbol, 'side': side, 'quantity_details': quantity_details}, priority=priority)
 
     def notify_trade_open_failed(self, symbol: str, side: str, price: float, reason: str, signal=None, details: Dict = None) -> Dict:
@@ -371,6 +442,7 @@ class NotificationManager:
             '【建议动作】',
             '优先检查交易所返回码、仓位模式、下单参数与余额',
         ]
+        lines.extend(self._build_observe_only_lines(signal, details))
         return self.send('trade', '❌ 开仓执行失败', lines, 'error', details or {}, priority=priority)
 
     def notify_trade_close(self, symbol: str, side: str, close_price: float, reason: str, pnl: float = None) -> Dict:

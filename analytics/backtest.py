@@ -269,6 +269,9 @@ class StrategyBacktester:
         total_wins = sum(x['wins'] for x in symbol_results)
         total_return = sum(x['total_return_pct'] for x in symbol_results)
         max_drawdown = min([x['max_drawdown_pct'] for x in symbol_results], default=0.0)
+        observe_only_tags = sorted({tag for row in symbol_results for tag in (row.get('observe_only_tags') or []) if tag})
+        regime_tags = sorted({tag for row in symbol_results for tag in (row.get('regime_tags') or []) if tag})
+        policy_tags = sorted({tag for row in symbol_results for tag in (row.get('policy_tags') or []) if tag})
         return {
             'summary': {
                 'symbols': len(symbol_results),
@@ -276,6 +279,11 @@ class StrategyBacktester:
                 'win_rate': round((total_wins / total_trades * 100), 2) if total_trades else 0.0,
                 'total_return_pct': round(total_return, 4),
                 'max_drawdown_pct': round(max_drawdown, 4),
+                'observe_only': True,
+                'observe_only_tags': observe_only_tags,
+                'observe_only_banner': 'Adaptive regime / policy currently run in observe-only mode; backtest outputs are display-only and do not alter execution logic.',
+                'regime_tags': regime_tags,
+                'policy_tags': policy_tags,
             },
             'symbols': symbol_results,
         }

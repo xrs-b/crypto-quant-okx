@@ -1085,13 +1085,17 @@ class TestNotifications(unittest.TestCase):
     def test_notify_signal_and_decision_store_logs(self):
         cfg = Config()
         cfg._config.setdefault('notification', {}).setdefault('discord', {})
-        cfg._config['notification']['discord'].update({'enabled': False})
+        cfg._config['notification']['discord'].update({'enabled': False, 'bot_token': '', 'channel_id': '', 'webhook_url': ''})
         db = FakeLogDB()
         notifier = NotificationManager(cfg, db, None)
         from signals.detector import Signal
-        signal = Signal(symbol='BTC/USDT', signal_type='buy', price=50000, strength=88, strategies_triggered=['RSI', 'MACD'])
+        signal = Signal(
+            symbol='BTC/USDT', signal_type='buy', price=50000, strength=88, strategies_triggered=['RSI', 'MACD'],
+            regime_snapshot=build_regime_snapshot('trend', 0.82, {'ema_gap': 0.03, 'ema_direction': 1, 'volatility': 0.01}, '趋势上涨'),
+            adaptive_policy_snapshot=resolve_regime_policy(cfg, 'BTC/USDT', build_regime_snapshot('trend', 0.82, {'ema_gap': 0.03, 'ema_direction': 1, 'volatility': 0.01}, '趋势上涨')),
+        )
         notifier.notify_signal(signal, True, None, {'passed': True})
-        notifier.notify_decision(signal, False, '风险拒绝', {'risk_gate': {'passed': False, 'reason': '风险拒绝'}})
+        notifier.notify_decision(signal, False, '风险拒绝', {'risk_gate': {'passed': False, 'reason': '风险拒绝'}, 'adaptive_policy_snapshot': signal.adaptive_policy_snapshot, 'regime_snapshot': signal.regime_snapshot})
         notifier.notify_trade_open('XRP/USDT', 'long', 1.48, 61040, trade_id=99, signal=signal, quantity_details={'contracts': 61040, 'contract_size': 0.01, 'coin_quantity': 610.4, 'notional_usdt': 903.39})
         notifier.notify_trade_open_failed('BTC/USDT', 'long', 50000, '交易所拒绝', signal, {'code': 'mock'})
         notifier.notify_trade_close_failed('BTC/USDT', 'long', '平仓失败', {'code': 'mock'})
@@ -1110,7 +1114,9 @@ class TestNotifications(unittest.TestCase):
         self.assertIn('下单张数：61,040', db.logs[2]['details']['message'])
         self.assertIn('折算数量：610.4 XRP', db.logs[2]['details']['message'])
         self.assertIn('通知等级：⚠️ 重要', db.logs[0]['details']['message'])
-        self.assertIn('====================', db.logs[0]['details']['message'])
+        self.assertIn('--------------------------------------------------------------', db.logs[0]['details']['message'])
+        self.assertIn('【Adaptive Regime（Observe-only）】', db.logs[0]['details']['message'])
+        self.assertIn('只增强观察与汇总展示，不改变真实交易执行', db.logs[0]['details']['message'])
         self.assertIn('【风控拦截】', db.logs[1]['details']['message'])
         self.assertIn('通知等级：🚨 紧急', db.logs[1]['details']['message'])
         self.assertIn('风险拒绝', db.logs[1]['details']['message'])
@@ -2115,6 +2121,8 @@ class TestHealthSummary(unittest.TestCase):
             self.assertIn('details', summary)
             self.assertTrue(any('环境' in line for line in summary['lines']))
             self.assertTrue(any('最近一轮' in line for line in summary['lines']))
+            self.assertTrue(any('Adaptive Regime' in line for line in summary['lines']))
+            self.assertTrue(any('observe-only' in line for line in summary['lines']))
         finally:
             if os.path.exists('data/test_health_summary.db'):
                 os.remove('data/test_health_summary.db')
@@ -2857,6 +2865,31 @@ class TestBacktestObserveOnlyTags(unittest.TestCase):
             self.assertTrue(trade['observe_only_summary'])
             self.assertIn('observe_only', trade['observe_only_tags']['tags'])
 
+    def test_backtest_aggregate_summary_includes_observe_only_banner(self):
+        cfg = Config()
+        backtester = StrategyBacktester(cfg)
+        summary = backtester._aggregate_results([
+            {
+                'symbol': 'BTC/USDT',
+                'trades': 2,
+                'wins': 1,
+                'losses': 1,
+                'win_rate': 50.0,
+                'total_return_pct': 3.2,
+                'avg_return_pct': 1.6,
+                'max_drawdown_pct': -1.1,
+                'recent_trades': [],
+                'regime_tags': ['trend'],
+                'policy_tags': ['adaptive_policy_v1_m1'],
+                'observe_only_tags': ['observe_only', 'adaptive_regime'],
+            }
+        ])
+        self.assertTrue(summary['summary']['observe_only'])
+        self.assertIn('observe-only', summary['summary']['observe_only_banner'])
+        self.assertIn('observe_only', summary['summary']['observe_only_tags'])
+        self.assertIn('trend', summary['summary']['regime_tags'])
+        self.assertIn('adaptive_policy_v1_m1', summary['summary']['policy_tags'])
+
 
 def run_tests():
     """运行所有测试"""
@@ -2970,10 +3003,37 @@ class TestExecutionObservability(unittest.TestCase):
             db = Database(os.path.join(tmpdir, 'test.db'))
             db.update_position(symbol='BTC/USDT:USDT', side='long', entry_price=50000, quantity=10, contract_size=0.01, coin_quantity=0.1, leverage=10, current_price=51000)
             signal_id = db.record_signal(symbol='BTC/USDT:USDT', signal_type='buy', price=50000, strength=80, reasons=[], strategies_triggered=[])
-            db.update_signal(signal_id, filter_details=json.dumps({'observability': {'signal_id': signal_id, 'root_signal_id': signal_id, 'layer_no': 1, 'deny_reason': 'direction_lock', 'current_symbol_exposure': 0.05, 'projected_symbol_exposure': 0.11, 'current_total_exposure': 0.05, 'projected_total_exposure': 0.11}}, ensure_ascii=False), filtered=1, filter_reason='方向锁占用中')
+            regime_snapshot = build_regime_snapshot('trend', 0.81, {'ema_gap': 0.03, 'ema_direction': 1, 'volatility': 0.01}, '趋势上涨')
+            adaptive_policy_snapshot = resolve_regime_policy(Config(), 'BTC/USDT:USDT', regime_snapshot)
+            db.update_signal(signal_id, filter_details=json.dumps({
+                'observability': {'signal_id': signal_id, 'root_signal_id': signal_id, 'layer_no': 1, 'deny_reason': 'direction_lock', 'current_symbol_exposure': 0.05, 'projected_symbol_exposure': 0.11, 'current_total_exposure': 0.05, 'projected_total_exposure': 0.11},
+                'regime_snapshot': regime_snapshot,
+                'adaptive_policy_snapshot': adaptive_policy_snapshot,
+                'adaptive_regime_observe_only': {
+                    'phase': adaptive_policy_snapshot.get('phase'),
+                    'state': adaptive_policy_snapshot.get('state'),
+                    'summary': adaptive_policy_snapshot.get('summary'),
+                    'tags': list(adaptive_policy_snapshot.get('tags') or []),
+                },
+                'entry_decision': {
+                    'decision': 'block',
+                    'score': 52,
+                    'reason_summary': '观测态样本',
+                    'breakdown': {
+                        'observe_only_phase': adaptive_policy_snapshot.get('phase'),
+                        'observe_only_state': adaptive_policy_snapshot.get('state'),
+                        'observe_only_summary': adaptive_policy_snapshot.get('summary'),
+                        'observe_only_tags': list(adaptive_policy_snapshot.get('tags') or []),
+                    },
+                },
+            }, ensure_ascii=False), filtered=1, filter_reason='方向锁占用中')
             db.create_open_intent(symbol='BTC/USDT:USDT', side='long', signal_id=signal_id, root_signal_id=signal_id, planned_margin=60, leverage=10, layer_no=1, plan_context={'foo': 'bar'})
             snapshot = db.get_execution_state_snapshot()
             self.assertIn('exposure', snapshot)
             self.assertGreater(snapshot['exposure']['projected_total_margin'], snapshot['exposure']['current_total_margin'])
             self.assertTrue(snapshot['signal_decisions'])
             self.assertEqual(snapshot['signal_decisions'][0]['deny_reason'], 'direction_lock')
+            self.assertTrue(snapshot['signal_decisions'][0]['observe_only'])
+            self.assertEqual(snapshot['signal_decisions'][0]['policy_mode'], 'observe_only')
+            self.assertTrue(snapshot['signal_decisions'][0]['observe_only_summary'])
+            self.assertIn('observe_only', snapshot['signal_decisions'][0]['observe_only_tags'])

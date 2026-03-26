@@ -1842,6 +1842,11 @@ class Database:
             fd = self._safe_json_dict(row.get('filter_details'))
             obs = self._safe_json_dict(fd.get('observability'))
             entry_decision = self._safe_json_dict(fd.get('entry_decision'))
+            policy_snapshot = self._safe_json_dict(fd.get('adaptive_policy_snapshot'))
+            regime_snapshot = self._safe_json_dict(fd.get('regime_snapshot'))
+            adaptive_observe = self._safe_json_dict(fd.get('adaptive_regime_observe_only'))
+            breakdown = self._safe_json_dict(entry_decision.get('breakdown'))
+            observe_only_tags = adaptive_observe.get('tags') or breakdown.get('observe_only_tags') or policy_snapshot.get('tags') or []
             digest.append({
                 'id': row.get('id'),
                 'created_at': row.get('created_at'),
@@ -1852,6 +1857,15 @@ class Database:
                 'decision': entry_decision.get('decision') or ('executed' if row.get('executed') else ('blocked' if row.get('filtered') else 'watch')),
                 'decision_reason': row.get('filter_reason') or entry_decision.get('reason_summary') or '--',
                 'signal_score': entry_decision.get('score'),
+                'observe_only': True,
+                'observe_only_phase': adaptive_observe.get('phase') or breakdown.get('observe_only_phase') or policy_snapshot.get('phase'),
+                'observe_only_state': adaptive_observe.get('state') or breakdown.get('observe_only_state') or policy_snapshot.get('state'),
+                'observe_only_summary': adaptive_observe.get('summary') or breakdown.get('observe_only_summary') or policy_snapshot.get('summary'),
+                'observe_only_tags': list(observe_only_tags or []),
+                'regime_name': regime_snapshot.get('name') or regime_snapshot.get('regime') or policy_snapshot.get('regime_name'),
+                'regime_confidence': regime_snapshot.get('confidence') if regime_snapshot else policy_snapshot.get('regime_confidence'),
+                'policy_mode': policy_snapshot.get('mode'),
+                'policy_version': policy_snapshot.get('policy_version'),
                 'signal_id': obs.get('signal_id') or row.get('id'),
                 'root_signal_id': obs.get('root_signal_id'),
                 'layer_no': obs.get('layer_no'),

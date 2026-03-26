@@ -2,6 +2,10 @@
 
 > 配套主计划：[`docs/adaptive-market-regime-framework-plan.md`](./adaptive-market-regime-framework-plan.md)
 >
+> M3 边界方案：[`docs/adaptive-market-regime-m3-boundary-plan.md`](./adaptive-market-regime-m3-boundary-plan.md)
+>
+> M4 边界方案：[`docs/adaptive-market-regime-m4-boundary-plan.md`](./adaptive-market-regime-m4-boundary-plan.md)
+>
 > 这份 backlog 不是重复方案，而是把方案拆成**可执行、可追踪、可灰度、可回滚**的开发清单，供后续主力开发按阶段推进。
 
 ---
@@ -431,6 +435,8 @@
 ---
 
 ## 7. M4：Execution Parameter Adaptation（开始影响 execution）
+
+> M4 执行边界、禁区、最小生效包、灰度/回滚策略详见：[`docs/adaptive-market-regime-m4-boundary-plan.md`](./adaptive-market-regime-m4-boundary-plan.md)
 
 ### AR-M4-01｜execution profile 支持 regime layer ratio override
 

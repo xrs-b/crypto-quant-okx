@@ -874,6 +874,8 @@ symbol_override.adaptive_regime
 
 ## M4：Execution Parameter Adaptation（轻度执行参数自适应）
 
+> M4 执行边界、禁区、最小生效包、灰度/回滚策略详见：[`docs/adaptive-market-regime-m4-boundary-plan.md`](./adaptive-market-regime-m4-boundary-plan.md)
+
 ### 目标
 
 在风险受控前提下，让 layer ratios / trailing / partial TP 轻量自适应。

@@ -2,6 +2,8 @@
 
 面向准备把本项目作为 **public repo** 分享时的保留/排除约定。
 
+> 维护策略：**公共仓库是唯一长期代码主线；私人环境只保留 config / secret / logs / db / runtime state 等运行态内容。**
+
 ## 公开仓库应保留
 
 这些内容适合留在公开仓库，方便别人 clone 后理解、安装、测试：
@@ -19,6 +21,8 @@
 - 部署与使用文档：
   - `README.md`
   - `docs/DEPLOYMENT.md`
+  - `docs/PUBLIC-MAINLINE-WORKFLOW.md`
+  - `docs/GITHUB-PUBLIC-REPO-COPY.md`
   - `PUBLIC-RELEASE-CHECKLIST.md`
   - 本文件
 - 测试：`tests/`
@@ -81,7 +85,7 @@
 
 ## 推荐工作流
 
-- **私有运行仓库**：保留你的真实运行态、日志、数据库、本地配置
-- **公开分享仓库**：只保留核心代码、示例配置、脱敏文档、测试与模板脚本
+- **公共 GitHub 仓库**：唯一长期代码主线，只保留核心代码、示例配置、脱敏文档、测试与模板脚本
+- **私人运行环境**：只保留你的真实运行态、日志、数据库、本地配置、`.env`、`config.local` 与机器专属部署文件
 
-如果二者长期混在同一个仓库，发布前请至少再做一次完整人工复核。
+如果二者长期混在同一个工作目录，发布前请至少再做一次完整人工复核，并遵守：[`docs/PUBLIC-MAINLINE-WORKFLOW.md`](docs/PUBLIC-MAINLINE-WORKFLOW.md)

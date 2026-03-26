@@ -10,6 +10,8 @@
 
 - `crypto-quant-okx`
 
+并明确把它作为：**唯一长期公共代码主线仓库**。
+
 可选备选：
 
 - `okx-quant-trading-kit`
@@ -78,17 +80,25 @@
 
 1. 完成最终 secrets / history / ignore 复核
 2. 跑基础语法检查与必要测试
-3. 核对 README、DEPLOYMENT、MANIFEST、CHECKLIST、LICENSE 一致
+3. 核对 README、DEPLOYMENT、MANIFEST、CHECKLIST、LICENSE、一致性文案与 workflow 文档
 4. 确认公开版只保留 `btc-focused` + `safe-mode`
-5. 提交一个“public release prep”收尾 commit
-6. 推到新的 public repo
-7. 打 tag：`v0.1.0`
-8. 编写 GitHub Release Notes
-9. 用公开仓库地址重新走一次 README 最短部署链路
+5. 明确对外说明：**public repo 是唯一代码主线，private 环境只保留运行态**
+6. 提交一个“public release prep”收尾 commit
+7. 推到新的 public repo
+8. 打 tag：`v0.1.0`
+9. 编写 GitHub Release Notes
+10. 用公开仓库地址重新走一次 README 最短部署链路
 
 ---
 
-## 6. 建议 release notes 骨架
+## 6. GitHub 门面文案
+
+- 推荐仓库名：`crypto-quant-okx`
+- GitHub short description：`An OKX-focused quant trading system for research, testnet deployment, and operator-supervised automation.`
+- topics 建议见：[`docs/GITHUB-PUBLIC-REPO-COPY.md`](GITHUB-PUBLIC-REPO-COPY.md)
+- about / description 草稿与 release notes 草稿见：[`docs/GITHUB-PUBLIC-REPO-COPY.md`](GITHUB-PUBLIC-REPO-COPY.md)
+
+## 7. 建议 release notes 骨架
 
 标题：
 
@@ -127,7 +137,7 @@
 
 ---
 
-## 7. 发布公告骨架
+## 8. 发布公告骨架
 
 可用于 GitHub / Discord / Telegram / 朋友圈技术说明的短文案：
 
@@ -143,7 +153,7 @@
 
 ---
 
-## 8. 首版之后建议的下一步
+## 9. 首版之后建议的下一步
 
 `v0.1.x` 可继续补：
 - bootstrap / doctor 脚本

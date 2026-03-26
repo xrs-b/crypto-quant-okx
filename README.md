@@ -1,173 +1,166 @@
-# OKX 合约量化交易机器人
+# crypto-quant-okx
 
-[![Python](https://img.shields.io/badge/Python-3.9+-blue.svg)](https://www.python.org/)
-[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+一个面向 **OKX U 本位合约** 的量化交易系统，支持 **信号检测、进场审批、风险控制、分层开仓（layering）、持仓对账、通知推送、Dashboard 观察、回测与参数分析**。
 
-基于机器学习的 OKX 合约自动交易系统，支持做多/做空、智能止盈止损、追踪止损等功能。
+> 这个项目更适合有一定 Python / 量化 / 交易所 API 使用经验的开发者或朋友交流学习。  
+> **不建议零基础用户直接上实盘。**
+
+---
 
 ## ⚠️ 风险提示
 
-> **重要**：合约交易风险极高，可能亏损全部资金！
-> - 请先用模拟盘 (testnet) 充分测试
-> - 请设置合理的止损止盈比例
-> - 不要投入超过承受能力的资金
-> - 本项目仅供学习交流，不构成投资建议
+**合约交易风险极高，可能亏损全部本金。**
 
-## ✨ 功能特性
+在使用本项目之前，请先接受以下事实：
 
-### 核心交易
-- 🤖 **ML模型预测** - Random Forest 模型预测涨跌概率
-- 📈 **多空双向** - 支持做多 (Long) 和做空 (Short)
-- 💰 **仓位管理** - 最大30%仓位，单笔10%
-- ⚡ **杠杆交易** - 支持1-50倍杠杆
+- 自动交易系统不保证盈利
+- 交易所 API、网络、配置错误都可能导致异常行为
+- 杠杆会同时放大收益和亏损
+- 任何实盘操作都应先在 **testnet / 模拟环境** 做完整验收
 
-### 风险管理
-- 🛡️ **固定止损** - 按杠杆计算亏损比例
-- 🎯 **固定止盈** - 按杠杆计算盈利比例
-- 📊 **分批止盈** - 50%仓位4%止盈，50%追踪止损
-- 🔄 **追踪止损** - 价格回调自动平仓，持久化存储
+**强烈建议先用 testnet 跑通以下链路：**
 
-### 信号系统
-- 📉 **RSI指标** - 14周期，相对强弱指数
-- 📊 **MACD指标** - 12/26/9，指数平滑异同移动平均线
-- 🎯 **信号强度** - 显示置信度百分比
-- 🤖 **ML确认** - 需要 ML 高概率确认才交易
+1. 读取余额
+2. 读取合约信息
+3. 通知测试
+4. 生成 smoke plan
+5. 执行最小 testnet 开平仓验收
+6. 观察日志、Dashboard、数据库是否一致
 
-### 其他
-- 📝 **交易日志** - 记录所有交易历史
-- 🔔 **Discord推送** - 实时推送交易信号 / 决策 / 交易 / 错误（第一版）
-- ⚙️ **配置驱动** - 所有参数从 config.yaml 读取
+---
 
-## 🏗️ 技术栈
+## 项目简介
 
-| 技术 | 说明 |
-|------|------|
-| Python 3.9+ | 编程语言 |
-| ccxt | 交易所 API 封装 |
-| scikit-learn | ML 模型训练 |
-| pandas | 数据处理 |
-| PyYAML | 配置文件解析 |
+`crypto-quant-okx` 不是单纯的“自动下单脚本”，而是一套偏工程化的交易系统，核心目标是：
 
-## 📁 目录结构
+- 自动检测候选交易信号
+- 用验证层与进场审批层过滤低质量机会
+- 用风险预算与仓位限制控制暴露
+- 支持分层开仓（layering）
+- 通过本地数据库、日志、Dashboard 和通知系统提升可观察性
+- 为回测、信号质量分析、参数优化预留接口
 
-```
-crypto-quant-okx/
-├── bot/
-│   ├── main.py                # 主入口（旧版兼容）
-│   └── run.py                 # 当前主运行入口 / CLI / dashboard
-├── ml/
-│   ├── train_model.py         # 训练模型
-│   ├── simple_model.py        # 简单模型
-│   ├── collect_data.py        # 收集历史数据
-│   └── *_model.pkl           # 训练好的模型
-├── strategies/
-│   └── *.py                  # 交易策略
-├── data/
-│   └── *.py                  # 数据处理
-├── config/
-│   ├── config.yaml            # 本地运行配置（已 git ignore）
-│   ├── config.local.yaml      # 本地私密覆盖（已 git ignore，可选）
-│   ├── config.yaml.example    # 可公开提交的完整示例配置
-│   └── config.local.yaml.example # 私密配置示例
-├── README.md                  # 项目说明
-└── requirements.txt           # 依赖
-```
+当前项目围绕 **OKX 合约** 场景设计，默认支持：
 
-## 🚀 快速开始
+- `testnet`：模拟盘
+- `real`：真实盘
+
+---
+
+## 适合谁 / 不适合谁
+
+### 适合
+- 想自己跑 OKX 合约 testnet / real 的开发者
+- 会改 YAML 配置、能看日志、能接受策略需要持续观察的人
+- 想保留“可解释、可监督、可回滚”运行方式的人
+- 想通过 OpenClaw 作为运维入口管理量化系统的人
+
+### 不太适合
+- 希望“下载即赚钱”的用户
+- 不理解杠杆 / 风控 / API 权限风险的人
+- 不愿意先做 testnet 验证的人
+
+---
+
+## 功能特性
+
+### 1) 信号与进场审批
+- 多指标信号检测
+- 信号验证与过滤
+- Entry Decision 进场审批层
+- 支持按币种局部覆盖参数（`symbol_overrides`）
+
+### 2) 风险控制
+- 总暴露上限控制
+- 单币种仓位上限
+- 连续亏损熔断
+- 冷却时间控制
+- 固定止损 / 止盈 / 追踪止损
+
+### 3) 分层开仓（Layering）
+- 多层计划仓位
+- 同方向锁（direction lock）
+- 信号幂等控制（signal idempotency）
+- 同周期重复加仓限制
+- 平仓后 layer state 自动 reset
+
+### 4) 对账与自愈
+- 交易所持仓、本地 positions、本地 open trades 三方对账
+- 自动补建缺失 open trade
+- 自动清理 orphan intents / locks
+- 自动同步 layer plan state
+
+### 5) 可观察性
+- Flask Dashboard
+- Discord / Telegram / Email 通知能力
+- 运行状态记录
+- 信号过滤原因可追踪
+- 分仓验收辅助脚本
+
+### 6) 研究与分析
+- 历史数据收集
+- ML 模型训练
+- 回测
+- 信号质量分析
+- 参数优化与候选币审查
+
+---
+
+## 系统要求
+
+### 基础要求
+- Python **3.9+**
+- macOS 或 Linux
+- OKX API（建议先用 testnet）
+- 建议使用项目虚拟环境 `.venv`
+
+### 主要依赖
+见 `requirements.txt`：
+
+- `ccxt`
+- `pandas`
+- `pandas-ta`
+- `pyyaml`
+- `requests`
+- `flask`
+- `flask-cors`
+- `scikit-learn`
+- `joblib`
+
+---
+
+## 快速开始
 
 ### 1. 克隆项目
 
 ```bash
-git clone https://github.com/xrs-b/crypto-quant-okx.git
+git clone <your-repo-url>
 cd crypto-quant-okx
 ```
 
-### 2. 安装依赖
+### 2. 创建虚拟环境并安装依赖
 
 ```bash
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 3. 配置
+### 3. 准备配置文件
 
 ```bash
-# 公开示例配置 → 本地运行配置
 cp config/config.yaml.example config/config.yaml
-
-# 私密配置示例 → 本地 secret 覆盖（推荐）
 cp config/config.local.yaml.example config/config.local.yaml
-
-# 编辑公开参数（币种、风控、模式等）
-vim config/config.yaml
-
-# 编辑私密参数（API Key / webhook / bot token 等）
-vim config/config.local.yaml
 ```
 
-**推荐约定：**
-- `config/config.yaml`：放**可公开**的业务参数，例如 watch_list、杠杆、风控、运行模式
-- `config/config.local.yaml`：只放**私密**参数，例如 API Key、Discord webhook、bot token
-- 两个文件都会被 Git 忽略，不会上 GitHub
-- 仓库会保留 `config/config.local.yaml.example` 作为格式模板，clone 后照住复制即可
-- `config/config.local.yaml` 是**可选文件**：不存在时系统会直接使用主配置继续运行，**不会因为缺少它而报错**
-- 如果你喜欢，也可以直接用环境变量：项目支持 `${ENV_NAME}` / `${ENV_NAME:-default}` 这种写法
+### 4. 编辑配置
 
-### 4. 运行
+建议分层管理：
 
-```bash
-# 手动运行（当前主入口）
-python3 bot/run.py
+- `config/config.yaml`：公开参数、策略参数、风控参数、watch list
+- `config/config.local.yaml`：只放私密参数，例如 API Key / webhook / bot token
 
-# 只读诊断交易所/合约参数（不会下单）
-python3 bot/run.py --exchange-diagnose
-
-# Discord 通知链路自检（支持 webhook_url，或 bot_token + channel_id）
-python3 bot/run.py --notify-test
-
-# 生成最小 testnet 验收计划（默认只预演，不会下单）
-python3 bot/run.py --exchange-smoke --symbol BTC/USDT --side long
-
-# 显式执行 testnet 最小开平仓验收（会下 testnet 单）
-python3 bot/run.py --exchange-smoke --symbol BTC/USDT --side long --execute
-
-# 启动 dashboard
-./.venv/bin/flask --app dashboard.api:app run --host 0.0.0.0 --port 5555
-```
-
-## ⚙️ 配置说明
-
-### 推荐配置分层
-
-| 文件 | 是否提交 GitHub | 作用 |
-|------|------------------|------|
-| `config/config.yaml.example` | 是 | 完整示例配置，给别人 clone 后参考 |
-| `config/config.yaml` | 否 | 你的本地公开参数配置 |
-| `config/config.local.yaml` | 否 | 你的本地私密覆盖（API Key / Token / Webhook） |
-
-### 公开参数 vs 私密参数
-
-**建议放在 `config/config.yaml` 的内容：**
-- `exchange.mode`
-- `exchange.position_mode`
-- `symbols.watch_list`
-- `symbols.candidate_watch_list`
-- `trading.*`
-- `strategies.*`
-- `market_filters.*`
-- `governance.*`
-
-**建议放在 `config/config.local.yaml` 的内容：**
-- `api.key`
-- `api.secret`
-- `api.passphrase`
-- `notification.discord.bot_token`
-- `notification.discord.webhook_url`
-- `notification.discord.channel_id`
-- 任何 email / telegram 等真实凭证
-
-### 环境变量占位写法
-
-项目支持以下写法：
+如果你喜欢走环境变量，也可以直接用：
 
 ```yaml
 api:
@@ -181,14 +174,169 @@ notification:
     channel_id: ${DISCORD_CHANNEL_ID:-}
 ```
 
-说明：
-- `${VAR}`：必须从环境变量读取，不存在就会变成空字符串
-- `${VAR:-default}`：环境变量不存在时，退回 `default`
+### 5. 先跑只读检查
+
+```bash
+python3 bot/run.py --exchange-diagnose
+python3 bot/run.py --notify-test
+```
+
+### 6. 生成最小 testnet 验收计划
+
+```bash
+python3 bot/run.py --exchange-smoke --symbol BTC/USDT --side long
+```
+
+### 7. 显式执行 testnet 最小开平仓验收（会下 testnet 单）
+
+```bash
+python3 bot/run.py --exchange-smoke --symbol BTC/USDT --side long --execute
+```
+
+### 8. 运行交易主程序
+
+```bash
+python3 bot/run.py
+```
+
+### 9. 启动 Dashboard
+
+```bash
+python3 bot/run.py --dashboard --port 5555
+```
+
+或：
+
+```bash
+./.venv/bin/flask --app dashboard.api:app run --host 0.0.0.0 --port 5555
+```
+
+---
+
+## OpenClaw 接入 / 安装思路
+
+如果你想把这套系统接到 OpenClaw，建议把它当成一个“本地可控服务”来接，而不是一上来做高风险自动化。
+
+### 推荐接法
+
+1. **先确保本地项目能独立跑通**
+   - `bot/run.py --exchange-diagnose`
+   - `bot/run.py --notify-test`
+   - `bot/run.py --daemon`
+   - Dashboard 可以正常打开
+
+2. **把 OpenClaw 当成运维入口**
+   - 查看日志
+   - 触发只读诊断
+   - 触发 testnet smoke
+   - 查看分仓状态报告
+   - 读取当前配置与运行状态
+
+3. **适合通过 OpenClaw 调用的命令**
+
+```bash
+python3 bot/run.py --exchange-diagnose
+python3 bot/run.py --notify-test
+python3 bot/run.py --reconcile-positions
+python3 scripts/layering_state_report.py
+```
+
+4. **不建议默认直接开放实盘高风险操作**
+   - 实盘开关、API 密钥、真实资金操作建议保留人工确认
+   - 最好先在 testnet 验证完整链路
+
+---
+
+## 传统本地部署
+
+### 方式 A：前台运行
+
+```bash
+python3 bot/run.py
+```
+
+### 方式 B：守护模式
+
+```bash
+python3 bot/run.py --daemon
+```
+
+### 方式 C：启动 Dashboard
+
+```bash
+python3 bot/run.py --dashboard --port 5555
+```
+
+### 方式 D：通知 relay
+
+```bash
+python3 bot/run.py --relay-outbox --once
+```
+
+### 辅助脚本说明
+
+项目中包含一些运维脚本：
+
+- `scripts/start.sh`
+- `scripts/keep_dashboard_alive.sh`
+- `scripts/okx-trading.service`
+- `scripts/candidate-review.cron.example`
+
+> 注意：这些脚本当前仍带有一定本地环境假设，适合作为模板参考。  
+> **朋友直接部署时，优先按本文档中的 Python 命令方式运行，不要默认依赖这些脚本。**
+
+---
+
+## 配置说明
+
+### 配置文件分层
+
+| 文件 | 用途 |
+|---|---|
+| `config/config.yaml.example` | 可公开提交的完整示例 |
+| `config/config.local.yaml.example` | 私密配置模板 |
+| `config/config.yaml` | 本地主配置 |
+| `config/config.local.yaml` | 本地私密覆盖 |
+
+### 适合放在 `config.yaml` 的内容
+- `exchange.mode`
+- `exchange.position_mode`
+- `symbols.watch_list`
+- `symbols.candidate_watch_list`
+- `trading.*`
+- `strategies.*`
+- `market_filters.*`
+- `governance.*`
+
+### 适合放在 `config.local.yaml` 的内容
+- `api.key`
+- `api.secret`
+- `api.passphrase`
+- `notification.discord.bot_token`
+- `notification.discord.webhook_url`
+- `notification.discord.channel_id`
+- 任何 Email / Telegram 等真实凭证
+
+### Layering 默认示例
+来自 `config/config.yaml.example`：
+
+```yaml
+trading:
+  layering:
+    layer_count: 3
+    layer_ratios: [0.06, 0.06, 0.04]
+    layer_max_total_ratio: 0.16
+    min_add_interval_seconds: 300
+    signal_idempotency_enabled: true
+    direction_lock_enabled: true
+    direction_lock_scope: symbol
+    allow_same_bar_multiple_adds: false
+    max_layers_per_signal: 1
+```
 
 ### 切换到真实交易
 
 ```yaml
-# config.yaml / config.local.yaml
 exchange:
   mode: real
 
@@ -198,130 +346,135 @@ api:
   passphrase: your_real_okx_api_passphrase
 ```
 
-**强烈建议：**先用 `testnet` 跑通，再切 `real`。
-
-## 📘 使用说明（老细版）
-
-如果你想用**低干预模式**管理系统、理解 dashboard、判断几时该调参数，建议先睇：
-
-- `docs/老细版-使用说明与调参指南.md`
+**强烈建议：先用 `testnet` 跑通，再切 `real`。**
 
 ---
 
-## 📊 交易参数详解
+## 常用运行命令
 
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| `position_size` | 0.1 | 单笔仓位占账户余额比例 |
-| `max_exposure` | 0.3 | 总仓位上限 (30%) |
-| `leverage` | 3 | 杠杆倍数 (OKX最高50x) |
-| `stop_loss` | 0.02 | 止损比例 (杠杆后) |
-| `take_profit` | 0.04 | 止盈比例 (杠杆后) |
-| `trailing_stop` | 0.02 | 追踪止损回调比例 |
-
-### 杠杆计算示例
-
-- 账户: 10,000 USDT
-- 单笔仓位: 10% = 1,000 USDT
-- 杠杆: 3x
-- 实际仓位: 3,000 USDT
-
-| 条件 | 实际盈亏 |
-|------|----------|
-| 价格上涨 2% | +6% (180 USDT) |
-| 价格下跌 2% | -6% (-180 USDT) |
-| 止损触发 | -2% × 3 = -6% |
-
-## 🤖 信号逻辑
-
-### 买入条件 (满足其一)
-
-```
-1. RSI < 35 且 ML概率 > 75%
-2. RSI < 40 且 ML概率 > 65%
-3. 传统信号 + ML强烈确认
-```
-
-### 卖出条件 (满足其一)
-
-```
-1. RSI > 65 且 ML概率 < 25%
-2. RSI > 60 且 ML概率 < 35%
-3. 传统信号 + ML强烈确认
-```
-
-### 信号强度计算
-
-```
-信号强度 = RSI得分 + MACD得分 + ML得分
-
-- RSI超卖/超买: +30
-- RSI偏低/偏高: +15
-- MACD金叉/死叉: +20
-- ML概率 > 70%: +30
-- ML概率 > 60%: +15
-```
-
-## 🔧 高级配置
-
-### 自动运行 (Cron)
+### 交易主流程
 
 ```bash
-# 每5分钟运行一次（当前主入口）
-*/5 * * * * cd /path/to/crypto-quant-okx && python3 bot/run.py
+python3 bot/run.py
 ```
 
-### ML模型训练
+### 守护模式
 
 ```bash
-# 收集数据
-python3 ml/collect_data.py
-
-# 训练模型
-python3 ml/train_model.py
+python3 bot/run.py --daemon
 ```
 
-## 📝 交易日志
+### 训练模型
 
-日志文件位置: `/tmp/okx_trades.json`
-
-```json
-[
-  {
-    "time": "2026-03-13T10:00:00",
-    "action": "OPEN_LONG",
-    "symbol": "SOL/USDT",
-    "price": 90.0,
-    "amount": 1.0,
-    "pnl": 0,
-    "note": "开多"
-  }
-]
+```bash
+python3 bot/run.py --collect
+python3 bot/run.py --train
 ```
 
-## 🔒 安全提示
+### 回测 / 分析
 
-1. **API密钥安全**
-   - 务必保管好 API 密钥
-   - 建议设置 IP 绑定
-   - 定期更换密钥
+```bash
+python3 bot/run.py --backtest
+python3 bot/run.py --signal-quality
+python3 bot/run.py --optimize
+```
 
-2. **敏感信息**
-   - `config/config.yaml` 已加入 `.gitignore`
-   - 提交代码前确保不包含真实密钥
+### 只读诊断
 
-## 🤝 贡献
+```bash
+python3 bot/run.py --exchange-diagnose
+python3 bot/run.py --reconcile-positions
+```
 
-欢迎提交 Issue 和 Pull Request！
+### 通知与 relay
 
-## 📄 License
-
-MIT License
-
-## 👤 作者
-
-- GitHub: [@xrs-b](https://github.com/xrs-b)
+```bash
+python3 bot/run.py --notify-test
+python3 bot/run.py --relay-outbox --once
+```
 
 ---
 
-*如果对你有帮助，欢迎 Star ⭐*
+## 日志与排障
+
+### 常见目录
+- `logs/`
+- `data/trading.db`
+- `data/runtime_state.json`
+
+### 常见问题
+
+#### 1. 缺少依赖
+如果手工运行时报缺包，请确认你使用的是项目虚拟环境，而不是系统 Python。
+
+#### 2. Dashboard 端口不一致
+如果你发现文档或配置里出现 `8050` / `5555` 两种端口写法，请在自己的部署里统一成一个端口。
+
+#### 3. 模型版本 warning
+如果看到 sklearn 相关 warning，通常说明本地依赖版本与历史模型文件版本不完全一致。可考虑重新训练模型。
+
+#### 4. 对账异常
+可先执行：
+
+```bash
+python3 bot/run.py --reconcile-positions
+```
+
+#### 5. 查看当前分仓状态
+
+```bash
+python3 scripts/layering_state_report.py
+```
+
+---
+
+## 目录结构
+
+```text
+crypto-quant-okx/
+├── analytics/           # 回测、优化、治理分析
+├── bot/                 # 主入口与运行控制
+├── config/              # 配置、样例、预设
+├── core/                # 配置、交易所、数据库、通知等核心模块
+├── dashboard/           # Flask Dashboard
+├── data/                # 本地数据库与运行状态
+├── docs/                # 使用说明、验收清单、上下文文档
+├── logs/                # 运行日志
+├── ml/                  # 数据收集、训练、模型文件
+├── scripts/             # 启动、守护、巡检脚本
+├── signals/             # 信号检测、验证、进场审批
+├── strategies/          # 策略库
+├── tests/               # 测试
+├── trading/             # 执行器、风控、仓位管理
+└── README.md
+```
+
+---
+
+## 部署建议
+
+如果你是准备分享给朋友，请按以下顺序做：
+
+1. 保留一个 **私有运行仓库** 继续承载你的真实交易环境
+2. 单独整理一个 **公开版仓库** 用于分享与安装
+3. 公开版只保留：
+   - 核心代码
+   - 示例配置
+   - 脱敏后的脚本
+   - 精简文档
+   - 必要测试
+4. 不要把以下内容放进公开仓库：
+   - 真实 API Key / Secret / Passphrase
+   - 真实 Discord / Telegram token
+   - 运行日志
+   - 本地数据库
+   - 运行时状态文件
+   - 个人运维脚本中的绝对路径
+
+---
+
+## 免责声明
+
+本项目仅供学习、研究与技术交流使用，**不构成任何投资建议，也不保证盈利**。  
+使用者应自行评估代码、配置、交易风险与法律合规责任。  
+因使用本项目造成的任何损失，项目作者与贡献者不承担责任。

@@ -11,8 +11,8 @@ from core.exchange import Exchange
 from core.database import Database
 from core.logger import trade_logger
 from analytics.recommendation import get_recommendation_provider
-from core.risk_budget import get_risk_budget_config, summarize_margin_usage, compute_entry_plan
-from core.regime_policy import build_observe_only_payload
+from core.risk_budget import get_risk_budget_config, summarize_margin_usage, compute_entry_plan, summarize_risk_hint_changes
+from core.regime_policy import build_observe_only_payload, build_risk_effective_snapshot
 
 
 def build_observability_context(*, symbol: str = None, side: str = None, signal_id: int = None, root_signal_id: int = None, layer_no: int = None, deny_reason: str = None, current_symbol_exposure: float = None, projected_symbol_exposure: float = None, current_total_exposure: float = None, projected_total_exposure: float = None, extra: Dict[str, Any] = None) -> Dict[str, Any]:
@@ -56,6 +56,27 @@ def enrich_observability_with_snapshots(config_helper: Any, symbol: Optional[str
         policy_snapshot=adaptive_policy_snapshot or source_plan.get('adaptive_policy_snapshot'),
     )
     enriched.update(payload)
+    risk_snapshot = build_risk_effective_snapshot(
+        config_helper,
+        symbol,
+        signal=signal,
+        regime_snapshot=payload.get('regime_snapshot'),
+        policy_snapshot=payload.get('adaptive_policy_snapshot'),
+    )
+    risk_hint_summary = summarize_risk_hint_changes(risk_snapshot.get('baseline'), risk_snapshot.get('effective'))
+    enriched['adaptive_risk_snapshot'] = risk_snapshot
+    enriched['adaptive_risk_hints'] = {
+        'enabled': bool(risk_snapshot.get('enabled')),
+        'effective_state': risk_snapshot.get('effective_state', 'disabled'),
+        'observe_only': bool(risk_snapshot.get('observe_only', True)),
+        'baseline': dict(risk_snapshot.get('baseline') or {}),
+        'effective': dict(risk_snapshot.get('effective') or {}),
+        'applied': list((risk_snapshot.get('applied_overrides') or {}).keys()),
+        'ignored': list(risk_snapshot.get('ignored_overrides') or []),
+        'would_tighten': bool(risk_snapshot.get('would_tighten', risk_hint_summary.get('would_tighten'))),
+        'would_tighten_fields': list(risk_snapshot.get('would_tighten_fields') or risk_hint_summary.get('would_tighten_fields') or []),
+        'hint_codes': list(risk_snapshot.get('hint_codes') or risk_hint_summary.get('hint_codes') or []),
+    }
     return enriched
 
 
@@ -1549,6 +1570,8 @@ class RiskManager:
             projected_total_exposure=entry_plan.get('projected_total_exposure_ratio'),
         )
         details['observability'] = enrich_observability_with_snapshots(self.config, symbol, observability, plan_context=plan_context)
+        details['adaptive_risk_snapshot'] = dict(details['observability'].get('adaptive_risk_snapshot') or {})
+        details['adaptive_risk_hints'] = dict(details['observability'].get('adaptive_risk_hints') or {})
         trade_logger.info(
             f"风控检查 {symbol}: 当前暴露:{current_exposure*100:.1f}%, "
             f"计划仓位:{position_ratio*100:.1f}%, 配置杠杆:{configured_leverage}x, 实际杠杆:{effective_leverage}x, "

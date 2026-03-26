@@ -6,8 +6,8 @@ from typing import Dict, List
 from datetime import datetime, timedelta
 from core.config import Config
 from core.exchange import Exchange
-from core.risk_budget import get_risk_budget_config, summarize_margin_usage, compute_entry_plan
-from core.regime_policy import build_observe_only_payload, build_validation_effective_snapshot
+from core.risk_budget import get_risk_budget_config, summarize_margin_usage, compute_entry_plan, summarize_risk_hint_changes
+from core.regime_policy import build_observe_only_payload, build_validation_effective_snapshot, build_risk_effective_snapshot
 
 
 class SignalValidator:
@@ -241,9 +241,17 @@ class SignalValidator:
             regime_snapshot=observe_only_payload.get('regime_snapshot'),
             policy_snapshot=observe_only_payload.get('adaptive_policy_snapshot'),
         )
+        risk_snapshot = build_risk_effective_snapshot(
+            self.config,
+            getattr(signal, 'symbol', None),
+            signal=signal,
+            regime_snapshot=observe_only_payload.get('regime_snapshot'),
+            policy_snapshot=observe_only_payload.get('adaptive_policy_snapshot'),
+        )
         validation_hints = self._build_validation_hints(signal, validation_snapshot)
         details['adaptive_validation_snapshot'] = validation_snapshot
         details['adaptive_validation_hints'] = validation_hints
+        details['adaptive_risk_snapshot'] = risk_snapshot
         enforcement_audit = self._build_adaptive_enforcement_audit(signal, validation_snapshot)
         details['adaptive_validation_observability'] = {
             'phase': 'm3_step2' if enforcement_audit.get('enforced') else 'm3_step1',
@@ -272,6 +280,22 @@ class SignalValidator:
 
         # 1. 已有同方向持仓（默认禁用同向加仓）
         risk_budget = get_risk_budget_config(self.config, signal.symbol)
+        risk_hint_summary = summarize_risk_hint_changes(
+            (risk_snapshot or {}).get('baseline'),
+            (risk_snapshot or {}).get('effective'),
+        )
+        details['adaptive_risk_hints'] = {
+            'enabled': bool((risk_snapshot or {}).get('enabled')),
+            'effective_state': (risk_snapshot or {}).get('effective_state', 'disabled'),
+            'observe_only': bool((risk_snapshot or {}).get('observe_only', True)),
+            'baseline': dict((risk_snapshot or {}).get('baseline') or {}),
+            'effective': dict((risk_snapshot or {}).get('effective') or {}),
+            'applied': list((risk_snapshot or {}).get('applied_overrides') or {}),
+            'ignored': list((risk_snapshot or {}).get('ignored_overrides') or []),
+            'would_tighten': bool((risk_snapshot or {}).get('would_tighten', risk_hint_summary.get('would_tighten'))),
+            'would_tighten_fields': list((risk_snapshot or {}).get('would_tighten_fields') or risk_hint_summary.get('would_tighten_fields') or []),
+            'hint_codes': list((risk_snapshot or {}).get('hint_codes') or risk_hint_summary.get('hint_codes') or []),
+        }
         existing = latest_positions.get(signal.symbol)
         add_position_enabled = bool(risk_budget.get('add_position_enabled', False))
         if existing and existing.get('side') == side and not add_position_enabled:

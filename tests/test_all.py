@@ -18,7 +18,7 @@ from datetime import datetime, timedelta
 from core.config import Config
 from core.database import Database
 from core.regime import build_regime_snapshot, normalize_regime_snapshot
-from core.regime_policy import resolve_regime_policy, build_observe_only_payload
+from core.regime_policy import resolve_regime_policy, build_observe_only_payload, build_risk_effective_snapshot
 from core.exchange import Exchange
 from core.notifier import NotificationManager
 from signals import Signal, SignalDetector, SignalValidator, SignalRecorder, EntryDecider
@@ -28,7 +28,7 @@ from analytics.backtest import StrategyBacktester
 from strategies.strategy_library import StrategyManager
 from bot.run import build_exchange_diagnostics, build_exchange_smoke_plan, build_runtime_health_summary, maybe_send_daily_health_summary, execute_exchange_smoke, reconcile_exchange_positions
 from dashboard.api import app
-from core.risk_budget import get_risk_budget_config, compute_entry_plan, summarize_margin_usage
+from core.risk_budget import get_risk_budget_config, compute_entry_plan, summarize_margin_usage, summarize_risk_hint_changes
 from core.presets import PresetManager
 
 
@@ -480,6 +480,46 @@ class TestSignalValidator(unittest.TestCase):
         self.assertIn('adaptive_regime_observe_only', details)
         self.assertTrue(details['adaptive_regime_observe_only']['summary'])
         self.assertIn('observe_only', details['adaptive_regime_observe_only']['tags'])
+        self.assertIn('adaptive_risk_snapshot', details)
+        self.assertIn('adaptive_risk_hints', details)
+
+    def test_validator_step3_emits_risk_hints_without_changing_entry_plan_inputs(self):
+        cfg = Config()
+        cfg._config['adaptive_regime'] = {
+            'enabled': True,
+            'mode': 'guarded_execute',
+            'guarded_execute': {
+                'risk_hints_enabled': True,
+                'enforce_conservative_only': True,
+            },
+            'regimes': {
+                'high_vol': {
+                    'risk_overrides': {
+                        'base_entry_margin_ratio': 0.05,
+                        'symbol_margin_cap_ratio': 0.10,
+                        'leverage_cap': 5,
+                        'total_margin_cap_ratio': 0.35,
+                    }
+                }
+            }
+        }
+        validator = SignalValidator(cfg, None)
+        signal = Signal(
+            symbol='BTC/USDT', signal_type='buy', price=50000, strength=50, strategies_triggered=['RSI', 'MACD'],
+            market_context={'trend': 'bullish', 'volatility': 0.06, 'atr_ratio': 0.06, 'volatility_too_low': False, 'volatility_too_high': False, 'regime': 'high_vol', 'regime_confidence': 0.8, 'regime_details': '高波动'}
+        )
+        passed, reason, details = validator.validate(signal)
+        self.assertTrue(passed)
+        self.assertEqual(details['adaptive_risk_snapshot']['effective_state'], 'hints_only')
+        self.assertTrue(details['adaptive_risk_hints']['would_tighten'])
+        self.assertIn('base_entry_margin_ratio', details['adaptive_risk_hints']['would_tighten_fields'])
+        self.assertIn('WOULD_TIGHTEN_LEVERAGE_CAP', details['adaptive_risk_hints']['hint_codes'])
+        self.assertEqual(
+            details['exposure_check']['entry_plan']['risk_budget']['base_entry_margin_ratio'],
+            get_risk_budget_config(cfg, 'BTC/USDT')['base_entry_margin_ratio']
+        )
+        self.assertTrue(any(item['key'] == 'total_margin_cap_ratio' and item['reason'] == 'non_conservative_override' for item in details['adaptive_risk_snapshot']['ignored_overrides']))
+        json.dumps(details, ensure_ascii=False)
 
     def test_validator_step1_emits_hints_without_changing_pass_result(self):
         cfg = Config()
@@ -2921,6 +2961,40 @@ class TestTradingExecutor(unittest.TestCase):
         self.assertEqual(details['observability']['adaptive_policy_snapshot']['mode'], 'observe_only')
         self.assertTrue(details['observability']['observe_only_summary'])
         self.assertIn('observe_only', details['observability']['observe_only_tags'])
+        self.assertIn('adaptive_risk_snapshot', details['observability'])
+        self.assertIn('adaptive_risk_hints', details['observability'])
+
+    def test_risk_manager_observability_contains_risk_hints_only_snapshot(self):
+        self.config._config['adaptive_regime'] = {
+            'enabled': True,
+            'mode': 'guarded_execute',
+            'guarded_execute': {
+                'risk_hints_enabled': True,
+                'enforce_conservative_only': True,
+            },
+            'regimes': {
+                'high_vol': {
+                    'risk_overrides': {
+                        'base_entry_margin_ratio': 0.05,
+                        'symbol_margin_cap_ratio': 0.10,
+                        'leverage_cap': 5,
+                    }
+                }
+            }
+        }
+        regime_snapshot = build_regime_snapshot('high_vol', 0.9, {'volatility': 0.04}, '高波动')
+        policy_snapshot = resolve_regime_policy(self.config, 'BTC/USDT', regime_snapshot)
+        can_open, reason, details = RiskManager(self.config, self.db).can_open_position(
+            'BTC/USDT',
+            side='long',
+            signal_id=124,
+            plan_context={'regime_snapshot': regime_snapshot, 'adaptive_policy_snapshot': policy_snapshot}
+        )
+        self.assertTrue(can_open)
+        self.assertEqual(details['adaptive_risk_snapshot']['effective_state'], 'hints_only')
+        self.assertTrue(details['adaptive_risk_hints']['would_tighten'])
+        self.assertIn('base_entry_margin_ratio', details['adaptive_risk_hints']['would_tighten_fields'])
+        self.assertIn('WOULD_TIGHTEN_BASE_ENTRY_MARGIN_RATIO', details['adaptive_risk_hints']['hint_codes'])
 
 
 class TestRiskBudgetSizing(unittest.TestCase):
@@ -2950,6 +3024,58 @@ class TestRiskBudgetSizing(unittest.TestCase):
         )
         self.assertTrue(plan['blocked'])
         self.assertIn('最小开仓门槛', plan['block_reason'])
+
+
+    def test_build_risk_effective_snapshot_defaults_to_disabled_hints(self):
+        snapshot = build_risk_effective_snapshot(self.config if hasattr(self, 'config') else Config(), 'BTC/USDT')
+        self.assertEqual(snapshot['effective_state'], 'disabled')
+        self.assertTrue(snapshot['observe_only'])
+        self.assertEqual(snapshot['baseline']['base_entry_margin_ratio'], snapshot['effective']['base_entry_margin_ratio'])
+        self.assertEqual(snapshot['applied_overrides'], {})
+
+    def test_build_risk_effective_snapshot_conservative_only_merge_and_ignored_reasons(self):
+        cfg = Config()
+        cfg._config['adaptive_regime'] = {
+            'enabled': True,
+            'mode': 'guarded_execute',
+            'guarded_execute': {
+                'risk_hints_enabled': True,
+                'enforce_conservative_only': True,
+            },
+            'defaults': {'policy_version': 'adaptive_policy_v1_m3_step3'},
+            'regimes': {
+                'high_vol': {
+                    'risk_overrides': {
+                        'base_entry_margin_ratio': 0.05,
+                        'symbol_margin_cap_ratio': 0.10,
+                        'leverage_cap': 5,
+                        'total_margin_cap_ratio': 0.35,
+                    }
+                }
+            }
+        }
+        signal = Signal(symbol='BTC/USDT', signal_type='buy', price=100, strength=55, reasons=[], strategies_triggered=['x'])
+        signal.market_context = {'regime': 'high_vol', 'regime_confidence': 0.9}
+        snapshot = build_risk_effective_snapshot(cfg, 'BTC/USDT', signal=signal)
+        self.assertEqual(snapshot['effective_state'], 'hints_only')
+        self.assertTrue(snapshot['enabled'])
+        self.assertAlmostEqual(snapshot['effective']['base_entry_margin_ratio'], 0.05, places=6)
+        self.assertAlmostEqual(snapshot['effective']['symbol_margin_cap_ratio'], 0.10, places=6)
+        self.assertEqual(snapshot['effective']['leverage_cap'], 5)
+        self.assertIn('base_entry_margin_ratio', snapshot['applied_overrides'])
+        self.assertTrue(any(row['key'] == 'total_margin_cap_ratio' for row in snapshot['ignored_overrides']))
+        self.assertIn('IGNORED_NON_CONSERVATIVE_OVERRIDE', snapshot['hint_codes'])
+
+    def test_summarize_risk_hint_changes_is_serializable(self):
+        summary = summarize_risk_hint_changes(
+            {'base_entry_margin_ratio': 0.08, 'leverage_cap': 10},
+            {'base_entry_margin_ratio': 0.05, 'leverage_cap': 5},
+        )
+        self.assertTrue(summary['would_tighten'])
+        self.assertIn('base_entry_margin_ratio', summary['would_tighten_fields'])
+        self.assertIn('WOULD_TIGHTEN_BASE_ENTRY_MARGIN_RATIO', summary['hint_codes'])
+        payload = json.dumps(summary, ensure_ascii=False)
+        self.assertIn('leverage_cap', payload)
 
 
 class TestRiskManager(unittest.TestCase):

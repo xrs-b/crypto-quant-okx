@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from core.regime import build_regime_snapshot, normalize_regime_snapshot
+from core.risk_budget import DEFAULT_RISK_BUDGET, get_risk_budget_config
 
 
 ADAPTIVE_POLICY_VERSION = "adaptive_policy_v1_m1"
@@ -217,6 +218,7 @@ def build_neutral_policy_snapshot(
     notes: Optional[list] = None,
     decision_overrides: Optional[Dict[str, Any]] = None,
     validation_overrides: Optional[Dict[str, Any]] = None,
+    risk_overrides: Optional[Dict[str, Any]] = None,
     effective_overrides: Optional[Dict[str, Any]] = None,
     is_effective: bool = False,
 ) -> Dict[str, Any]:
@@ -236,7 +238,7 @@ def build_neutral_policy_snapshot(
         'signal_weight_overrides': {},
         'decision_overrides': dict(decision_overrides or {}),
         'validation_overrides': dict(validation_overrides or {}),
-        'risk_overrides': {},
+        'risk_overrides': dict(risk_overrides or {}),
         'execution_overrides': {},
         'effective_overrides': dict(effective_overrides or {}),
         'is_effective': bool(is_effective),
@@ -362,6 +364,110 @@ def merge_validation_overrides_conservatively(baseline_snapshot: Dict[str, Any],
     }
 
 
+def build_risk_baseline_snapshot(config_helper: Any, symbol: Optional[str]) -> Dict[str, Any]:
+    baseline = dict(DEFAULT_RISK_BUDGET)
+    baseline.update(get_risk_budget_config(config_helper, symbol))
+    baseline['leverage_cap'] = None
+    return baseline
+
+
+def merge_risk_overrides_conservatively(baseline_snapshot: Dict[str, Any], risk_overrides: Optional[Dict[str, Any]] = None, *, conservative_only: bool = True) -> Dict[str, Any]:
+    baseline_snapshot = dict(baseline_snapshot or {})
+    effective = dict(baseline_snapshot)
+    applied_overrides: Dict[str, Dict[str, Any]] = {}
+    ignored_overrides: List[Dict[str, Any]] = []
+    lower_only_fields = {
+        'total_margin_cap_ratio',
+        'total_margin_soft_cap_ratio',
+        'symbol_margin_cap_ratio',
+        'base_entry_margin_ratio',
+        'max_entry_margin_ratio',
+        'leverage_cap',
+    }
+
+    for key, requested in dict(risk_overrides or {}).items():
+        if key not in lower_only_fields:
+            ignored_overrides.append({'key': key, 'requested': requested, 'reason': 'unsupported_risk_field', 'code': 'IGNORED_UNSUPPORTED_RISK_FIELD'})
+            continue
+        if requested is None:
+            ignored_overrides.append({'key': key, 'requested': requested, 'reason': 'empty_override', 'code': 'IGNORED_EMPTY_OVERRIDE'})
+            continue
+        if not isinstance(requested, (int, float)):
+            ignored_overrides.append({'key': key, 'requested': requested, 'reason': 'override_not_numeric', 'code': 'IGNORED_INVALID_OVERRIDE'})
+            continue
+        baseline = baseline_snapshot.get(key)
+        if baseline is None:
+            effective[key] = float(requested)
+            applied_overrides[key] = {'baseline': baseline, 'effective': effective[key], 'requested': requested, 'source': f'risk_overrides.{key}'}
+            continue
+        baseline_float = float(baseline)
+        requested_float = float(requested)
+        final_value = min(baseline_float, requested_float)
+        if final_value + 1e-12 < baseline_float:
+            effective[key] = int(final_value) if key == 'leverage_cap' else final_value
+            applied_overrides[key] = {'baseline': baseline, 'effective': effective[key], 'requested': requested, 'source': f'risk_overrides.{key}'}
+        elif conservative_only and requested_float > baseline_float + 1e-12:
+            ignored_overrides.append({'key': key, 'requested': requested, 'baseline': baseline, 'reason': 'non_conservative_override', 'code': 'IGNORED_NON_CONSERVATIVE_OVERRIDE'})
+
+    if float(effective.get('total_margin_soft_cap_ratio', 0) or 0) > float(effective.get('total_margin_cap_ratio', 0) or 0):
+        effective['total_margin_soft_cap_ratio'] = float(effective.get('total_margin_cap_ratio') or 0)
+    if float(effective.get('max_entry_margin_ratio', 0) or 0) < float(effective.get('base_entry_margin_ratio', 0) or 0):
+        effective['base_entry_margin_ratio'] = float(effective.get('max_entry_margin_ratio') or 0)
+    if float(effective.get('max_entry_margin_ratio', 0) or 0) < float(effective.get('min_entry_margin_ratio', 0) or 0):
+        effective['min_entry_margin_ratio'] = float(effective.get('max_entry_margin_ratio') or 0)
+    return {
+        'effective': effective,
+        'applied_overrides': applied_overrides,
+        'ignored_overrides': ignored_overrides,
+    }
+
+
+def build_risk_effective_snapshot(config_helper: Any, symbol: Optional[str], *, signal: Any = None, regime_snapshot: Optional[Dict[str, Any]] = None, policy_snapshot: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    observe_payload = build_observe_only_payload(config_helper, symbol, signal=signal, regime_snapshot=regime_snapshot, policy_snapshot=policy_snapshot)
+    adaptive_cfg = config_helper.get_adaptive_regime_config(symbol) if hasattr(config_helper, 'get_adaptive_regime_config') else {}
+    guarded_cfg = dict(adaptive_cfg.get('guarded_execute') or {})
+    normalized_policy = observe_payload['adaptive_policy_snapshot']
+    normalized_regime = observe_payload['regime_snapshot']
+    baseline = build_risk_baseline_snapshot(config_helper, symbol)
+    conservative_only = bool(guarded_cfg.get('enforce_conservative_only', True))
+    hints_enabled = bool(guarded_cfg.get('risk_hints_enabled', False))
+    merged = merge_risk_overrides_conservatively(
+        baseline,
+        dict(normalized_policy.get('risk_overrides') or {}),
+        conservative_only=conservative_only,
+    )
+    mode = str(normalized_policy.get('mode') or adaptive_cfg.get('mode') or 'observe_only')
+    would_tighten_fields = list(merged.get('applied_overrides') or {})
+    hint_codes: List[str] = []
+    for field in would_tighten_fields:
+        hint_codes.append(f"WOULD_TIGHTEN_{field.upper()}")
+    for ignored in merged.get('ignored_overrides') or []:
+        code = ignored.get('code')
+        if code and code not in hint_codes:
+            hint_codes.append(code)
+    return {
+        'enabled': hints_enabled,
+        'baseline': baseline,
+        'effective': merged['effective'],
+        'effective_state': 'hints_only' if hints_enabled else 'disabled',
+        'policy_mode': mode,
+        'policy_version': normalized_policy.get('policy_version') or ADAPTIVE_POLICY_VERSION,
+        'policy_source': normalized_policy.get('policy_source') or 'adaptive_regime.defaults',
+        'regime_name': normalized_regime.get('name'),
+        'regime_confidence': normalized_regime.get('confidence'),
+        'stability_score': normalized_regime.get('stability_score'),
+        'transition_risk': normalized_regime.get('transition_risk'),
+        'applied_overrides': merged['applied_overrides'],
+        'ignored_overrides': merged['ignored_overrides'],
+        'observe_only': True,
+        'hints_enabled': hints_enabled,
+        'conservative_only': conservative_only,
+        'would_tighten': bool(would_tighten_fields),
+        'would_tighten_fields': would_tighten_fields,
+        'hint_codes': hint_codes,
+    }
+
+
 def build_validation_effective_snapshot(config_helper: Any, symbol: Optional[str], *, signal: Any = None, regime_snapshot: Optional[Dict[str, Any]] = None, policy_snapshot: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     observe_payload = build_observe_only_payload(config_helper, symbol, signal=signal, regime_snapshot=regime_snapshot, policy_snapshot=policy_snapshot)
     adaptive_cfg = config_helper.get_adaptive_regime_config(symbol) if hasattr(config_helper, 'get_adaptive_regime_config') else {}
@@ -436,10 +542,12 @@ class RegimePolicyResolver:
         regime_cfg = regimes.get(regime_name, {}) or {}
         decision_overrides = self._deep_merge(defaults.get('decision_overrides', {}) or {}, regime_cfg.get('decision_overrides', {}) or {})
         validation_overrides = self._deep_merge(defaults.get('validation_overrides', {}) or {}, regime_cfg.get('validation_overrides', {}) or {})
+        risk_overrides = self._deep_merge(defaults.get('risk_overrides', {}) or {}, regime_cfg.get('risk_overrides', {}) or {})
         return {
             'regime_name': regime_name,
             'decision_overrides': decision_overrides,
             'validation_overrides': validation_overrides,
+            'risk_overrides': risk_overrides,
         }
 
     def resolve(self, symbol: Optional[str], regime_snapshot: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -451,12 +559,14 @@ class RegimePolicyResolver:
         policy_source = 'symbol_override' if matched_override else 'adaptive_regime.defaults'
         normalized_regime = normalize_regime_snapshot(regime_snapshot)
         decision_policy = self._build_decision_policy(adaptive_cfg, normalized_regime)
-        is_effective = bool(enabled and mode in self.DECISION_EFFECTIVE_MODES and (decision_policy['decision_overrides'] or decision_policy['validation_overrides']))
+        is_effective = bool(enabled and mode in self.DECISION_EFFECTIVE_MODES and (decision_policy['decision_overrides'] or decision_policy['validation_overrides'] or decision_policy['risk_overrides']))
         notes = ['m1-observe-only' if not is_effective else 'm2-decision-aware', 'neutral-policy' if not is_effective else 'decision-policy']
         if decision_policy['decision_overrides']:
             notes.append(f"decision_overrides:{decision_policy['regime_name']}")
         if decision_policy['validation_overrides']:
             notes.append(f"validation_overrides:{decision_policy['regime_name']}")
+        if decision_policy['risk_overrides']:
+            notes.append(f"risk_overrides:{decision_policy['regime_name']}")
         return build_neutral_policy_snapshot(
             normalized_regime,
             mode=mode,
@@ -468,8 +578,9 @@ class RegimePolicyResolver:
             notes=notes,
             decision_overrides=decision_policy['decision_overrides'],
             validation_overrides=decision_policy['validation_overrides'],
-            effective_overrides=(({'decision': decision_policy['decision_overrides']} if decision_policy['decision_overrides'] else {}) | ({'validation': decision_policy['validation_overrides']} if decision_policy['validation_overrides'] else {})) if is_effective else {},
+            effective_overrides=(({'decision': decision_policy['decision_overrides']} if decision_policy['decision_overrides'] else {}) | ({'validation': decision_policy['validation_overrides']} if decision_policy['validation_overrides'] else {}) | ({'risk': decision_policy['risk_overrides']} if decision_policy['risk_overrides'] else {})) if is_effective else {},
             is_effective=is_effective,
+            risk_overrides=decision_policy['risk_overrides'],
         )
 
 

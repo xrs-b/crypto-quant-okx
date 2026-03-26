@@ -4,6 +4,16 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 
+RISK_HINT_FIELDS = (
+    'total_margin_cap_ratio',
+    'total_margin_soft_cap_ratio',
+    'symbol_margin_cap_ratio',
+    'base_entry_margin_ratio',
+    'max_entry_margin_ratio',
+    'leverage_cap',
+)
+
+
 DEFAULT_RISK_BUDGET = {
     'total_margin_cap_ratio': 0.30,
     'total_margin_soft_cap_ratio': 0.25,
@@ -127,6 +137,36 @@ def derive_quality_bucket(signal: Any = None) -> str:
     if strength <= 30 and strategies <= 1:
         return 'low'
     return 'normal'
+
+
+def summarize_risk_hint_changes(baseline: Optional[Dict[str, Any]] = None, effective: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    baseline = dict(baseline or {})
+    effective = dict(effective or {})
+    applied = []
+    ignored = []
+    hint_codes = []
+    for field in RISK_HINT_FIELDS:
+        before = baseline.get(field)
+        after = effective.get(field)
+        if before is None and after is None:
+            continue
+        if before is None and after is not None:
+            applied.append({'field': field, 'baseline': before, 'effective': after, 'would_tighten': True})
+            hint_codes.append(f'WOULD_TIGHTEN_{field.upper()}')
+            continue
+        if after is None:
+            ignored.append({'field': field, 'baseline': before, 'effective': after, 'would_tighten': False})
+            continue
+        if float(after) + 1e-12 < float(before):
+            applied.append({'field': field, 'baseline': before, 'effective': after, 'would_tighten': True})
+            hint_codes.append(f'WOULD_TIGHTEN_{field.upper()}')
+    return {
+        'applied': applied,
+        'ignored': ignored,
+        'hint_codes': hint_codes,
+        'would_tighten': bool(applied),
+        'would_tighten_fields': [row['field'] for row in applied],
+    }
 
 
 def compute_entry_plan(*, total_balance: float, free_balance: float, current_total_margin: float, current_symbol_margin: float,

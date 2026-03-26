@@ -588,3 +588,35 @@
 - 分仓验收清单：[`docs/layering-acceptance-checklist.md`](./layering-acceptance-checklist.md)
 
 > 一句话总结：**先把口径统一、先把观察打通、先从 decision 开始，再逐步碰 risk 与 execution。** 唔好一上来就把 adaptive regime 直接塞进 executor 主干，咁样最易出事。
+
+## Status（2026-03-26 / M3 Step 3）: done
+
+### 新增内容
+
+- 在 **risk / budget / execution observability** 路径补上 `adaptive_risk_snapshot` 与 `adaptive_risk_hints`
+- 当前阶段保持 **hints-only / observe-only**：
+  - 不改 `compute_entry_plan()` 输入
+  - 不改 execution 真正生效参数
+  - 只输出 baseline vs effective 的保守风险视图
+- 支持 conservative-only risk merge，当前已覆盖：
+  - `total_margin_cap_ratio`
+  - `total_margin_soft_cap_ratio`
+  - `symbol_margin_cap_ratio`
+  - `base_entry_margin_ratio`
+  - `max_entry_margin_ratio`
+  - `leverage_cap`
+- 输出明确区分：
+  - `baseline`
+  - `effective`
+  - `applied_overrides`
+  - `ignored_overrides`
+  - `would_tighten` / `would_tighten_fields`
+  - `hint_codes`
+  - `observe_only`
+  - `effective_state=hints_only|disabled`
+
+### 仍然刻意不做的事
+
+- 不修改 execution 骨架
+- 不真正把 adaptive risk view 写回 `compute_entry_plan()` / 下单输入
+- 不提前进入 M4 execution adaptation

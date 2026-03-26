@@ -76,3 +76,35 @@ validator 输出现在会同时包含：
 - 开启后仅对 rollout symbol 生效
 - 只收紧，不放宽 baseline
 - 输出可清楚解释：baseline / effective / applied / ignored / enforced / why block
+
+## Status（2026-03-26 / M3 Step 3）: done
+
+### 新增内容
+
+- 在 **risk / budget / execution observability** 路径补上 `adaptive_risk_snapshot` 与 `adaptive_risk_hints`
+- 当前阶段保持 **hints-only / observe-only**：
+  - 不改 `compute_entry_plan()` 输入
+  - 不改 execution 真正生效参数
+  - 只输出 baseline vs effective 的保守风险视图
+- 支持 conservative-only risk merge，当前已覆盖：
+  - `total_margin_cap_ratio`
+  - `total_margin_soft_cap_ratio`
+  - `symbol_margin_cap_ratio`
+  - `base_entry_margin_ratio`
+  - `max_entry_margin_ratio`
+  - `leverage_cap`
+- 输出明确区分：
+  - `baseline`
+  - `effective`
+  - `applied_overrides`
+  - `ignored_overrides`
+  - `would_tighten` / `would_tighten_fields`
+  - `hint_codes`
+  - `observe_only`
+  - `effective_state=hints_only|disabled`
+
+### 仍然刻意不做的事
+
+- 不修改 execution 骨架
+- 不真正把 adaptive risk view 写回 `compute_entry_plan()` / 下单输入
+- 不提前进入 M4 execution adaptation

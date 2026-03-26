@@ -858,6 +858,12 @@ symbol_override.adaptive_regime
 - risk budget 支持 regime-based cap override（建议晚于 validator hints-only）
 - `risk_anomaly` / 高 `transition_risk` 的统一 reason code 与保守 gate
 
+### 进度备注（2026-03-26 / M3 Step 4）
+
+- risk guard 已从 Step 3 的 hints-only 进入 Step 4 小范围 conservative enforcement。
+- 当前只允许 adaptive regime 真正收紧 `risk budget / entry sizing` 相关 caps（总暴露、单币种暴露、entry margin ratio、leverage cap），并受 `risk_enforcement_enabled + rollout_symbols + conservative_only` 共同控制。
+- execution profile / layering 参数仍然禁止进入 M3 生效范围。
+
 ### 验收
 
 - 执行层骨架不变

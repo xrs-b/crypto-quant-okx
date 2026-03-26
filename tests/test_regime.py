@@ -20,7 +20,7 @@ from core.regime import (
     detect_regime,
     normalize_regime_snapshot,
 )
-from core.regime_policy import ADAPTIVE_POLICY_VERSION, resolve_regime_policy, build_validation_baseline_snapshot, build_validation_effective_snapshot
+from core.regime_policy import ADAPTIVE_POLICY_VERSION, resolve_regime_policy, build_validation_baseline_snapshot, build_validation_effective_snapshot, build_risk_effective_snapshot
 
 
 def generate_test_data(regime_type: str, n: int = 100) -> pd.DataFrame:
@@ -214,6 +214,68 @@ class TestValidationEffectiveSnapshot(unittest.TestCase):
         self.assertIn('policy_version', snapshot)
         self.assertIn('stability_score', snapshot)
         self.assertIn('transition_risk', snapshot)
+
+
+class TestRiskEffectiveSnapshotStep4(unittest.TestCase):
+    def test_risk_snapshot_default_keeps_enforcement_disabled(self):
+        cfg = Config()
+        snapshot = build_risk_effective_snapshot(cfg, 'BTC/USDT')
+        self.assertEqual(snapshot['effective_state'], 'disabled')
+        self.assertTrue(snapshot['observe_only'])
+        self.assertEqual(snapshot['baseline'], snapshot['effective'])
+        self.assertEqual(snapshot['enforced_fields'], [])
+
+    def test_risk_snapshot_enforces_only_conservative_fields_when_enabled(self):
+        cfg = Config()
+        cfg._config['adaptive_regime'] = {
+            'enabled': True,
+            'mode': 'guarded_execute',
+            'guarded_execute': {
+                'risk_hints_enabled': True,
+                'risk_enforcement_enabled': True,
+                'rollout_symbols': ['BTC/USDT'],
+            },
+            'regimes': {
+                'high_vol': {
+                    'risk_overrides': {
+                        'base_entry_margin_ratio': 0.05,
+                        'symbol_margin_cap_ratio': 0.10,
+                        'leverage_cap': 5,
+                    }
+                }
+            }
+        }
+        snapshot = build_risk_effective_snapshot(
+            cfg, 'BTC/USDT', regime_snapshot=build_regime_snapshot('high_vol', 0.9, {'volatility': 0.05}, '高波动')
+        )
+        self.assertEqual(snapshot['effective_state'], 'effective')
+        self.assertFalse(snapshot['observe_only'])
+        self.assertAlmostEqual(snapshot['effective']['base_entry_margin_ratio'], 0.05, places=6)
+        self.assertEqual(snapshot['effective']['leverage_cap'], 5)
+        self.assertIn('base_entry_margin_ratio', snapshot['enforced_fields'])
+        self.assertTrue(any(row['field'] == 'base_entry_margin_ratio' and row['enforced'] for row in snapshot['field_decisions']))
+
+    def test_risk_snapshot_rollout_miss_keeps_hints_only(self):
+        cfg = Config()
+        cfg._config['adaptive_regime'] = {
+            'enabled': True,
+            'mode': 'guarded_execute',
+            'guarded_execute': {
+                'risk_hints_enabled': True,
+                'risk_enforcement_enabled': True,
+                'rollout_symbols': ['ETH/USDT'],
+            },
+            'regimes': {
+                'high_vol': {'risk_overrides': {'base_entry_margin_ratio': 0.05}}
+            }
+        }
+        snapshot = build_risk_effective_snapshot(
+            cfg, 'BTC/USDT', regime_snapshot=build_regime_snapshot('high_vol', 0.9, {'volatility': 0.05}, '高波动')
+        )
+        self.assertEqual(snapshot['effective_state'], 'hints_only')
+        self.assertTrue(snapshot['observe_only'])
+        self.assertFalse(snapshot['rollout_match'])
+        self.assertTrue(any(row['reason'] == 'rollout_symbol_not_matched' for row in snapshot['ignored_overrides']))
 
 
 class TestAdaptiveRegimeConfigAndPolicy(unittest.TestCase):

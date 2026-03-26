@@ -388,6 +388,13 @@
   - 不影响现有 direction lock / intent 幂等逻辑
 - **依赖关系**：AR-M3-01
 - **风险 / 回滚点**：收得过紧可能导致“理论 allow，实际永远不开仓”；回滚到 M2 或仅保留 anomaly hard block
+- **Status（2026-03-26 / M3 Step 4）**：done
+- **Notes**：
+  - 已在 `core/regime_policy.py` / `trading/executor.py` / `RiskManager.can_open_position()` 落地 risk conservative enforcement：仅在 `guarded_execute.risk_enforcement_enabled=true`、`mode in {guarded_execute, full}`、且 rollout symbol 命中时，risk budget / entry sizing 才真正使用 adaptive effective caps。
+  - 当前真实生效范围严格限制在 M3 risk budget / sizing guardrails：`total_margin_cap_ratio`、`total_margin_soft_cap_ratio`、`symbol_margin_cap_ratio`、`base_entry_margin_ratio`、`max_entry_margin_ratio`、`leverage_cap`。
+  - 继续保持“只收紧不放宽”：任何会放宽 baseline 的 risk override 都会进入 `ignored_overrides`，不会进入 `enforced_budget`。
+  - `adaptive_risk_snapshot` / `adaptive_risk_hints` 已补齐 `baseline / effective / enforced_budget / applied / ignored / enforced_fields / field_decisions / rollout_match / effective_state`，且 entry plan 已明确区分“看见的 effective candidate”和“真正 enforced 的 budget”。
+  - 仍然**不碰 execution profile / layering 参数**，未提前进入 M4。
 
 ### AR-M3-03｜`risk_anomaly` / 高 transition risk hard block
 
@@ -589,7 +596,7 @@
 
 > 一句话总结：**先把口径统一、先把观察打通、先从 decision 开始，再逐步碰 risk 与 execution。** 唔好一上来就把 adaptive regime 直接塞进 executor 主干，咁样最易出事。
 
-## Status（2026-03-26 / M3 Step 3）: done
+## Status（2026-03-26 / M3 Step 4）: done
 
 ### 新增内容
 

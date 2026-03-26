@@ -431,25 +431,105 @@ def build_risk_effective_snapshot(config_helper: Any, symbol: Optional[str], *, 
     baseline = build_risk_baseline_snapshot(config_helper, symbol)
     conservative_only = bool(guarded_cfg.get('enforce_conservative_only', True))
     hints_enabled = bool(guarded_cfg.get('risk_hints_enabled', False))
+    enforcement_enabled = bool(guarded_cfg.get('risk_enforcement_enabled', False))
+    rollout_symbols = list(guarded_cfg.get('rollout_symbols') or [])
+    rollout_match = (not rollout_symbols) or (symbol in rollout_symbols)
+    mode = str(normalized_policy.get('mode') or adaptive_cfg.get('mode') or 'observe_only')
+    enforcement_fields = [
+        str(item).strip()
+        for item in (guarded_cfg.get('risk_enforcement_fields') or [
+            'total_margin_cap_ratio',
+            'total_margin_soft_cap_ratio',
+            'symbol_margin_cap_ratio',
+            'base_entry_margin_ratio',
+            'max_entry_margin_ratio',
+            'leverage_cap',
+        ]) if str(item).strip()
+    ]
     merged = merge_risk_overrides_conservatively(
         baseline,
         dict(normalized_policy.get('risk_overrides') or {}),
         conservative_only=conservative_only,
     )
-    mode = str(normalized_policy.get('mode') or adaptive_cfg.get('mode') or 'observe_only')
+
+    if enforcement_enabled and mode in {'guarded_execute', 'full'} and rollout_match:
+        effective_state = 'effective'
+    elif hints_enabled or merged.get('applied_overrides') or merged.get('ignored_overrides'):
+        effective_state = 'hints_only'
+    else:
+        effective_state = 'disabled'
+
+    enforced_effective = dict(baseline)
+    field_decisions = []
+    enforced_fields = []
     would_tighten_fields = list(merged.get('applied_overrides') or {})
     hint_codes: List[str] = []
+
+    for field in enforcement_fields:
+        base_value = baseline.get(field)
+        effective_value = merged['effective'].get(field)
+        applied_row = (merged.get('applied_overrides') or {}).get(field)
+        applied = bool(applied_row)
+        can_enforce = effective_state == 'effective' and applied
+        if can_enforce:
+            enforced_effective[field] = effective_value
+            enforced_fields.append(field)
+        if applied:
+            hint_codes.append(f"WOULD_TIGHTEN_{field.upper()}")
+        if applied and can_enforce:
+            decision = 'applied'
+            reason = 'conservative_tighten_enforced'
+        elif applied and effective_state != 'effective':
+            decision = 'observe_only'
+            reason = 'risk_enforcement_not_live'
+        elif applied:
+            decision = 'ignored'
+            reason = 'field_not_in_enforcement_scope'
+        else:
+            decision = 'unchanged'
+            reason = 'no_conservative_tighten'
+        field_decisions.append({
+            'field': field,
+            'baseline': base_value,
+            'effective': effective_value,
+            'applied': applied,
+            'ignored': not applied,
+            'enforced': can_enforce,
+            'decision': decision,
+            'reason': reason,
+        })
+
     for field in would_tighten_fields:
-        hint_codes.append(f"WOULD_TIGHTEN_{field.upper()}")
-    for ignored in merged.get('ignored_overrides') or []:
+        if field not in enforcement_fields:
+            applied_row = (merged.get('applied_overrides') or {}).get(field) or {}
+            field_decisions.append({
+                'field': field,
+                'baseline': baseline.get(field),
+                'effective': merged['effective'].get(field),
+                'applied': True,
+                'ignored': True,
+                'enforced': False,
+                'decision': 'ignored',
+                'reason': 'field_not_in_enforcement_scope',
+                'requested': applied_row.get('requested'),
+            })
+            hint_codes.append(f"WOULD_TIGHTEN_{field.upper()}")
+
+    ignored_overrides = list(merged.get('ignored_overrides') or [])
+    if rollout_symbols and not rollout_match:
+        ignored_overrides.append({'key': 'rollout_symbols', 'requested': rollout_symbols, 'reason': 'rollout_symbol_not_matched', 'code': 'ROLL_OUT_SYMBOL_NOT_MATCHED'})
+    for ignored in ignored_overrides:
         code = ignored.get('code')
         if code and code not in hint_codes:
             hint_codes.append(code)
+
     return {
-        'enabled': hints_enabled,
+        'enabled': bool(hints_enabled or enforcement_enabled),
         'baseline': baseline,
         'effective': merged['effective'],
-        'effective_state': 'hints_only' if hints_enabled else 'disabled',
+        'enforced_budget': enforced_effective,
+        'effective_candidate': merged['effective'],
+        'effective_state': effective_state,
         'policy_mode': mode,
         'policy_version': normalized_policy.get('policy_version') or ADAPTIVE_POLICY_VERSION,
         'policy_source': normalized_policy.get('policy_source') or 'adaptive_regime.defaults',
@@ -458,13 +538,19 @@ def build_risk_effective_snapshot(config_helper: Any, symbol: Optional[str], *, 
         'stability_score': normalized_regime.get('stability_score'),
         'transition_risk': normalized_regime.get('transition_risk'),
         'applied_overrides': merged['applied_overrides'],
-        'ignored_overrides': merged['ignored_overrides'],
-        'observe_only': True,
+        'ignored_overrides': ignored_overrides,
+        'observe_only': effective_state != 'effective',
         'hints_enabled': hints_enabled,
+        'enforcement_enabled': enforcement_enabled,
         'conservative_only': conservative_only,
+        'rollout_symbols': rollout_symbols,
+        'rollout_match': rollout_match,
+        'enforcement_fields': enforcement_fields,
         'would_tighten': bool(would_tighten_fields),
         'would_tighten_fields': would_tighten_fields,
+        'enforced_fields': enforced_fields,
         'hint_codes': hint_codes,
+        'field_decisions': field_decisions,
     }
 
 

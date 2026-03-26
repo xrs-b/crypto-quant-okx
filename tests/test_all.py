@@ -1813,14 +1813,14 @@ class TestReconcilePositions(unittest.TestCase):
             self.assertIn('XRP/USDT', symbols)
             self.assertNotIn('SOL/USDT', symbols)
             self.assertEqual(report['summary']['exchange_positions'], 2)
-            self.assertEqual(report['summary']['open_trades'], 1)
+            self.assertEqual(report['summary']['open_trades'], 2)
             self.assertEqual(report['summary']['stale_open_trades_closed'], 1)
             self.assertEqual(report['summary']['open_trade_missing_exchange'], 0)
             closed_eth = db.get_trades(symbol='ETH/USDT', limit=5)[0]
             self.assertEqual(closed_eth['status'], 'closed')
             self.assertIn('自动收口', closed_eth.get('notes') or '')
-            self.assertEqual(report['summary']['exchange_missing_open_trade'], 1)
-            self.assertEqual(report['diff']['exchange_missing_open_trade'][0]['symbol'], 'XRP/USDT')
+            self.assertEqual(report['summary']['exchange_missing_open_trade'], 0)
+            self.assertEqual(report['created_open_trades'][0]['symbol'], 'XRP/USDT')
         finally:
             if os.path.exists('data/test_reconcile.db'):
                 os.remove('data/test_reconcile.db')
@@ -3066,6 +3066,34 @@ class TestRiskBudgetSizing(unittest.TestCase):
         self.assertTrue(any(row['key'] == 'total_margin_cap_ratio' for row in snapshot['ignored_overrides']))
         self.assertIn('IGNORED_NON_CONSERVATIVE_OVERRIDE', snapshot['hint_codes'])
 
+    def test_build_risk_effective_snapshot_step4_enforcement_rolls_out_safely(self):
+        cfg = Config()
+        cfg._config['adaptive_regime'] = {
+            'enabled': True,
+            'mode': 'guarded_execute',
+            'guarded_execute': {
+                'risk_hints_enabled': True,
+                'risk_enforcement_enabled': True,
+                'rollout_symbols': ['BTC/USDT'],
+            },
+            'regimes': {
+                'high_vol': {
+                    'risk_overrides': {
+                        'base_entry_margin_ratio': 0.05,
+                        'symbol_margin_cap_ratio': 0.10,
+                        'leverage_cap': 5,
+                    }
+                }
+            }
+        }
+        signal = Signal(symbol='BTC/USDT', signal_type='buy', price=100, strength=55, reasons=[], strategies_triggered=['x'])
+        signal.market_context = {'regime': 'high_vol', 'regime_confidence': 0.9}
+        snapshot = build_risk_effective_snapshot(cfg, 'BTC/USDT', signal=signal)
+        self.assertEqual(snapshot['effective_state'], 'effective')
+        self.assertFalse(snapshot['observe_only'])
+        self.assertEqual(snapshot['enforced_fields'], ['symbol_margin_cap_ratio', 'base_entry_margin_ratio', 'leverage_cap'])
+        self.assertTrue(any(row['field'] == 'base_entry_margin_ratio' and row['enforced'] for row in snapshot['field_decisions']))
+
     def test_summarize_risk_hint_changes_is_serializable(self):
         summary = summarize_risk_hint_changes(
             {'base_entry_margin_ratio': 0.08, 'leverage_cap': 10},
@@ -3127,6 +3155,104 @@ class TestRiskManagerBudgetDetails(unittest.TestCase):
         self.assertTrue(can_open)
         self.assertIn('entry_plan', details['exposure_limit'])
         self.assertIn('position_ratio', details['exposure_limit'])
+
+
+    def test_can_open_position_step4_keeps_default_observe_only(self):
+        can_open, reason, details = self.risk_mgr.can_open_position('BTC/USDT', side='long')
+        self.assertTrue(can_open)
+        self.assertEqual(details['adaptive_risk_snapshot']['effective_state'], 'disabled')
+        self.assertEqual(details['exposure_limit']['entry_plan']['risk_budget']['base_entry_margin_ratio'], 0.1)
+
+    def test_can_open_position_step4_enforces_tighter_budget_when_rollout_matches(self):
+        self.config._config['adaptive_regime'] = {
+            'enabled': True,
+            'mode': 'guarded_execute',
+            'guarded_execute': {
+                'risk_hints_enabled': True,
+                'risk_enforcement_enabled': True,
+                'rollout_symbols': ['BTC/USDT'],
+            },
+            'regimes': {
+                'high_vol': {
+                    'risk_overrides': {
+                        'base_entry_margin_ratio': 0.05,
+                        'symbol_margin_cap_ratio': 0.10,
+                        'leverage_cap': 5,
+                        'total_margin_cap_ratio': 0.20,
+                    }
+                }
+            }
+        }
+        self.config._config.setdefault('trading', {})['leverage'] = 10
+        regime_snapshot = build_regime_snapshot('high_vol', 0.9, {'volatility': 0.05}, '高波动')
+        policy_snapshot = resolve_regime_policy(self.config, 'BTC/USDT', regime_snapshot)
+        can_open, reason, details = self.risk_mgr.can_open_position(
+            'BTC/USDT', side='long', signal_id=501,
+            plan_context={'regime_snapshot': regime_snapshot, 'adaptive_policy_snapshot': policy_snapshot}
+        )
+        self.assertTrue(can_open)
+        self.assertEqual(details['adaptive_risk_snapshot']['effective_state'], 'effective')
+        self.assertAlmostEqual(details['exposure_limit']['entry_plan']['risk_budget']['base_entry_margin_ratio'], 0.05, places=6)
+        self.assertEqual(details['exposure_limit']['planned_leverage'], 5)
+        self.assertEqual(details['adaptive_risk_hints']['enforced_fields'], ['total_margin_cap_ratio', 'symbol_margin_cap_ratio', 'base_entry_margin_ratio', 'leverage_cap'])
+
+    def test_can_open_position_step4_never_relaxes_baseline(self):
+        self.config._config['adaptive_regime'] = {
+            'enabled': True,
+            'mode': 'guarded_execute',
+            'guarded_execute': {
+                'risk_hints_enabled': True,
+                'risk_enforcement_enabled': True,
+                'rollout_symbols': ['BTC/USDT'],
+            },
+            'regimes': {
+                'high_vol': {
+                    'risk_overrides': {
+                        'base_entry_margin_ratio': 0.12,
+                        'symbol_margin_cap_ratio': 0.20,
+                        'leverage_cap': 20,
+                    }
+                }
+            }
+        }
+        self.config._config.setdefault('trading', {})['leverage'] = 10
+        regime_snapshot = build_regime_snapshot('high_vol', 0.9, {'volatility': 0.05}, '高波动')
+        policy_snapshot = resolve_regime_policy(self.config, 'BTC/USDT', regime_snapshot)
+        can_open, reason, details = self.risk_mgr.can_open_position(
+            'BTC/USDT', side='long', signal_id=502,
+            plan_context={'regime_snapshot': regime_snapshot, 'adaptive_policy_snapshot': policy_snapshot}
+        )
+        self.assertTrue(can_open)
+        self.assertEqual(details['adaptive_risk_snapshot']['effective_state'], 'effective')
+        self.assertAlmostEqual(details['exposure_limit']['entry_plan']['risk_budget']['base_entry_margin_ratio'], 0.1, places=6)
+        self.assertEqual(details['exposure_limit']['planned_leverage'], 10)
+        self.assertTrue(any(row['key'] == 'base_entry_margin_ratio' and row['reason'] == 'non_conservative_override' for row in details['adaptive_risk_snapshot']['ignored_overrides']))
+
+    def test_can_open_position_step4_rollout_miss_stays_hints_only(self):
+        self.config._config['adaptive_regime'] = {
+            'enabled': True,
+            'mode': 'guarded_execute',
+            'guarded_execute': {
+                'risk_hints_enabled': True,
+                'risk_enforcement_enabled': True,
+                'rollout_symbols': ['ETH/USDT'],
+            },
+            'regimes': {
+                'high_vol': {
+                    'risk_overrides': {'base_entry_margin_ratio': 0.05}
+                }
+            }
+        }
+        regime_snapshot = build_regime_snapshot('high_vol', 0.9, {'volatility': 0.05}, '高波动')
+        policy_snapshot = resolve_regime_policy(self.config, 'BTC/USDT', regime_snapshot)
+        can_open, reason, details = self.risk_mgr.can_open_position(
+            'BTC/USDT', side='long', signal_id=503,
+            plan_context={'regime_snapshot': regime_snapshot, 'adaptive_policy_snapshot': policy_snapshot}
+        )
+        self.assertTrue(can_open)
+        self.assertEqual(details['adaptive_risk_snapshot']['effective_state'], 'hints_only')
+        self.assertAlmostEqual(details['exposure_limit']['entry_plan']['risk_budget']['base_entry_margin_ratio'], 0.1, places=6)
+        self.assertFalse(details['adaptive_risk_hints']['rollout_match'])
 
 
 

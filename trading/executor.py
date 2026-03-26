@@ -71,11 +71,15 @@ def enrich_observability_with_snapshots(config_helper: Any, symbol: Optional[str
         'observe_only': bool(risk_snapshot.get('observe_only', True)),
         'baseline': dict(risk_snapshot.get('baseline') or {}),
         'effective': dict(risk_snapshot.get('effective') or {}),
+        'effective_candidate': dict(risk_snapshot.get('effective_candidate') or risk_snapshot.get('effective') or {}),
         'applied': list((risk_snapshot.get('applied_overrides') or {}).keys()),
         'ignored': list(risk_snapshot.get('ignored_overrides') or []),
         'would_tighten': bool(risk_snapshot.get('would_tighten', risk_hint_summary.get('would_tighten'))),
         'would_tighten_fields': list(risk_snapshot.get('would_tighten_fields') or risk_hint_summary.get('would_tighten_fields') or []),
+        'enforced_fields': list(risk_snapshot.get('enforced_fields') or []),
+        'rollout_match': bool(risk_snapshot.get('rollout_match', True)),
         'hint_codes': list(risk_snapshot.get('hint_codes') or risk_hint_summary.get('hint_codes') or []),
+        'field_decisions': list(risk_snapshot.get('field_decisions') or []),
     }
     return enriched
 
@@ -435,7 +439,13 @@ class TradingExecutor:
             return False, layer_plan.get('reason') or '分层资格不通过', merge_observability_details({'stage': 'layer_eligibility', 'layer_plan': layer_plan}, build_observability_context(symbol=symbol, side=side, signal_id=signal_id, root_signal_id=layer_plan.get('root_signal_id') or root_signal_id or signal_id, layer_no=layer_plan.get('layer_no'), deny_reason='layer_eligibility'))
 
         snapshot = self._build_latest_risk_snapshot(symbol, side, current_price=current_price)
-        risk_budget = get_risk_budget_config(self.config, symbol)
+        adaptive_risk_snapshot = build_risk_effective_snapshot(
+            self.config,
+            symbol,
+            regime_snapshot=(plan_context or {}).get('regime_snapshot'),
+            policy_snapshot=(plan_context or {}).get('adaptive_policy_snapshot'),
+        )
+        risk_budget = dict(adaptive_risk_snapshot.get('enforced_budget') or get_risk_budget_config(self.config, symbol))
         entry_plan = compute_entry_plan(
             total_balance=float(snapshot.get('balance_total') or 0.0),
             free_balance=float(snapshot.get('balance_free') or 0.0),
@@ -451,6 +461,7 @@ class TradingExecutor:
         merged = dict(layer_plan)
         merged['signal_id'] = signal_id
         merged['current_price'] = current_price
+        merged['adaptive_risk_snapshot'] = adaptive_risk_snapshot
         merged['entry_plan'] = entry_plan
         merged['planned_margin'] = float(entry_plan.get('allowed_margin') or 0.0)
         approved_context = build_observability_context(symbol=symbol, side=side, signal_id=signal_id, root_signal_id=merged.get('root_signal_id') or root_signal_id or signal_id, layer_no=merged.get('layer_no'), current_symbol_exposure=entry_plan.get('current_symbol_exposure_ratio'), projected_symbol_exposure=entry_plan.get('projected_symbol_exposure_ratio'), current_total_exposure=entry_plan.get('current_total_exposure_ratio'), projected_total_exposure=entry_plan.get('projected_total_exposure_ratio'))
@@ -516,14 +527,18 @@ class TradingExecutor:
         # 计算开仓数量 - 修复：基于实际杠杆计算，确保保证金占比准确
         # 步骤1: 先设置杠杆到交易所（确保一致）
         configured_leverage = self.trading_config.get('leverage', 10)
+        adaptive_risk_snapshot = dict(plan_context.get('adaptive_risk_snapshot') or {})
+        leverage_cap = (adaptive_risk_snapshot.get('enforced_budget') or adaptive_risk_snapshot.get('effective') or {}).get('leverage_cap')
+        planned_leverage = min(int(configured_leverage), int(leverage_cap)) if leverage_cap else int(configured_leverage)
         try:
             if self.exchange.is_futures_symbol(symbol):
-                self.exchange.set_leverage(symbol, configured_leverage)
+                self.exchange.set_leverage(symbol, planned_leverage)
         except Exception as e:
             trade_logger.warning(f"{symbol}: 设置杠杆失败，将使用配置值 - {e}")
         
         # 步骤2: 获取实际杠杆（交易所可能调整）
-        effective_leverage = self.exchange.get_actual_leverage(symbol) if hasattr(self.exchange, 'get_actual_leverage') else configured_leverage
+        exchange_leverage = self.exchange.get_actual_leverage(symbol) if hasattr(self.exchange, 'get_actual_leverage') else planned_leverage
+        effective_leverage = min(planned_leverage, int(exchange_leverage or planned_leverage))
         
         # 步骤3: 按目标保证金计算名义价值
         # 目标: 10% 保证金 = available * position_ratio
@@ -535,7 +550,7 @@ class TradingExecutor:
         
         # 可观察性日志
         trade_logger.info(
-            f"{symbol}: 仓位计算 - 配置杠杆:{configured_leverage}x, 实际杠杆:{effective_leverage}x, "
+            f"{symbol}: 仓位计算 - 配置杠杆:{configured_leverage}x, 计划杠杆:{planned_leverage}x, 实际杠杆:{effective_leverage}x, "
             f"目标保证金:{target_margin:.2f}USDT({position_ratio*100:.0f}%), 目标名义:{desired_notional:.2f}USDT"
         )
         
@@ -1490,13 +1505,22 @@ class RiskManager:
             'max': max_daily_drawdown
         }
 
-        risk_budget = get_risk_budget_config(self.config, symbol)
+        adaptive_risk_snapshot = build_risk_effective_snapshot(
+            self.config,
+            symbol,
+            regime_snapshot=(plan_context or {}).get('regime_snapshot'),
+            policy_snapshot=(plan_context or {}).get('adaptive_policy_snapshot'),
+        )
+        risk_budget = dict(adaptive_risk_snapshot.get('enforced_budget') or get_risk_budget_config(self.config, symbol))
         configured_leverage = int(self.trading_config.get('leverage', 10))
 
-        effective_leverage = configured_leverage
+        leverage_cap = risk_budget.get('leverage_cap')
+        planned_leverage = min(configured_leverage, int(leverage_cap)) if leverage_cap else configured_leverage
+        effective_leverage = planned_leverage
         if self._exchange:
             try:
-                effective_leverage = self._exchange.get_actual_leverage(symbol) if hasattr(self._exchange, 'get_actual_leverage') else configured_leverage
+                exchange_leverage = self._exchange.get_actual_leverage(symbol) if hasattr(self._exchange, 'get_actual_leverage') else planned_leverage
+                effective_leverage = min(planned_leverage, int(exchange_leverage or planned_leverage))
             except Exception:
                 pass
 
@@ -1570,7 +1594,7 @@ class RiskManager:
             projected_total_exposure=entry_plan.get('projected_total_exposure_ratio'),
         )
         details['observability'] = enrich_observability_with_snapshots(self.config, symbol, observability, plan_context=plan_context)
-        details['adaptive_risk_snapshot'] = dict(details['observability'].get('adaptive_risk_snapshot') or {})
+        details['adaptive_risk_snapshot'] = dict(details['observability'].get('adaptive_risk_snapshot') or adaptive_risk_snapshot or {})
         details['adaptive_risk_hints'] = dict(details['observability'].get('adaptive_risk_hints') or {})
         trade_logger.info(
             f"风控检查 {symbol}: 当前暴露:{current_exposure*100:.1f}%, "
@@ -1600,8 +1624,10 @@ class RiskManager:
             'projected_symbol': round(projected_symbol, 4),
             'max': max_exposure,
             'max_symbol': max_symbol,
-            'planned_leverage': configured_leverage,
+            'planned_leverage': planned_leverage,
+            'configured_leverage': configured_leverage,
             'effective_leverage': effective_leverage,
+            'leverage_cap': leverage_cap,
             'position_ratio': position_ratio,
             'entry_plan': entry_plan,
         }

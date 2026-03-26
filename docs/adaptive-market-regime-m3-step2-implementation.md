@@ -77,7 +77,7 @@ validator 输出现在会同时包含：
 - 只收紧，不放宽 baseline
 - 输出可清楚解释：baseline / effective / applied / ignored / enforced / why block
 
-## Status（2026-03-26 / M3 Step 3）: done
+## Status（2026-03-26 / M3 Step 4）: done
 
 ### 新增内容
 
@@ -108,3 +108,37 @@ validator 输出现在会同时包含：
 - 不修改 execution 骨架
 - 不真正把 adaptive risk view 写回 `compute_entry_plan()` / 下单输入
 - 不提前进入 M4 execution adaptation
+
+
+### Step 4 新增内容（Risk Conservative Enforcement）
+
+- risk 层开始小范围真生效，但仍只限 **risk budget / entry sizing guardrails**，不碰 execution profile / layering 参数。
+- 新增 `guarded_execute.risk_enforcement_enabled` 与 `risk_enforcement_fields`；默认关闭，继续安全。
+- rollout 继续复用 `rollout_symbols`，可按单 symbol 灰度；未命中 rollout 时保持 `hints_only`。
+- 真正 enforced 的字段当前仅限：
+  - `total_margin_cap_ratio`
+  - `total_margin_soft_cap_ratio`
+  - `symbol_margin_cap_ratio`
+  - `base_entry_margin_ratio`
+  - `max_entry_margin_ratio`
+  - `leverage_cap`
+- `RiskManager` / `TradingExecutor` 现在只消费 `enforced_budget`：
+  - 默认 / hints-only 仍走 baseline budget
+  - 只有在 risk enforcement 生效时，entry plan 才真正使用收紧后的 budget
+  - leverage 也只会被 cap 下压，不会被放大
+- observability 现已明确输出：
+  - `baseline`
+  - `effective`（candidate）
+  - `enforced_budget`
+  - `applied_overrides`
+  - `ignored_overrides`
+  - `enforced_fields`
+  - `field_decisions`
+  - `effective_state=disabled|hints_only|effective`
+  - `rollout_match`
+
+### Step 4 仍然刻意不做的事
+
+- 不改 `layer_ratios` / `layer_max_total_ratio`
+- 不改 `min_add_interval_seconds` / `max_layers_per_signal` / execution plan 编排
+- 不改 partial TP / trailing / reconcile / intent / direction lock 主链路

@@ -813,6 +813,70 @@ class TestEntryDecider(unittest.TestCase):
         self.assertTrue(any(rule['reason'] == 'adaptive 条件式观望命中' for rule in payload['breakdown']['adaptive_triggered_rules']))
         self.assertIn('adaptive:payload-check', payload['breakdown']['adaptive_decision_tags'])
 
+    def test_entry_decider_step3_output_contains_stable_adaptive_decision_audit(self):
+        decider = EntryDecider({
+            'adaptive_regime': {
+                'enabled': True,
+                'mode': 'full',
+                'defaults': {
+                    'decision_overrides': {
+                        'allow_score_min': 81,
+                        'decision_notes': ['step3 audit note'],
+                        'decision_tags': ['adaptive:audit'],
+                        'conditional_overrides': [
+                            {
+                                'metric': 'signal_strength_score',
+                                'operator': '<=',
+                                'value': 80,
+                                'action': 'watch',
+                                'reason': 'adaptive audit watch fired',
+                            }
+                        ],
+                    }
+                }
+            }
+        })
+        payload = decider.decide(self._make_signal()).to_dict()['breakdown']
+        audit = payload['adaptive_decision_audit']
+        self.assertEqual(sorted(audit.keys()), ['applied', 'effective', 'ignored', 'triggered'])
+        self.assertEqual(audit['effective']['mode'], 'full')
+        self.assertTrue(audit['effective']['is_effective'])
+        self.assertEqual(audit['effective']['thresholds']['allow_score_min'], 81)
+        self.assertIn('decision_notes', audit['applied'])
+        self.assertIn('adaptive:audit', audit['effective']['tags'])
+        self.assertTrue(any(item['status'] == 'triggered' and item['stage'] == 'conditional_rule' for item in audit['triggered']))
+        self.assertEqual(audit['triggered'], payload['adaptive_triggered_rules'])
+        self.assertEqual(audit['applied'], payload['adaptive_applied_overrides'])
+
+    def test_entry_decider_step3_ignored_overrides_include_stage_and_status(self):
+        decider = EntryDecider({
+            'adaptive_regime': {
+                'enabled': True,
+                'mode': 'decision_only',
+                'defaults': {
+                    'decision_overrides': {
+                        'allow_score_min': 60,
+                        'decision_tags': 'not-a-list',
+                        'conditional_overrides': [
+                            {
+                                'metric': 'unknown_metric',
+                                'operator': '>=',
+                                'value': 1,
+                                'action': 'block',
+                            },
+                        ]
+                    }
+                }
+            }
+        })
+        payload = decider.decide(self._make_signal()).to_dict()['breakdown']
+        ignored = payload['adaptive_decision_audit']['ignored']
+        self.assertTrue(all(item['status'] == 'ignored' for item in ignored))
+        self.assertTrue(any(item['key'] == 'allow_score_min' and item['stage'] == 'threshold_rule' for item in ignored))
+        self.assertTrue(any(item['key'] == 'decision_tags' and item['stage'] == 'decision_metadata' for item in ignored))
+        self.assertTrue(any(item['key'] == 'conditional_overrides[0]' and item['stage'] == 'conditional_rule' for item in ignored))
+        self.assertEqual(ignored, payload['adaptive_ignored_overrides'])
+
 
 class TestSignalValidatorRegimeFilter(unittest.TestCase):
     """Regime Layer v1 过滤测试"""

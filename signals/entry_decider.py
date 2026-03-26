@@ -65,6 +65,7 @@ class DecisionBreakdown:
     adaptive_triggered_rules: List[Dict[str, Any]] = field(default_factory=list)
     adaptive_decision_notes: List[str] = field(default_factory=list)
     adaptive_decision_tags: List[str] = field(default_factory=list)
+    adaptive_decision_audit: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -243,6 +244,7 @@ class EntryDecider:
         breakdown.adaptive_ignored_overrides = adaptive_meta['ignored_overrides']
         breakdown.adaptive_decision_notes = adaptive_meta['notes']
         breakdown.adaptive_decision_tags = adaptive_meta['tags']
+        self._sync_adaptive_breakdown(breakdown, self._build_adaptive_decision_audit(effective_thresholds, adaptive_meta))
         result.observe_only = not adaptive_meta['is_effective']
 
         # 1. Signal Strength Score
@@ -292,16 +294,81 @@ class EntryDecider:
         result.reason_summary = self._generate_summary(result.decision, breakdown, signal)
         return result
 
-    def _append_ignored_override(self, ignored_overrides: List[Dict[str, Any]], key: str, reason: str, value: Any = None):
+    def _append_ignored_override(self, ignored_overrides: List[Dict[str, Any]], key: str, reason: str, value: Any = None, *, stage: str = 'decision_normalization'):
         ignored_overrides.append({
-            'key': key,
+            'key': str(key or '?'),
             'value': value,
-            'reason': reason,
+            'reason': str(reason or 'ignored'),
+            'stage': stage,
+            'status': 'ignored',
         })
 
     def _append_applied_override(self, applied_overrides: List[str], key: str):
+        key = str(key or '?')
         if key not in applied_overrides:
             applied_overrides.append(key)
+
+    def _append_unique_text(self, items: List[str], value: Any):
+        if isinstance(value, str) and value and value not in items:
+            items.append(value)
+
+    def _normalize_triggered_rule(self, key: str, action: str, metric: str, actual: Any, operator: str, expected: Any, reason: str) -> Dict[str, Any]:
+        return {
+            'key': str(key or '?'),
+            'status': 'triggered',
+            'stage': 'conditional_rule',
+            'action': str(action or 'watch'),
+            'metric': str(metric or '?'),
+            'actual': actual,
+            'operator': str(operator or '=='),
+            'value': expected,
+            'reason': str(reason or ''),
+        }
+
+    def _build_adaptive_decision_audit(self, effective_thresholds: Dict[str, Any], adaptive_meta: Dict[str, Any]) -> Dict[str, Any]:
+        adaptive_meta = adaptive_meta or {}
+        return {
+            'effective': {
+                'mode': adaptive_meta.get('mode', 'observe_only'),
+                'state': adaptive_meta.get('state', 'neutral'),
+                'is_effective': bool(adaptive_meta.get('is_effective', False)),
+                'thresholds': dict(effective_thresholds or {}),
+                'overrides': copy.deepcopy(adaptive_meta.get('effective_overrides') or {}),
+                'notes': list(adaptive_meta.get('notes') or []),
+                'tags': list(adaptive_meta.get('tags') or []),
+            },
+            'applied': list(adaptive_meta.get('applied_overrides') or []),
+            'ignored': copy.deepcopy(adaptive_meta.get('ignored_overrides') or []),
+            'triggered': copy.deepcopy(adaptive_meta.get('triggered_rules') or []),
+        }
+
+    def _sync_adaptive_breakdown(self, breakdown: DecisionBreakdown, audit: Dict[str, Any]):
+        audit = audit or {}
+        effective = dict(audit.get('effective') or {})
+        breakdown.adaptive_policy_mode = effective.get('mode', breakdown.adaptive_policy_mode)
+        breakdown.adaptive_policy_state = effective.get('state', breakdown.adaptive_policy_state)
+        breakdown.adaptive_policy_is_effective = bool(effective.get('is_effective', breakdown.adaptive_policy_is_effective))
+        breakdown.adaptive_effective_thresholds = dict(effective.get('thresholds') or {})
+        breakdown.adaptive_effective_overrides = copy.deepcopy(effective.get('overrides') or {})
+        breakdown.adaptive_decision_notes = list(effective.get('notes') or [])
+        breakdown.adaptive_decision_tags = list(effective.get('tags') or [])
+        breakdown.adaptive_applied_overrides = list(audit.get('applied') or [])
+        breakdown.adaptive_ignored_overrides = copy.deepcopy(audit.get('ignored') or [])
+        breakdown.adaptive_triggered_rules = copy.deepcopy(audit.get('triggered') or [])
+        breakdown.adaptive_decision_audit = {
+            'effective': {
+                'mode': breakdown.adaptive_policy_mode,
+                'state': breakdown.adaptive_policy_state,
+                'is_effective': breakdown.adaptive_policy_is_effective,
+                'thresholds': dict(breakdown.adaptive_effective_thresholds or {}),
+                'overrides': copy.deepcopy(breakdown.adaptive_effective_overrides or {}),
+                'notes': list(breakdown.adaptive_decision_notes or []),
+                'tags': list(breakdown.adaptive_decision_tags or []),
+            },
+            'applied': list(breakdown.adaptive_applied_overrides or []),
+            'ignored': copy.deepcopy(breakdown.adaptive_ignored_overrides or []),
+            'triggered': copy.deepcopy(breakdown.adaptive_triggered_rules or []),
+        }
 
     def _build_effective_thresholds(self, policy_snapshot: Dict[str, Any]) -> tuple:
         effective_thresholds = dict(self.thresholds)
@@ -334,7 +401,7 @@ class EntryDecider:
             override_value = decision_overrides.get(key)
             base_value = effective_thresholds.get(key)
             if not isinstance(override_value, (int, float)):
-                self._append_ignored_override(ignored_overrides, key, 'override is not numeric', override_value)
+                self._append_ignored_override(ignored_overrides, key, 'override is not numeric', override_value, stage='threshold_rule')
                 continue
             if base_value is None:
                 effective_thresholds[key] = override_value
@@ -342,14 +409,14 @@ class EntryDecider:
                 notes.append(f'{key}: adopt conservative threshold from adaptive override')
                 continue
             if not isinstance(base_value, (int, float)):
-                self._append_ignored_override(ignored_overrides, key, 'baseline is not numeric', override_value)
+                self._append_ignored_override(ignored_overrides, key, 'baseline is not numeric', override_value, stage='threshold_rule')
                 continue
             final_value = max(base_value, override_value) if rule == 'max' else min(base_value, override_value)
             if final_value != base_value:
                 effective_thresholds[key] = final_value
                 self._append_applied_override(applied_overrides, key)
             else:
-                self._append_ignored_override(ignored_overrides, key, 'override ignored because it would loosen baseline', override_value)
+                self._append_ignored_override(ignored_overrides, key, 'override ignored because it would loosen baseline', override_value, stage='threshold_rule')
                 notes.append(f'{key}: override ignored because it would loosen baseline')
 
         for tendency_key in ('downgrade_allow_to_watch', 'downgrade_watch_to_block'):
@@ -361,29 +428,27 @@ class EntryDecider:
                 if override_value:
                     self._append_applied_override(applied_overrides, tendency_key)
                 else:
-                    self._append_ignored_override(ignored_overrides, tendency_key, 'override disabled explicitly', override_value)
+                    self._append_ignored_override(ignored_overrides, tendency_key, 'override disabled explicitly', override_value, stage='decision_downgrade')
             else:
-                self._append_ignored_override(ignored_overrides, tendency_key, 'override is not boolean', override_value)
+                self._append_ignored_override(ignored_overrides, tendency_key, 'override is not boolean', override_value, stage='decision_downgrade')
 
         note_tags = decision_overrides.get('decision_tags') or []
         if isinstance(note_tags, list):
             for tag in note_tags:
-                if isinstance(tag, str) and tag and tag not in tags:
-                    tags.append(tag)
+                self._append_unique_text(tags, tag)
             if tags:
                 self._append_applied_override(applied_overrides, 'decision_tags')
         elif 'decision_tags' in decision_overrides:
-            self._append_ignored_override(ignored_overrides, 'decision_tags', 'override is not a list', decision_overrides.get('decision_tags'))
+            self._append_ignored_override(ignored_overrides, 'decision_tags', 'override is not a list', decision_overrides.get('decision_tags'), stage='decision_metadata')
 
         decision_notes = decision_overrides.get('decision_notes') or []
         if isinstance(decision_notes, list):
             for note in decision_notes:
-                if isinstance(note, str) and note and note not in notes:
-                    notes.append(note)
+                self._append_unique_text(notes, note)
             if decision_notes:
                 self._append_applied_override(applied_overrides, 'decision_notes')
         elif 'decision_notes' in decision_overrides:
-            self._append_ignored_override(ignored_overrides, 'decision_notes', 'override is not a list', decision_overrides.get('decision_notes'))
+            self._append_ignored_override(ignored_overrides, 'decision_notes', 'override is not a list', decision_overrides.get('decision_notes'), stage='decision_metadata')
 
         effective_overrides.setdefault('decision', {})
         for key in applied_overrides:
@@ -690,13 +755,13 @@ class EntryDecider:
         })
 
         if conditional_rules and not isinstance(conditional_rules, list):
-            self._append_ignored_override(ignored_overrides, 'conditional_overrides', 'override is not a list', conditional_rules)
+            self._append_ignored_override(ignored_overrides, 'conditional_overrides', 'override is not a list', conditional_rules, stage='conditional_rule')
             conditional_rules = []
 
         for idx, rule in enumerate(conditional_rules):
             key = f'conditional_overrides[{idx}]'
             if not isinstance(rule, dict):
-                self._append_ignored_override(ignored_overrides, key, 'rule is not a dict', rule)
+                self._append_ignored_override(ignored_overrides, key, 'rule is not a dict', rule, stage='conditional_rule')
                 continue
             metric = rule.get('metric')
             operator = rule.get('operator', '<=')
@@ -704,40 +769,38 @@ class EntryDecider:
             action = str(rule.get('action') or 'watch').lower()
             actual = metrics.get(metric)
             if metric not in metrics:
-                self._append_ignored_override(ignored_overrides, key, 'metric not supported', metric)
+                self._append_ignored_override(ignored_overrides, key, 'metric not supported', metric, stage='conditional_rule')
                 continue
             if operator not in {'>=', '>', '<=', '<', '==', '!='}:
-                self._append_ignored_override(ignored_overrides, key, 'operator not supported', operator)
+                self._append_ignored_override(ignored_overrides, key, 'operator not supported', operator, stage='conditional_rule')
                 continue
             if action not in {'watch', 'block'}:
-                self._append_ignored_override(ignored_overrides, key, 'action must be watch or block', action)
+                self._append_ignored_override(ignored_overrides, key, 'action must be watch or block', action, stage='conditional_rule')
                 continue
             try:
                 matched = self._compare_rule(actual, operator, expected)
             except Exception:
-                self._append_ignored_override(ignored_overrides, key, 'rule comparison failed', rule)
+                self._append_ignored_override(ignored_overrides, key, 'rule comparison failed', rule, stage='conditional_rule')
                 continue
             if not matched:
-                self._append_ignored_override(ignored_overrides, key, 'condition not met', {'metric': metric, 'actual': actual, 'operator': operator, 'value': expected})
+                self._append_ignored_override(ignored_overrides, key, 'condition not met', {'metric': metric, 'actual': actual, 'operator': operator, 'value': expected}, stage='conditional_rule')
                 continue
             reason = str(rule.get('reason') or f'adaptive rule matched: {metric} {operator} {expected}')
             note = rule.get('note')
             tag = rule.get('tag')
-            triggered_rules.append({
-                'key': key,
-                'action': action,
-                'metric': metric,
-                'actual': actual,
-                'operator': operator,
-                'value': expected,
-                'reason': reason,
-            })
+            triggered_rules.append(self._normalize_triggered_rule(
+                key=key,
+                action=action,
+                metric=metric,
+                actual=actual,
+                operator=operator,
+                expected=expected,
+                reason=reason,
+            ))
             self._append_applied_override(applied_overrides, key)
             watch_reasons.append(reason)
-            if isinstance(note, str) and note and note not in notes:
-                notes.append(note)
-            if isinstance(tag, str) and tag and tag not in tags:
-                tags.append(tag)
+            self._append_unique_text(notes, note)
+            self._append_unique_text(tags, tag)
             if action == 'block':
                 force_block = True
             else:
@@ -826,11 +889,20 @@ class EntryDecider:
         for reason in conditional_result['watch_reasons']:
             if reason not in watch_reasons:
                 watch_reasons.append(reason)
-        breakdown.adaptive_triggered_rules = conditional_result['triggered_rules']
-        breakdown.adaptive_decision_notes = conditional_result['notes']
-        breakdown.adaptive_decision_tags = conditional_result['tags']
-        breakdown.adaptive_ignored_overrides = conditional_result['ignored_overrides']
-        breakdown.adaptive_applied_overrides = conditional_result['applied_overrides']
+        self._sync_adaptive_breakdown(breakdown, {
+            'effective': {
+                'mode': breakdown.adaptive_policy_mode,
+                'state': breakdown.adaptive_policy_state,
+                'is_effective': breakdown.adaptive_policy_is_effective,
+                'thresholds': breakdown.adaptive_effective_thresholds,
+                'overrides': breakdown.adaptive_effective_overrides,
+                'notes': conditional_result['notes'],
+                'tags': conditional_result['tags'],
+            },
+            'applied': conditional_result['applied_overrides'],
+            'ignored': conditional_result['ignored_overrides'],
+            'triggered': conditional_result['triggered_rules'],
+        })
 
         if strategy_count <= 1 and getattr(signal, 'strength', 0) <= self._cfg('single_strategy_block_max_strength', 24, effective_thresholds) and total_score <= self._cfg('single_strategy_block_max_score', 64, effective_thresholds):
             watch_reasons.append("单策略弱信号，缺少交叉确认")

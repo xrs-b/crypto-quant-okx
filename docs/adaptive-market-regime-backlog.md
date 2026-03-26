@@ -326,6 +326,7 @@
 - **测试 / 验收**：抽样查看高分 block 与低分 allow，解释字段完整可读
 - **依赖关系**：AR-M2-01, AR-M2-02
 - **风险 / 回滚点**：无明显风险，主要是避免输出过长刷爆通知
+- **进度备注（2026-03-26 / M2 Step 3）**：已把 EntryDecider 内 adaptive decision 元数据收口成较稳定的 decision-audit 结构，统一 `effective / applied / ignored / triggered` 四类输出，同时保留旧 breakdown 字段兼容；仍严格遵守“只收紧不放宽”，且未触碰 validator / risk / execution 生效逻辑。
 
 ### AR-M2-04｜baseline vs decision_only 对比脚本 / 报表
 

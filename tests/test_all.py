@@ -541,6 +541,130 @@ class TestSignalValidator(unittest.TestCase):
         self.assertTrue(any(item['reason'] == 'rollout_symbol_not_matched' for item in ignored))
         json.dumps(details, ensure_ascii=False)
 
+    def test_validator_step2_default_safe_does_not_enforce_effective_gate(self):
+        cfg = Config()
+        cfg._config['adaptive_regime'] = {
+            'enabled': True,
+            'mode': 'guarded_execute',
+            'regimes': {'high_vol': {'validation_overrides': {'min_strength': 80}}}
+        }
+        validator = SignalValidator(cfg, None)
+        signal = Signal(
+            symbol='BTC/USDT', signal_type='buy', price=50000, strength=50, strategies_triggered=['RSI', 'MACD'],
+            market_context={'trend': 'bullish', 'volatility': 0.06, 'atr_ratio': 0.06, 'volatility_too_low': False, 'volatility_too_high': False, 'regime': 'high_vol', 'regime_confidence': 0.8, 'regime_details': '高波动'}
+        )
+        passed, reason, details = validator.validate(signal)
+        self.assertTrue(passed)
+        self.assertFalse(details['adaptive_validation_observability']['enforced'])
+        self.assertTrue(details['adaptive_validation_snapshot']['observe_only'])
+        self.assertEqual(details['adaptive_validation_enforcement']['summary'], 'adaptive enforcement inactive; validator stays on baseline path')
+
+    def test_validator_step2_can_enforce_threshold_tightening_for_rollout_symbol(self):
+        cfg = Config()
+        cfg._config['adaptive_regime'] = {
+            'enabled': True,
+            'mode': 'guarded_execute',
+            'guarded_execute': {
+                'validator_enforcement_enabled': True,
+                'rollout_symbols': ['BTC/USDT'],
+                'validator_enforcement_categories': ['thresholds'],
+            },
+            'regimes': {'high_vol': {'validation_overrides': {'min_strength': 80}}}
+        }
+        validator = SignalValidator(cfg, None)
+        signal = Signal(
+            symbol='BTC/USDT', signal_type='buy', price=50000, strength=50, strategies_triggered=['RSI', 'MACD'],
+            market_context={'trend': 'bullish', 'volatility': 0.06, 'atr_ratio': 0.06, 'volatility_too_low': False, 'volatility_too_high': False, 'regime': 'high_vol', 'regime_confidence': 0.8, 'regime_details': '高波动'}
+        )
+        passed, reason, details = validator.validate(signal)
+        self.assertFalse(passed)
+        self.assertEqual(reason, 'adaptive 生效后信号强度不足')
+        self.assertTrue(details['adaptive_validation_observability']['enforced'])
+        self.assertEqual(details['adaptive_validation_observability']['block_code'], 'ADAPTIVE_WEAK_SIGNAL_STRENGTH')
+        self.assertEqual(details['adaptive_validation_enforcement']['decision'], 'block')
+        self.assertTrue(any(item['key'] == 'min_strength' for item in details['adaptive_validation_enforcement']['applied']))
+
+    def test_validator_step2_never_loosens_baseline_even_when_enforcement_enabled(self):
+        cfg = Config()
+        cfg._config['strategies'] = {'composite': {'min_strength': 28, 'min_strategy_count': 2}}
+        cfg._config['adaptive_regime'] = {
+            'enabled': True,
+            'mode': 'guarded_execute',
+            'guarded_execute': {
+                'validator_enforcement_enabled': True,
+                'rollout_symbols': ['BTC/USDT'],
+                'validator_enforcement_categories': ['thresholds'],
+            },
+            'regimes': {'trend': {'validation_overrides': {'min_strength': 20, 'min_strategy_count': 1}}}
+        }
+        validator = SignalValidator(cfg, None)
+        signal = Signal(
+            symbol='BTC/USDT', signal_type='buy', price=50000, strength=24, strategies_triggered=['RSI'],
+            market_context={'trend': 'bullish', 'volatility': 0.02, 'atr_ratio': 0.02, 'volatility_too_low': False, 'volatility_too_high': False, 'regime': 'trend', 'regime_confidence': 0.8, 'regime_details': '趋势'}
+        )
+        passed, reason, details = validator.validate(signal)
+        self.assertFalse(passed)
+        self.assertEqual(reason, '触发策略数不足')
+        self.assertTrue(details['adaptive_validation_snapshot']['effective']['min_strength'] >= 28)
+        self.assertTrue(details['adaptive_validation_snapshot']['effective']['min_strategy_count'] >= 2)
+        ignored = details['adaptive_validation_snapshot']['ignored_overrides']
+        self.assertTrue(any(item['key'] == 'min_strength' and item['reason'] == 'non_conservative_override' for item in ignored))
+        self.assertTrue(any(item['key'] == 'min_strategy_count' and item['reason'] == 'non_conservative_override' for item in ignored))
+
+    def test_validator_step2_rollout_symbol_miss_keeps_hints_only(self):
+        cfg = Config()
+        cfg._config['adaptive_regime'] = {
+            'enabled': True,
+            'mode': 'guarded_execute',
+            'guarded_execute': {
+                'validator_enforcement_enabled': True,
+                'rollout_symbols': ['ETH/USDT'],
+                'validator_enforcement_categories': ['thresholds'],
+            },
+            'regimes': {'high_vol': {'validation_overrides': {'min_strength': 80}}}
+        }
+        validator = SignalValidator(cfg, None)
+        signal = Signal(
+            symbol='BTC/USDT', signal_type='buy', price=50000, strength=50, strategies_triggered=['RSI', 'MACD'],
+            market_context={'trend': 'bullish', 'volatility': 0.06, 'atr_ratio': 0.06, 'volatility_too_low': False, 'volatility_too_high': False, 'regime': 'high_vol', 'regime_confidence': 0.8, 'regime_details': '高波动'}
+        )
+        passed, reason, details = validator.validate(signal)
+        self.assertTrue(passed)
+        self.assertFalse(details['adaptive_validation_observability']['enforced'])
+        self.assertFalse(details['adaptive_validation_snapshot']['rollout_match'])
+        self.assertEqual(details['adaptive_validation_enforcement']['decision'], 'pass')
+
+    def test_validator_step2_observability_contains_baseline_effective_applied_ignored_and_block_reason(self):
+        cfg = Config()
+        cfg._config['market_filters'] = {'block_high_volatility': False, 'block_low_volatility': False}
+        cfg._config['adaptive_regime'] = {
+            'enabled': True,
+            'mode': 'guarded_execute',
+            'guarded_execute': {
+                'validator_enforcement_enabled': True,
+                'rollout_symbols': ['BTC/USDT'],
+                'validator_enforcement_categories': ['market_guards'],
+            },
+            'regimes': {'high_vol': {'validation_overrides': {'block_high_volatility': True}}}
+        }
+        validator = SignalValidator(cfg, None)
+        signal = Signal(
+            symbol='BTC/USDT', signal_type='buy', price=50000, strength=50, strategies_triggered=['RSI', 'MACD'],
+            market_context={'trend': 'bullish', 'volatility': 0.08, 'atr_ratio': 0.08, 'volatility_too_low': False, 'volatility_too_high': True, 'regime': 'high_vol', 'regime_confidence': 0.8, 'regime_details': '高波动放大'}
+        )
+        passed, reason, details = validator.validate(signal)
+        self.assertFalse(passed)
+        observability = details['adaptive_validation_observability']
+        enforcement = details['adaptive_validation_enforcement']
+        self.assertEqual(observability['block_code'], 'ADAPTIVE_HIGH_VOLATILITY')
+        self.assertEqual(observability['effective_result'], 'block')
+        self.assertIn('baseline', enforcement)
+        self.assertIn('effective', enforcement)
+        self.assertIn('applied_overrides', enforcement)
+        self.assertIn('ignored_overrides', enforcement)
+        self.assertTrue(any(item['key'] == 'block_high_volatility' for item in enforcement['applied']))
+        self.assertTrue(enforcement['block_reasons'])
+
 
 class TestEntryDecider(unittest.TestCase):
     def _make_signal(self, **overrides):

@@ -43,6 +43,7 @@ DEFAULT_ADAPTIVE_REGIME_CONFIG = {
         'validator_snapshot_enabled': True,
         'validator_hints_enabled': True,
         'validator_enforcement_enabled': False,
+        'validator_enforcement_categories': ['thresholds', 'market_guards', 'regime_guards'],
         'risk_hints_enabled': False,
         'enforce_conservative_only': True,
         'rollout_symbols': [],

@@ -93,7 +93,7 @@ class SignalValidator:
         hint_codes = []
         would_block_reasons = []
         would_tighten_fields = []
-        notes = ['validator still uses baseline thresholds in step1']
+        notes = ['validator uses baseline thresholds unless m3 step2 guarded enforcement is truly enabled']
 
         def add_hint(code: str, field: str = None, message: str = None, would_block: bool = False):
             if code not in hint_codes:
@@ -151,6 +151,72 @@ class SignalValidator:
             'observe_only': bool(snapshot.get('observe_only', True)),
         }
 
+    def _build_adaptive_enforcement_audit(self, signal, snapshot: Dict) -> Dict:
+        baseline = dict(snapshot.get('baseline') or {})
+        effective = dict(snapshot.get('effective') or {})
+        context = getattr(signal, 'market_context', {}) or {}
+        enforced = bool(snapshot.get('effective_state') == 'effective' and snapshot.get('enforcement_enabled'))
+        categories = list(snapshot.get('enforcement_categories') or [])
+        audit = {
+            'phase': 'm3_step2',
+            'baseline': baseline,
+            'effective': effective,
+            'applied_overrides': dict(snapshot.get('applied_overrides') or {}),
+            'ignored_overrides': list(snapshot.get('ignored_overrides') or []),
+            'rollout_match': bool(snapshot.get('rollout_match', True)),
+            'rollout_symbols': list(snapshot.get('rollout_symbols') or []),
+            'enforcement_enabled': bool(snapshot.get('enforcement_enabled', False)),
+            'effective_state': snapshot.get('effective_state', 'hints_only'),
+            'observe_only': bool(snapshot.get('observe_only', True)),
+            'conservative_only': bool(snapshot.get('conservative_only', True)),
+            'enforced': enforced,
+            'enforcement_categories': categories,
+            'applied': [],
+            'ignored': [],
+            'block_reasons': [],
+            'decision': 'pending',
+            'summary': '',
+            'context': {
+                'trend': context.get('trend'),
+                'volatility_too_high': bool(context.get('volatility_too_high')),
+                'volatility_too_low': bool(context.get('volatility_too_low')),
+                'regime': context.get('regime'),
+                'regime_confidence': float(context.get('regime_confidence', 0.0) or 0.0),
+                'transition_risk': float(snapshot.get('transition_risk', 0.0) or 0.0),
+            },
+        }
+        if not enforced:
+            audit['summary'] = 'adaptive enforcement inactive; validator stays on baseline path'
+            return audit
+        return audit
+
+    def _mark_adaptive_applied(self, audit: Dict, key: str, *, category: str, reason: str, baseline=None, effective=None, actual=None):
+        audit.setdefault('applied', []).append({
+            'key': key,
+            'category': category,
+            'reason': reason,
+            'baseline': baseline,
+            'effective': effective,
+            'actual': actual,
+            'status': 'applied',
+        })
+
+    def _adaptive_failure(self, code: str, reason: str, details: Dict, audit: Dict, detail_key: str = None) -> tuple:
+        if detail_key and detail_key in details and isinstance(details[detail_key], dict):
+            details[detail_key]['adaptive_enforced'] = True
+            details[detail_key]['adaptive_reason_code'] = code
+        audit['decision'] = 'block'
+        audit.setdefault('block_reasons', []).append({'code': code, 'reason': reason, 'status': 'blocked'})
+        audit['summary'] = reason
+        observability = details.get('adaptive_validation_observability') or {}
+        observability['effective_result'] = 'block'
+        observability['enforced'] = True
+        observability['block_reason'] = reason
+        observability['block_code'] = code
+        details['adaptive_validation_observability'] = observability
+        details['adaptive_validation_enforcement'] = audit
+        return False, reason, details
+
     def validate(self, signal, current_positions: Dict = None,
                  tracking_data: Dict = None) -> tuple:
         """验证信号，返回 (passed, reason, details)"""
@@ -178,17 +244,23 @@ class SignalValidator:
         validation_hints = self._build_validation_hints(signal, validation_snapshot)
         details['adaptive_validation_snapshot'] = validation_snapshot
         details['adaptive_validation_hints'] = validation_hints
+        enforcement_audit = self._build_adaptive_enforcement_audit(signal, validation_snapshot)
         details['adaptive_validation_observability'] = {
-            'phase': 'm3_step1',
+            'phase': 'm3_step2' if enforcement_audit.get('enforced') else 'm3_step1',
             'state': validation_snapshot.get('effective_state', 'hints_only'),
             'mode': validation_snapshot.get('policy_mode', 'observe_only'),
             'rollout_match': validation_snapshot.get('rollout_match', True),
             'enforcement_enabled': validation_snapshot.get('enforcement_enabled', False),
             'conservative_only': validation_snapshot.get('conservative_only', True),
             'observe_only': validation_snapshot.get('observe_only', True),
+            'enforced': enforcement_audit.get('enforced', False),
+            'enforcement_categories': list(validation_snapshot.get('enforcement_categories') or []),
             'baseline_result': 'pending',
             'effective_result': validation_hints.get('hinted_result', 'pass'),
+            'block_reason': None,
+            'block_code': None,
         }
+        details['adaptive_validation_enforcement'] = enforcement_audit
         latest_positions, used_exchange_positions = self._get_latest_positions_view(current_positions)
 
         # 0. 先过滤非方向性信号
@@ -514,6 +586,102 @@ class SignalValidator:
         observability['baseline_result'] = 'pass'
         observability['effective_result'] = hints.get('hinted_result', observability.get('effective_result', 'pass'))
         details['adaptive_validation_observability'] = observability
+
+        audit = details.get('adaptive_validation_enforcement') or {}
+        effective = validation_snapshot.get('effective') or {}
+        baseline = validation_snapshot.get('baseline') or {}
+        categories = set(validation_snapshot.get('enforcement_categories') or [])
+        context = getattr(signal, 'market_context', {}) or {}
+        transition_risk = float(validation_snapshot.get('transition_risk', 0.0) or 0.0)
+        regime = context.get('regime', 'unknown')
+        regime_confidence = float(context.get('regime_confidence', 0.0) or 0.0)
+
+        if audit.get('enforced'):
+            if 'thresholds' in categories:
+                if float(effective.get('min_strength', 0) or 0) > float(baseline.get('min_strength', 0) or 0):
+                    self._mark_adaptive_applied(audit, 'min_strength', category='thresholds', reason='effective min_strength tightened validator gate', baseline=baseline.get('min_strength'), effective=effective.get('min_strength'), actual=signal.strength)
+                    if signal.strength < effective.get('min_strength', 0):
+                        details['strength_check'] = {
+                            'passed': False,
+                            'reason': f"adaptive 生效后信号强度不足({signal.strength}<{effective.get('min_strength')})",
+                            'baseline': baseline.get('min_strength'),
+                            'effective': effective.get('min_strength'),
+                        }
+                        return self._adaptive_failure('ADAPTIVE_WEAK_SIGNAL_STRENGTH', 'adaptive 生效后信号强度不足', details, audit, 'strength_check')
+                if int(effective.get('min_strategy_count', 0) or 0) > int(baseline.get('min_strategy_count', 0) or 0):
+                    self._mark_adaptive_applied(audit, 'min_strategy_count', category='thresholds', reason='effective min_strategy_count tightened validator gate', baseline=baseline.get('min_strategy_count'), effective=effective.get('min_strategy_count'), actual=len(signal.strategies_triggered))
+                    if len(signal.strategies_triggered) < effective.get('min_strategy_count', 0):
+                        details['strategy_check'] = {
+                            'passed': False,
+                            'reason': f"adaptive 生效后触发策略数不足({len(signal.strategies_triggered)}<{effective.get('min_strategy_count')})",
+                            'baseline': baseline.get('min_strategy_count'),
+                            'effective': effective.get('min_strategy_count'),
+                        }
+                        return self._adaptive_failure('ADAPTIVE_INSUFFICIENT_STRATEGY_COUNT', 'adaptive 生效后触发策略数不足', details, audit, 'strategy_check')
+            if 'market_guards' in categories:
+                if effective.get('block_high_volatility') and not baseline.get('block_high_volatility'):
+                    self._mark_adaptive_applied(audit, 'block_high_volatility', category='market_guards', reason='effective snapshot newly blocks high volatility', baseline=baseline.get('block_high_volatility'), effective=effective.get('block_high_volatility'), actual=bool(context.get('volatility_too_high')))
+                    if context.get('volatility_too_high'):
+                        details['market_volatility_check'] = {
+                            'passed': False,
+                            'reason': f"adaptive 生效后拦截高波动({context.get('volatility')})",
+                            'context': context,
+                            'baseline': baseline.get('block_high_volatility'),
+                            'effective': effective.get('block_high_volatility'),
+                        }
+                        return self._adaptive_failure('ADAPTIVE_HIGH_VOLATILITY', 'adaptive 生效后拦截高波动', details, audit, 'market_volatility_check')
+                if effective.get('block_low_volatility') and not baseline.get('block_low_volatility'):
+                    self._mark_adaptive_applied(audit, 'block_low_volatility', category='market_guards', reason='effective snapshot newly blocks low volatility', baseline=baseline.get('block_low_volatility'), effective=effective.get('block_low_volatility'), actual=bool(context.get('volatility_too_low')))
+                    if context.get('volatility_too_low'):
+                        details['market_volatility_check'] = {
+                            'passed': False,
+                            'reason': f"adaptive 生效后拦截低波动({context.get('volatility')})",
+                            'context': context,
+                            'baseline': baseline.get('block_low_volatility'),
+                            'effective': effective.get('block_low_volatility'),
+                        }
+                        return self._adaptive_failure('ADAPTIVE_LOW_VOLATILITY', 'adaptive 生效后拦截低波动', details, audit, 'market_volatility_check')
+                if effective.get('block_counter_trend') and not baseline.get('block_counter_trend'):
+                    counter_trend_hit = (signal.signal_type == 'buy' and context.get('trend') == 'bearish') or (signal.signal_type == 'sell' and context.get('trend') == 'bullish')
+                    self._mark_adaptive_applied(audit, 'block_counter_trend', category='market_guards', reason='effective snapshot newly blocks counter trend entries', baseline=baseline.get('block_counter_trend'), effective=effective.get('block_counter_trend'), actual=counter_trend_hit)
+                    if counter_trend_hit:
+                        details['trend_alignment_check'] = {
+                            'passed': False,
+                            'reason': 'adaptive 生效后拦截逆势信号',
+                            'context': context,
+                            'baseline': baseline.get('block_counter_trend'),
+                            'effective': effective.get('block_counter_trend'),
+                        }
+                        return self._adaptive_failure('ADAPTIVE_COUNTER_TREND', 'adaptive 生效后拦截逆势信号', details, audit, 'trend_alignment_check')
+            if 'regime_guards' in categories:
+                if regime == 'risk_anomaly' and regime_confidence >= 0.5:
+                    self._mark_adaptive_applied(audit, 'risk_anomaly_guard', category='regime_guards', reason='risk anomaly hard block enforced in guarded validator', baseline='observe_only', effective='block', actual=regime)
+                    details['regime_guard_check'] = {
+                        'passed': False,
+                        'reason': f"adaptive 生效后拦截风险异常({context.get('regime_details', '')})",
+                        'regime': regime,
+                        'confidence': regime_confidence,
+                    }
+                    return self._adaptive_failure('ADAPTIVE_REGIME_RISK_ANOMALY', 'adaptive 生效后拦截风险异常', details, audit, 'regime_guard_check')
+                if transition_risk >= 0.8:
+                    self._mark_adaptive_applied(audit, 'transition_risk', category='regime_guards', reason='high transition risk hard block enforced in guarded validator', baseline='observe_only', effective='block', actual=transition_risk)
+                    details['regime_guard_check'] = {
+                        'passed': False,
+                        'reason': f'adaptive 生效后拦截高切换风险({transition_risk:.2f})',
+                        'regime': regime,
+                        'confidence': regime_confidence,
+                        'transition_risk': transition_risk,
+                    }
+                    return self._adaptive_failure('ADAPTIVE_TRANSITION_RISK', 'adaptive 生效后拦截高切换风险', details, audit, 'regime_guard_check')
+            audit['decision'] = 'pass'
+            audit['summary'] = 'adaptive enforcement active but did not add extra block'
+            details['adaptive_validation_enforcement'] = audit
+            observability = details.get('adaptive_validation_observability') or {}
+            observability['effective_result'] = 'pass'
+            details['adaptive_validation_observability'] = observability
+        else:
+            audit['decision'] = 'pass'
+            details['adaptive_validation_enforcement'] = audit
         return True, None, details
 
     def get_filter_summary(self, details: dict) -> str:

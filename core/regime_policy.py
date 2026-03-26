@@ -377,6 +377,7 @@ def build_validation_effective_snapshot(config_helper: Any, symbol: Optional[str
     )
     rollout_symbols = list(guarded_cfg.get('rollout_symbols') or [])
     rollout_match = (not rollout_symbols) or (symbol in rollout_symbols)
+    enforcement_categories = [str(item).strip() for item in (guarded_cfg.get('validator_enforcement_categories') or ['thresholds', 'market_guards', 'regime_guards']) if str(item).strip()]
     mode = str(normalized_policy.get('mode') or adaptive_cfg.get('mode') or 'observe_only')
     enforcement_enabled = bool(guarded_cfg.get('validator_enforcement_enabled', False))
     snapshot_enabled = bool(guarded_cfg.get('validator_snapshot_enabled', True))
@@ -409,6 +410,7 @@ def build_validation_effective_snapshot(config_helper: Any, symbol: Optional[str
         'conservative_only': conservative_only,
         'rollout_symbols': rollout_symbols,
         'rollout_match': rollout_match,
+        'enforcement_categories': enforcement_categories,
     }
 
 

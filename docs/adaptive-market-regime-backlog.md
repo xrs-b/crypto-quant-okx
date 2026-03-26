@@ -369,8 +369,8 @@
   - Step 1 先做 `effective_validation_snapshot + hints + observability`，默认保持 `validator_enforcement_enabled=false`，不直接改变 pass / block 结果
   - Step 2 才进入 `validator conservative enforcement`，并要求 rollout symbol、conservative-only、防呆与回滚开关齐全
   - 详细任务拆分见：[`docs/adaptive-market-regime-m3-step1-implementation.md`](./adaptive-market-regime-m3-step1-implementation.md)
-- **Status（2026-03-26 / M3 Step 1）**：done
-- **Notes**：`signals/validator.py` 已接入 validator-level `adaptive_validation_snapshot / adaptive_validation_hints / adaptive_validation_observability`；当前仍以 baseline validator 为真实判定，adaptive 只输出 `baseline vs effective`、`applied/ignored`、`would_block`、`hint_codes`、`observe_only/effective_state` 等观测字段；未修改 risk / execution 生效逻辑。
+- **Status（2026-03-26 / M3 Step 2）**：done
+- **Notes**：`signals/validator.py` 已从 Step 1 的 hints-only 进入 Step 2 guarded enforcement：仅在 `validator_enforcement_enabled=true` + rollout symbol 命中 + `mode in {guarded_execute, full}` 时，validator 才会小范围真正使用 adaptive effective gate；当前只接入 validator 层 conservative enforcement（`min_strength`、`min_strategy_count`、`block_counter_trend`、`block_high_volatility`、`block_low_volatility`、`risk_anomaly` hard block、`transition_risk` hard block），并新增 `validator_enforcement_categories` 以支持部分场景灰度；仍严格保持“只更保守，不放宽 baseline”，且未修改 risk / execution 生效逻辑。详细说明见：[`docs/adaptive-market-regime-m3-step2-implementation.md`](./adaptive-market-regime-m3-step2-implementation.md)
 
 ### AR-M3-02｜risk budget 支持 conservative overrides
 

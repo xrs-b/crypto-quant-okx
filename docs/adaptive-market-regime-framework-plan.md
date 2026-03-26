@@ -902,10 +902,16 @@ symbol_override.adaptive_regime
 - `layer_ratios` 继续默认 hints-only，等第二批 rollout 才进入 live layer plan
 - 详细实施拆分见：[`docs/adaptive-market-regime-m4-step3-implementation.md`](./adaptive-market-regime-m4-step3-implementation.md)
 
+### Step 4（layering plan shape / `layer_ratios` guarded live）
+
+- 先补 baseline / effective / live `layer_ratios` 与 `layer_count`（derived）审计
+- `layer_count` 只作为 `layer_ratios` 长度派生结果进入审计，不做独立扩层 override
+- 仅在 `layering_plan_shape_enforcement_enabled=true` + rollout 命中 + conservative-only 校验通过时，才允许 `layer_ratios` 进入 live layer plan
+- 详细实施拆分见：[`docs/adaptive-market-regime-m4-step4-implementation.md`](./adaptive-market-regime-m4-step4-implementation.md)
+
 ### 后续步骤（guarded layering deeper rollout / exit hints）
 
-- `layer_ratios` 真生效、deep layering profile 收紧继续后置
-- trailing / partial TP 先 hints-only，再视样本讨论 enforcement
+- partial TP / trailing 先 hints-only，再视样本讨论 enforcement
 
 ### 工作项
 

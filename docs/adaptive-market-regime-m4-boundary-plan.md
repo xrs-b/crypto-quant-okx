@@ -6,6 +6,8 @@
 >
 > 配套 M3 边界：[`docs/adaptive-market-regime-m3-boundary-plan.md`](./adaptive-market-regime-m3-boundary-plan.md)
 >
+> 配套 M4 Step 4 实施稿：[`docs/adaptive-market-regime-m4-step4-implementation.md`](./adaptive-market-regime-m4-step4-implementation.md)
+>
 > 目的：在真正进入 M4 前，先把 adaptive regime 在 **execution / layering** 层的实施边界、禁区、灰度方式、回滚方式与推荐推进顺序讲清楚，避免一上来把当前已稳定的 execution state machine、layer plan 与持仓管理链路搅乱。
 
 ---

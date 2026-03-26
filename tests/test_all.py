@@ -987,6 +987,27 @@ class TestNotifications(unittest.TestCase):
         self.assertEqual(db.outbox[-1]['status'], 'delivered')
         self.assertEqual(db.outbox[-1]['details']['delivery']['path'], 'direct')
 
+    def test_notify_test_bypasses_category_switch_and_reports_direct_delivery(self):
+        cfg = Config()
+        cfg._config.setdefault('notification', {}).setdefault('discord', {})
+        cfg._config['notification']['discord'].update({
+            'enabled': True,
+            'notify_trades': False,
+            'webhook_url': '',
+            'bot_token': 'x',
+            'channel_id': '123'
+        })
+        db = FakeLogDB()
+        notifier = NotificationManager(cfg, db, None)
+        notifier._send_discord = lambda content: True
+        result = notifier.test_discord()
+        self.assertTrue(result['enabled'])
+        self.assertTrue(result['delivered'])
+        self.assertEqual(result['outbox_status'], 'delivered')
+        self.assertEqual(db.outbox[-1]['status'], 'delivered')
+        self.assertEqual(db.outbox[-1]['details']['event_type'], 'notify-test')
+        self.assertEqual(db.outbox[-1]['details']['delivery']['path'], 'direct')
+
     def test_notification_keeps_pending_when_direct_send_fails(self):
         cfg = Config()
         cfg._config.setdefault('notification', {}).setdefault('discord', {})

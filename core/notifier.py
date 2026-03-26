@@ -524,4 +524,37 @@ class NotificationManager:
 
     def test_discord(self) -> Dict:
         now = datetime.now().isoformat()
-        return self.send('decision', '🔔 Discord 通知测试', [f'时间：{self._format_time(now)}', '如果你见到呢条消息，代表 webhook 推送链路正常'], 'info', {'time': now, 'kind': 'notify-test'})
+        title = '🔔 Discord 通知测试'
+        body = self._render_message(title, [f'时间：{self._format_time(now)}', '如果你见到呢条消息，代表 Discord 推送链路正常'])
+        details = {'time': now, 'kind': 'notify-test'}
+        outbox_id = self._store_event('info', 'notify-test', body, details, title)
+
+        transport_enabled = bool(
+            self.discord_cfg.get('webhook_url')
+            or (self.discord_cfg.get('bot_token') and self.discord_cfg.get('channel_id'))
+        )
+        delivered = self._send_discord(body) if transport_enabled else False
+        outbox_status = 'delivered' if delivered else ('pending' if transport_enabled else 'disabled')
+        self._update_outbox_status(outbox_id, outbox_status, {
+            **details,
+            'event_type': 'notify-test',
+            'level': 'info',
+            'title': title,
+            'priority': 'normal',
+            'delivery': {
+                'enabled': transport_enabled,
+                'suppressed': False,
+                'delivered': delivered,
+                'path': 'direct' if delivered else ('bridge_pending' if transport_enabled else 'disabled'),
+            }
+        })
+        return {
+            'delivered': delivered,
+            'enabled': transport_enabled,
+            'suppressed': False,
+            'message': body,
+            'outbox_id': outbox_id,
+            'outbox_status': outbox_status,
+            'priority': 'normal',
+            'aggregate_summary': None,
+        }

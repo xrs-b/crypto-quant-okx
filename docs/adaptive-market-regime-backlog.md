@@ -347,6 +347,8 @@
 ## 6. M3：Validation / Risk 保守生效（开始影响 validation / risk）
 
 > M3 边界、禁区、最小生效包、灰度/回滚策略详见：[`docs/adaptive-market-regime-m3-boundary-plan.md`](./adaptive-market-regime-m3-boundary-plan.md)
+>
+> M3 Step 1 可直接开工的实施拆分详见：[`docs/adaptive-market-regime-m3-step1-implementation.md`](./adaptive-market-regime-m3-step1-implementation.md)
 
 ### AR-M3-01｜validator 支持 effective validation snapshot
 
@@ -363,6 +365,10 @@
   - 不允许 override 把阈值调得比 baseline 更激进
 - **依赖关系**：AR-M2 阶段完成
 - **风险 / 回滚点**：若误支持放宽阈值，立即回退到 decision_only
+- **实施拆分（2026-03-26）**：
+  - Step 1 先做 `effective_validation_snapshot + hints + observability`，默认保持 `validator_enforcement_enabled=false`，不直接改变 pass / block 结果
+  - Step 2 才进入 `validator conservative enforcement`，并要求 rollout symbol、conservative-only、防呆与回滚开关齐全
+  - 详细任务拆分见：[`docs/adaptive-market-regime-m3-step1-implementation.md`](./adaptive-market-regime-m3-step1-implementation.md)
 
 ### AR-M3-02｜risk budget 支持 conservative overrides
 

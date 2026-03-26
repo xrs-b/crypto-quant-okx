@@ -4,6 +4,8 @@
 >
 > 配套 backlog：[`docs/adaptive-market-regime-backlog.md`](./adaptive-market-regime-backlog.md)
 >
+> Step 1 实施稿：[`docs/adaptive-market-regime-m3-step1-implementation.md`](./adaptive-market-regime-m3-step1-implementation.md)
+>
 > 目的：在真正进入 M3 开发前，先把 adaptive regime 在 **validator / risk** 层的实施边界、风险、回滚策略、灰度方式与推荐推进顺序讲清楚，避免一上来把现有执行主链路搅乱。
 
 ---
@@ -750,6 +752,7 @@ M3 上线后，建议盯以下监控点。
 - 在 backlog / framework 的 M3 段落加入口链接
 
 ### Step 2：做 validator effective snapshot（不立刻全生效）
+- 详细拆分见：[`docs/adaptive-market-regime-m3-step1-implementation.md`](./adaptive-market-regime-m3-step1-implementation.md)
 - 输出 `base vs effective validation snapshot`
 - 保留 `applied / ignored / reason_code`
 
@@ -800,6 +803,7 @@ M3 上线后，建议盯以下监控点。
 
 - 主计划：[`docs/adaptive-market-regime-framework-plan.md`](./adaptive-market-regime-framework-plan.md)
 - Backlog：[`docs/adaptive-market-regime-backlog.md`](./adaptive-market-regime-backlog.md)
+- M3 Step 1 实施稿：[`docs/adaptive-market-regime-m3-step1-implementation.md`](./adaptive-market-regime-m3-step1-implementation.md)
 - M0 实施稿：[`docs/adaptive-market-regime-m0-implementation.md`](./adaptive-market-regime-m0-implementation.md)
 - Layering 配置：[`docs/layering-config-notes.md`](./layering-config-notes.md)
 - Layering 验收清单：[`docs/layering-acceptance-checklist.md`](./layering-acceptance-checklist.md)

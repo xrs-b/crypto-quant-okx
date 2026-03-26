@@ -832,22 +832,37 @@ symbol_override.adaptive_regime
 ## M3：Guarded Validation & Risk（影响验证和风险，不推翻执行骨架）
 
 > M3 实施边界与回滚策略详见：[`docs/adaptive-market-regime-m3-boundary-plan.md`](./adaptive-market-regime-m3-boundary-plan.md)
+>
+> M3 Step 1 可直接开工的实施拆分详见：[`docs/adaptive-market-regime-m3-step1-implementation.md`](./adaptive-market-regime-m3-step1-implementation.md)
 
 ### 目标
 
 让 regime 影响 validator 与 risk budget，但只允许朝更保守方向调整。
 
+### Step 1（validator effective snapshot / hints / observability）
+
+- 先产出 validator `baseline vs effective` snapshot
+- 先补 `applied / ignored / hints / would_block_reasons`
+- 默认不直接改变 validator pass / block 结果
+- 先证明 M3 validator guardrail 的可解释性，再进入 enforcement
+
+### Step 2（validator conservative enforcement）
+
+- 在 rollout symbol + conservative-only + 回滚开关齐全后
+- 才允许让 effective validator thresholds 小范围真生效
+- 真生效范围仍限于 validator guardrails，不越界到 execution profile
+
 ### 工作项
 
 - validator 支持 effective thresholds snapshot
-- risk budget 支持 regime-based cap override
-- high_vol / risk_anomaly 下限制 layer ratios / exposure
+- risk budget 支持 regime-based cap override（建议晚于 validator hints-only）
+- `risk_anomaly` / 高 `transition_risk` 的统一 reason code 与保守 gate
 
 ### 验收
 
 - 执行层骨架不变
 - `direction_lock / intents / layering / reconcile` 不受破坏
-- 高风险状态下仓位明显收紧
+- Step 1 默认不改变 validator 结果，Step 2 才允许小范围 conservative enforcement
 
 ---
 

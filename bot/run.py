@@ -878,7 +878,7 @@ def main():
     parser.add_argument('--symbol', type=str, help='指定 smoke/diagnose 目标币种')
     parser.add_argument('--side', type=str, default='long', choices=['long', 'short'], help='smoke 验收方向')
     parser.add_argument('--dry-run', action='store_true', help='配合清理命令，仅预览不删除')
-    parser.add_argument('--port', type=int, default=8050, help='仪表盘端口')
+    parser.add_argument('--port', type=int, default=5555, help='仪表盘端口（默认 5555）')
     
     args = parser.parse_args()
     

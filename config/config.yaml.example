@@ -22,7 +22,7 @@ dashboard:
   auto_refresh_seconds: 30
   enabled: true
   host: 0.0.0.0
-  port: 8050
+  port: 5555
   theme: dark
   title: OKX量化交易仪表盘
 

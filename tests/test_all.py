@@ -996,7 +996,7 @@ class TestNotifications(unittest.TestCase):
         })
         cfg._config.setdefault('dashboard', {}).update({
             'host': '0.0.0.0',
-            'port': 8050
+            'port': 5555
         })
         db = FakeLogDB()
         notifier = NotificationManager(cfg, db, None)
@@ -1037,7 +1037,7 @@ class TestNotifications(unittest.TestCase):
         })
         cfg._config.setdefault('dashboard', {}).update({
             'host': '0.0.0.0',
-            'port': 8050
+            'port': 5555
         })
         db = FakeLogDB()
         notifier = NotificationManager(cfg, db, None)

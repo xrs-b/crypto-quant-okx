@@ -18,7 +18,7 @@ from datetime import datetime, timedelta
 from core.config import Config
 from core.database import Database
 from core.regime import build_regime_snapshot, normalize_regime_snapshot
-from core.regime_policy import resolve_regime_policy
+from core.regime_policy import resolve_regime_policy, build_observe_only_payload
 from core.exchange import Exchange
 from core.notifier import NotificationManager
 from signals import Signal, SignalDetector, SignalValidator, SignalRecorder, EntryDecider
@@ -2859,11 +2859,12 @@ class TestBacktestObserveOnlyTags(unittest.TestCase):
         self.assertIn('observe_only_tags', result)
         if result['recent_trades']:
             trade = result['recent_trades'][-1]
-            self.assertIn('observe_only_tags', trade)
-            self.assertIn('regime_snapshot', trade['observe_only_tags'])
-            self.assertIn('adaptive_policy_snapshot', trade['observe_only_tags'])
-            self.assertTrue(trade['observe_only_summary'])
-            self.assertIn('observe_only', trade['observe_only_tags']['tags'])
+            self.assertIn('observe_only', trade)
+            self.assertIn('snapshots', trade['observe_only'])
+            self.assertIn('regime_snapshot', trade['observe_only']['snapshots'])
+            self.assertIn('adaptive_policy_snapshot', trade['observe_only']['snapshots'])
+            self.assertTrue(trade['observe_only']['summary'])
+            self.assertIn('observe_only', trade['observe_only']['tags'])
 
     def test_backtest_aggregate_summary_includes_observe_only_banner(self):
         cfg = Config()
@@ -2887,6 +2888,8 @@ class TestBacktestObserveOnlyTags(unittest.TestCase):
         self.assertTrue(summary['summary']['observe_only'])
         self.assertIn('observe-only', summary['summary']['observe_only_banner'])
         self.assertIn('observe_only', summary['summary']['observe_only_tags'])
+        self.assertIn('observe_only_summary_view', summary['summary'])
+        self.assertIn('top_tags', summary['summary']['observe_only_summary_view'])
         self.assertIn('trend', summary['summary']['regime_tags'])
         self.assertIn('adaptive_policy_v1_m1', summary['summary']['policy_tags'])
 
@@ -2931,6 +2934,17 @@ if __name__ == '__main__':
     sys.exit(0 if success else 1)
 
 
+
+
+class TestObserveOnlyNormalization(unittest.TestCase):
+    def test_build_observe_only_payload_exposes_canonical_object(self):
+        regime_snapshot = build_regime_snapshot('trend', 0.81, {'ema_gap': 0.03}, '趋势上涨')
+        payload = build_observe_only_payload(Config(), 'BTC/USDT:USDT', regime_snapshot=regime_snapshot)
+        self.assertIn('observe_only', payload)
+        self.assertTrue(payload['observe_only']['enabled'])
+        self.assertEqual(payload['observe_only_summary'], payload['observe_only']['summary'])
+        self.assertEqual(payload['observe_only_phase'], payload['observe_only']['phase'])
+        self.assertIn('top_tags', payload['observe_only'])
 
 class TestLayeringConfig(unittest.TestCase):
     def test_default_layering_is_backward_compatible(self):
@@ -3033,7 +3047,11 @@ class TestExecutionObservability(unittest.TestCase):
             self.assertGreater(snapshot['exposure']['projected_total_margin'], snapshot['exposure']['current_total_margin'])
             self.assertTrue(snapshot['signal_decisions'])
             self.assertEqual(snapshot['signal_decisions'][0]['deny_reason'], 'direction_lock')
-            self.assertTrue(snapshot['signal_decisions'][0]['observe_only'])
+            self.assertIn('summary', snapshot['signal_decisions'][0]['observe_only'])
             self.assertEqual(snapshot['signal_decisions'][0]['policy_mode'], 'observe_only')
             self.assertTrue(snapshot['signal_decisions'][0]['observe_only_summary'])
             self.assertIn('observe_only', snapshot['signal_decisions'][0]['observe_only_tags'])
+            self.assertIn('observe_only_summary', snapshot)
+            self.assertIn('top_tags', snapshot['observe_only_summary'])
+            self.assertIn('recent_decisions', snapshot['summary'])
+            self.assertTrue(snapshot['summary']['observe_only_banner'])

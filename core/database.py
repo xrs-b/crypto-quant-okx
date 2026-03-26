@@ -9,6 +9,8 @@ from typing import Dict, List, Optional, Any
 from pathlib import Path
 import pandas as pd
 
+from core.regime_policy import normalize_observe_only_view, summarize_observe_only_collection
+
 
 class Database:
     """数据库管理类"""
@@ -1846,7 +1848,17 @@ class Database:
             regime_snapshot = self._safe_json_dict(fd.get('regime_snapshot'))
             adaptive_observe = self._safe_json_dict(fd.get('adaptive_regime_observe_only'))
             breakdown = self._safe_json_dict(entry_decision.get('breakdown'))
-            observe_only_tags = adaptive_observe.get('tags') or breakdown.get('observe_only_tags') or policy_snapshot.get('tags') or []
+            observe_only_view = normalize_observe_only_view(
+                adaptive_observe or {
+                    'phase': breakdown.get('observe_only_phase') or policy_snapshot.get('phase'),
+                    'state': breakdown.get('observe_only_state') or policy_snapshot.get('state'),
+                    'summary': breakdown.get('observe_only_summary') or policy_snapshot.get('summary'),
+                    'tags': breakdown.get('observe_only_tags') or policy_snapshot.get('tags') or [],
+                },
+                regime_snapshot=regime_snapshot,
+                policy_snapshot=policy_snapshot,
+                fallback_summary=breakdown.get('observe_only_summary') or policy_snapshot.get('summary'),
+            )
             digest.append({
                 'id': row.get('id'),
                 'created_at': row.get('created_at'),
@@ -1857,11 +1869,11 @@ class Database:
                 'decision': entry_decision.get('decision') or ('executed' if row.get('executed') else ('blocked' if row.get('filtered') else 'watch')),
                 'decision_reason': row.get('filter_reason') or entry_decision.get('reason_summary') or '--',
                 'signal_score': entry_decision.get('score'),
-                'observe_only': True,
-                'observe_only_phase': adaptive_observe.get('phase') or breakdown.get('observe_only_phase') or policy_snapshot.get('phase'),
-                'observe_only_state': adaptive_observe.get('state') or breakdown.get('observe_only_state') or policy_snapshot.get('state'),
-                'observe_only_summary': adaptive_observe.get('summary') or breakdown.get('observe_only_summary') or policy_snapshot.get('summary'),
-                'observe_only_tags': list(observe_only_tags or []),
+                'observe_only': observe_only_view,
+                'observe_only_phase': observe_only_view.get('phase'),
+                'observe_only_state': observe_only_view.get('state'),
+                'observe_only_summary': observe_only_view.get('summary'),
+                'observe_only_tags': list(observe_only_view.get('tags') or []),
                 'regime_name': regime_snapshot.get('name') or regime_snapshot.get('regime') or policy_snapshot.get('regime_name'),
                 'regime_confidence': regime_snapshot.get('confidence') if regime_snapshot else policy_snapshot.get('regime_confidence'),
                 'policy_mode': policy_snapshot.get('mode'),
@@ -1892,6 +1904,18 @@ class Database:
             row['plan_data'] = self._safe_json_dict(row.get('plan_data'))
         exposure = self._build_execution_exposure_summary(positions, intents)
         signal_digest = self._build_signal_decision_digest()
+        observe_only_summary = summarize_observe_only_collection(signal_digest)
+        recent_decisions = []
+        for row in signal_digest[:5]:
+            recent_decisions.append({
+                'symbol': row.get('symbol'),
+                'decision': row.get('decision'),
+                'created_at': row.get('created_at'),
+                'regime': (row.get('observe_only') or {}).get('regime', {}).get('name'),
+                'policy_mode': (row.get('observe_only') or {}).get('policy', {}).get('mode'),
+                'top_tags': (row.get('observe_only') or {}).get('top_tags') or [],
+                'summary': (row.get('observe_only') or {}).get('summary'),
+            })
         return {
             'active_intents': intents,
             'direction_locks': locks,
@@ -1899,12 +1923,16 @@ class Database:
             'positions': positions,
             'exposure': exposure,
             'signal_decisions': signal_digest,
+            'observe_only_summary': observe_only_summary,
             'summary': {
                 'active_intents': len(intents),
                 'direction_locks': len(locks),
                 'active_layer_plans': sum(1 for row in plans if row.get('status') != 'idle'),
                 'open_positions': len(positions),
                 'signals_with_decision': len(signal_digest),
+                'observe_only_banner': observe_only_summary.get('banner'),
+                'observe_only_top_tags': observe_only_summary.get('top_tags'),
+                'recent_decisions': recent_decisions,
             }
         }
 

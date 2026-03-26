@@ -54,6 +54,7 @@ from ml.engine import MLEngine
 from core.regime import RegimeDetector, detect_regime, Regime
 from analytics import StrategyBacktester, SignalQualityAnalyzer, ParameterOptimizer, GovernanceEngine
 from analytics.mfe_mae import MFEAnalyzer, get_mfe_mae_analysis
+from core.regime_policy import summarize_observe_only_collection
 
 # 初始化
 config = Config()
@@ -1912,7 +1913,9 @@ def get_system_status():
 @app.route('/api/system/execution-state')
 def get_execution_state():
     """最小执行态观察接口：layer plan / active intents / direction locks"""
-    return jsonify({'success': True, 'data': db.get_execution_state_snapshot()})
+    data = db.get_execution_state_snapshot()
+    data['summary']['observe_only_summary'] = data.get('observe_only_summary', {})
+    return jsonify({'success': True, 'data': data, 'summary': data.get('summary', {})})
 
 
 @app.route('/api/system/checklist')

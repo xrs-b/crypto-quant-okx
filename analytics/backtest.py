@@ -13,6 +13,7 @@ from core.config import Config
 from core.database import Database
 from signals.detector import SignalDetector
 from signals.validator import SignalValidator
+from core.regime_policy import normalize_observe_only_view, summarize_observe_only_collection
 
 
 @dataclass
@@ -183,15 +184,11 @@ class StrategyBacktester:
                         'reason': exit_reason,
                         'regime_tag': ((position.regime_snapshot or {}).get('name') if position.regime_snapshot else None),
                         'policy_tag': ((position.adaptive_policy_snapshot or {}).get('policy_version') if position.adaptive_policy_snapshot else None),
-                        'observe_only_summary': (position.adaptive_policy_snapshot or {}).get('summary') or (position.regime_snapshot or {}).get('details'),
-                        'observe_only_phase': (position.adaptive_policy_snapshot or {}).get('phase'),
-                        'observe_only_state': (position.adaptive_policy_snapshot or {}).get('state'),
-                        'observe_only_tags': {
-                            'regime_snapshot': position.regime_snapshot or {},
-                            'adaptive_policy_snapshot': position.adaptive_policy_snapshot or {},
-                            'summary': (position.adaptive_policy_snapshot or {}).get('summary'),
-                            'tags': list((position.adaptive_policy_snapshot or {}).get('tags') or []),
-                        },
+                        'observe_only': normalize_observe_only_view(
+                            regime_snapshot=position.regime_snapshot or {},
+                            policy_snapshot=position.adaptive_policy_snapshot or {},
+                            fallback_summary=(position.adaptive_policy_snapshot or {}).get('summary') or (position.regime_snapshot or {}).get('details'),
+                        ),
                     })
                     position = None
                     continue
@@ -224,15 +221,11 @@ class StrategyBacktester:
                 'reason': 'end_of_backtest',
                 'regime_tag': ((position.regime_snapshot or {}).get('name') if position.regime_snapshot else None),
                 'policy_tag': ((position.adaptive_policy_snapshot or {}).get('policy_version') if position.adaptive_policy_snapshot else None),
-                'observe_only_summary': (position.adaptive_policy_snapshot or {}).get('summary') or (position.regime_snapshot or {}).get('details'),
-                'observe_only_phase': (position.adaptive_policy_snapshot or {}).get('phase'),
-                'observe_only_state': (position.adaptive_policy_snapshot or {}).get('state'),
-                'observe_only_tags': {
-                    'regime_snapshot': position.regime_snapshot or {},
-                    'adaptive_policy_snapshot': position.adaptive_policy_snapshot or {},
-                    'summary': (position.adaptive_policy_snapshot or {}).get('summary'),
-                    'tags': list((position.adaptive_policy_snapshot or {}).get('tags') or []),
-                },
+                'observe_only': normalize_observe_only_view(
+                    regime_snapshot=position.regime_snapshot or {},
+                    policy_snapshot=position.adaptive_policy_snapshot or {},
+                    fallback_summary=(position.adaptive_policy_snapshot or {}).get('summary') or (position.regime_snapshot or {}).get('details'),
+                ),
             })
 
         total_return = sum(t['return_pct'] for t in trades)
@@ -248,7 +241,7 @@ class StrategyBacktester:
 
         regime_tags = sorted({t.get('regime_tag') for t in trades if t.get('regime_tag')})
         policy_tags = sorted({t.get('policy_tag') for t in trades if t.get('policy_tag')})
-        observe_only_tags = sorted({tag for t in trades for tag in ((t.get('observe_only_tags') or {}).get('tags') or []) if tag})
+        observe_only_tags = sorted({tag for t in trades for tag in ((t.get('observe_only') or {}).get('tags') or []) if tag})
         return {
             'symbol': symbol,
             'trades': len(trades),
@@ -259,6 +252,7 @@ class StrategyBacktester:
             'avg_return_pct': round((total_return / len(trades)), 4) if trades else 0.0,
             'max_drawdown_pct': round(max_drawdown, 4),
             'recent_trades': trades[-10:],
+            'observe_only_summary_view': summarize_observe_only_collection(trades[-10:]),
             'regime_tags': regime_tags,
             'policy_tags': policy_tags,
             'observe_only_tags': observe_only_tags,
@@ -272,6 +266,12 @@ class StrategyBacktester:
         observe_only_tags = sorted({tag for row in symbol_results for tag in (row.get('observe_only_tags') or []) if tag})
         regime_tags = sorted({tag for row in symbol_results for tag in (row.get('regime_tags') or []) if tag})
         policy_tags = sorted({tag for row in symbol_results for tag in (row.get('policy_tags') or []) if tag})
+        observe_only_summary_view = summarize_observe_only_collection([
+            trade
+            for row in symbol_results
+            for trade in (row.get('recent_trades') or [])
+            if trade.get('observe_only')
+        ])
         return {
             'summary': {
                 'symbols': len(symbol_results),
@@ -281,7 +281,8 @@ class StrategyBacktester:
                 'max_drawdown_pct': round(max_drawdown, 4),
                 'observe_only': True,
                 'observe_only_tags': observe_only_tags,
-                'observe_only_banner': 'Adaptive regime / policy currently run in observe-only mode; backtest outputs are display-only and do not alter execution logic.',
+                'observe_only_banner': observe_only_summary_view.get('banner'),
+                'observe_only_summary_view': observe_only_summary_view,
                 'regime_tags': regime_tags,
                 'policy_tags': policy_tags,
             },
@@ -458,6 +459,12 @@ class SignalQualityAnalyzer:
             })
         symbol_stats.sort(key=lambda x: x['avg_quality_pct'], reverse=True)
         valid.sort(key=lambda x: x['created_at'], reverse=True)
+        observe_only_summary_view = summarize_observe_only_collection([
+            trade
+            for row in symbol_results
+            for trade in (row.get('recent_trades') or [])
+            if trade.get('observe_only')
+        ])
         return {
             'summary': {
                 'signals_scored': len(valid),

@@ -111,6 +111,100 @@ def build_observe_only_bundle(regime_snapshot: Optional[Dict[str, Any]], policy_
     }
 
 
+
+
+def normalize_observe_only_view(observe_only: Optional[Dict[str, Any]] = None, *, regime_snapshot: Optional[Dict[str, Any]] = None, policy_snapshot: Optional[Dict[str, Any]] = None, fallback_summary: Optional[str] = None) -> Dict[str, Any]:
+    observe = dict(observe_only or {})
+    normalized_regime = normalize_regime_snapshot(regime_snapshot)
+    normalized_policy = enrich_policy_snapshot(dict(policy_snapshot or {})) if policy_snapshot else None
+    bundle = build_observe_only_bundle(normalized_regime, normalized_policy or build_neutral_policy_snapshot(normalized_regime))
+    tags: List[str] = []
+    for item in observe.get('tags') or bundle['tags']:
+        if item and item not in tags:
+            tags.append(str(item))
+    summary = observe.get('summary') or fallback_summary or bundle['summary']
+    phase = observe.get('phase') or bundle['phase']
+    state = observe.get('state') or bundle['state']
+    banner = observe.get('banner') or 'Adaptive regime / policy currently run in observe-only mode; outputs are display-only and do not alter execution logic.'
+    top_tags = tags[:5]
+    return {
+        'enabled': True,
+        'phase': phase,
+        'state': state,
+        'summary': summary,
+        'banner': banner,
+        'tags': tags,
+        'top_tags': top_tags,
+        'tag_count': len(tags),
+        'regime': {
+            'name': normalized_regime.get('name'),
+            'family': normalized_regime.get('family'),
+            'direction': normalized_regime.get('direction'),
+            'confidence': normalized_regime.get('confidence'),
+        },
+        'policy': {
+            'mode': (normalized_policy or {}).get('mode'),
+            'version': (normalized_policy or {}).get('policy_version'),
+            'source': (normalized_policy or {}).get('policy_source'),
+            'state': (normalized_policy or {}).get('state'),
+        },
+        'notes': list(observe.get('notes') or bundle.get('notes') or []),
+        'snapshots': {
+            'regime_snapshot': normalized_regime,
+            'adaptive_policy_snapshot': normalized_policy or {},
+        },
+    }
+
+
+def summarize_observe_only_collection(items: List[Dict[str, Any]], *, recent_limit: int = 5) -> Dict[str, Any]:
+    normalized = [normalize_observe_only_view(item.get('observe_only') or item, regime_snapshot=((item.get('observe_only') or item).get('snapshots') or {}).get('regime_snapshot'), policy_snapshot=((item.get('observe_only') or item).get('snapshots') or {}).get('adaptive_policy_snapshot'), fallback_summary=((item.get('observe_only') or item).get('summary')) ) for item in (items or []) if (item.get('observe_only') or item)]
+    tag_counts: Dict[str, int] = {}
+    regime_counts: Dict[str, int] = {}
+    policy_counts: Dict[str, int] = {}
+    phase_counts: Dict[str, int] = {}
+    state_counts: Dict[str, int] = {}
+    recent = []
+    for idx, item in enumerate(normalized):
+        for tag in item.get('tags') or []:
+            tag_counts[tag] = tag_counts.get(tag, 0) + 1
+        regime = ((item.get('regime') or {}).get('name')) or '--'
+        regime_counts[regime] = regime_counts.get(regime, 0) + 1
+        policy = ((item.get('policy') or {}).get('mode')) or '--'
+        policy_counts[policy] = policy_counts.get(policy, 0) + 1
+        phase = item.get('phase') or '--'
+        phase_counts[phase] = phase_counts.get(phase, 0) + 1
+        state = item.get('state') or '--'
+        state_counts[state] = state_counts.get(state, 0) + 1
+        if idx < recent_limit:
+            recent.append({
+                'summary': item.get('summary'),
+                'phase': item.get('phase'),
+                'state': item.get('state'),
+                'regime': item.get('regime'),
+                'policy': item.get('policy'),
+                'top_tags': item.get('top_tags') or [],
+            })
+    def top(counts: Dict[str, int], limit: int = 5):
+        return [{'value': k, 'count': v} for k, v in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:limit] if k and k != '--']
+    top_tags = top(tag_counts)
+    top_regimes = top(regime_counts, limit=3)
+    top_policies = top(policy_counts, limit=3)
+    dominant_phase = top(phase_counts, limit=1)
+    dominant_state = top(state_counts, limit=1)
+    banner = normalized[0].get('banner') if normalized else 'Adaptive regime / policy currently run in observe-only mode; outputs are display-only and do not alter execution logic.'
+    if top_tags:
+        banner = f"{banner} Top tags: {', '.join([row['value'] for row in top_tags[:3]])}."
+    return {
+        'count': len(normalized),
+        'banner': banner,
+        'top_tags': top_tags,
+        'top_regimes': top_regimes,
+        'top_policies': top_policies,
+        'dominant_phase': dominant_phase[0]['value'] if dominant_phase else None,
+        'dominant_state': dominant_state[0]['value'] if dominant_state else None,
+        'recent': recent,
+    }
+
 def build_neutral_policy_snapshot(
     regime_snapshot: Optional[Dict[str, Any]] = None,
     *,
@@ -192,17 +286,18 @@ def build_observe_only_payload(config_helper: Any, symbol: Optional[str], signal
     regime_view = build_regime_observe_only_view(normalized_regime)
     policy_view = build_policy_observe_only_view(normalized_policy)
     bundle = build_observe_only_bundle(normalized_regime, normalized_policy)
+    observe_only = normalize_observe_only_view(bundle, regime_snapshot=normalized_regime, policy_snapshot=normalized_policy)
     return {
         'regime_snapshot': normalized_regime,
         'adaptive_policy_snapshot': normalized_policy,
         'regime_observe_only': regime_view,
         'adaptive_policy_observe_only': policy_view,
-        'observe_only_summary': bundle['summary'],
-        'observe_only_tags': bundle['tags'],
-        'observe_only_notes': bundle['notes'],
-        'observe_only_phase': bundle['phase'],
-        'observe_only_state': bundle['state'],
-        'observe_only': True,
+        'observe_only': observe_only,
+        'observe_only_summary': observe_only['summary'],
+        'observe_only_tags': observe_only['tags'],
+        'observe_only_notes': observe_only['notes'],
+        'observe_only_phase': observe_only['phase'],
+        'observe_only_state': observe_only['state'],
     }
 
 

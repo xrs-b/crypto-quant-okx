@@ -1,5 +1,9 @@
+# 使用前先把 PROJECT_DIR 改成你自己的仓库路径；也可以直接 export PROJECT_DIR 后复用
+PROJECT_DIR=/path/to/crypto-quant-okx
+VENV_PYTHON=$PROJECT_DIR/.venv/bin/python3
+
 # 每天上午9点复查候选币
-0 9 * * * cd /Volumes/MacHD/Projects/crypto-quant-okx && /usr/bin/python3 scripts/review_candidates.py >> /tmp/okx-candidate-review.log 2>&1
+0 9 * * * cd $PROJECT_DIR && PROJECT_DIR=$PROJECT_DIR $VENV_PYTHON scripts/review_candidates.py >> /tmp/okx-candidate-review.log 2>&1
 
 # 每晚23:30生成日报摘要
-30 23 * * * cd /Volumes/MacHD/Projects/crypto-quant-okx && /usr/bin/python3 scripts/daily_summary.py >> /tmp/okx-daily-summary.log 2>&1
+30 23 * * * cd $PROJECT_DIR && PROJECT_DIR=$PROJECT_DIR $VENV_PYTHON scripts/daily_summary.py >> /tmp/okx-daily-summary.log 2>&1

@@ -8,8 +8,14 @@
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
-        <string>/Volumes/MacHD/Projects/crypto-quant-okx/scripts/keep_dashboard_alive.sh</string>
+        <string>/path/to/crypto-quant-okx/scripts/keep_dashboard_alive.sh</string>
     </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PROJECT_DIR</key>
+        <string>/path/to/crypto-quant-okx</string>
+    </dict>
 
     <key>RunAtLoad</key>
     <true/>
@@ -18,12 +24,12 @@
     <integer>1800</integer>
 
     <key>WorkingDirectory</key>
-    <string>/Volumes/MacHD/Projects/crypto-quant-okx</string>
+    <string>/path/to/crypto-quant-okx</string>
 
     <key>StandardOutPath</key>
-    <string>/Volumes/MacHD/Projects/crypto-quant-okx/logs/dashboard-keepalive.launchd.log</string>
+    <string>/path/to/crypto-quant-okx/logs/dashboard-keepalive.launchd.log</string>
 
     <key>StandardErrorPath</key>
-    <string>/Volumes/MacHD/Projects/crypto-quant-okx/logs/dashboard-keepalive.launchd.err.log</string>
+    <string>/path/to/crypto-quant-okx/logs/dashboard-keepalive.launchd.err.log</string>
 </dict>
 </plist>

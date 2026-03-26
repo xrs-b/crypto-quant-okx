@@ -1,14 +1,15 @@
 #!/bin/bash
 set -euo pipefail
 
-PROJECT_DIR="/Volumes/MacHD/Projects/crypto-quant-okx"
-VENV_FLASK="$PROJECT_DIR/.venv/bin/flask"
-LOG_DIR="$PROJECT_DIR/logs"
-LOG_FILE="$LOG_DIR/dashboard-keepalive.log"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="${PROJECT_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+VENV_FLASK="${VENV_FLASK:-$PROJECT_DIR/.venv/bin/flask}"
+LOG_DIR="${LOG_DIR:-$PROJECT_DIR/logs}"
+LOG_FILE="${LOG_FILE:-$LOG_DIR/dashboard-keepalive.log}"
 APP="dashboard.api:app"
-HOST="0.0.0.0"
-PORT="5555"
-CHECK_URL="http://127.0.0.1:${PORT}/overview"
+HOST="${HOST:-0.0.0.0}"
+PORT="${DASHBOARD_PORT:-5555}"
+CHECK_URL="${CHECK_URL:-http://127.0.0.1:${PORT}/overview}"
 
 mkdir -p "$LOG_DIR"
 
@@ -24,9 +25,9 @@ is_healthy() {
 
 start_dashboard() {
   cd "$PROJECT_DIR"
-  nohup "$VENV_FLASK" --app "$APP" run --host "$HOST" --port "$PORT" >> "$LOG_FILE" 2>&1 &
+  PROJECT_DIR="$PROJECT_DIR" nohup "$VENV_FLASK" --app "$APP" run --host "$HOST" --port "$PORT" >> "$LOG_FILE" 2>&1 &
   disown || true
-  log "dashboard started on ${HOST}:${PORT}"
+  log "dashboard started on ${HOST}:${PORT} (project_dir=${PROJECT_DIR})"
 }
 
 if is_healthy; then

@@ -20,6 +20,8 @@
 
 **强烈建议先用 testnet 跑通以下链路：**
 
+> 公开部署完整步骤见：[`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)
+
 1. 读取余额
 2. 读取合约信息
 3. 通知测试
@@ -149,6 +151,7 @@ pip install -r requirements.txt
 ### 3. 准备配置文件
 
 ```bash
+cp .env.example .env
 cp config/config.yaml.example config/config.yaml
 cp config/config.local.yaml.example config/config.local.yaml
 ```
@@ -172,6 +175,16 @@ notification:
   discord:
     bot_token: ${DISCORD_BOT_TOKEN:-}
     channel_id: ${DISCORD_CHANNEL_ID:-}
+```
+
+建议同时准备 `.env`：
+
+```dotenv
+PROJECT_DIR=/absolute/path/to/crypto-quant-okx
+DASHBOARD_SECRET_KEY=replace_with_a_long_random_secret
+OKX_API_KEY=your_okx_api_key
+OKX_API_SECRET=your_okx_api_secret
+OKX_API_PASSPHRASE=your_okx_api_passphrase
 ```
 
 ### 5. 先跑只读检查
@@ -261,10 +274,22 @@ python3 bot/run.py
 python3 bot/run.py --daemon
 ```
 
+或：
+
+```bash
+PROJECT_DIR="$PWD" scripts/start.public.sh start
+```
+
 ### 方式 C：启动 Dashboard
 
 ```bash
 python3 bot/run.py --dashboard --port 5555
+```
+
+或：
+
+```bash
+PROJECT_DIR="$PWD" scripts/start.public.sh dashboard
 ```
 
 ### 方式 D：通知 relay
@@ -278,12 +303,23 @@ python3 bot/run.py --relay-outbox --once
 项目中包含一些运维脚本：
 
 - `scripts/start.sh`
+- `scripts/start.public.sh`
 - `scripts/keep_dashboard_alive.sh`
 - `scripts/okx-trading.service`
 - `scripts/candidate-review.cron.example`
 
-> 注意：这些脚本当前仍带有一定本地环境假设，适合作为模板参考。  
-> **朋友直接部署时，优先按本文档中的 Python 命令方式运行，不要默认依赖这些脚本。**
+这些脚本已经支持：
+
+- 自动从脚本位置推导项目根目录
+- 或通过 `PROJECT_DIR=/your/path` 覆盖
+- 优先使用项目 `.venv`
+
+朋友直接部署时，推荐这样调用：
+
+```bash
+PROJECT_DIR="$PWD" scripts/start.public.sh start
+PROJECT_DIR="$PWD" scripts/start.public.sh dashboard
+```
 
 ---
 
@@ -408,7 +444,7 @@ python3 bot/run.py --relay-outbox --once
 如果手工运行时报缺包，请确认你使用的是项目虚拟环境，而不是系统 Python。
 
 #### 2. Dashboard 端口不一致
-如果你发现文档或配置里出现 `8050` / `5555` 两种端口写法，请在自己的部署里统一成一个端口。
+如果你发现文档或配置里出现 `8050` / `5555` 两种端口写法，请在自己的部署里统一成一个端口。默认脚本目前使用 `5555`。
 
 #### 3. 模型版本 warning
 如果看到 sklearn 相关 warning，通常说明本地依赖版本与历史模型文件版本不完全一致。可考虑重新训练模型。

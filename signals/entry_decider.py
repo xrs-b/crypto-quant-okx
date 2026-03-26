@@ -49,6 +49,10 @@ class DecisionBreakdown:
     # 观测辅助信息（兼容旧 API，新增字段只会出现在 breakdown 中）
     signal_conflict_score: int = 0            # 多空冲突程度，越高代表越冲突
     mean_reversion_bias: bool = False         # 是否主要依赖 RSI / Bollinger / Pattern 等抄底摸顶逻辑
+    observe_only_phase: str = ""
+    observe_only_state: str = ""
+    observe_only_summary: str = ""
+    observe_only_tags: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -159,6 +163,10 @@ class EntryDecider:
         result.adaptive_policy_snapshot = observe_only_payload['adaptive_policy_snapshot']
         setattr(signal, 'regime_snapshot', result.regime_snapshot)
         setattr(signal, 'adaptive_policy_snapshot', result.adaptive_policy_snapshot)
+        breakdown.observe_only_phase = observe_only_payload.get('observe_only_phase', '')
+        breakdown.observe_only_state = observe_only_payload.get('observe_only_state', '')
+        breakdown.observe_only_summary = observe_only_payload.get('observe_only_summary', '')
+        breakdown.observe_only_tags = list(observe_only_payload.get('observe_only_tags') or [])
         
         # 1. Signal Strength Score
         signal_strength_score, signal_strength_reason = self._eval_signal_strength(signal)
@@ -642,6 +650,7 @@ class EntryDecider:
             return (f"信号建议观望：总分{total_hint}分，"
                     f"信号强度{strength}，趋势{alignment_to_chinese(breakdown.trend_alignment_score)}，"
                     f"波动{alignment_to_chinese(breakdown.volatility_fitness_score)}。"
+                    f"观察标签:{breakdown.observe_only_phase}/{breakdown.observe_only_state}。"
                     f"建议继续观察确认。")
         
         else:  # ALLOW

@@ -198,7 +198,10 @@ class TestAdaptiveRegimeConfigAndPolicy(unittest.TestCase):
         self.assertFalse(policy['is_effective'])
         self.assertEqual(policy['decision_overrides'], {})
         self.assertEqual(policy['execution_overrides'], {})
-        self.assertIn('m0-observe-only', policy['notes'])
+        self.assertEqual(policy['phase'], 'observe_only')
+        self.assertEqual(policy['state'], 'neutral')
+        self.assertIn('policy_mode:observe_only', policy['tags'])
+        self.assertIn('m1-observe-only', policy['notes'])
 
 
 if __name__ == '__main__':

@@ -37,7 +37,7 @@ DEFAULT_ADAPTIVE_REGIME_CONFIG = {
         'cooloff_bars_after_switch': 0,
     },
     'defaults': {
-        'policy_version': 'adaptive_policy_v1_m0',
+        'policy_version': 'adaptive_policy_v1_m1',
     },
     'regimes': {},
 }

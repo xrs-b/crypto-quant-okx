@@ -477,6 +477,9 @@ class TestSignalValidator(unittest.TestCase):
         self.assertTrue(details['observe_only'])
         self.assertEqual(details['regime_snapshot']['regime'], 'trend')
         self.assertEqual(details['adaptive_policy_snapshot']['mode'], 'observe_only')
+        self.assertIn('adaptive_regime_observe_only', details)
+        self.assertTrue(details['adaptive_regime_observe_only']['summary'])
+        self.assertIn('observe_only', details['adaptive_regime_observe_only']['tags'])
 
 
 class TestEntryDecider(unittest.TestCase):
@@ -585,6 +588,9 @@ class TestEntryDecider(unittest.TestCase):
         self.assertIn('regime_snapshot', payload)
         self.assertIn('adaptive_policy_snapshot', payload)
         self.assertEqual(payload['adaptive_policy_snapshot']['mode'], 'observe_only')
+        self.assertEqual(payload['breakdown']['observe_only_phase'], 'observe_only')
+        self.assertTrue(payload['breakdown']['observe_only_summary'])
+        self.assertIn('observe_only', payload['breakdown']['observe_only_tags'])
     
 
 
@@ -2437,6 +2443,8 @@ class TestTradingExecutor(unittest.TestCase):
         self.assertTrue(can_open)
         self.assertEqual(details['observability']['regime_snapshot']['regime'], 'trend')
         self.assertEqual(details['observability']['adaptive_policy_snapshot']['mode'], 'observe_only')
+        self.assertTrue(details['observability']['observe_only_summary'])
+        self.assertIn('observe_only', details['observability']['observe_only_tags'])
 
 
 class TestRiskBudgetSizing(unittest.TestCase):
@@ -2840,11 +2848,14 @@ class TestBacktestObserveOnlyTags(unittest.TestCase):
         result = backtester._run_symbol('BTC/USDT', data)
         self.assertIn('regime_tags', result)
         self.assertIn('policy_tags', result)
+        self.assertIn('observe_only_tags', result)
         if result['recent_trades']:
             trade = result['recent_trades'][-1]
             self.assertIn('observe_only_tags', trade)
             self.assertIn('regime_snapshot', trade['observe_only_tags'])
             self.assertIn('adaptive_policy_snapshot', trade['observe_only_tags'])
+            self.assertTrue(trade['observe_only_summary'])
+            self.assertIn('observe_only', trade['observe_only_tags']['tags'])
 
 
 def run_tests():

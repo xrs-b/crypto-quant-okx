@@ -183,9 +183,14 @@ class StrategyBacktester:
                         'reason': exit_reason,
                         'regime_tag': ((position.regime_snapshot or {}).get('name') if position.regime_snapshot else None),
                         'policy_tag': ((position.adaptive_policy_snapshot or {}).get('policy_version') if position.adaptive_policy_snapshot else None),
+                        'observe_only_summary': (position.adaptive_policy_snapshot or {}).get('summary') or (position.regime_snapshot or {}).get('details'),
+                        'observe_only_phase': (position.adaptive_policy_snapshot or {}).get('phase'),
+                        'observe_only_state': (position.adaptive_policy_snapshot or {}).get('state'),
                         'observe_only_tags': {
                             'regime_snapshot': position.regime_snapshot or {},
                             'adaptive_policy_snapshot': position.adaptive_policy_snapshot or {},
+                            'summary': (position.adaptive_policy_snapshot or {}).get('summary'),
+                            'tags': list((position.adaptive_policy_snapshot or {}).get('tags') or []),
                         },
                     })
                     position = None
@@ -219,9 +224,14 @@ class StrategyBacktester:
                 'reason': 'end_of_backtest',
                 'regime_tag': ((position.regime_snapshot or {}).get('name') if position.regime_snapshot else None),
                 'policy_tag': ((position.adaptive_policy_snapshot or {}).get('policy_version') if position.adaptive_policy_snapshot else None),
+                'observe_only_summary': (position.adaptive_policy_snapshot or {}).get('summary') or (position.regime_snapshot or {}).get('details'),
+                'observe_only_phase': (position.adaptive_policy_snapshot or {}).get('phase'),
+                'observe_only_state': (position.adaptive_policy_snapshot or {}).get('state'),
                 'observe_only_tags': {
                     'regime_snapshot': position.regime_snapshot or {},
                     'adaptive_policy_snapshot': position.adaptive_policy_snapshot or {},
+                    'summary': (position.adaptive_policy_snapshot or {}).get('summary'),
+                    'tags': list((position.adaptive_policy_snapshot or {}).get('tags') or []),
                 },
             })
 
@@ -238,6 +248,7 @@ class StrategyBacktester:
 
         regime_tags = sorted({t.get('regime_tag') for t in trades if t.get('regime_tag')})
         policy_tags = sorted({t.get('policy_tag') for t in trades if t.get('policy_tag')})
+        observe_only_tags = sorted({tag for t in trades for tag in ((t.get('observe_only_tags') or {}).get('tags') or []) if tag})
         return {
             'symbol': symbol,
             'trades': len(trades),
@@ -250,6 +261,7 @@ class StrategyBacktester:
             'recent_trades': trades[-10:],
             'regime_tags': regime_tags,
             'policy_tags': policy_tags,
+            'observe_only_tags': observe_only_tags,
         }
 
     def _aggregate_results(self, symbol_results: List[Dict]) -> Dict:

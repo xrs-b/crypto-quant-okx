@@ -86,6 +86,15 @@ class SignalValidator:
         details = {}
         observe_only_payload = build_observe_only_payload(self.config, getattr(signal, 'symbol', None), signal=signal)
         details.update(observe_only_payload)
+        details['adaptive_regime_observe_only'] = {
+            'phase': observe_only_payload.get('observe_only_phase'),
+            'state': observe_only_payload.get('observe_only_state'),
+            'summary': observe_only_payload.get('observe_only_summary'),
+            'tags': list(observe_only_payload.get('observe_only_tags') or []),
+            'notes': list(observe_only_payload.get('observe_only_notes') or []),
+            'regime': observe_only_payload.get('regime_observe_only') or {},
+            'policy': observe_only_payload.get('adaptive_policy_observe_only') or {},
+        }
         latest_positions, used_exchange_positions = self._get_latest_positions_view(current_positions)
 
         # 0. 先过滤非方向性信号

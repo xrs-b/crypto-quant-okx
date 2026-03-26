@@ -3965,8 +3965,113 @@ class TestLayeringBehavior(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn('同一 bar', reason)
 
+    def test_adaptive_live_guardrails_can_tighten_runtime_layering_checks(self):
+        self.cfg._config['adaptive_regime'] = {
+            'enabled': True,
+            'mode': 'guarded_execute',
+            'guarded_execute': {
+                'execution_profile_hints_enabled': True,
+                'execution_profile_enforcement_enabled': True,
+                'layering_profile_hints_enabled': True,
+                'layering_profile_enforcement_enabled': True,
+                'layering_plan_shape_enforcement_enabled': False,
+                'rollout_symbols': ['BTC/USDT'],
+            },
+            'regimes': {
+                'high_vol': {
+                    'execution_overrides': {
+                        'layer_ratios': [0.05, 0.05, 0.03],
+                        'max_layers_per_signal': 1,
+                        'min_add_interval_seconds': 600,
+                        'profit_only_add': True,
+                        'allow_same_bar_multiple_adds': False,
+                    }
+                }
+            }
+        }
+        regime_snapshot = build_regime_snapshot('high_vol', 0.9, {'volatility': 0.05}, '高波动')
+        policy_snapshot = resolve_regime_policy(self.cfg, 'BTC/USDT', regime_snapshot)
+        self.db.record_trade('BTC/USDT', 'long', 100, 1, leverage=1, signal_id=1, layer_no=1, root_signal_id=1)
+        self.db.save_layer_plan_state(
+            'BTC/USDT', 'long', status='active', current_layer=1, root_signal_id=1,
+            plan_data={
+                'filled_layers': [1],
+                'pending_layers': [],
+                'layer_ratios': [0.06, 0.06, 0.04],
+                'max_total_ratio': 0.16,
+                'signal_layer_counts': {'2': 1},
+                'signal_bar_markers': {'bar-2': 'ts'},
+                'last_filled_at': datetime.utcnow().isoformat(),
+            }
+        )
+        ok, reason, details = self.executor._check_layering_runtime_guards(
+            'BTC/USDT', 'long', signal_id=2,
+            plan_context={'current_price': 99, 'signal_bar_marker': 'bar-2', 'regime_snapshot': regime_snapshot, 'adaptive_policy_snapshot': policy_snapshot}
+        )
+        self.assertFalse(ok)
+        self.assertIn('浮盈', reason)
+        self.assertEqual(details['layering']['max_layers_per_signal'], 1)
+        self.assertEqual(details['layering']['min_add_interval_seconds'], 600)
+        self.assertTrue(details['layering']['profit_only_add'])
+        self.assertEqual(details['layering']['layer_ratios'], [0.06, 0.06, 0.04])
+        self.assertTrue(details['layering_profile_really_enforced'])
+        self.assertFalse(details['plan_shape_really_enforced'])
+        self.assertEqual(details['observability']['deny_reason'], 'profit_only_add')
+
 
 class TestExecutionObservability(unittest.TestCase):
+    def test_adaptive_execution_hints_expose_baseline_effective_live_enforced_applied_ignored(self):
+        cfg = Config()
+        db = Database('data/test_execution_observability.db')
+        try:
+            cfg._config['adaptive_regime'] = {
+                'enabled': True,
+                'mode': 'guarded_execute',
+                'guarded_execute': {
+                    'execution_profile_hints_enabled': True,
+                    'execution_profile_enforcement_enabled': True,
+                    'layering_profile_hints_enabled': True,
+                    'layering_profile_enforcement_enabled': True,
+                    'layering_plan_shape_enforcement_enabled': False,
+                    'rollout_symbols': ['BTC/USDT'],
+                },
+                'regimes': {
+                    'high_vol': {
+                        'execution_overrides': {
+                            'layer_ratios': [0.05, 0.05, 0.03],
+                            'layer_max_total_ratio': 0.13,
+                            'min_add_interval_seconds': 600,
+                            'profit_only_add': True,
+                            'allow_same_bar_multiple_adds': True,
+                        }
+                    }
+                }
+            }
+            executor = TradingExecutor(cfg, FakeExecutorExchange(), db)
+            regime_snapshot = build_regime_snapshot('high_vol', 0.9, {'volatility': 0.05}, '高波动')
+            policy_snapshot = resolve_regime_policy(cfg, 'BTC/USDT', regime_snapshot)
+            approved, _, details = executor._prepare_open_execution(
+                'BTC/USDT', 'long', 50000, signal_id=998,
+                plan_context=executor._get_layer_plan('BTC/USDT', 'long', signal_id=998, plan_context={'regime_snapshot': regime_snapshot, 'adaptive_policy_snapshot': policy_snapshot}) | {'regime_snapshot': regime_snapshot, 'adaptive_policy_snapshot': policy_snapshot}
+            )
+            self.assertTrue(approved)
+            enriched = details['plan_context']['observability']['adaptive_execution_hints']
+            self.assertIn('baseline', enriched)
+            self.assertIn('effective', enriched)
+            self.assertIn('live', enriched)
+            self.assertIn('enforced', enriched)
+            self.assertIn('applied', enriched)
+            self.assertIn('ignored', enriched)
+            self.assertIn('ignored_fields', enriched)
+            self.assertEqual(enriched['effective']['layer_max_total_ratio'], 0.13)
+            self.assertEqual(enriched['live']['layer_max_total_ratio'], 0.13)
+            self.assertEqual(enriched['enforced']['layer_max_total_ratio'], 0.13)
+            self.assertIn('layer_ratios', enriched['applied'])
+            self.assertIn('allow_same_bar_multiple_adds', enriched['ignored_fields'])
+        finally:
+            if os.path.exists('data/test_execution_observability.db'):
+                os.remove('data/test_execution_observability.db')
+
     def test_build_observability_context_rounds_expected_fields(self):
         ctx = build_observability_context(
             symbol='BTC/USDT:USDT', side='long', signal_id=12, root_signal_id=10, layer_no=2,

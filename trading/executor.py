@@ -89,15 +89,22 @@ def enrich_observability_with_snapshots(config_helper: Any, symbol: Optional[str
         'field_decisions': list(risk_snapshot.get('field_decisions') or []),
     }
     enriched['adaptive_execution_snapshot'] = execution_snapshot
+    effective_profile = dict(execution_snapshot.get('effective') or {})
+    live_profile = dict(execution_snapshot.get('live') or execution_snapshot.get('enforced_profile') or execution_snapshot.get('baseline') or {})
+    enforced_profile = dict(execution_snapshot.get('enforced_profile') or execution_snapshot.get('baseline') or {})
+    ignored_rows = list(execution_snapshot.get('ignored_overrides') or [])
     enriched['adaptive_execution_hints'] = {
         'enabled': bool(execution_snapshot.get('enabled')),
         'effective_state': execution_snapshot.get('effective_state', 'disabled'),
         'baseline': dict(execution_snapshot.get('baseline') or {}),
-        'effective_hint': dict(execution_snapshot.get('effective') or {}),
-        'live': dict(execution_snapshot.get('live') or execution_snapshot.get('enforced_profile') or execution_snapshot.get('baseline') or {}),
-        'enforced_profile': dict(execution_snapshot.get('enforced_profile') or execution_snapshot.get('baseline') or {}),
+        'effective': effective_profile,
+        'effective_hint': effective_profile,
+        'live': live_profile,
+        'enforced': enforced_profile,
+        'enforced_profile': enforced_profile,
         'applied': list((execution_snapshot.get('applied_overrides') or {}).keys()),
-        'ignored': list(execution_snapshot.get('ignored_overrides') or []),
+        'ignored': ignored_rows,
+        'ignored_fields': [str(item.get('key')) for item in ignored_rows if item.get('key')],
         'enforced_fields': list(execution_snapshot.get('enforced_fields') or []),
         'hinted_only_fields': list(execution_snapshot.get('hinted_only_fields') or []),
         'layering_enforced_fields': list(execution_snapshot.get('layering_enforced_fields') or []),
@@ -108,7 +115,7 @@ def enrich_observability_with_snapshots(config_helper: Any, symbol: Optional[str
         'would_change_execution_profile': bool(execution_snapshot.get('would_tighten')),
         'would_tighten_fields': list(execution_snapshot.get('would_tighten_fields') or []),
         'hint_codes': list(execution_snapshot.get('hint_codes') or []),
-        'ignored_reasons': list({str(item.get('reason')) for item in (execution_snapshot.get('ignored_overrides') or []) if item.get('reason')}),
+        'ignored_reasons': list({str(item.get('reason')) for item in ignored_rows if item.get('reason')}),
         'notes': ['step3 live scope only enforces conservative layering guardrails when rollout/enforcement is enabled', 'layer_ratios remains hints-only unless layering_plan_shape_enforcement_enabled=true'],
         'field_decisions': list(execution_snapshot.get('field_decisions') or []),
     }
@@ -357,13 +364,32 @@ class TradingExecutor:
         filled_layers = sorted(int(x) for x in (plan_data.get('filled_layers') or []))
         last_filled_at = plan_data.get('last_filled_at')
 
+        def _guard_details(stage: str, context: Dict[str, Any], extra: Dict[str, Any] = None) -> Dict[str, Any]:
+            payload = {
+                'stage': stage,
+                'layering': layering,
+                'baseline_layering': execution_profile['baseline'],
+                'effective_layering': execution_profile['effective'],
+                'live_layering': execution_profile['live'],
+                'execution_profile_really_enforced': bool((execution_profile.get('snapshot') or {}).get('execution_profile_really_enforced')),
+                'layering_profile_really_enforced': bool((execution_profile.get('snapshot') or {}).get('layering_profile_really_enforced')),
+                'plan_shape_really_enforced': bool((execution_profile.get('snapshot') or {}).get('plan_shape_really_enforced')),
+                'applied': list((((execution_profile.get('snapshot') or {}).get('applied_overrides') or {}).keys())),
+                'ignored': list(((execution_profile.get('snapshot') or {}).get('ignored_overrides') or [])),
+                'enforced_fields': list(((execution_profile.get('snapshot') or {}).get('enforced_fields') or [])),
+                'field_decisions': list(((execution_profile.get('snapshot') or {}).get('field_decisions') or [])),
+            }
+            if extra:
+                payload.update(extra)
+            return merge_observability_details(payload, context)
+
         if layering.get('signal_idempotency_enabled', True) and signal_id is not None:
             existing_trade = self.db.get_trade_by_signal_id(signal_id)
             if existing_trade:
-                return False, 'signal_id 已存在成交记录，跳过重复开仓', merge_observability_details({'stage': 'signal_idempotency', 'trade_id': existing_trade.get('id')}, build_observability_context(symbol=symbol, side=side, signal_id=signal_id, root_signal_id=state.get('root_signal_id') or signal_id, layer_no=(max(filled_layers) + 1) if filled_layers else 1, deny_reason='signal_idempotency'))
+                return False, 'signal_id 已存在成交记录，跳过重复开仓', _guard_details('signal_idempotency', build_observability_context(symbol=symbol, side=side, signal_id=signal_id, root_signal_id=state.get('root_signal_id') or signal_id, layer_no=(max(filled_layers) + 1) if filled_layers else 1, deny_reason='signal_idempotency'), {'trade_id': existing_trade.get('id')})
             existing_intent = self.db.get_open_intent_by_signal_id(signal_id)
             if existing_intent:
-                return False, 'signal_id 已存在进行中的开仓 intent', merge_observability_details({'stage': 'signal_idempotency', 'intent_id': existing_intent.get('id')}, build_observability_context(symbol=symbol, side=side, signal_id=signal_id, root_signal_id=existing_intent.get('root_signal_id') or state.get('root_signal_id') or signal_id, layer_no=existing_intent.get('layer_no') or ((max(filled_layers) + 1) if filled_layers else 1), deny_reason='signal_idempotency'))
+                return False, 'signal_id 已存在进行中的开仓 intent', _guard_details('signal_idempotency', build_observability_context(symbol=symbol, side=side, signal_id=signal_id, root_signal_id=existing_intent.get('root_signal_id') or state.get('root_signal_id') or signal_id, layer_no=existing_intent.get('layer_no') or ((max(filled_layers) + 1) if filled_layers else 1), deny_reason='signal_idempotency'), {'intent_id': existing_intent.get('id')})
 
         if layering.get('profit_only_add') and filled_layers:
             latest_trade = self.db.get_latest_open_trade(symbol, side)
@@ -372,7 +398,7 @@ class TradingExecutor:
             if entry_price > 0 and current_price > 0:
                 profitable = current_price >= entry_price if side == 'long' else current_price <= entry_price
                 if not profitable:
-                    return False, 'profit_only_add 已开启，当前未处于浮盈，禁止加仓', merge_observability_details({'stage': 'profit_only_add'}, build_observability_context(symbol=symbol, side=side, signal_id=signal_id, root_signal_id=state.get('root_signal_id') or signal_id, layer_no=(max(filled_layers) + 1) if filled_layers else 1, deny_reason='profit_only_add'))
+                    return False, 'profit_only_add 已开启，当前未处于浮盈，禁止加仓', _guard_details('profit_only_add', build_observability_context(symbol=symbol, side=side, signal_id=signal_id, root_signal_id=state.get('root_signal_id') or signal_id, layer_no=(max(filled_layers) + 1) if filled_layers else 1, deny_reason='profit_only_add'))
 
         if filled_layers and layering.get('min_add_interval_seconds', 0) > 0 and last_filled_at:
             try:
@@ -382,20 +408,20 @@ class TradingExecutor:
             if last_dt is not None:
                 elapsed = (datetime.utcnow() - last_dt).total_seconds()
                 if elapsed < layering['min_add_interval_seconds']:
-                    return False, '未达到最小加仓时间间隔', merge_observability_details({'stage': 'min_add_interval_seconds', 'remaining_seconds': int(layering['min_add_interval_seconds'] - elapsed)}, build_observability_context(symbol=symbol, side=side, signal_id=signal_id, root_signal_id=state.get('root_signal_id') or signal_id, layer_no=(max(filled_layers) + 1) if filled_layers else 1, deny_reason='min_add_interval_seconds'))
+                    return False, '未达到最小加仓时间间隔', _guard_details('min_add_interval_seconds', build_observability_context(symbol=symbol, side=side, signal_id=signal_id, root_signal_id=state.get('root_signal_id') or signal_id, layer_no=(max(filled_layers) + 1) if filled_layers else 1, deny_reason='min_add_interval_seconds'), {'remaining_seconds': int(layering['min_add_interval_seconds'] - elapsed)})
 
         if signal_id is not None:
             signal_counts = dict(plan_data.get('signal_layer_counts') or {})
             count_for_signal = int(signal_counts.get(str(signal_id), 0) or 0)
             if count_for_signal >= int(layering.get('max_layers_per_signal') or layering.get('layer_count') or 1):
-                return False, '单个 signal 已达到最大允许分仓层数', merge_observability_details({'stage': 'max_layers_per_signal', 'count_for_signal': count_for_signal}, build_observability_context(symbol=symbol, side=side, signal_id=signal_id, root_signal_id=state.get('root_signal_id') or signal_id, layer_no=(max(filled_layers) + 1) if filled_layers else 1, deny_reason='max_layers_per_signal'))
+                return False, '单个 signal 已达到最大允许分仓层数', _guard_details('max_layers_per_signal', build_observability_context(symbol=symbol, side=side, signal_id=signal_id, root_signal_id=state.get('root_signal_id') or signal_id, layer_no=(max(filled_layers) + 1) if filled_layers else 1, deny_reason='max_layers_per_signal'), {'count_for_signal': count_for_signal})
             if not layering.get('allow_same_bar_multiple_adds', False):
                 marker = self._get_signal_bar_marker(signal_id=signal_id, plan_context=plan_context)
                 markers = dict(plan_data.get('signal_bar_markers') or {})
                 if marker and markers.get(marker):
-                    return False, '同一 bar 已执行过加仓，禁止重复加仓', merge_observability_details({'stage': 'allow_same_bar_multiple_adds', 'signal_bar_marker': marker}, build_observability_context(symbol=symbol, side=side, signal_id=signal_id, root_signal_id=state.get('root_signal_id') or signal_id, layer_no=(max(filled_layers) + 1) if filled_layers else 1, deny_reason='allow_same_bar_multiple_adds'))
+                    return False, '同一 bar 已执行过加仓，禁止重复加仓', _guard_details('allow_same_bar_multiple_adds', build_observability_context(symbol=symbol, side=side, signal_id=signal_id, root_signal_id=state.get('root_signal_id') or signal_id, layer_no=(max(filled_layers) + 1) if filled_layers else 1, deny_reason='allow_same_bar_multiple_adds'), {'signal_bar_marker': marker})
 
-        return True, None, merge_observability_details({'stage': 'layering_guard', 'layering': layering, 'baseline_layering': execution_profile['baseline'], 'effective_layering': execution_profile['effective'], 'live_layering': execution_profile['live'], 'execution_profile_really_enforced': bool((execution_profile.get('snapshot') or {}).get('execution_profile_really_enforced')), 'layering_profile_really_enforced': bool((execution_profile.get('snapshot') or {}).get('layering_profile_really_enforced')), 'plan_shape_really_enforced': bool((execution_profile.get('snapshot') or {}).get('plan_shape_really_enforced')), 'field_decisions': list(((execution_profile.get('snapshot') or {}).get('field_decisions') or []))}, build_observability_context(symbol=symbol, side=side, signal_id=signal_id, root_signal_id=state.get('root_signal_id') or signal_id, layer_no=(max(filled_layers) + 1) if filled_layers else 1))
+        return True, None, _guard_details('layering_guard', build_observability_context(symbol=symbol, side=side, signal_id=signal_id, root_signal_id=state.get('root_signal_id') or signal_id, layer_no=(max(filled_layers) + 1) if filled_layers else 1))
 
 
     def _get_layer_plan(self, symbol: str, side: str, signal_id: int = None, root_signal_id: int = None, plan_context: Dict[str, Any] = None) -> Dict[str, Any]:

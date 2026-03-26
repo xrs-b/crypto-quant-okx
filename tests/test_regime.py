@@ -514,9 +514,14 @@ class TestExecutionEffectiveSnapshotStep1(unittest.TestCase):
 class TestAdaptiveRegimeConfigAndPolicy(unittest.TestCase):
     def test_adaptive_regime_defaults_are_safe(self):
         cfg = Config()
+        cfg._config['adaptive_regime'] = {}
         adaptive = cfg.get_adaptive_regime_config()
         self.assertFalse(adaptive['enabled'])
         self.assertEqual(adaptive['mode'], 'observe_only')
+        guarded = adaptive.get('guarded_execute') or {}
+        self.assertFalse(guarded.get('layering_profile_hints_enabled', True))
+        self.assertFalse(guarded.get('layering_profile_enforcement_enabled', True))
+        self.assertFalse(guarded.get('layering_plan_shape_enforcement_enabled', True))
         self.assertEqual(adaptive['detector']['version'], 'regime_v1_m0')
         self.assertEqual(cfg.get_adaptive_regime_mode(), 'observe_only')
         self.assertFalse(cfg.is_adaptive_regime_enabled())

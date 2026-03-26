@@ -556,6 +556,14 @@ adaptive_layering_snapshot:
 
 ---
 
+## 实施状态更新（2026-03-27 / 第一批）
+
+- 已完成 **第一批 guarded layering live**：`layer_max_total_ratio`、`max_layers_per_signal`、`min_add_interval_seconds`、`profit_only_add`、`allow_same_bar_multiple_adds` 已在 execution/layering 路径接入 live guardrails。
+- 生效前提仍然严格：`execution_profile_enforcement_enabled=true`、`layering_profile_enforcement_enabled=true`、policy mode ∈ `{guarded_execute, full}`、rollout 命中、且 override 通过 conservative-only 校验。
+- 默认仍安全关闭；rollout miss / 开关关闭时继续回退 baseline live。
+- `layer_ratios` 仍然 **hints-only**，未在本批进入 live layer plan；`layer_count` 仍只作 derived / audit。
+- observability 已明确输出 baseline / effective / live / enforced / applied / ignored / field decisions / 是否真正 enforced。
+
 ## 8. 配置开关建议
 
 ```yaml

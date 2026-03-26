@@ -20,7 +20,7 @@ from core.regime import (
     detect_regime,
     normalize_regime_snapshot,
 )
-from core.regime_policy import ADAPTIVE_POLICY_VERSION, resolve_regime_policy, build_validation_baseline_snapshot, build_validation_effective_snapshot, build_risk_effective_snapshot
+from core.regime_policy import ADAPTIVE_POLICY_VERSION, resolve_regime_policy, build_validation_baseline_snapshot, build_validation_effective_snapshot, build_risk_effective_snapshot, build_execution_effective_snapshot
 
 
 def generate_test_data(regime_type: str, n: int = 100) -> pd.DataFrame:
@@ -276,6 +276,77 @@ class TestRiskEffectiveSnapshotStep4(unittest.TestCase):
         self.assertTrue(snapshot['observe_only'])
         self.assertFalse(snapshot['rollout_match'])
         self.assertTrue(any(row['reason'] == 'rollout_symbol_not_matched' for row in snapshot['ignored_overrides']))
+
+
+class TestExecutionEffectiveSnapshotStep1(unittest.TestCase):
+    def test_execution_snapshot_default_keeps_hints_disabled(self):
+        cfg = Config()
+        snapshot = build_execution_effective_snapshot(cfg, 'BTC/USDT')
+        self.assertEqual(snapshot['effective_state'], 'disabled')
+        self.assertEqual(snapshot['baseline'], snapshot['effective'])
+        self.assertTrue(snapshot['observe_only'])
+
+    def test_execution_snapshot_applies_only_conservative_execution_hints(self):
+        cfg = Config()
+        cfg._config['adaptive_regime'] = {
+            'enabled': True,
+            'mode': 'guarded_execute',
+            'guarded_execute': {
+                'execution_profile_hints_enabled': True,
+                'execution_profile_enforcement_enabled': False,
+                'layering_profile_enforcement_enabled': False,
+                'enforce_conservative_only': True,
+            },
+            'regimes': {
+                'high_vol': {
+                    'execution_overrides': {
+                        'layer_ratios': [0.05, 0.05, 0.03],
+                        'layer_max_total_ratio': 0.13,
+                        'max_layers_per_signal': 1,
+                        'min_add_interval_seconds': 600,
+                        'profit_only_add': True,
+                        'leverage_cap': 20,
+                    }
+                }
+            }
+        }
+        snapshot = build_execution_effective_snapshot(
+            cfg, 'BTC/USDT', regime_snapshot=build_regime_snapshot('high_vol', 0.9, {'volatility': 0.05}, '高波动')
+        )
+        self.assertEqual(snapshot['effective_state'], 'hints_only')
+        self.assertEqual(snapshot['effective']['layer_ratios'], [0.05, 0.05, 0.03])
+        self.assertEqual(snapshot['effective']['layer_max_total_ratio'], 0.13)
+        self.assertEqual(snapshot['effective']['min_add_interval_seconds'], 600)
+        self.assertTrue(snapshot['effective']['profit_only_add'])
+        self.assertIn('layer_ratios', snapshot['applied_overrides'])
+        self.assertTrue(any(item['key'] == 'leverage_cap' and item['reason'] == 'non_conservative_override' for item in snapshot['ignored_overrides']))
+        self.assertIn('WOULD_REDUCE_LAYER_RATIOS', snapshot['hint_codes'])
+        self.assertIn('IGNORED_NON_CONSERVATIVE_OVERRIDE', snapshot['hint_codes'])
+
+    def test_execution_snapshot_rollout_miss_stays_hints_only_and_serializable(self):
+        cfg = Config()
+        cfg._config['adaptive_regime'] = {
+            'enabled': True,
+            'mode': 'guarded_execute',
+            'guarded_execute': {
+                'execution_profile_hints_enabled': True,
+                'execution_profile_enforcement_enabled': True,
+                'rollout_symbols': ['ETH/USDT'],
+            },
+            'regimes': {
+                'high_vol': {
+                    'execution_overrides': {'min_add_interval_seconds': 600}
+                }
+            }
+        }
+        snapshot = build_execution_effective_snapshot(
+            cfg, 'BTC/USDT', regime_snapshot=build_regime_snapshot('high_vol', 0.9, {'volatility': 0.05}, '高波动')
+        )
+        self.assertEqual(snapshot['effective_state'], 'hints_only')
+        self.assertFalse(snapshot['rollout_match'])
+        self.assertTrue(any(item['reason'] == 'rollout_symbol_not_matched' for item in snapshot['ignored_overrides']))
+        import json
+        json.dumps(snapshot, ensure_ascii=False)
 
 
 class TestAdaptiveRegimeConfigAndPolicy(unittest.TestCase):

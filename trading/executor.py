@@ -12,7 +12,7 @@ from core.database import Database
 from core.logger import trade_logger
 from analytics.recommendation import get_recommendation_provider
 from core.risk_budget import get_risk_budget_config, summarize_margin_usage, compute_entry_plan, summarize_risk_hint_changes
-from core.regime_policy import build_observe_only_payload, build_risk_effective_snapshot
+from core.regime_policy import build_observe_only_payload, build_risk_effective_snapshot, build_execution_effective_snapshot
 
 
 def build_observability_context(*, symbol: str = None, side: str = None, signal_id: int = None, root_signal_id: int = None, layer_no: int = None, deny_reason: str = None, current_symbol_exposure: float = None, projected_symbol_exposure: float = None, current_total_exposure: float = None, projected_total_exposure: float = None, extra: Dict[str, Any] = None) -> Dict[str, Any]:
@@ -64,6 +64,13 @@ def enrich_observability_with_snapshots(config_helper: Any, symbol: Optional[str
         policy_snapshot=payload.get('adaptive_policy_snapshot'),
     )
     risk_hint_summary = summarize_risk_hint_changes(risk_snapshot.get('baseline'), risk_snapshot.get('effective'))
+    execution_snapshot = build_execution_effective_snapshot(
+        config_helper,
+        symbol,
+        signal=signal,
+        regime_snapshot=payload.get('regime_snapshot'),
+        policy_snapshot=payload.get('adaptive_policy_snapshot'),
+    )
     enriched['adaptive_risk_snapshot'] = risk_snapshot
     enriched['adaptive_risk_hints'] = {
         'enabled': bool(risk_snapshot.get('enabled')),
@@ -80,6 +87,22 @@ def enrich_observability_with_snapshots(config_helper: Any, symbol: Optional[str
         'rollout_match': bool(risk_snapshot.get('rollout_match', True)),
         'hint_codes': list(risk_snapshot.get('hint_codes') or risk_hint_summary.get('hint_codes') or []),
         'field_decisions': list(risk_snapshot.get('field_decisions') or []),
+    }
+    enriched['adaptive_execution_snapshot'] = execution_snapshot
+    enriched['adaptive_execution_hints'] = {
+        'enabled': bool(execution_snapshot.get('enabled')),
+        'effective_state': execution_snapshot.get('effective_state', 'disabled'),
+        'baseline': dict(execution_snapshot.get('baseline') or {}),
+        'effective_hint': dict(execution_snapshot.get('effective') or {}),
+        'applied': list((execution_snapshot.get('applied_overrides') or {}).keys()),
+        'ignored': list(execution_snapshot.get('ignored_overrides') or []),
+        'rollout_match': bool(execution_snapshot.get('rollout_match', True)),
+        'would_change_execution_profile': bool(execution_snapshot.get('would_tighten')),
+        'would_tighten_fields': list(execution_snapshot.get('would_tighten_fields') or []),
+        'hint_codes': list(execution_snapshot.get('hint_codes') or []),
+        'ignored_reasons': list({str(item.get('reason')) for item in (execution_snapshot.get('ignored_overrides') or []) if item.get('reason')}),
+        'notes': ['step1 keeps baseline execution profile live'],
+        'field_decisions': list(execution_snapshot.get('field_decisions') or []),
     }
     return enriched
 

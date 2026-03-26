@@ -440,6 +440,13 @@
 
 ### AR-M4-01｜execution profile 支持 regime layer ratio override
 
+- **Status（2026-03-26 / M4 Step 1）**：done
+- **Notes**：
+  - 已在 `core/regime_policy.py` / `trading/executor.py` 落地 `baseline_execution_profile` 与 `effective_execution_profile_hint`，当前严格保持 hints-only，不改 live entry plan / layer plan / 下单输入。
+  - 已支持 execution conservative-only merge，当前覆盖 `layer_ratios`、`layer_max_total_ratio`、`max_layers_per_signal`、`min_add_interval_seconds`、`profit_only_add`、`allow_same_bar_multiple_adds`、`leverage_cap`。
+  - observability 已统一输出 `baseline / effective hint / applied / ignored / rollout_match / effective_state / hint_codes / ignored reasons`，并通过 executor observability / intent plan_context 进入摘要链路。
+  - 默认仍由 baseline execution profile 驱动真实执行；`execution_profile_enforcement_enabled=false`、`layering_profile_enforcement_enabled=false` 时不会提前进入 M4 Step 2。
+
 - **阶段 / 优先级**：M4 / P0
 - **生效范围**：开始影响 `execution`
 - **目标**：在不改执行骨架的前提下，根据 regime 调整 layer ratios / max total ratio 等执行参数。

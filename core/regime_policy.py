@@ -219,6 +219,7 @@ def build_neutral_policy_snapshot(
     decision_overrides: Optional[Dict[str, Any]] = None,
     validation_overrides: Optional[Dict[str, Any]] = None,
     risk_overrides: Optional[Dict[str, Any]] = None,
+    execution_overrides: Optional[Dict[str, Any]] = None,
     effective_overrides: Optional[Dict[str, Any]] = None,
     is_effective: bool = False,
 ) -> Dict[str, Any]:
@@ -239,7 +240,7 @@ def build_neutral_policy_snapshot(
         'decision_overrides': dict(decision_overrides or {}),
         'validation_overrides': dict(validation_overrides or {}),
         'risk_overrides': dict(risk_overrides or {}),
-        'execution_overrides': {},
+        'execution_overrides': dict(execution_overrides or {}),
         'effective_overrides': dict(effective_overrides or {}),
         'is_effective': bool(is_effective),
         'notes': list(notes or ['m1-observe-only']),
@@ -371,6 +372,118 @@ def build_risk_baseline_snapshot(config_helper: Any, symbol: Optional[str]) -> D
     return baseline
 
 
+def build_execution_baseline_snapshot(config_helper: Any, symbol: Optional[str]) -> Dict[str, Any]:
+    layering = config_helper.get_layering_config(symbol) if hasattr(config_helper, 'get_layering_config') else {}
+    trading_cfg = config_helper.get_symbol_section(symbol, 'trading') if hasattr(config_helper, 'get_symbol_section') else {}
+    leverage_cap = int(trading_cfg.get('leverage', 10) or 10)
+    return {
+        'layer_ratios': [float(x) for x in (layering.get('layer_ratios') or [0.06, 0.06, 0.04])],
+        'layer_max_total_ratio': float(layering.get('layer_max_total_ratio') or 0.16),
+        'max_layers_per_signal': int(layering.get('max_layers_per_signal') or len(layering.get('layer_ratios') or [0.06, 0.06, 0.04])),
+        'min_add_interval_seconds': int(layering.get('min_add_interval_seconds') or 0),
+        'profit_only_add': bool(layering.get('profit_only_add', False)),
+        'allow_same_bar_multiple_adds': bool(layering.get('allow_same_bar_multiple_adds', False)),
+        'leverage_cap': leverage_cap,
+    }
+
+
+def merge_execution_overrides_conservatively(baseline_snapshot: Dict[str, Any], execution_overrides: Optional[Dict[str, Any]] = None, *, conservative_only: bool = True) -> Dict[str, Any]:
+    baseline_snapshot = dict(baseline_snapshot or {})
+    effective = dict(baseline_snapshot)
+    applied_overrides: Dict[str, Dict[str, Any]] = {}
+    ignored_overrides: List[Dict[str, Any]] = []
+
+    for key, requested in dict(execution_overrides or {}).items():
+        baseline = baseline_snapshot.get(key)
+        if key == 'layer_ratios':
+            if not isinstance(requested, list) or not requested:
+                ignored_overrides.append({'key': key, 'requested': requested, 'reason': 'override_not_list', 'code': 'IGNORED_INVALID_OVERRIDE'})
+                continue
+            try:
+                requested_values = [float(x) for x in requested]
+            except Exception:
+                ignored_overrides.append({'key': key, 'requested': requested, 'reason': 'override_not_numeric', 'code': 'IGNORED_INVALID_OVERRIDE'})
+                continue
+            baseline_values = [float(x) for x in (baseline or [])]
+            if len(requested_values) != len(baseline_values):
+                ignored_overrides.append({'key': key, 'requested': requested, 'baseline': baseline, 'reason': 'layer_ratio_length_mismatch', 'code': 'IGNORED_INVALID_OVERRIDE'})
+                continue
+            non_conservative = any(req > base + 1e-12 for req, base in zip(requested_values, baseline_values)) or (sum(requested_values) > sum(baseline_values) + 1e-12)
+            if conservative_only and non_conservative:
+                ignored_overrides.append({'key': key, 'requested': requested_values, 'baseline': baseline_values, 'reason': 'non_conservative_override', 'code': 'IGNORED_NON_CONSERVATIVE_OVERRIDE'})
+                continue
+            if any(abs(req - base) > 1e-12 for req, base in zip(requested_values, baseline_values)):
+                effective[key] = requested_values
+                applied_overrides[key] = {'baseline': baseline_values, 'effective': requested_values, 'requested': requested_values, 'source': f'execution_overrides.{key}'}
+            continue
+        if key in {'layer_max_total_ratio', 'leverage_cap'}:
+            if not isinstance(requested, (int, float)):
+                ignored_overrides.append({'key': key, 'requested': requested, 'reason': 'override_not_numeric', 'code': 'IGNORED_INVALID_OVERRIDE'})
+                continue
+            requested_float = float(requested)
+            baseline_float = float(baseline)
+            final_value = min(baseline_float, requested_float)
+            if final_value + 1e-12 < baseline_float:
+                effective[key] = int(final_value) if key == 'leverage_cap' else final_value
+                applied_overrides[key] = {'baseline': baseline, 'effective': effective[key], 'requested': requested, 'source': f'execution_overrides.{key}'}
+            elif conservative_only and requested_float > baseline_float + 1e-12:
+                ignored_overrides.append({'key': key, 'requested': requested, 'baseline': baseline, 'reason': 'non_conservative_override', 'code': 'IGNORED_NON_CONSERVATIVE_OVERRIDE'})
+            continue
+        if key == 'max_layers_per_signal':
+            if not isinstance(requested, (int, float)):
+                ignored_overrides.append({'key': key, 'requested': requested, 'reason': 'override_not_numeric', 'code': 'IGNORED_INVALID_OVERRIDE'})
+                continue
+            requested_int = int(requested)
+            baseline_int = int(baseline)
+            final_value = min(baseline_int, requested_int)
+            if final_value < baseline_int:
+                effective[key] = final_value
+                applied_overrides[key] = {'baseline': baseline_int, 'effective': final_value, 'requested': requested_int, 'source': f'execution_overrides.{key}'}
+            elif conservative_only and requested_int > baseline_int:
+                ignored_overrides.append({'key': key, 'requested': requested_int, 'baseline': baseline_int, 'reason': 'non_conservative_override', 'code': 'IGNORED_NON_CONSERVATIVE_OVERRIDE'})
+            continue
+        if key == 'min_add_interval_seconds':
+            if not isinstance(requested, (int, float)):
+                ignored_overrides.append({'key': key, 'requested': requested, 'reason': 'override_not_numeric', 'code': 'IGNORED_INVALID_OVERRIDE'})
+                continue
+            requested_int = int(requested)
+            baseline_int = int(baseline)
+            final_value = max(baseline_int, requested_int)
+            if final_value > baseline_int:
+                effective[key] = final_value
+                applied_overrides[key] = {'baseline': baseline_int, 'effective': final_value, 'requested': requested_int, 'source': f'execution_overrides.{key}'}
+            elif conservative_only and requested_int < baseline_int:
+                ignored_overrides.append({'key': key, 'requested': requested_int, 'baseline': baseline_int, 'reason': 'non_conservative_override', 'code': 'IGNORED_NON_CONSERVATIVE_OVERRIDE'})
+            continue
+        if key == 'profit_only_add':
+            requested_bool = bool(requested)
+            baseline_bool = bool(baseline)
+            if requested_bool and not baseline_bool:
+                effective[key] = True
+                applied_overrides[key] = {'baseline': baseline_bool, 'effective': True, 'requested': requested_bool, 'source': f'execution_overrides.{key}'}
+            elif conservative_only and (not requested_bool) and baseline_bool:
+                ignored_overrides.append({'key': key, 'requested': requested_bool, 'baseline': baseline_bool, 'reason': 'non_conservative_override', 'code': 'IGNORED_NON_CONSERVATIVE_OVERRIDE'})
+            continue
+        if key == 'allow_same_bar_multiple_adds':
+            requested_bool = bool(requested)
+            baseline_bool = bool(baseline)
+            if (not requested_bool) and baseline_bool:
+                effective[key] = False
+                applied_overrides[key] = {'baseline': baseline_bool, 'effective': False, 'requested': requested_bool, 'source': f'execution_overrides.{key}'}
+            elif conservative_only and requested_bool and not baseline_bool:
+                ignored_overrides.append({'key': key, 'requested': requested_bool, 'baseline': baseline_bool, 'reason': 'non_conservative_override', 'code': 'IGNORED_NON_CONSERVATIVE_OVERRIDE'})
+            continue
+        ignored_overrides.append({'key': key, 'requested': requested, 'reason': 'unsupported_execution_field', 'code': 'IGNORED_UNSUPPORTED_EXECUTION_FIELD'})
+
+    if sum(effective.get('layer_ratios') or []) > float(effective.get('layer_max_total_ratio') or 0) + 1e-12:
+        effective['layer_max_total_ratio'] = float(sum(effective.get('layer_ratios') or []))
+    return {
+        'effective': effective,
+        'applied_overrides': applied_overrides,
+        'ignored_overrides': ignored_overrides,
+    }
+
+
 def merge_risk_overrides_conservatively(baseline_snapshot: Dict[str, Any], risk_overrides: Optional[Dict[str, Any]] = None, *, conservative_only: bool = True) -> Dict[str, Any]:
     baseline_snapshot = dict(baseline_snapshot or {})
     effective = dict(baseline_snapshot)
@@ -419,6 +532,106 @@ def merge_risk_overrides_conservatively(baseline_snapshot: Dict[str, Any], risk_
         'effective': effective,
         'applied_overrides': applied_overrides,
         'ignored_overrides': ignored_overrides,
+    }
+
+
+def build_execution_effective_snapshot(config_helper: Any, symbol: Optional[str], *, signal: Any = None, regime_snapshot: Optional[Dict[str, Any]] = None, policy_snapshot: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    observe_payload = build_observe_only_payload(config_helper, symbol, signal=signal, regime_snapshot=regime_snapshot, policy_snapshot=policy_snapshot)
+    adaptive_cfg = config_helper.get_adaptive_regime_config(symbol) if hasattr(config_helper, 'get_adaptive_regime_config') else {}
+    guarded_cfg = dict(adaptive_cfg.get('guarded_execute') or {})
+    normalized_policy = observe_payload['adaptive_policy_snapshot']
+    normalized_regime = observe_payload['regime_snapshot']
+    baseline = build_execution_baseline_snapshot(config_helper, symbol)
+    conservative_only = bool(guarded_cfg.get('conservative_only', guarded_cfg.get('enforce_conservative_only', True)))
+    hints_enabled = bool(guarded_cfg.get('execution_profile_hints_enabled', False))
+    enforcement_enabled = bool(guarded_cfg.get('execution_profile_enforcement_enabled', False))
+    layering_enforcement_enabled = bool(guarded_cfg.get('layering_profile_enforcement_enabled', False))
+    rollout_symbols = list(guarded_cfg.get('rollout_symbols') or [])
+    rollout_match = (not rollout_symbols) or (symbol in rollout_symbols)
+    mode = str(normalized_policy.get('mode') or adaptive_cfg.get('mode') or 'observe_only')
+    merged = merge_execution_overrides_conservatively(
+        baseline,
+        dict(normalized_policy.get('execution_overrides') or {}),
+        conservative_only=conservative_only,
+    )
+    if enforcement_enabled and mode in {'guarded_execute', 'full'} and rollout_match:
+        effective_state = 'effective'
+    elif hints_enabled or merged.get('applied_overrides') or merged.get('ignored_overrides'):
+        effective_state = 'hints_only'
+    else:
+        effective_state = 'disabled'
+
+    ignored_overrides = list(merged.get('ignored_overrides') or [])
+    if rollout_symbols and not rollout_match:
+        ignored_overrides.append({'key': 'rollout_symbols', 'requested': rollout_symbols, 'reason': 'rollout_symbol_not_matched', 'code': 'ROLLOUT_SYMBOL_NOT_MATCHED'})
+
+    applied_keys = list((merged.get('applied_overrides') or {}).keys())
+    hint_codes: List[str] = []
+    field_decisions: List[Dict[str, Any]] = []
+    code_map = {
+        'layer_ratios': 'WOULD_REDUCE_LAYER_RATIOS',
+        'layer_max_total_ratio': 'WOULD_REDUCE_LAYER_MAX_TOTAL_RATIO',
+        'max_layers_per_signal': 'WOULD_REDUCE_MAX_LAYERS_PER_SIGNAL',
+        'min_add_interval_seconds': 'WOULD_INCREASE_MIN_ADD_INTERVAL_SECONDS',
+        'profit_only_add': 'WOULD_ENABLE_PROFIT_ONLY_ADD',
+        'allow_same_bar_multiple_adds': 'WOULD_DISABLE_SAME_BAR_MULTIPLE_ADDS',
+        'leverage_cap': 'WOULD_REDUCE_LEVERAGE_CAP',
+    }
+    for field in ['layer_ratios', 'layer_max_total_ratio', 'max_layers_per_signal', 'min_add_interval_seconds', 'profit_only_add', 'allow_same_bar_multiple_adds', 'leverage_cap']:
+        applied = field in applied_keys
+        enforced = effective_state == 'effective' and (field not in {'layer_ratios'} or layering_enforcement_enabled)
+        reason = 'no_change'
+        if applied and effective_state != 'effective':
+            reason = 'execution_enforcement_disabled'
+        elif applied and field == 'layer_ratios' and not layering_enforcement_enabled:
+            reason = 'layering_enforcement_disabled'
+        elif applied and enforced:
+            reason = 'conservative_tighten_enforced'
+        elif applied:
+            reason = 'field_not_live'
+        field_decisions.append({
+            'field': field,
+            'baseline': baseline.get(field),
+            'effective': merged['effective'].get(field),
+            'applied': applied,
+            'ignored': not applied,
+            'enforced': enforced,
+            'decision': 'applied' if applied else 'unchanged',
+            'reason': reason,
+        })
+        if applied and code_map.get(field) and code_map[field] not in hint_codes:
+            hint_codes.append(code_map[field])
+    for ignored in ignored_overrides:
+        code = ignored.get('code')
+        if code and code not in hint_codes:
+            hint_codes.append(code)
+
+    return {
+        'enabled': bool(hints_enabled or enforcement_enabled),
+        'baseline': baseline,
+        'effective': merged['effective'],
+        'effective_candidate': merged['effective'],
+        'effective_state': effective_state,
+        'policy_mode': mode,
+        'policy_version': normalized_policy.get('policy_version') or ADAPTIVE_POLICY_VERSION,
+        'policy_source': normalized_policy.get('policy_source') or 'adaptive_regime.defaults',
+        'regime_name': normalized_regime.get('name'),
+        'regime_confidence': normalized_regime.get('confidence'),
+        'stability_score': normalized_regime.get('stability_score'),
+        'transition_risk': normalized_regime.get('transition_risk'),
+        'applied_overrides': merged['applied_overrides'],
+        'ignored_overrides': ignored_overrides,
+        'observe_only': effective_state != 'effective',
+        'hints_enabled': hints_enabled,
+        'enforcement_enabled': enforcement_enabled,
+        'layering_enforcement_enabled': layering_enforcement_enabled,
+        'conservative_only': conservative_only,
+        'rollout_symbols': rollout_symbols,
+        'rollout_match': rollout_match,
+        'would_tighten': bool(applied_keys),
+        'would_tighten_fields': applied_keys,
+        'hint_codes': hint_codes,
+        'field_decisions': field_decisions,
     }
 
 
@@ -629,11 +842,13 @@ class RegimePolicyResolver:
         decision_overrides = self._deep_merge(defaults.get('decision_overrides', {}) or {}, regime_cfg.get('decision_overrides', {}) or {})
         validation_overrides = self._deep_merge(defaults.get('validation_overrides', {}) or {}, regime_cfg.get('validation_overrides', {}) or {})
         risk_overrides = self._deep_merge(defaults.get('risk_overrides', {}) or {}, regime_cfg.get('risk_overrides', {}) or {})
+        execution_overrides = self._deep_merge(defaults.get('execution_overrides', {}) or {}, regime_cfg.get('execution_overrides', {}) or {})
         return {
             'regime_name': regime_name,
             'decision_overrides': decision_overrides,
             'validation_overrides': validation_overrides,
             'risk_overrides': risk_overrides,
+            'execution_overrides': execution_overrides,
         }
 
     def resolve(self, symbol: Optional[str], regime_snapshot: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -653,6 +868,8 @@ class RegimePolicyResolver:
             notes.append(f"validation_overrides:{decision_policy['regime_name']}")
         if decision_policy['risk_overrides']:
             notes.append(f"risk_overrides:{decision_policy['regime_name']}")
+        if decision_policy['execution_overrides']:
+            notes.append(f"execution_overrides:{decision_policy['regime_name']}")
         return build_neutral_policy_snapshot(
             normalized_regime,
             mode=mode,
@@ -664,9 +881,10 @@ class RegimePolicyResolver:
             notes=notes,
             decision_overrides=decision_policy['decision_overrides'],
             validation_overrides=decision_policy['validation_overrides'],
-            effective_overrides=(({'decision': decision_policy['decision_overrides']} if decision_policy['decision_overrides'] else {}) | ({'validation': decision_policy['validation_overrides']} if decision_policy['validation_overrides'] else {}) | ({'risk': decision_policy['risk_overrides']} if decision_policy['risk_overrides'] else {})) if is_effective else {},
+            effective_overrides=(({'decision': decision_policy['decision_overrides']} if decision_policy['decision_overrides'] else {}) | ({'validation': decision_policy['validation_overrides']} if decision_policy['validation_overrides'] else {}) | ({'risk': decision_policy['risk_overrides']} if decision_policy['risk_overrides'] else {}) | ({'execution': decision_policy['execution_overrides']} if decision_policy['execution_overrides'] else {})) if is_effective else {},
             is_effective=is_effective,
             risk_overrides=decision_policy['risk_overrides'],
+            execution_overrides=decision_policy['execution_overrides'],
         )
 
 

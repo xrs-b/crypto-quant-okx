@@ -94,6 +94,13 @@ M4 后续阶段才考虑：
 
 ---
 
+## 0. 实施状态（2026-03-26）
+
+- `core/regime_policy.py` 已补齐 `build_execution_baseline_snapshot()`、`merge_execution_overrides_conservatively()`、`build_execution_effective_snapshot()`。
+- `trading/executor.py` 已在 observability / plan_context 链路接入统一 `adaptive_execution_snapshot` 与 `adaptive_execution_hints`。
+- 当前阶段保持 **hints-only**：真实 `entry_plan / layer_plan / order sizing` 继续走 baseline，不提前进入 execution enforcement。
+- 已补测试覆盖：conservative-only merge、ignored reasons、rollout mismatch、JSON serializable、以及 hints-only 不改变 live execution inputs。
+
 ## 3. Step 1 完成后的交付定义
 
 完成 Step 1 后，系统至少应能做到：

@@ -18,7 +18,7 @@ from datetime import datetime, timedelta
 from core.config import Config
 from core.database import Database
 from core.regime import build_regime_snapshot, normalize_regime_snapshot
-from core.regime_policy import resolve_regime_policy, build_observe_only_payload, build_risk_effective_snapshot
+from core.regime_policy import resolve_regime_policy, build_observe_only_payload, build_risk_effective_snapshot, build_execution_effective_snapshot
 from core.exchange import Exchange
 from core.notifier import NotificationManager
 from signals import Signal, SignalDetector, SignalValidator, SignalRecorder, EntryDecider
@@ -2964,6 +2964,50 @@ class TestTradingExecutor(unittest.TestCase):
         self.assertIn('adaptive_risk_snapshot', details['observability'])
         self.assertIn('adaptive_risk_hints', details['observability'])
 
+    def test_prepare_open_execution_step1_emits_execution_hints_without_mutating_live_inputs(self):
+        self.config._config['adaptive_regime'] = {
+            'enabled': True,
+            'mode': 'guarded_execute',
+            'guarded_execute': {
+                'execution_profile_hints_enabled': True,
+                'execution_profile_enforcement_enabled': False,
+                'layering_profile_enforcement_enabled': False,
+                'enforce_conservative_only': True,
+            },
+            'regimes': {
+                'high_vol': {
+                    'execution_overrides': {
+                        'layer_ratios': [0.05, 0.05, 0.03],
+                        'layer_max_total_ratio': 0.13,
+                        'min_add_interval_seconds': 600,
+                        'profit_only_add': True,
+                    }
+                }
+            }
+        }
+        self.executor.exchange = FakeExecutorExchange()
+        regime_snapshot = build_regime_snapshot('high_vol', 0.9, {'volatility': 0.05}, '高波动')
+        policy_snapshot = resolve_regime_policy(self.config, 'BTC/USDT', regime_snapshot)
+        layered_plan = self.executor._get_layer_plan('BTC/USDT', 'long', signal_id=888)
+        layered_plan.update({'regime_snapshot': regime_snapshot, 'adaptive_policy_snapshot': policy_snapshot})
+        approved, reason, details = self.executor._prepare_open_execution(
+            'BTC/USDT', 'long', 50000, signal_id=888,
+            plan_context=layered_plan
+        )
+        self.assertTrue(approved)
+        plan_context = details['plan_context']
+        self.assertEqual(plan_context['layer_ratio'], 0.06)
+        self.assertEqual(plan_context['layer_ratios'], [0.06, 0.06, 0.04])
+        self.assertEqual(plan_context['entry_plan']['effective_entry_margin_ratio'], 0.06)
+        hints = plan_context['observability']['adaptive_execution_hints']
+        self.assertEqual(hints['effective_state'], 'hints_only')
+        self.assertIn('layer_ratios', hints['would_tighten_fields'])
+        self.assertIn('min_add_interval_seconds', hints['would_tighten_fields'])
+        self.assertIn('profit_only_add', hints['would_tighten_fields'])
+        self.assertEqual(hints['effective_hint']['layer_ratios'], [0.05, 0.05, 0.03])
+        self.assertEqual(hints['baseline']['layer_ratios'], [0.06, 0.06, 0.04])
+        json.dumps(plan_context['observability'], ensure_ascii=False)
+
     def test_risk_manager_observability_contains_risk_hints_only_snapshot(self):
         self.config._config['adaptive_regime'] = {
             'enabled': True,
@@ -3093,6 +3137,32 @@ class TestRiskBudgetSizing(unittest.TestCase):
         self.assertFalse(snapshot['observe_only'])
         self.assertEqual(snapshot['enforced_fields'], ['symbol_margin_cap_ratio', 'base_entry_margin_ratio', 'leverage_cap'])
         self.assertTrue(any(row['field'] == 'base_entry_margin_ratio' and row['enforced'] for row in snapshot['field_decisions']))
+
+    def test_build_execution_effective_snapshot_is_serializable(self):
+        cfg = Config()
+        cfg._config['adaptive_regime'] = {
+            'enabled': True,
+            'mode': 'guarded_execute',
+            'guarded_execute': {
+                'execution_profile_hints_enabled': True,
+                'enforce_conservative_only': True,
+            },
+            'regimes': {
+                'high_vol': {
+                    'execution_overrides': {
+                        'min_add_interval_seconds': 999,
+                        'profit_only_add': True,
+                    }
+                }
+            }
+        }
+        regime_snapshot = build_regime_snapshot('high_vol', 0.9, {'volatility': 0.05}, '高波动')
+        snapshot = build_execution_effective_snapshot(
+            cfg, 'BTC/USDT', regime_snapshot=regime_snapshot, policy_snapshot=resolve_regime_policy(cfg, 'BTC/USDT', regime_snapshot)
+        )
+        self.assertEqual(snapshot['effective_state'], 'hints_only')
+        self.assertIn('min_add_interval_seconds', snapshot['would_tighten_fields'])
+        json.dumps(snapshot, ensure_ascii=False)
 
     def test_summarize_risk_hint_changes_is_serializable(self):
         summary = summarize_risk_hint_changes(

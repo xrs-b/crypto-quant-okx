@@ -215,6 +215,9 @@ def build_neutral_policy_snapshot(
     matched_symbol: Optional[str] = None,
     matched_symbol_override: bool = False,
     notes: Optional[list] = None,
+    decision_overrides: Optional[Dict[str, Any]] = None,
+    effective_overrides: Optional[Dict[str, Any]] = None,
+    is_effective: bool = False,
 ) -> Dict[str, Any]:
     normalized_regime = normalize_regime_snapshot(regime_snapshot)
     base = {
@@ -230,12 +233,12 @@ def build_neutral_policy_snapshot(
         'matched_symbol': matched_symbol,
         'matched_symbol_override': bool(matched_symbol_override),
         'signal_weight_overrides': {},
-        'decision_overrides': {},
+        'decision_overrides': dict(decision_overrides or {}),
         'validation_overrides': {},
         'risk_overrides': {},
         'execution_overrides': {},
-        'effective_overrides': {},
-        'is_effective': False,
+        'effective_overrides': dict(effective_overrides or {}),
+        'is_effective': bool(is_effective),
         'notes': list(notes or ['m1-observe-only']),
     }
     return enrich_policy_snapshot(base)
@@ -302,8 +305,30 @@ def build_observe_only_payload(config_helper: Any, symbol: Optional[str], signal
 
 
 class RegimePolicyResolver:
+    DECISION_EFFECTIVE_MODES = {'decision_only', 'guarded_execute', 'full'}
+
     def __init__(self, config_helper: Any):
         self.config = config_helper
+
+    def _deep_merge(self, base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+        result = dict(base or {})
+        for key, value in (override or {}).items():
+            if isinstance(value, dict) and isinstance(result.get(key), dict):
+                result[key] = self._deep_merge(result[key], value)
+            else:
+                result[key] = value
+        return result
+
+    def _build_decision_policy(self, adaptive_cfg: Dict[str, Any], regime_snapshot: Dict[str, Any]) -> Dict[str, Any]:
+        defaults = adaptive_cfg.get('defaults', {}) or {}
+        regimes = adaptive_cfg.get('regimes', {}) or {}
+        regime_name = (regime_snapshot or {}).get('name') or (regime_snapshot or {}).get('regime') or 'unknown'
+        regime_cfg = regimes.get(regime_name, {}) or {}
+        decision_overrides = self._deep_merge(defaults.get('decision_overrides', {}) or {}, regime_cfg.get('decision_overrides', {}) or {})
+        return {
+            'regime_name': regime_name,
+            'decision_overrides': decision_overrides,
+        }
 
     def resolve(self, symbol: Optional[str], regime_snapshot: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         adaptive_cfg = self.config.get_adaptive_regime_config(symbol)
@@ -312,15 +337,24 @@ class RegimePolicyResolver:
         defaults = adaptive_cfg.get('defaults', {}) or {}
         matched_override = bool(symbol and (self.config.get_symbol_overrides(symbol) or {}).get('adaptive_regime'))
         policy_source = 'symbol_override' if matched_override else 'adaptive_regime.defaults'
+        normalized_regime = normalize_regime_snapshot(regime_snapshot)
+        decision_policy = self._build_decision_policy(adaptive_cfg, normalized_regime)
+        is_effective = bool(enabled and mode in self.DECISION_EFFECTIVE_MODES and decision_policy['decision_overrides'])
+        notes = ['m1-observe-only' if not is_effective else 'm2-decision-aware', 'neutral-policy' if not is_effective else 'decision-policy']
+        if decision_policy['decision_overrides']:
+            notes.append(f"decision_overrides:{decision_policy['regime_name']}")
         return build_neutral_policy_snapshot(
-            regime_snapshot,
+            normalized_regime,
             mode=mode,
             enabled=enabled,
             policy_version=defaults.get('policy_version', ADAPTIVE_POLICY_VERSION),
             policy_source=policy_source,
             matched_symbol=symbol,
             matched_symbol_override=matched_override,
-            notes=['m1-observe-only', 'neutral-policy'],
+            notes=notes,
+            decision_overrides=decision_policy['decision_overrides'],
+            effective_overrides={'decision': decision_policy['decision_overrides']} if is_effective else {},
+            is_effective=is_effective,
         )
 
 

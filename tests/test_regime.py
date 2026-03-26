@@ -203,6 +203,40 @@ class TestAdaptiveRegimeConfigAndPolicy(unittest.TestCase):
         self.assertIn('policy_mode:observe_only', policy['tags'])
         self.assertIn('m1-observe-only', policy['notes'])
 
+    def test_resolve_regime_policy_exposes_decision_only_overrides_without_touching_execution(self):
+        cfg = Config()
+        cfg._config['adaptive_regime'] = {
+            'enabled': True,
+            'mode': 'decision_only',
+            'defaults': {
+                'policy_version': 'adaptive_policy_v1_m2',
+                'decision_overrides': {
+                    'allow_score_min': 79,
+                    'downgrade_allow_to_watch': True,
+                },
+            },
+            'regimes': {
+                'trend': {
+                    'decision_overrides': {
+                        'allow_score_min': 82,
+                    }
+                }
+            }
+        }
+        regime_snapshot = build_regime_snapshot(
+            regime='trend',
+            confidence=0.81,
+            indicators={'ema_gap': 0.03, 'ema_direction': 1, 'volatility': 0.015},
+            details='趋势上涨',
+        )
+        policy = resolve_regime_policy(cfg, 'BTC/USDT', regime_snapshot)
+        self.assertEqual(policy['mode'], 'decision_only')
+        self.assertTrue(policy['is_effective'])
+        self.assertEqual(policy['decision_overrides']['allow_score_min'], 82)
+        self.assertTrue(policy['decision_overrides']['downgrade_allow_to_watch'])
+        self.assertEqual(policy['effective_overrides']['decision']['allow_score_min'], 82)
+        self.assertEqual(policy['execution_overrides'], {})
+
 
 if __name__ == '__main__':
     unittest.main()

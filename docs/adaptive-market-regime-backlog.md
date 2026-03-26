@@ -285,6 +285,11 @@
 - **风险 / 回滚点**：
   - 风险：审批层过度收紧导致交易数断崖式下降
   - 回滚：切回 `observe_only`，保留数据继续对比
+- **进展（2026-03-26 / M2 Step 1）**：
+  - 已在 `signals/entry_decider.py` 接入 decision-aware adaptive override，当前仅消费 `decision_overrides`
+  - 仅在 `adaptive_regime.mode in {decision_only, guarded_execute, full}` 且 `enabled=true` 时生效；`observe_only` 继续只观察不改决策
+  - 当前实现只允许更保守方向生效：提高 `allow_score_min`、降低 `block_score_max` / `max_conflict_ratio_allow`，以及可选 `downgrade_allow_to_watch` / `downgrade_watch_to_block`
+  - decision 输出已补充 `adaptive_effective_thresholds / adaptive_effective_overrides / adaptive_applied_overrides`，方便灰度观察与回滚
 
 ### AR-M2-02｜transition risk / stability gate 接入审批层
 

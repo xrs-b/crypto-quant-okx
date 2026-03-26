@@ -483,6 +483,24 @@ class TestSignalValidator(unittest.TestCase):
 
 
 class TestEntryDecider(unittest.TestCase):
+    def _make_signal(self, **overrides):
+        base = dict(
+            symbol='BTC/USDT',
+            signal_type='buy',
+            price=50000,
+            strength=72,
+            strategies_triggered=['MACD', 'Volume'],
+            reasons=[
+                {'strategy': 'MACD', 'action': 'buy', 'strength': 30, 'confidence': 0.8},
+                {'strategy': 'Volume', 'action': 'buy', 'strength': 20, 'confidence': 0.7},
+            ],
+            direction_score={'buy': 38.0, 'sell': 0.0, 'net': 38.0},
+            market_context={'trend': 'bullish', 'volatility': 0.012, 'atr_ratio': 0.012, 'volatility_too_low': False, 'volatility_too_high': False},
+            regime_info={'regime': 'trend', 'confidence': 0.7},
+        )
+        base.update(overrides)
+        return Signal(**base)
+
     def test_sideways_mean_reversion_buy_gets_watch(self):
         decider = EntryDecider({})
         signal = Signal(
@@ -568,20 +586,7 @@ class TestEntryDecider(unittest.TestCase):
 
     def test_entry_decider_returns_observe_only_snapshots_without_affecting_decision_shape(self):
         decider = EntryDecider({})
-        signal = Signal(
-            symbol='BTC/USDT',
-            signal_type='buy',
-            price=50000,
-            strength=72,
-            strategies_triggered=['MACD', 'Volume'],
-            reasons=[
-                {'strategy': 'MACD', 'action': 'buy', 'strength': 30, 'confidence': 0.8},
-                {'strategy': 'Volume', 'action': 'buy', 'strength': 20, 'confidence': 0.7},
-            ],
-            direction_score={'buy': 38.0, 'sell': 0.0, 'net': 38.0},
-            market_context={'trend': 'bullish', 'volatility': 0.012, 'atr_ratio': 0.012, 'volatility_too_low': False, 'volatility_too_high': False},
-            regime_info={'regime': 'trend', 'confidence': 0.7}
-        )
+        signal = self._make_signal()
         result = decider.decide(signal)
         payload = result.to_dict()
         self.assertTrue(payload['observe_only'])
@@ -591,6 +596,96 @@ class TestEntryDecider(unittest.TestCase):
         self.assertEqual(payload['breakdown']['observe_only_phase'], 'observe_only')
         self.assertTrue(payload['breakdown']['observe_only_summary'])
         self.assertIn('observe_only', payload['breakdown']['observe_only_tags'])
+
+    def test_entry_decider_observe_only_mode_does_not_apply_adaptive_overrides(self):
+        baseline = EntryDecider({}).decide(self._make_signal())
+        decider = EntryDecider({
+            'adaptive_regime': {
+                'enabled': True,
+                'mode': 'observe_only',
+                'defaults': {
+                    'decision_overrides': {
+                        'allow_score_min': 90,
+                        'downgrade_allow_to_watch': True,
+                    }
+                }
+            }
+        })
+        result = decider.decide(self._make_signal())
+        self.assertTrue(result.observe_only)
+        self.assertEqual(result.decision, baseline.decision)
+        self.assertEqual(result.score, baseline.score)
+        self.assertEqual(result.breakdown.adaptive_applied_overrides, [])
+        self.assertFalse(result.breakdown.adaptive_policy_is_effective)
+
+    def test_entry_decider_decision_only_mode_applies_conservative_override(self):
+        decider = EntryDecider({
+            'adaptive_regime': {
+                'enabled': True,
+                'mode': 'decision_only',
+                'defaults': {
+                    'decision_overrides': {
+                        'allow_score_min': 80,
+                        'downgrade_allow_to_watch': True,
+                    }
+                },
+                'regimes': {
+                    'trend': {
+                        'decision_overrides': {
+                            'allow_score_min': 82,
+                        }
+                    }
+                }
+            }
+        })
+        result = decider.decide(self._make_signal())
+        self.assertFalse(result.observe_only)
+        self.assertEqual(result.decision, 'watch')
+        self.assertTrue(result.breakdown.adaptive_policy_is_effective)
+        self.assertIn('allow_score_min', result.breakdown.adaptive_applied_overrides)
+        self.assertIn('downgrade_allow_to_watch', result.breakdown.adaptive_applied_overrides)
+        self.assertEqual(result.breakdown.adaptive_effective_thresholds['allow_score_min'], 82)
+        self.assertEqual(result.adaptive_policy_snapshot['mode'], 'decision_only')
+        self.assertIn('decision', result.adaptive_policy_snapshot['effective_overrides'])
+
+    def test_entry_decider_conservative_override_never_loosens_baseline(self):
+        decider = EntryDecider({
+            'adaptive_regime': {
+                'enabled': True,
+                'mode': 'decision_only',
+                'defaults': {
+                    'decision_overrides': {
+                        'allow_score_min': 60,
+                        'block_score_max': 40,
+                        'max_conflict_ratio_allow': 0.5,
+                    }
+                }
+            }
+        })
+        result = decider.decide(self._make_signal())
+        self.assertEqual(result.breakdown.adaptive_effective_thresholds['allow_score_min'], 68)
+        self.assertEqual(result.breakdown.adaptive_effective_thresholds['block_score_max'], 35)
+        self.assertEqual(result.breakdown.adaptive_effective_thresholds['max_conflict_ratio_allow'], 0.35)
+        self.assertTrue(any('loosen baseline' in note for note in result.breakdown.adaptive_decision_notes))
+
+    def test_entry_decider_output_contains_effective_override_info(self):
+        decider = EntryDecider({
+            'adaptive_regime': {
+                'enabled': True,
+                'mode': 'decision_only',
+                'defaults': {
+                    'decision_overrides': {
+                        'allow_score_min': 81,
+                    }
+                }
+            }
+        })
+        payload = decider.decide(self._make_signal()).to_dict()
+        self.assertIn('adaptive_effective_overrides', payload['breakdown'])
+        self.assertIn('adaptive_applied_overrides', payload['breakdown'])
+        self.assertIn('adaptive_effective_thresholds', payload['breakdown'])
+        self.assertEqual(payload['breakdown']['adaptive_effective_overrides']['decision']['allow_score_min'], 81)
+        self.assertIn('allow_score_min', payload['breakdown']['adaptive_applied_overrides'])
     
 
 

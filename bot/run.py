@@ -23,6 +23,7 @@ from core.exchange import Exchange
 from core.logger import logger
 from core.notifier import NotificationManager
 from core.presets import PresetManager
+from core.paths import DATA_DIR
 from signals import SignalDetector, SignalValidator, SignalRecorder, EntryDecider
 from trading import TradingExecutor, RiskManager
 from ml.engine import MLEngine, ModelTrainer, DataCollector
@@ -59,7 +60,7 @@ def run_notification_relay(interval: int = 30, once: bool = False, limit: int = 
             break
         time.sleep(interval)
 
-RUNTIME_STATE_PATH = Path('/Volumes/MacHD/Projects/crypto-quant-okx/data/runtime_state.json')
+RUNTIME_STATE_PATH = DATA_DIR / 'runtime_state.json'
 
 
 def load_runtime_state() -> dict:

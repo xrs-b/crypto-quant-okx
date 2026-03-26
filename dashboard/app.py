@@ -11,7 +11,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core import config, db
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'okx-trading-dashboard-secret-key'
+_default_secret = 'dev-only-change-me'
+app.config['SECRET_KEY'] = os.getenv('DASHBOARD_SECRET_KEY', _default_secret)
+if app.config['SECRET_KEY'] == _default_secret:
+    app.logger.warning(
+        'DASHBOARD_SECRET_KEY 未设置，当前使用仅适合本地开发的默认 SECRET_KEY；公开部署前请在环境变量或 .env 中设置强随机值。'
+    )
 
 
 # ============================================================================

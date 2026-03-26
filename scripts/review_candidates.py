@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """候选观察任务：可供 cron / 手动运行"""
+import os
 import sys
 from pathlib import Path
 
-PROJECT_DIR = Path('/Volumes/MacHD/Projects/crypto-quant-okx')
+PROJECT_DIR = Path(os.getenv('PROJECT_DIR', Path(__file__).resolve().parent.parent)).resolve()
 sys.path.insert(0, str(PROJECT_DIR))
 
 from core.config import Config

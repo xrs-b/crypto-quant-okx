@@ -686,7 +686,132 @@ class TestEntryDecider(unittest.TestCase):
         self.assertIn('adaptive_effective_thresholds', payload['breakdown'])
         self.assertEqual(payload['breakdown']['adaptive_effective_overrides']['decision']['allow_score_min'], 81)
         self.assertIn('allow_score_min', payload['breakdown']['adaptive_applied_overrides'])
-    
+
+    def test_entry_decider_step2_supports_finer_grained_allow_guards(self):
+        decider = EntryDecider({
+            'adaptive_regime': {
+                'enabled': True,
+                'mode': 'guarded_execute',
+                'defaults': {
+                    'decision_overrides': {
+                        'min_signal_strength_for_allow': 90,
+                        'decision_notes': ['regime prefers stronger confirmation'],
+                        'decision_tags': ['adaptive:needs-stronger-signal'],
+                    }
+                }
+            }
+        })
+        result = decider.decide(self._make_signal())
+        self.assertEqual(result.decision, 'watch')
+        self.assertIn('min_signal_strength_for_allow', result.breakdown.adaptive_applied_overrides)
+        self.assertIn('decision_notes', result.breakdown.adaptive_applied_overrides)
+        self.assertIn('decision_tags', result.breakdown.adaptive_applied_overrides)
+        self.assertIn('regime prefers stronger confirmation', result.breakdown.adaptive_decision_notes)
+        self.assertIn('adaptive:needs-stronger-signal', result.breakdown.adaptive_decision_tags)
+        self.assertTrue(any('adaptive 保守阈值' in reason for reason in result.watch_reasons))
+
+    def test_entry_decider_step2_conditional_override_can_force_block_with_reason_tag_and_note(self):
+        decider = EntryDecider({
+            'adaptive_regime': {
+                'enabled': True,
+                'mode': 'full',
+                'defaults': {
+                    'decision_overrides': {
+                        'conditional_overrides': [
+                            {
+                                'metric': 'signal_conflict_score',
+                                'operator': '>=',
+                                'value': 20,
+                                'action': 'block',
+                                'reason': 'adaptive 冲突阈值命中，继续收紧',
+                                'tag': 'adaptive:conflict-tighten',
+                                'note': 'conflict block fired in step2',
+                            }
+                        ]
+                    }
+                }
+            }
+        })
+        signal = self._make_signal(
+            strategies_triggered=['MACD', 'Volume', 'ML'],
+            reasons=[
+                {'strategy': 'MACD', 'action': 'buy', 'strength': 30, 'confidence': 0.8},
+                {'strategy': 'Volume', 'action': 'sell', 'strength': 18, 'confidence': 0.7},
+                {'strategy': 'ML', 'action': 'buy', 'strength': 16, 'confidence': 0.7},
+            ],
+            direction_score={'buy': 38.0, 'sell': 10.0, 'net': 28.0},
+            market_context={'trend': 'bullish', 'volatility': 0.012, 'atr_ratio': 0.012, 'volatility_too_low': False, 'volatility_too_high': False},
+        )
+        result = decider.decide(signal)
+        self.assertEqual(result.decision, 'block')
+        self.assertTrue(any('adaptive 冲突阈值命中' in reason for reason in result.watch_reasons))
+        self.assertTrue(any(rule['action'] == 'block' for rule in result.breakdown.adaptive_triggered_rules))
+        self.assertIn('adaptive:conflict-tighten', result.breakdown.adaptive_decision_tags)
+        self.assertIn('conflict block fired in step2', result.breakdown.adaptive_decision_notes)
+
+    def test_entry_decider_step2_records_ignored_override_reasons(self):
+        decider = EntryDecider({
+            'adaptive_regime': {
+                'enabled': True,
+                'mode': 'decision_only',
+                'defaults': {
+                    'decision_overrides': {
+                        'allow_score_min': 60,
+                        'decision_tags': 'not-a-list',
+                        'conditional_overrides': [
+                            {
+                                'metric': 'unknown_metric',
+                                'operator': '>=',
+                                'value': 1,
+                                'action': 'block',
+                            },
+                            {
+                                'metric': 'signal_strength_score',
+                                'operator': 'approx',
+                                'value': 70,
+                                'action': 'watch',
+                            },
+                        ]
+                    }
+                }
+            }
+        })
+        result = decider.decide(self._make_signal())
+        ignored = result.breakdown.adaptive_ignored_overrides
+        self.assertTrue(any(item['key'] == 'allow_score_min' and 'loosen baseline' in item['reason'] for item in ignored))
+        self.assertTrue(any(item['key'] == 'decision_tags' and 'not a list' in item['reason'] for item in ignored))
+        self.assertTrue(any(item['key'] == 'conditional_overrides[0]' and 'metric not supported' in item['reason'] for item in ignored))
+        self.assertTrue(any(item['key'] == 'conditional_overrides[1]' and 'operator not supported' in item['reason'] for item in ignored))
+
+    def test_entry_decider_step2_output_contains_ignored_and_triggered_fields(self):
+        decider = EntryDecider({
+            'adaptive_regime': {
+                'enabled': True,
+                'mode': 'decision_only',
+                'defaults': {
+                    'decision_overrides': {
+                        'conditional_overrides': [
+                            {
+                                'metric': 'signal_strength_score',
+                                'operator': '<=',
+                                'value': 80,
+                                'action': 'watch',
+                                'reason': 'adaptive 条件式观望命中',
+                            }
+                        ],
+                        'decision_notes': ['payload fields should be visible'],
+                        'decision_tags': ['adaptive:payload-check'],
+                    }
+                }
+            }
+        })
+        payload = decider.decide(self._make_signal()).to_dict()
+        self.assertIn('adaptive_ignored_overrides', payload['breakdown'])
+        self.assertIn('adaptive_triggered_rules', payload['breakdown'])
+        self.assertIn('adaptive_decision_notes', payload['breakdown'])
+        self.assertIn('adaptive_decision_tags', payload['breakdown'])
+        self.assertTrue(any(rule['reason'] == 'adaptive 条件式观望命中' for rule in payload['breakdown']['adaptive_triggered_rules']))
+        self.assertIn('adaptive:payload-check', payload['breakdown']['adaptive_decision_tags'])
 
 
 class TestSignalValidatorRegimeFilter(unittest.TestCase):

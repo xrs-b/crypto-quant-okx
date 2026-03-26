@@ -290,6 +290,12 @@
   - 仅在 `adaptive_regime.mode in {decision_only, guarded_execute, full}` 且 `enabled=true` 时生效；`observe_only` 继续只观察不改决策
   - 当前实现只允许更保守方向生效：提高 `allow_score_min`、降低 `block_score_max` / `max_conflict_ratio_allow`，以及可选 `downgrade_allow_to_watch` / `downgrade_watch_to_block`
   - decision 输出已补充 `adaptive_effective_thresholds / adaptive_effective_overrides / adaptive_applied_overrides`，方便灰度观察与回滚
+- **进展（2026-03-26 / M2 Step 2）**：
+  - 在不触碰 validator / risk / execution 生效逻辑前提下，继续扩展 `signals/entry_decider.py` 的 decision-aware 能力
+  - 新增更细粒度的保守审批门槛：可按维度收紧 `signal_strength / regime_alignment / volatility_fitness / trend_alignment / execution_risk / ml_confidence / signal_conflict_score` 的 allow 边界
+  - 新增条件式 `conditional_overrides`：支持在命中指定评分/冲突条件时直接触发 `watch` / `block`，并附带结构化 `reason / tag / note`
+  - observability 从“仅 applied keys”升级为 `adaptive_effective_* + adaptive_applied_overrides + adaptive_ignored_overrides + adaptive_triggered_rules + adaptive_decision_notes + adaptive_decision_tags`，方便灰度期明确看到 effective / applied / ignored 及原因
+  - 继续保持“只收紧不放宽”原则：所有数值 override 仍经 conservative merge，任何会放宽 baseline 的输入都会被忽略并写入 ignored reason
 
 ### AR-M2-02｜transition risk / stability gate 接入审批层
 

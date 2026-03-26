@@ -1130,8 +1130,14 @@ adaptive_regime:
 
 ## 22. 相关文档
 
+- `docs/adaptive-market-regime-backlog.md`
 - `docs/layering-config-notes.md`
 - `docs/layering-acceptance-checklist.md`
 - `README.md`
 
-> 这份方案是后续 adaptive regime 开发的主追踪文档。后续建议所有设计变更、阶段完成记录、风险备注，都持续追加到本文或配套 issue/checklist，而唔好散落喺聊天记录度。
+> 建议分工：
+>
+> - 本文继续作为 **主计划 / 架构说明**
+> - `docs/adaptive-market-regime-backlog.md` 作为 **可执行 backlog / 阶段追踪清单**
+>
+> 后续设计变更、阶段完成记录、风险备注，优先写进这两份文档或配套 issue/checklist，而唔好散落喺聊天记录度。

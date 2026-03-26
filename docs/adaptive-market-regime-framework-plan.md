@@ -1131,6 +1131,7 @@ adaptive_regime:
 ## 22. 相关文档
 
 - `docs/adaptive-market-regime-backlog.md`
+- `docs/adaptive-market-regime-m0-implementation.md`
 - `docs/layering-config-notes.md`
 - `docs/layering-acceptance-checklist.md`
 - `README.md`

@@ -78,6 +78,8 @@
 
 ## 3. M0：基础定义与观测位（只观察不生效）
 
+> M0 直接开工清单：[`docs/adaptive-market-regime-m0-implementation.md`](./adaptive-market-regime-m0-implementation.md)
+
 ### AR-M0-01｜统一 regime taxonomy 与 snapshot schema
 
 - **阶段 / 优先级**：M0 / P0

@@ -8,6 +8,8 @@
 >
 > 前置步骤：[`docs/adaptive-market-regime-m4-step1-implementation.md`](./adaptive-market-regime-m4-step1-implementation.md)、[`docs/adaptive-market-regime-m4-step2-implementation.md`](./adaptive-market-regime-m4-step2-implementation.md)、[`docs/adaptive-market-regime-m4-step3-implementation.md`](./adaptive-market-regime-m4-step3-implementation.md)
 >
+> 第二批可直接开工拆分：[`docs/adaptive-market-regime-m4-step4-batch2-implementation.md`](./adaptive-market-regime-m4-step4-batch2-implementation.md)
+>
 > 相关执行链文档：[`docs/layering-config-notes.md`](./layering-config-notes.md)、[`docs/layering-acceptance-checklist.md`](./layering-acceptance-checklist.md)
 
 ---

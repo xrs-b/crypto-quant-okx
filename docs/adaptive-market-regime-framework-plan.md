@@ -908,6 +908,7 @@ symbol_override.adaptive_regime
 - `layer_count` 只作为 `layer_ratios` 长度派生结果进入审计，不做独立扩层 override
 - 仅在 `layering_plan_shape_enforcement_enabled=true` + rollout 命中 + conservative-only 校验通过时，才允许 `layer_ratios` 进入 live layer plan
 - 详细实施拆分见：[`docs/adaptive-market-regime-m4-step4-implementation.md`](./adaptive-market-regime-m4-step4-implementation.md)
+- 第二批可直接开工任务拆分见：[`docs/adaptive-market-regime-m4-step4-batch2-implementation.md`](./adaptive-market-regime-m4-step4-batch2-implementation.md)
 
 ### 后续步骤（guarded layering deeper rollout / exit hints）
 

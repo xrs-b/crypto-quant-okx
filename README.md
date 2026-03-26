@@ -29,10 +29,13 @@
 - [`docs/adaptive-market-regime-m4-step2-implementation.md`](docs/adaptive-market-regime-m4-step2-implementation.md)
 - [`docs/adaptive-market-regime-m4-step3-implementation.md`](docs/adaptive-market-regime-m4-step3-implementation.md)
 - [`docs/adaptive-market-regime-m4-step4-implementation.md`](docs/adaptive-market-regime-m4-step4-implementation.md)
+- [`docs/adaptive-market-regime-m4-step4-batch2-implementation.md`](docs/adaptive-market-regime-m4-step4-batch2-implementation.md)
 
 M4 Step 3 status: guarded layering profile 第一批已落地，当前 live 只放行 conservative guardrail-like layering 字段；`layer_ratios` 继续 hints-only，除非显式开启 `layering_plan_shape_enforcement_enabled`。
 
 M4 Step 4 planning status: 已新增 plan-shape / `layer_ratios` guarded live 实施拆分；原则是先补齐 baseline/effective/live shape audit，再通过独立开关小范围放开 `layer_ratios`，并保持 `layer_count` 仅作为 derived 审计字段。
+
+M4 Step 4 batch2 status: 已补第二批可直接开工实施稿，明确区分 hints / guardrails live / plan shape live，并把 `layer_ratios`、`layer_count` 与 `layer_max_total_ratio`、`max_layers_per_signal`、`min_add_interval_seconds`、`profit_only_add` 的约束关系、灰度、失败信号和回滚粒度写清楚。
 - [`docs/adaptive-market-regime-m3-step1-implementation.md`](docs/adaptive-market-regime-m3-step1-implementation.md)
 - [`docs/adaptive-market-regime-m0-implementation.md`](docs/adaptive-market-regime-m0-implementation.md)
 - [`PUBLIC-REPO-MANIFEST.md`](PUBLIC-REPO-MANIFEST.md)

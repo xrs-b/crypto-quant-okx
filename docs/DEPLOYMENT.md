@@ -196,6 +196,9 @@ PROJECT_DIR="$PWD" scripts/start.public.sh dashboard
 - 不要写死作者机器路径
 - 用 `PROJECT_DIR=/你的路径`
 - 优先用项目虚拟环境 `.venv/bin/python3`
+- 把仓库里的 `*.service` / `*.plist` / `*.cron.example` 当作模板，而不是可直接照搬的作者本机配置
+
+更多公开版保留/排除规则见：`PUBLIC-REPO-MANIFEST.md`
 
 ### Dashboard 保活
 

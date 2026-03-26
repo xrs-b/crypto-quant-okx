@@ -8,6 +8,7 @@ __pycache__/
 config/config.yaml
 config/config.local.yaml
 bot.pid
+dashboard.pid
 data/trading.db
 ml/data/
 ml/models/

@@ -17,7 +17,7 @@ database:
     trades_days: 365
   type: sqlite
 exchange:
-  default_leverage: 10
+  default_leverage: 3
   mode: testnet
   name: okx
   position_mode: hedge
@@ -80,7 +80,7 @@ notification:
     username: your_email@gmail.com
   telegram:
     bot_token: '
-    chat_id: ''
+    chat_id: your_chat_id
     enabled: false
 runtime:
   interval_seconds: 300
@@ -102,8 +102,8 @@ strategies:
     strength_weight: 15
   composite:
     enabled: true
-    min_strategy_count: 1
-    min_strength: 24
+    min_strategy_count: 2
+    min_strength: 28
   divergence:
     enabled: true
     lookback: 20
@@ -118,7 +118,7 @@ strategies:
     fast_period: 12
     signal_period: 9
     slow_period: 26
-    strength_weight: 24
+    strength_weight: 20
   pattern:
     enabled: true
     strength_weight: 20
@@ -130,7 +130,7 @@ strategies:
     strength_weight: 40
   volume:
     enabled: true
-    strength_weight: 32
+    strength_weight: 25
     volume_ma_period: 20
     volume_multiplier: 1.5
 symbols:
@@ -148,14 +148,47 @@ symbols:
   - BTC/USDT
 trading:
   cooldown_minutes: 15
-  leverage: 10
+  leverage: 3
   max_consecutive_losses: 3
   max_daily_drawdown: 0.03
   max_exposure: 0.3
   max_position_per_symbol: 0.15
+  total_margin_cap_ratio: 0.3
+  total_margin_soft_cap_ratio: 0.25
+  symbol_margin_cap_ratio: 0.12
+  base_entry_margin_ratio: 0.08
+  min_entry_margin_ratio: 0.04
+  max_entry_margin_ratio: 0.1
+  add_position_enabled: false
+  quality_scaling_enabled: false
+  high_quality_multiplier: 1.15
+  low_quality_multiplier: 0.75
   max_trades_per_day: 10
   min_trade_interval: 300
   position_size: 0.1
-  stop_loss: 0.018
-  take_profit: 0.035
-  trailing_stop: 0.01
+  stop_loss: 0.02
+  take_profit: 0.04
+  trailing_stop: 0.015
+  trailing_activation: 0.01
+  partial_tp_enabled: false
+  partial_tp_threshold: 0.015
+  partial_tp_ratio: 0.5
+  layering:
+    layer_count: 3
+    layer_ratios:
+    - 0.06
+    - 0.06
+    - 0.04
+    layer_max_total_ratio: 0.16
+    min_add_interval_seconds: 300
+    profit_only_add: false
+    disallow_skip_layers: true
+    direction_lock_enabled: true
+    direction_lock_scope: symbol
+    direction_lock_release_on_flat: true
+    signal_idempotency_enabled: true
+    signal_idempotency_ttl_seconds: 600
+    max_layers_per_signal: 1
+    allow_same_bar_multiple_adds: false
+    require_position_exists: true
+    strict_ratio_sum_check: false

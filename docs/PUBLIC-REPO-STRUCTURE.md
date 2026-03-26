@@ -33,9 +33,7 @@ crypto-quant-okx/
 │   ├── config.local.yaml.example
 │   └── presets/
 │       ├── btc-focused.yaml
-│       ├── btc-grid-candidate.yaml
-│       ├── safe-mode.yaml
-│       └── xrp-candidate.yaml
+│       └── safe-mode.yaml
 │
 ├── docs/
 │   ├── DEPLOYMENT.md
@@ -88,7 +86,7 @@ crypto-quant-okx/
 
 - `config.yaml.example`：完整、可运行、无秘密
 - `config.local.yaml.example`：私密字段模板
-- `presets/`：仅保留确认无私密信息、确实对外有价值的预设
+- `presets/`：仅保留确认无私密信息、确实对外有价值、而且不容易误导朋友直接实盘的预设
 
 不建议公开：
 

@@ -37,7 +37,8 @@
 建议重点检查：
 
 - `config/config.local.yaml`
-- `config/presets/*.yaml`
+- `config/presets/btc-focused.yaml`
+- `config/presets/safe-mode.yaml`
 - `config/backups/`
 - `.env`
 - shell history / 临时导出文件 / 打包文件
@@ -107,7 +108,8 @@ find . -maxdepth 3 \( -name '*.pid' -o -name '*.db' -o -path './logs/*' -o -path
    - `docs/`
    - `scripts/` 中可模板化的脚本
    - `config/*.example`
-   - `config/presets/*.yaml`（确认无真实凭证）
+   - `config/presets/btc-focused.yaml`（确认无真实凭证）
+   - `config/presets/safe-mode.yaml`（确认无真实凭证）
    - `requirements*.txt` / `LICENSE` / `.gitignore` / `.env.example`
 3. 不要直接拷贝：
    - 本地数据库

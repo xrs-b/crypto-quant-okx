@@ -831,6 +831,8 @@ symbol_override.adaptive_regime
 
 ## M3：Guarded Validation & Risk（影响验证和风险，不推翻执行骨架）
 
+> M3 实施边界与回滚策略详见：[`docs/adaptive-market-regime-m3-boundary-plan.md`](./adaptive-market-regime-m3-boundary-plan.md)
+
 ### 目标
 
 让 regime 影响 validator 与 risk budget，但只允许朝更保守方向调整。

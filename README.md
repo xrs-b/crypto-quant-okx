@@ -23,6 +23,7 @@
 - [`docs/GITHUB-PUBLIC-REPO-COPY.md`](docs/GITHUB-PUBLIC-REPO-COPY.md)
 - [`docs/adaptive-market-regime-framework-plan.md`](docs/adaptive-market-regime-framework-plan.md)
 - [`docs/adaptive-market-regime-backlog.md`](docs/adaptive-market-regime-backlog.md)
+- [`docs/adaptive-market-regime-m3-boundary-plan.md`](docs/adaptive-market-regime-m3-boundary-plan.md)
 - [`docs/adaptive-market-regime-m0-implementation.md`](docs/adaptive-market-regime-m0-implementation.md)
 - [`PUBLIC-REPO-MANIFEST.md`](PUBLIC-REPO-MANIFEST.md)
 

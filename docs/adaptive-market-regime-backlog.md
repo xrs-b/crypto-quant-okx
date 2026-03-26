@@ -346,6 +346,8 @@
 
 ## 6. M3：Validation / Risk 保守生效（开始影响 validation / risk）
 
+> M3 边界、禁区、最小生效包、灰度/回滚策略详见：[`docs/adaptive-market-regime-m3-boundary-plan.md`](./adaptive-market-regime-m3-boundary-plan.md)
+
 ### AR-M3-01｜validator 支持 effective validation snapshot
 
 - **阶段 / 优先级**：M3 / P0

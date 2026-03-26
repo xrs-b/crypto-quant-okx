@@ -27,6 +27,21 @@ DEFAULT_LAYERING_CONFIG = {
     'allow_same_bar_multiple_adds': False,
 }
 
+DEFAULT_ADAPTIVE_REGIME_CONFIG = {
+    'enabled': False,
+    'mode': 'observe_only',
+    'detector': {
+        'version': 'regime_v1_m0',
+        'min_confidence': 0.5,
+        'min_stability_score': 0.0,
+        'cooloff_bars_after_switch': 0,
+    },
+    'defaults': {
+        'policy_version': 'adaptive_policy_v1_m0',
+    },
+    'regimes': {},
+}
+
 
 class Config:
     """配置管理类"""
@@ -62,6 +77,7 @@ class Config:
 
         self._config = self._resolve_env_placeholders(self._config)
         self._normalize_legacy_layering_config()
+        self._normalize_adaptive_regime_config()
         self._validate()
 
     def _get_local_override_paths(self) -> List[Path]:
@@ -123,8 +139,18 @@ class Config:
                 normalized['layer_count'] = len(normalized['layer_ratios'])
         trading['layering'] = normalized
 
+    def _normalize_adaptive_regime_config(self):
+        adaptive_regime = self._config.get('adaptive_regime') or {}
+        if adaptive_regime is None:
+            adaptive_regime = {}
+        if not isinstance(adaptive_regime, dict):
+            raise ValueError('adaptive_regime 必须是对象')
+        normalized = self._deep_merge(DEFAULT_ADAPTIVE_REGIME_CONFIG, adaptive_regime)
+        self._config['adaptive_regime'] = normalized
+
     def _validate(self):
         self._validate_layering_config()
+        self._validate_adaptive_regime_config()
 
     def _validate_layering_config(self):
         trading = self.get('trading', {}) or {}
@@ -188,6 +214,62 @@ class Config:
             layering[key] = bool(layering.get(key, DEFAULT_LAYERING_CONFIG[key]))
         return layering
 
+    def _validate_adaptive_regime_config(self):
+        adaptive_regime = self.get('adaptive_regime', {}) or {}
+        if not isinstance(adaptive_regime, dict):
+            raise ValueError('adaptive_regime 必须是对象')
+
+        mode = str(adaptive_regime.get('mode', DEFAULT_ADAPTIVE_REGIME_CONFIG['mode']) or '').strip()
+        if mode not in {'disabled', 'observe_only', 'decision_only', 'guarded_execute', 'full'}:
+            raise ValueError('adaptive_regime.mode 仅支持 disabled / observe_only / decision_only / guarded_execute / full')
+
+        detector = adaptive_regime.get('detector') or {}
+        if not isinstance(detector, dict):
+            raise ValueError('adaptive_regime.detector 必须是对象')
+        defaults = adaptive_regime.get('defaults') or {}
+        if not isinstance(defaults, dict):
+            raise ValueError('adaptive_regime.defaults 必须是对象')
+        regimes = adaptive_regime.get('regimes') or {}
+        if not isinstance(regimes, dict):
+            raise ValueError('adaptive_regime.regimes 必须是对象')
+
+        detector['version'] = str(detector.get('version') or DEFAULT_ADAPTIVE_REGIME_CONFIG['detector']['version'])
+        detector['min_confidence'] = float(detector.get('min_confidence', DEFAULT_ADAPTIVE_REGIME_CONFIG['detector']['min_confidence']) or 0)
+        detector['min_stability_score'] = float(detector.get('min_stability_score', DEFAULT_ADAPTIVE_REGIME_CONFIG['detector']['min_stability_score']) or 0)
+        detector['cooloff_bars_after_switch'] = int(detector.get('cooloff_bars_after_switch', DEFAULT_ADAPTIVE_REGIME_CONFIG['detector']['cooloff_bars_after_switch']) or 0)
+        if not 0 <= detector['min_confidence'] <= 1:
+            raise ValueError('adaptive_regime.detector.min_confidence 必须在 0~1 之间')
+        if not 0 <= detector['min_stability_score'] <= 1:
+            raise ValueError('adaptive_regime.detector.min_stability_score 必须在 0~1 之间')
+        if detector['cooloff_bars_after_switch'] < 0:
+            raise ValueError('adaptive_regime.detector.cooloff_bars_after_switch 不能 < 0')
+
+        defaults['policy_version'] = str(defaults.get('policy_version') or DEFAULT_ADAPTIVE_REGIME_CONFIG['defaults']['policy_version'])
+        adaptive_regime['enabled'] = bool(adaptive_regime.get('enabled', DEFAULT_ADAPTIVE_REGIME_CONFIG['enabled']))
+        adaptive_regime['mode'] = mode
+        adaptive_regime['detector'] = detector
+        adaptive_regime['defaults'] = defaults
+        adaptive_regime['regimes'] = regimes
+
+    def get_adaptive_regime_config(self, symbol: str = None) -> Dict[str, Any]:
+        if symbol:
+            adaptive_regime = self.get_symbol_value(symbol, 'adaptive_regime', None)
+            if isinstance(adaptive_regime, dict):
+                merged = self._deep_merge(DEFAULT_ADAPTIVE_REGIME_CONFIG, adaptive_regime)
+            else:
+                merged = self.get('adaptive_regime', {}) or {}
+        else:
+            merged = self.get('adaptive_regime', {}) or {}
+        merged = self._deep_merge(DEFAULT_ADAPTIVE_REGIME_CONFIG, merged)
+        return merged
+
+    def get_adaptive_regime_mode(self, symbol: str = None) -> str:
+        return str(self.get_adaptive_regime_config(symbol).get('mode', DEFAULT_ADAPTIVE_REGIME_CONFIG['mode']))
+
+    def is_adaptive_regime_enabled(self, symbol: str = None) -> bool:
+        adaptive_regime = self.get_adaptive_regime_config(symbol)
+        return bool(adaptive_regime.get('enabled', False)) and adaptive_regime.get('mode') != 'disabled'
+
     def _deep_merge(self, base: Dict, override: Dict) -> Dict:
         """深度合并配置"""
         result = dict(base)
@@ -237,7 +319,8 @@ class Config:
                 'macd': {'enabled': True, 'fast_period': 12, 'slow_period': 26, 'signal_period': 9},
                 'ma_cross': {'enabled': True, 'fast_period': 5, 'slow_period': 20},
                 'bollinger': {'enabled': True, 'period': 20, 'std_multiplier': 2}
-            }
+            },
+            'adaptive_regime': self._deep_merge({}, DEFAULT_ADAPTIVE_REGIME_CONFIG),
         }
     
     def _get_nested_value(self, data: Dict, key: str, default: Any = None) -> Any:

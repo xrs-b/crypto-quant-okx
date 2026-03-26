@@ -1,62 +1,60 @@
-"""
-Regime Layer v1 测试
-"""
-import pandas as pd
-import numpy as np
-import unittest
-from datetime import datetime, timedelta
-
-import sys
+"""Regime Layer v1 / adaptive regime M0 测试"""
 import os
+import sys
+import tempfile
+import unittest
+from datetime import datetime
+
+import numpy as np
+import pandas as pd
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from core.regime import RegimeDetector, Regime, detect_regime
+from core.config import Config
+from core.regime import (
+    REGIME_DETECTOR_VERSION,
+    Regime,
+    RegimeDetector,
+    RegimeResult,
+    build_regime_snapshot,
+    detect_regime,
+    normalize_regime_snapshot,
+)
+from core.regime_policy import ADAPTIVE_POLICY_VERSION, resolve_regime_policy
 
 
 def generate_test_data(regime_type: str, n: int = 100) -> pd.DataFrame:
-    """生成测试数据"""
     np.random.seed(42)
     dates = pd.date_range(end=datetime.now(), periods=n, freq='1h')
-    
+
     if regime_type == 'trend_up':
-        # 上涨趋势
         base = 1000
         trend = np.linspace(0, 200, n)
         noise = np.random.normal(0, 10, n)
         close = base + trend + noise
-        
     elif regime_type == 'trend_down':
-        # 下跌趋势
         base = 1200
         trend = np.linspace(0, -200, n)
         noise = np.random.normal(0, 10, n)
         close = base + trend + noise
-        
     elif regime_type == 'range':
-        # 震荡
         base = 1000
         cycle = np.sin(np.linspace(0, 10 * np.pi, n)) * 50
         noise = np.random.normal(0, 15, n)
         close = base + cycle + noise
-        
     elif regime_type == 'high_vol':
-        # 高波动
         base = 1000
         trend = np.linspace(0, 50, n)
-        noise = np.random.normal(0, 80, n)  # 大噪声
+        noise = np.random.normal(0, 80, n)
         close = base + trend + noise
-        
     elif regime_type == 'low_vol':
-        # 低波动
         base = 1000
         trend = np.sin(np.linspace(0, 2 * np.pi, n)) * 20
         noise = np.random.normal(0, 3, n)
         close = base + trend + noise
-        
     else:
         close = np.random.uniform(900, 1100, n) + np.random.normal(0, 5, n)
-    
-    # 生成 OHLCV
+
     data = {
         'close': close,
         'open': close * (1 + np.random.uniform(-0.01, 0.01, n)),
@@ -64,118 +62,144 @@ def generate_test_data(regime_type: str, n: int = 100) -> pd.DataFrame:
         'low': close * (1 - np.abs(np.random.uniform(0, 0.02, n))),
         'volume': np.random.uniform(1000, 5000, n),
     }
-    
-    df = pd.DataFrame(data, index=dates)
-    return df
+    return pd.DataFrame(data, index=dates)
 
 
 class TestRegimeDetector(unittest.TestCase):
-    """Regime 检测器测试"""
-    
     def setUp(self):
         self.detector = RegimeDetector()
-    
+
     def test_trend_up(self):
-        """测试上涨趋势"""
-        df = generate_test_data('trend_up', 100)
-        result = self.detector.detect(df)
-        
-        print(f"\n[Trend Up] Regime: {result.regime}, Confidence: {result.confidence}")
-        print(f"  Details: {result.details}")
-        print(f"  Indicators: {result.indicators}")
-        
-        # 趋势应该被检测到
+        result = self.detector.detect(generate_test_data('trend_up', 100))
         self.assertIn(result.regime, [Regime.TREND, Regime.HIGH_VOL])
-    
+
     def test_trend_down(self):
-        """测试下跌趋势"""
-        df = generate_test_data('trend_down', 100)
-        result = self.detector.detect(df)
-        
-        print(f"\n[Trend Down] Regime: {result.regime}, Confidence: {result.confidence}")
-        print(f"  Details: {result.details}")
-        
+        result = self.detector.detect(generate_test_data('trend_down', 100))
         self.assertIn(result.regime, [Regime.TREND, Regime.HIGH_VOL])
-    
+
     def test_range(self):
-        """测试震荡市场"""
-        df = generate_test_data('range', 100)
-        result = self.detector.detect(df)
-        
-        print(f"\n[Range] Regime: {result.regime}, Confidence: {result.confidence}")
-        print(f"  Details: {result.details}")
-        
-        # 震荡或低波动
+        result = self.detector.detect(generate_test_data('range', 100))
         self.assertIn(result.regime, [Regime.RANGE, Regime.LOW_VOL, Regime.TREND])
-    
+
     def test_high_vol(self):
-        """测试高波动"""
-        df = generate_test_data('high_vol', 100)
-        result = self.detector.detect(df)
-        
-        print(f"\n[High Vol] Regime: {result.regime}, Confidence: {result.confidence}")
-        print(f"  Details: {result.details}")
-        
+        result = self.detector.detect(generate_test_data('high_vol', 100))
         self.assertIn(result.regime, [Regime.HIGH_VOL, Regime.RISK_ANOMALY])
-    
+
     def test_low_vol(self):
-        """测试低波动"""
-        df = generate_test_data('low_vol', 100)
-        result = self.detector.detect(df)
-        
-        print(f"\n[Low Vol] Regime: {result.regime}, Confidence: {result.confidence}")
-        print(f"  Details: {result.details}")
-        
+        result = self.detector.detect(generate_test_data('low_vol', 100))
         self.assertIn(result.regime, [Regime.LOW_VOL, Regime.RANGE])
-    
+
     def test_insufficient_data(self):
-        """测试数据不足"""
-        df = generate_test_data('trend_up', 10)  # 太少数据
-        result = self.detector.detect(df)
-        
-        print(f"\n[Insufficient] Regime: {result.regime}, Confidence: {result.confidence}")
-        
+        result = self.detector.detect(generate_test_data('trend_up', 10))
         self.assertEqual(result.regime, Regime.UNKNOWN)
-    
+
     def test_empty_data(self):
-        """测试空数据"""
-        df = pd.DataFrame()
-        result = self.detector.detect(df)
-        
+        result = self.detector.detect(pd.DataFrame())
         self.assertEqual(result.regime, Regime.UNKNOWN)
-    
+
     def test_convenience_function(self):
-        """测试便捷函数"""
-        df = generate_test_data('trend_up', 100)
-        result = detect_regime(df)
-        
+        result = detect_regime(generate_test_data('trend_up', 100))
         self.assertIsInstance(result.regime, Regime)
         self.assertIsInstance(result.confidence, float)
 
 
-def run_tests():
-    """运行测试"""
-    print("=" * 60)
-    print("Regime Layer v1 Tests")
-    print("=" * 60)
-    
-    # 创建测试套件
-    loader = unittest.TestLoader()
-    suite = loader.loadTestsFromTestCase(TestRegimeDetector)
-    
-    # 运行
-    runner = unittest.TextTestRunner(verbosity=2)
-    result = runner.run(suite)
-    
-    print("\n" + "=" * 60)
-    if result.wasSuccessful():
-        print("✅ All tests passed!")
-    else:
-        print(f"❌ {len(result.failures)} failures, {len(result.errors)} errors")
-    print("=" * 60)
-    
-    return result.wasSuccessful()
+class TestRegimeSnapshotSchema(unittest.TestCase):
+    def test_result_to_dict_contains_legacy_and_new_snapshot_fields(self):
+        result = RegimeResult(
+            regime=Regime.TREND,
+            confidence=0.78,
+            indicators={'ema_gap': 0.023456, 'volatility': 0.01234, 'ema_direction': 1},
+            details='趋势上涨',
+        )
+        snapshot = result.to_dict()
+        self.assertEqual(snapshot['regime'], 'trend')
+        self.assertEqual(snapshot['name'], 'trend')
+        self.assertEqual(snapshot['family'], 'trend')
+        self.assertEqual(snapshot['direction'], 'up')
+        self.assertIn('stability_score', snapshot)
+        self.assertIn('transition_risk', snapshot)
+        self.assertIn('features', snapshot)
+        self.assertEqual(snapshot['features']['ema_gap'], 0.02346)
+        self.assertEqual(snapshot['detector_version'], REGIME_DETECTOR_VERSION)
+        self.assertTrue(snapshot['detected_at'])
+
+    def test_unknown_snapshot_normalization_is_backward_compatible(self):
+        legacy = {'regime': 'unknown', 'confidence': 0.0, 'indicators': {}, 'details': 'fallback'}
+        snapshot = normalize_regime_snapshot(legacy)
+        self.assertEqual(snapshot['name'], 'unknown')
+        self.assertEqual(snapshot['family'], 'unknown')
+        self.assertEqual(snapshot['direction'], 'unknown')
+        self.assertEqual(snapshot['detector_version'], REGIME_DETECTOR_VERSION)
+
+    def test_build_regime_snapshot_accepts_legacy_regime_string(self):
+        snapshot = build_regime_snapshot(
+            regime='high_vol',
+            confidence=0.7,
+            indicators={'ema_direction': -1, 'volatility': 0.05},
+            details='legacy string input',
+        )
+        self.assertEqual(snapshot['regime'], 'high_vol')
+        self.assertEqual(snapshot['family'], 'vol')
+        self.assertEqual(snapshot['direction'], 'down')
+
+
+class TestAdaptiveRegimeConfigAndPolicy(unittest.TestCase):
+    def test_adaptive_regime_defaults_are_safe(self):
+        cfg = Config()
+        adaptive = cfg.get_adaptive_regime_config()
+        self.assertFalse(adaptive['enabled'])
+        self.assertEqual(adaptive['mode'], 'observe_only')
+        self.assertEqual(adaptive['detector']['version'], 'regime_v1_m0')
+        self.assertEqual(cfg.get_adaptive_regime_mode(), 'observe_only')
+        self.assertFalse(cfg.is_adaptive_regime_enabled())
+
+    def test_symbol_override_can_switch_mode_without_affecting_default(self):
+        cfg = Config()
+        cfg._config['symbol_overrides'] = {
+            'BTC/USDT': {
+                'adaptive_regime': {
+                    'enabled': True,
+                    'mode': 'disabled',
+                    'defaults': {'policy_version': 'adaptive_policy_symbol'},
+                }
+            }
+        }
+        btc = cfg.get_adaptive_regime_config('BTC/USDT')
+        eth = cfg.get_adaptive_regime_config('ETH/USDT')
+        self.assertEqual(btc['mode'], 'disabled')
+        self.assertEqual(btc['defaults']['policy_version'], 'adaptive_policy_symbol')
+        self.assertEqual(eth['mode'], 'observe_only')
+        self.assertFalse(cfg.is_adaptive_regime_enabled('BTC/USDT'))
+
+    def test_invalid_adaptive_regime_mode_raises(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg_path = os.path.join(tmpdir, 'config.yaml')
+            with open(cfg_path, 'w', encoding='utf-8') as f:
+                f.write(
+                    "adaptive_regime:\n"
+                    "  enabled: true\n"
+                    "  mode: turbo\n"
+                )
+            with self.assertRaises(ValueError):
+                Config(cfg_path)
+
+    def test_resolve_regime_policy_returns_neutral_observe_only_snapshot(self):
+        cfg = Config()
+        regime_snapshot = build_regime_snapshot(
+            regime='trend',
+            confidence=0.81,
+            indicators={'ema_gap': 0.03, 'ema_direction': 1, 'volatility': 0.015},
+            details='趋势上涨',
+        )
+        policy = resolve_regime_policy(cfg, 'BTC/USDT', regime_snapshot)
+        self.assertEqual(policy['mode'], 'observe_only')
+        self.assertEqual(policy['policy_version'], ADAPTIVE_POLICY_VERSION)
+        self.assertEqual(policy['regime_name'], 'trend')
+        self.assertFalse(policy['is_effective'])
+        self.assertEqual(policy['decision_overrides'], {})
+        self.assertEqual(policy['execution_overrides'], {})
+        self.assertIn('m0-observe-only', policy['notes'])
 
 
 if __name__ == '__main__':
-    run_tests()
+    unittest.main()

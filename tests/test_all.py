@@ -17,6 +17,8 @@ from datetime import datetime, timedelta
 
 from core.config import Config
 from core.database import Database
+from core.regime import build_regime_snapshot, normalize_regime_snapshot
+from core.regime_policy import resolve_regime_policy
 from core.exchange import Exchange
 from core.notifier import NotificationManager
 from signals import Signal, SignalDetector, SignalValidator, SignalRecorder, EntryDecider
@@ -400,6 +402,39 @@ class TestConfig(unittest.TestCase):
                 os.environ['CRYPTO_QUANT_OKX_ENABLE_HOME_LOCAL'] = old_enable
             if old_path is not None:
                 os.environ['CRYPTO_QUANT_OKX_HOME_LOCAL_CONFIG'] = old_path
+
+
+class TestAdaptiveRegimeM0(unittest.TestCase):
+    def test_regime_snapshot_schema_helper_keeps_legacy_fields(self):
+        snapshot = normalize_regime_snapshot({
+            'regime': 'trend',
+            'confidence': 0.72,
+            'indicators': {'ema_gap': 0.02, 'ema_direction': 1, 'volatility': 0.01},
+            'details': 'legacy snapshot',
+        })
+        self.assertEqual(snapshot['regime'], 'trend')
+        self.assertEqual(snapshot['name'], 'trend')
+        self.assertEqual(snapshot['family'], 'trend')
+        self.assertEqual(snapshot['direction'], 'up')
+        self.assertIn('stability_score', snapshot)
+        self.assertIn('transition_risk', snapshot)
+
+    def test_config_default_and_observe_only_policy_do_not_change_behavior(self):
+        cfg = Config()
+        regime_snapshot = build_regime_snapshot(
+            regime='range',
+            confidence=0.6,
+            indicators={'ema_gap': 0.001, 'ema_direction': -1, 'volatility': 0.01},
+            details='区间震荡',
+        )
+        policy = resolve_regime_policy(cfg, 'BTC/USDT', regime_snapshot)
+        self.assertEqual(cfg.get_adaptive_regime_mode(), 'observe_only')
+        self.assertFalse(cfg.is_adaptive_regime_enabled())
+        self.assertEqual(policy['mode'], 'observe_only')
+        self.assertFalse(policy['is_effective'])
+        self.assertEqual(policy['effective_overrides'], {})
+        self.assertEqual(policy['signal_weight_overrides'], {})
+        self.assertEqual(policy['validation_overrides'], {})
 
 
 class TestSignalValidator(unittest.TestCase):

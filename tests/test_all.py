@@ -3006,7 +3006,89 @@ class TestTradingExecutor(unittest.TestCase):
         self.assertIn('profit_only_add', hints['would_tighten_fields'])
         self.assertEqual(hints['effective_hint']['layer_ratios'], [0.05, 0.05, 0.03])
         self.assertEqual(hints['baseline']['layer_ratios'], [0.06, 0.06, 0.04])
+        self.assertFalse(hints['execution_profile_really_enforced'])
         json.dumps(plan_context['observability'], ensure_ascii=False)
+
+    def test_prepare_open_execution_step2_enforces_guardrails_but_keeps_layer_ratios_baseline(self):
+        self.config._config['adaptive_regime'] = {
+            'enabled': True,
+            'mode': 'guarded_execute',
+            'guarded_execute': {
+                'execution_profile_hints_enabled': True,
+                'execution_profile_enforcement_enabled': True,
+                'layering_profile_enforcement_enabled': False,
+                'enforce_conservative_only': True,
+                'rollout_symbols': ['BTC/USDT'],
+            },
+            'regimes': {
+                'high_vol': {
+                    'execution_overrides': {
+                        'layer_ratios': [0.05, 0.05, 0.03],
+                        'layer_max_total_ratio': 0.13,
+                        'max_layers_per_signal': 1,
+                        'min_add_interval_seconds': 600,
+                        'profit_only_add': True,
+                    }
+                }
+            }
+        }
+        self.executor.exchange = FakeExecutorExchange()
+        regime_snapshot = build_regime_snapshot('high_vol', 0.9, {'volatility': 0.05}, '高波动')
+        policy_snapshot = resolve_regime_policy(self.config, 'BTC/USDT', regime_snapshot)
+        layered_plan = self.executor._get_layer_plan('BTC/USDT', 'long', signal_id=889, plan_context={'regime_snapshot': regime_snapshot, 'adaptive_policy_snapshot': policy_snapshot})
+        layered_plan.update({'regime_snapshot': regime_snapshot, 'adaptive_policy_snapshot': policy_snapshot})
+        approved, reason, details = self.executor._prepare_open_execution(
+            'BTC/USDT', 'long', 50000, signal_id=889,
+            plan_context=layered_plan
+        )
+        self.assertTrue(approved)
+        plan_context = details['plan_context']
+        self.assertEqual(plan_context['layer_ratio'], 0.06)
+        self.assertEqual(plan_context['layer_ratios'], [0.06, 0.06, 0.04])
+        self.assertEqual(plan_context['max_total_ratio'], 0.13)
+        hints = plan_context['observability']['adaptive_execution_hints']
+        self.assertTrue(hints['execution_profile_really_enforced'])
+        self.assertEqual(hints['enforced_profile']['layer_max_total_ratio'], 0.13)
+        self.assertEqual(hints['enforced_profile']['max_layers_per_signal'], 1)
+        self.assertEqual(hints['enforced_profile']['min_add_interval_seconds'], 600)
+        self.assertTrue(hints['enforced_profile']['profit_only_add'])
+        self.assertEqual(hints['enforced_profile']['layer_ratios'], [0.06, 0.06, 0.04])
+        self.assertIn('layer_max_total_ratio', hints['enforced_fields'])
+        self.assertNotIn('layer_ratios', hints['enforced_fields'])
+
+    def test_execution_profile_rollout_guard_keeps_live_execution_on_baseline(self):
+        self.config._config['adaptive_regime'] = {
+            'enabled': True,
+            'mode': 'guarded_execute',
+            'guarded_execute': {
+                'execution_profile_hints_enabled': True,
+                'execution_profile_enforcement_enabled': True,
+                'layering_profile_enforcement_enabled': False,
+                'rollout_symbols': ['ETH/USDT'],
+            },
+            'regimes': {
+                'high_vol': {
+                    'execution_overrides': {
+                        'layer_max_total_ratio': 0.13,
+                        'min_add_interval_seconds': 600,
+                        'profit_only_add': True,
+                    }
+                }
+            }
+        }
+        self.executor.exchange = FakeExecutorExchange()
+        regime_snapshot = build_regime_snapshot('high_vol', 0.9, {'volatility': 0.05}, '高波动')
+        policy_snapshot = resolve_regime_policy(self.config, 'BTC/USDT', regime_snapshot)
+        layered_plan = self.executor._get_layer_plan('BTC/USDT', 'long', signal_id=890, plan_context={'regime_snapshot': regime_snapshot, 'adaptive_policy_snapshot': policy_snapshot})
+        layered_plan.update({'regime_snapshot': regime_snapshot, 'adaptive_policy_snapshot': policy_snapshot})
+        approved, reason, details = self.executor._prepare_open_execution('BTC/USDT', 'long', 50000, signal_id=890, plan_context=layered_plan)
+        self.assertTrue(approved)
+        plan_context = details['plan_context']
+        self.assertEqual(plan_context['max_total_ratio'], 0.16)
+        hints = plan_context['observability']['adaptive_execution_hints']
+        self.assertFalse(hints['rollout_match'])
+        self.assertFalse(hints['execution_profile_really_enforced'])
+        self.assertEqual(hints['enforced_profile']['layer_max_total_ratio'], 0.16)
 
     def test_risk_manager_observability_contains_risk_hints_only_snapshot(self):
         self.config._config['adaptive_regime'] = {

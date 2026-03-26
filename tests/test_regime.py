@@ -348,6 +348,75 @@ class TestExecutionEffectiveSnapshotStep1(unittest.TestCase):
         import json
         json.dumps(snapshot, ensure_ascii=False)
 
+    def test_execution_snapshot_step2_enforces_only_guardrail_fields_by_default(self):
+        cfg = Config()
+        cfg._config['adaptive_regime'] = {
+            'enabled': True,
+            'mode': 'guarded_execute',
+            'guarded_execute': {
+                'execution_profile_hints_enabled': True,
+                'execution_profile_enforcement_enabled': True,
+                'layering_profile_enforcement_enabled': False,
+                'enforce_conservative_only': True,
+                'rollout_symbols': ['BTC/USDT'],
+            },
+            'regimes': {
+                'high_vol': {
+                    'execution_overrides': {
+                        'layer_ratios': [0.05, 0.05, 0.03],
+                        'layer_max_total_ratio': 0.13,
+                        'max_layers_per_signal': 1,
+                        'min_add_interval_seconds': 600,
+                        'profit_only_add': True,
+                    }
+                }
+            }
+        }
+        snapshot = build_execution_effective_snapshot(
+            cfg, 'BTC/USDT', regime_snapshot=build_regime_snapshot('high_vol', 0.9, {'volatility': 0.05}, '高波动')
+        )
+        self.assertEqual(snapshot['effective_state'], 'effective')
+        self.assertEqual(snapshot['enforced_profile']['layer_max_total_ratio'], 0.13)
+        self.assertEqual(snapshot['enforced_profile']['max_layers_per_signal'], 1)
+        self.assertEqual(snapshot['enforced_profile']['min_add_interval_seconds'], 600)
+        self.assertTrue(snapshot['enforced_profile']['profit_only_add'])
+        self.assertEqual(snapshot['enforced_profile']['layer_ratios'], snapshot['baseline']['layer_ratios'])
+        self.assertNotIn('layer_ratios', snapshot['enforced_fields'])
+        self.assertTrue(snapshot['execution_profile_really_enforced'])
+
+    def test_execution_snapshot_step2_never_loosens_baseline_and_exposes_live_field_decisions(self):
+        cfg = Config()
+        cfg._config['adaptive_regime'] = {
+            'enabled': True,
+            'mode': 'guarded_execute',
+            'guarded_execute': {
+                'execution_profile_hints_enabled': True,
+                'execution_profile_enforcement_enabled': True,
+                'rollout_symbols': ['BTC/USDT'],
+            },
+            'regimes': {
+                'high_vol': {
+                    'execution_overrides': {
+                        'layer_max_total_ratio': 0.30,
+                        'max_layers_per_signal': 9,
+                        'min_add_interval_seconds': 0,
+                        'profit_only_add': False,
+                        'allow_same_bar_multiple_adds': True,
+                    }
+                }
+            }
+        }
+        snapshot = build_execution_effective_snapshot(
+            cfg, 'BTC/USDT', regime_snapshot=build_regime_snapshot('high_vol', 0.9, {'volatility': 0.05}, '高波动')
+        )
+        self.assertEqual(snapshot['effective_state'], 'effective')
+        self.assertFalse(snapshot['execution_profile_really_enforced'])
+        self.assertEqual(snapshot['enforced_profile'], snapshot['baseline'])
+        self.assertTrue(any(item['key'] == 'layer_max_total_ratio' and item['reason'] == 'non_conservative_override' for item in snapshot['ignored_overrides']))
+        min_add = next(item for item in snapshot['field_decisions'] if item['field'] == 'min_add_interval_seconds')
+        self.assertEqual(min_add['live'], snapshot['baseline']['min_add_interval_seconds'])
+        self.assertEqual(min_add['decision'], 'unchanged')
+
 
 class TestAdaptiveRegimeConfigAndPolicy(unittest.TestCase):
     def test_adaptive_regime_defaults_are_safe(self):

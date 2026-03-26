@@ -94,14 +94,17 @@ def enrich_observability_with_snapshots(config_helper: Any, symbol: Optional[str
         'effective_state': execution_snapshot.get('effective_state', 'disabled'),
         'baseline': dict(execution_snapshot.get('baseline') or {}),
         'effective_hint': dict(execution_snapshot.get('effective') or {}),
+        'enforced_profile': dict(execution_snapshot.get('enforced_profile') or execution_snapshot.get('baseline') or {}),
         'applied': list((execution_snapshot.get('applied_overrides') or {}).keys()),
         'ignored': list(execution_snapshot.get('ignored_overrides') or []),
+        'enforced_fields': list(execution_snapshot.get('enforced_fields') or []),
+        'execution_profile_really_enforced': bool(execution_snapshot.get('execution_profile_really_enforced', False)),
         'rollout_match': bool(execution_snapshot.get('rollout_match', True)),
         'would_change_execution_profile': bool(execution_snapshot.get('would_tighten')),
         'would_tighten_fields': list(execution_snapshot.get('would_tighten_fields') or []),
         'hint_codes': list(execution_snapshot.get('hint_codes') or []),
         'ignored_reasons': list({str(item.get('reason')) for item in (execution_snapshot.get('ignored_overrides') or []) if item.get('reason')}),
-        'notes': ['step1 keeps baseline execution profile live'],
+        'notes': ['step2 enforces only conservative execution guardrails when rollout/enforcement is enabled', 'layer_ratios remains hints-only unless layering_profile_enforcement_enabled=true'],
         'field_decisions': list(execution_snapshot.get('field_decisions') or []),
     }
     return enriched
@@ -311,6 +314,22 @@ class TradingExecutor:
             return self.config.get_layering_config(symbol)
         return dict(DEFAULT_LAYERING_CONFIG)
 
+    def _get_live_execution_profile(self, symbol: str, plan_context: Dict[str, Any] = None) -> Dict[str, Any]:
+        baseline = self._get_layering_config(symbol)
+        execution_snapshot = build_execution_effective_snapshot(
+            self.config,
+            symbol,
+            regime_snapshot=(plan_context or {}).get('regime_snapshot'),
+            policy_snapshot=(plan_context or {}).get('adaptive_policy_snapshot'),
+        )
+        enforced_profile = dict(execution_snapshot.get('enforced_profile') or baseline)
+        return {
+            'baseline': baseline,
+            'effective': dict(execution_snapshot.get('effective') or baseline),
+            'live': enforced_profile,
+            'snapshot': execution_snapshot,
+        }
+
     def _get_direction_lock_scope_key(self, symbol: str, side: str) -> tuple:
         layering = self._get_layering_config(symbol)
         if layering.get('direction_lock_enabled', True) and layering.get('direction_lock_scope') == 'symbol':
@@ -326,7 +345,8 @@ class TradingExecutor:
         return str(signal_id) if signal_id is not None else None
 
     def _check_layering_runtime_guards(self, symbol: str, side: str, signal_id: int = None, plan_context: Dict[str, Any] = None) -> tuple:
-        layering = self._get_layering_config(symbol)
+        execution_profile = self._get_live_execution_profile(symbol, plan_context)
+        layering = execution_profile['live']
         state = self.db.get_layer_plan_state(symbol, side)
         plan_data = dict(state.get('plan_data') or {})
         filled_layers = sorted(int(x) for x in (plan_data.get('filled_layers') or []))
@@ -370,11 +390,12 @@ class TradingExecutor:
                 if marker and markers.get(marker):
                     return False, '同一 bar 已执行过加仓，禁止重复加仓', merge_observability_details({'stage': 'allow_same_bar_multiple_adds', 'signal_bar_marker': marker}, build_observability_context(symbol=symbol, side=side, signal_id=signal_id, root_signal_id=state.get('root_signal_id') or signal_id, layer_no=(max(filled_layers) + 1) if filled_layers else 1, deny_reason='allow_same_bar_multiple_adds'))
 
-        return True, None, merge_observability_details({'stage': 'layering_guard', 'layering': layering}, build_observability_context(symbol=symbol, side=side, signal_id=signal_id, root_signal_id=state.get('root_signal_id') or signal_id, layer_no=(max(filled_layers) + 1) if filled_layers else 1))
+        return True, None, merge_observability_details({'stage': 'layering_guard', 'layering': layering, 'baseline_layering': execution_profile['baseline'], 'effective_layering': execution_profile['effective'], 'execution_profile_really_enforced': bool((execution_profile.get('snapshot') or {}).get('execution_profile_really_enforced'))}, build_observability_context(symbol=symbol, side=side, signal_id=signal_id, root_signal_id=state.get('root_signal_id') or signal_id, layer_no=(max(filled_layers) + 1) if filled_layers else 1))
 
 
-    def _get_layer_plan(self, symbol: str, side: str, signal_id: int = None, root_signal_id: int = None) -> Dict[str, Any]:
-        layering = self._get_layering_config(symbol)
+    def _get_layer_plan(self, symbol: str, side: str, signal_id: int = None, root_signal_id: int = None, plan_context: Dict[str, Any] = None) -> Dict[str, Any]:
+        execution_profile = self._get_live_execution_profile(symbol, plan_context)
+        layering = execution_profile['live']
         state = self.db.get_layer_plan_state(symbol, side)
         plan_data = dict(state.get('plan_data') or {})
         layer_ratios = plan_data.get('layer_ratios') or layering.get('layer_ratios') or [0.06, 0.06, 0.04]
@@ -401,6 +422,10 @@ class TradingExecutor:
             'layer_count': layer_count,
             'layer_ratios': layer_ratios,
             'max_total_ratio': float(plan_data.get('max_total_ratio') or layering.get('layer_max_total_ratio') or sum(layer_ratios) or 0.16),
+            'baseline_layering': execution_profile['baseline'],
+            'effective_layering': execution_profile['effective'],
+            'live_layering': execution_profile['live'],
+            'execution_profile_really_enforced': bool((execution_profile.get('snapshot') or {}).get('execution_profile_really_enforced')),
         }
 
     def _reserve_layer(self, symbol: str, side: str, layer_plan: Dict[str, Any]):
@@ -457,7 +482,22 @@ class TradingExecutor:
         if lock:
             return False, 'symbol+side 方向锁已被占用', merge_observability_details({'stage': 'hard_intercept', 'lock': lock, 'lock_scope': {'symbol': lock_symbol, 'side': lock_side}}, build_observability_context(symbol=symbol, side=side, signal_id=signal_id, root_signal_id=root_signal_id or signal_id, deny_reason='direction_lock'))
 
-        layer_plan = plan_context or self._get_layer_plan(symbol, side, signal_id=signal_id, root_signal_id=root_signal_id)
+        layer_plan = plan_context or self._get_layer_plan(symbol, side, signal_id=signal_id, root_signal_id=root_signal_id, plan_context=plan_context)
+        live_execution_profile = self._get_live_execution_profile(symbol, layer_plan)
+        live_layering = dict(live_execution_profile.get('live') or {})
+        layer_plan = dict(layer_plan or {})
+        layer_plan.setdefault('baseline_layering', live_execution_profile.get('baseline') or {})
+        layer_plan.setdefault('effective_layering', live_execution_profile.get('effective') or {})
+        layer_plan['live_layering'] = live_layering
+        if 'layer_ratios' not in layer_plan:
+            layer_plan['layer_ratios'] = list(live_layering.get('layer_ratios') or layer_plan.get('layer_ratios') or [])
+        existing_max_total_ratio = layer_plan.get('plan_data', {}).get('max_total_ratio')
+        live_max_total_ratio = live_layering.get('layer_max_total_ratio')
+        if existing_max_total_ratio is not None and live_max_total_ratio is not None:
+            layer_plan['max_total_ratio'] = float(min(float(existing_max_total_ratio), float(live_max_total_ratio)))
+        else:
+            layer_plan['max_total_ratio'] = float(existing_max_total_ratio or live_max_total_ratio or layer_plan.get('max_total_ratio') or sum(layer_plan.get('layer_ratios') or []) or 0.16)
+        layer_plan['execution_profile_really_enforced'] = bool((live_execution_profile.get('snapshot') or {}).get('execution_profile_really_enforced'))
         if not layer_plan.get('eligible', True):
             return False, layer_plan.get('reason') or '分层资格不通过', merge_observability_details({'stage': 'layer_eligibility', 'layer_plan': layer_plan}, build_observability_context(symbol=symbol, side=side, signal_id=signal_id, root_signal_id=layer_plan.get('root_signal_id') or root_signal_id or signal_id, layer_no=layer_plan.get('layer_no'), deny_reason='layer_eligibility'))
 

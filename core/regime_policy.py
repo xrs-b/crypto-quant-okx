@@ -566,6 +566,8 @@ def build_execution_effective_snapshot(config_helper: Any, symbol: Optional[str]
         ignored_overrides.append({'key': 'rollout_symbols', 'requested': rollout_symbols, 'reason': 'rollout_symbol_not_matched', 'code': 'ROLLOUT_SYMBOL_NOT_MATCHED'})
 
     applied_keys = list((merged.get('applied_overrides') or {}).keys())
+    enforced_effective = dict(baseline)
+    enforced_fields: List[str] = []
     hint_codes: List[str] = []
     field_decisions: List[Dict[str, Any]] = []
     code_map = {
@@ -580,23 +582,35 @@ def build_execution_effective_snapshot(config_helper: Any, symbol: Optional[str]
     for field in ['layer_ratios', 'layer_max_total_ratio', 'max_layers_per_signal', 'min_add_interval_seconds', 'profit_only_add', 'allow_same_bar_multiple_adds', 'leverage_cap']:
         applied = field in applied_keys
         enforced = effective_state == 'effective' and (field not in {'layer_ratios'} or layering_enforcement_enabled)
+        baseline_value = baseline.get(field)
+        effective_value = merged['effective'].get(field)
+        live_value = baseline_value
         reason = 'no_change'
+        decision = 'unchanged'
         if applied and effective_state != 'effective':
             reason = 'execution_enforcement_disabled'
+            decision = 'applied_candidate'
         elif applied and field == 'layer_ratios' and not layering_enforcement_enabled:
             reason = 'layering_enforcement_disabled'
+            decision = 'applied_candidate'
         elif applied and enforced:
+            live_value = effective_value
+            enforced_effective[field] = effective_value
+            enforced_fields.append(field)
             reason = 'conservative_tighten_enforced'
+            decision = 'enforced'
         elif applied:
             reason = 'field_not_live'
+            decision = 'applied_candidate'
         field_decisions.append({
             'field': field,
-            'baseline': baseline.get(field),
-            'effective': merged['effective'].get(field),
+            'baseline': baseline_value,
+            'effective': effective_value,
+            'live': live_value,
             'applied': applied,
             'ignored': not applied,
             'enforced': enforced,
-            'decision': 'applied' if applied else 'unchanged',
+            'decision': decision,
             'reason': reason,
         })
         if applied and code_map.get(field) and code_map[field] not in hint_codes:
@@ -611,6 +625,9 @@ def build_execution_effective_snapshot(config_helper: Any, symbol: Optional[str]
         'baseline': baseline,
         'effective': merged['effective'],
         'effective_candidate': merged['effective'],
+        'enforced_profile': enforced_effective,
+        'enforced_fields': enforced_fields,
+        'execution_profile_really_enforced': bool(enforced_fields),
         'effective_state': effective_state,
         'policy_mode': mode,
         'policy_version': normalized_policy.get('policy_version') or ADAPTIVE_POLICY_VERSION,

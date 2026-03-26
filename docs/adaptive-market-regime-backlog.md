@@ -470,8 +470,8 @@
 ### AR-M4-02｜executor 落地 effective execution profile 追踪
 
 - **阶段 / 优先级**：M4 / P0
-- **生效范围**：开始影响 execution observability
-- **目标**：让执行层不仅“用了什么参数”，还要能解释“为什么这套参数此时生效”。
+- **生效范围**：从 execution observability 进入受控 execution guardrail enforcement
+- **目标**：让执行层不仅“用了什么参数”，还要能解释“为什么这套参数此时生效”，并在 rollout / conservative-only 前提下让外围 guardrails 小范围真生效。
 - **涉及模块**：`trading/executor.py`、通知、trade/open_trade 记录、dashboard execution 面板
 - **输入**：effective execution profile、policy snapshot、account exposure
 - **输出**：结构化 execution observability 记录
@@ -479,7 +479,8 @@
 - **可观测性要求**：至少包含 `policy_mode / policy_version / effective_layer_ratios / effective_cap / override_reason`
 - **测试 / 验收**：随机抽取执行样本，可从 trade 记录追到 regime 与 policy
 - **依赖关系**：AR-M4-01
-- **风险 / 回滚点**：无明显风险，但若记录不完整，不要贸然放大 execution 生效范围
+- **风险 / 回滚点**：若 rollout 样本不足或 observability 解释不清，应立即关闭 `execution_profile_enforcement_enabled` 回退到 hints-only
+- **Notes**：M4 Step 2 已落地最小可控 enforcement：仅当 `execution_profile_enforcement_enabled=true` + rollout symbol 命中 + `mode in {guarded_execute, full}` 时，executor 才真正采用 `enforced_profile`。当前真实生效字段仅限 guardrails：`layer_max_total_ratio`、`max_layers_per_signal`、`min_add_interval_seconds`、`profit_only_add`、`allow_same_bar_multiple_adds`、`leverage_cap`；`layer_ratios` 继续默认 hints-only，除非显式开启 `layering_profile_enforcement_enabled`。同时 observability 已补齐 `baseline / effective / enforced_profile / enforced_fields / execution_profile_really_enforced / field_decisions`。详细说明见：[`docs/adaptive-market-regime-m4-step2-implementation.md`](./adaptive-market-regime-m4-step2-implementation.md)
 
 ### AR-M4-03｜trailing / partial TP regime profile 化（可选增强）
 

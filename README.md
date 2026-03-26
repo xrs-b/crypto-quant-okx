@@ -2,10 +2,26 @@
 
 一个面向 **OKX U 本位合约** 的量化交易系统，支持 **信号检测、进场审批、风险控制、分层开仓（layering）、持仓对账、通知推送、Dashboard 观察、回测与参数分析**。
 
+> 推荐公开仓库名：**`crypto-quant-okx`**
+>
+> GitHub short description：**An OKX-focused quant trading system for research, testnet deployment, and operator-supervised automation.**
+
 许可证：**MIT**。选择 MIT 的原因很简单：对朋友分享和二次改造阻力最低、保留署名要求、同时配合 MIT 的免责条款，比较符合这个“学习 / 研究 / 自行承担交易风险”的公开版定位。
 
 > 这个项目更适合有一定 Python / 量化 / 交易所 API 使用经验的开发者或朋友交流学习。  
 > **不建议零基础用户直接上实盘。**
+
+## Public mainline policy
+
+- **公共 GitHub 仓库是唯一长期代码主线**
+- **私人环境只保留运行态与本地覆盖**：例如 `.env`、`config/config.local.yaml`、`logs/`、`data/trading.db`、`data/runtime_state.json`
+- 不在公共仓库长期保留真实运行态、真实凭证与私人机器痕迹
+
+相关文档：
+
+- [`docs/PUBLIC-MAINLINE-WORKFLOW.md`](docs/PUBLIC-MAINLINE-WORKFLOW.md)
+- [`docs/GITHUB-PUBLIC-REPO-COPY.md`](docs/GITHUB-PUBLIC-REPO-COPY.md)
+- [`PUBLIC-REPO-MANIFEST.md`](PUBLIC-REPO-MANIFEST.md)
 
 ---
 
@@ -512,21 +528,26 @@ crypto-quant-okx/
 
 如果你是准备分享给朋友，请按以下顺序做：
 
-1. 保留一个 **私有运行仓库** 继续承载你的真实交易环境
-2. 单独整理一个 **公开版仓库** 用于分享与安装
-3. 公开版只保留：
+1. 以 **公共仓库作为唯一代码主线** 继续维护代码、文档、测试与模板脚本
+2. 私人环境只承载真实交易运行态与本地覆盖，不再把它当成长期平行代码主线
+3. 公共仓库只保留：
    - 核心代码
    - 示例配置
    - 脱敏后的脚本
    - 精简文档
    - 必要测试
-4. 不要把以下内容放进公开仓库：
+4. 不要把以下内容放进公共仓库：
    - 真实 API Key / Secret / Passphrase
    - 真实 Discord / Telegram token
+   - `.env`
+   - `config/config.yaml`
+   - `config/config.local.yaml`
    - 运行日志
    - 本地数据库
    - 运行时状态文件
    - 个人运维脚本中的绝对路径
+
+详细工作约定见：[`docs/PUBLIC-MAINLINE-WORKFLOW.md`](docs/PUBLIC-MAINLINE-WORKFLOW.md)
 
 ---
 

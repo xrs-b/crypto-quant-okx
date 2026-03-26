@@ -179,7 +179,8 @@ cp config/config.local.yaml.example config/config.local.yaml
 建议分层管理：
 
 - `config/config.yaml`：公开参数、策略参数、风控参数、watch list
-- `config/config.local.yaml`：只放私密参数，例如 API Key / webhook / bot token
+- `config/presets/*.yaml`：只放可公开的策略/开关，不放 Discord / Telegram secret
+- `config/config.local.yaml`：只放私密参数，例如 API Key / webhook / bot token / chat id / channel id
 
 如果你喜欢走环境变量，也可以直接用：
 
@@ -193,6 +194,9 @@ notification:
   discord:
     bot_token: ${DISCORD_BOT_TOKEN:-}
     channel_id: ${DISCORD_CHANNEL_ID:-}
+
+# 注意：preset 不要写 bot_token / webhook / channel_id / chat_id
+# 这些 secret 统一放 config.local.yaml 或 .env
 ```
 
 建议同时准备 `.env`：

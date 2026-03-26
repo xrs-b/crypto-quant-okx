@@ -26,6 +26,7 @@ from strategies.strategy_library import StrategyManager
 from bot.run import build_exchange_diagnostics, build_exchange_smoke_plan, build_runtime_health_summary, maybe_send_daily_health_summary, execute_exchange_smoke, reconcile_exchange_positions
 from dashboard.api import app
 from core.risk_budget import get_risk_budget_config, compute_entry_plan, summarize_margin_usage
+from core.presets import PresetManager
 
 
 class FakeExchange:
@@ -251,6 +252,57 @@ class TestConfig(unittest.TestCase):
         """测试持仓模式配置"""
         self.assertIn(self.config.position_mode, ['oneway', 'hedge', 'one-way', 'net', 'single'])
 
+    def test_preset_apply_keeps_local_notification_secrets(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg_dir = Path(tmpdir) / 'config'
+            presets_dir = cfg_dir / 'presets'
+            cfg_dir.mkdir(parents=True, exist_ok=True)
+            presets_dir.mkdir(parents=True, exist_ok=True)
+
+            cfg_path = cfg_dir / 'config.yaml'
+            local_path = cfg_dir / 'config.local.yaml'
+            preset_path = presets_dir / 'safe-mode.yaml'
+
+            cfg_path.write_text(
+                "symbols:\n"
+                "  watch_list: [\"ETH/USDT\"]\n"
+                "notification:\n"
+                "  discord:\n"
+                "    enabled: true\n",
+                encoding='utf-8'
+            )
+            local_path.write_text(
+                "notification:\n"
+                "  discord:\n"
+                "    channel_id: local-private-channel\n"
+                "    bot_token: local-private-token\n"
+                "    webhook_url: https://discord.com/api/webhooks/local/private\n",
+                encoding='utf-8'
+            )
+            preset_path.write_text(
+                "symbols:\n"
+                "  watch_list: [\"BTC/USDT\"]\n"
+                "notification:\n"
+                "  discord:\n"
+                "    enabled: true\n"
+                "    notify_signals: false\n"
+                "  telegram:\n"
+                "    enabled: false\n",
+                encoding='utf-8'
+            )
+
+            with patch('pathlib.Path.home', return_value=Path(tmpdir)):
+                manager = PresetManager(Config(str(cfg_path)))
+                result = manager.apply_preset('safe-mode', auto_restart=False)
+                self.assertEqual(result['applied'], 'safe-mode')
+
+                reloaded = Config(str(cfg_path))
+            self.assertEqual(reloaded.get('symbols.watch_list'), ['BTC/USDT'])
+            self.assertEqual(reloaded.get('notification.discord.channel_id'), 'local-private-channel')
+            self.assertEqual(reloaded.get('notification.discord.bot_token'), 'local-private-token')
+            self.assertEqual(reloaded.get('notification.discord.webhook_url'), 'https://discord.com/api/webhooks/local/private')
+            self.assertFalse(reloaded.get('notification.discord.notify_signals'))
+
     def test_env_placeholder_resolution_and_local_override(self):
         old_api_key = os.environ.get('OKX_API_KEY')
         old_bot_token = os.environ.get('DISCORD_BOT_TOKEN')
@@ -275,7 +327,7 @@ class TestConfig(unittest.TestCase):
                     "  discord:\n"
                     "    channel_id: local-private-channel\n"
                 )
-            with patch('core.config.Path.home', return_value=Path(tmpdir)):
+            with patch('pathlib.Path.home', return_value=Path(tmpdir)):
                 cfg = Config(cfg_path)
             self.assertEqual(cfg.get('api.key'), 'env-okx-key')
             self.assertEqual(cfg.get('api.secret'), 'fallback-secret')

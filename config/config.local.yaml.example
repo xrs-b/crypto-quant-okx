@@ -3,6 +3,7 @@
 # ----------------------------------------------------------------------------
 # 用法：cp config/config.local.yaml.example config/config.local.yaml
 # 这里只放真实 secret / 私有 channel / 私有 webhook 等内容。
+# presets 不应承载 notification secret；需要覆盖时统一写在这里或 .env。
 # Config 会在读取 config.yaml 后，再自动合并本文件覆盖。
 # ============================================================================
 
@@ -16,6 +17,9 @@ notification:
     channel_id: your_real_discord_channel_id
     webhook_url: https://discord.com/api/webhooks/xxx/yyy
     bot_token: your_real_discord_bot_token
+  telegram:
+    bot_token: your_real_telegram_bot_token
+    chat_id: your_real_telegram_chat_id
 
 trading:
   layering:

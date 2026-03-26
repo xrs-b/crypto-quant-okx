@@ -63,10 +63,7 @@ ml:
     min_return_threshold: 0.002
 notification:
   discord:
-    channel_id: ${DISCORD_CHANNEL_ID:-your_discord_channel_id}
-    webhook_url: ${DISCORD_WEBHOOK_URL:-}
     webhook_username: OKX量化机器人
-    bot_token: '
     enabled: true
     notify_errors: true
     notify_signals: true
@@ -79,8 +76,6 @@ notification:
     to_address: your_email@gmail.com
     username: your_email@gmail.com
   telegram:
-    bot_token: '
-    chat_id: ${TELEGRAM_CHAT_ID:-}
     enabled: false
 runtime:
   interval_seconds: 300

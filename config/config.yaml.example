@@ -86,7 +86,8 @@ ml:
 
 notification:
   discord:
-    # 建议：channel_id / webhook / bot token 只放 config.local.yaml 或环境变量
+    # presets 只保留 enabled / notify_* 等非敏感开关
+    # channel_id / webhook / bot token 只放 config.local.yaml 或环境变量
     channel_id: ${DISCORD_CHANNEL_ID:-your_discord_channel_id}
     webhook_url: ${DISCORD_WEBHOOK_URL:-}
     webhook_username: OKX量化机器人

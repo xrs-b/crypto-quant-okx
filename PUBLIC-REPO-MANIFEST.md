@@ -16,8 +16,8 @@
   - `.env.example`
   - `config/config.yaml.example`
   - `config/config.local.yaml.example`
-  - `config/presets/btc-focused.yaml`
-  - `config/presets/safe-mode.yaml`
+  - `config/presets/btc-focused.yaml`（仅公开策略/通知开关，不含 secret）
+  - `config/presets/safe-mode.yaml`（仅公开策略/通知开关，不含 secret）
 - 部署与使用文档：
   - `README.md`
   - `docs/DEPLOYMENT.md`
@@ -43,6 +43,7 @@
   - `config/config.yaml`
   - `config/config.local.yaml`
   - `config/backups/`
+  - 所有 Discord / Telegram / SMTP / webhook / channel/chat id 等真实通知凭证
 - 运行态文件：
   - `logs/`
   - `*.pid`

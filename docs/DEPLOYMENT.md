@@ -40,6 +40,7 @@ cp config/config.local.yaml.example config/config.local.yaml
 
 - `.env`：环境变量与 secret
 - `config/config.yaml`：公开参数、策略参数、风控参数
+- `config/presets/*.yaml`：只放公开策略参数与 notification 开关，不放 bot token / webhook / channel/chat id
 - `config/config.local.yaml`：本机私密覆盖（如你不想把 secret 放进 `.env`）
 
 ## 5. 填入最小必要配置
@@ -85,7 +86,13 @@ api:
   key: your_real_or_testnet_key
   secret: your_real_or_testnet_secret
   passphrase: your_real_or_testnet_passphrase
+notification:
+  discord:
+    bot_token: your_real_discord_bot_token
+    channel_id: your_real_discord_channel_id
 ```
+
+> `config/presets/*.yaml` 不应再写 notification secret；preset apply 后，Config 仍会继续把 `config.local.yaml` 覆盖合并回来。
 
 Dashboard 建议仍走环境变量：
 

@@ -39,6 +39,14 @@ DEFAULT_ADAPTIVE_REGIME_CONFIG = {
     'defaults': {
         'policy_version': 'adaptive_policy_v1_m1',
     },
+    'guarded_execute': {
+        'validator_snapshot_enabled': True,
+        'validator_hints_enabled': True,
+        'validator_enforcement_enabled': False,
+        'risk_hints_enabled': False,
+        'enforce_conservative_only': True,
+        'rollout_symbols': [],
+    },
     'regimes': {},
 }
 

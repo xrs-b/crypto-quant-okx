@@ -481,6 +481,66 @@ class TestSignalValidator(unittest.TestCase):
         self.assertTrue(details['adaptive_regime_observe_only']['summary'])
         self.assertIn('observe_only', details['adaptive_regime_observe_only']['tags'])
 
+    def test_validator_step1_emits_hints_without_changing_pass_result(self):
+        cfg = Config()
+        cfg._config['adaptive_regime'] = {
+            'enabled': True,
+            'mode': 'guarded_execute',
+            'regimes': {'high_vol': {'validation_overrides': {'min_strength': 80, 'min_strategy_count': 3}}}
+        }
+        validator = SignalValidator(cfg, None)
+        signal = Signal(
+            symbol='BTC/USDT', signal_type='buy', price=50000, strength=50, strategies_triggered=['RSI', 'MACD'],
+            market_context={'trend': 'bullish', 'volatility': 0.06, 'atr_ratio': 0.06, 'volatility_too_low': False, 'volatility_too_high': False, 'regime': 'high_vol', 'regime_confidence': 0.8, 'regime_details': '高波动'}
+        )
+        passed, reason, details = validator.validate(signal)
+        self.assertTrue(passed)
+        hints = details['adaptive_validation_hints']
+        self.assertEqual(hints['baseline_result'], 'pass')
+        self.assertEqual(hints['hinted_result'], 'block')
+        self.assertTrue(hints['would_change_result'])
+        self.assertIn('WOULD_RAISE_MIN_STRENGTH', hints['hint_codes'])
+        self.assertIn('WOULD_RAISE_MIN_STRATEGY_COUNT', hints['hint_codes'])
+        self.assertEqual(details['adaptive_validation_snapshot']['effective_state'], 'hints_only')
+        self.assertTrue(details['adaptive_validation_snapshot']['observe_only'])
+
+    def test_validator_step1_preserves_existing_block_reason_when_baseline_fails(self):
+        cfg = Config()
+        cfg._config['adaptive_regime'] = {
+            'enabled': True,
+            'mode': 'guarded_execute',
+            'regimes': {'trend': {'validation_overrides': {'min_strength': 99}}}
+        }
+        validator = SignalValidator(cfg, None)
+        signal = Signal(symbol='BTC/USDT', signal_type='hold', price=50000, strength=0)
+        passed, reason, details = validator.validate(signal)
+        self.assertFalse(passed)
+        self.assertEqual(reason, '无可执行方向')
+        self.assertIn('adaptive_validation_snapshot', details)
+        self.assertIn('adaptive_validation_hints', details)
+        self.assertEqual(details['adaptive_validation_hints']['baseline_result'], 'block')
+
+    def test_validator_step1_records_ignored_reason_and_is_json_serializable(self):
+        cfg = Config()
+        cfg._config['market_filters'] = {'block_counter_trend': True}
+        cfg._config['adaptive_regime'] = {
+            'enabled': True,
+            'mode': 'guarded_execute',
+            'guarded_execute': {'rollout_symbols': ['ETH/USDT']},
+            'regimes': {'trend': {'validation_overrides': {'block_counter_trend': False}}}
+        }
+        validator = SignalValidator(cfg, None)
+        signal = Signal(
+            symbol='BTC/USDT', signal_type='buy', price=50000, strength=50, strategies_triggered=['RSI', 'MACD'],
+            market_context={'trend': 'bullish', 'volatility': 0.02, 'atr_ratio': 0.02, 'volatility_too_low': False, 'volatility_too_high': False, 'regime': 'trend', 'regime_confidence': 0.8, 'regime_details': '趋势'}
+        )
+        passed, reason, details = validator.validate(signal)
+        self.assertTrue(passed)
+        ignored = details['adaptive_validation_snapshot']['ignored_overrides']
+        self.assertTrue(any(item['reason'] == 'non_conservative_override' for item in ignored))
+        self.assertTrue(any(item['reason'] == 'rollout_symbol_not_matched' for item in ignored))
+        json.dumps(details, ensure_ascii=False)
+
 
 class TestEntryDecider(unittest.TestCase):
     def _make_signal(self, **overrides):
@@ -917,7 +977,7 @@ class TestSignalValidatorRegimeFilter(unittest.TestCase):
             signal_type='buy',
             price=50000,
             strength=50,
-            strategies_triggered=['RSI'],
+            strategies_triggered=['RSI', 'MACD'],
             market_context={
                 'trend': 'sideways',
                 'volatility': 0.005,
@@ -941,7 +1001,7 @@ class TestSignalValidatorRegimeFilter(unittest.TestCase):
             signal_type='buy',
             price=50000,
             strength=50,
-            strategies_triggered=['RSI'],
+            strategies_triggered=['RSI', 'MACD'],
             market_context={
                 'trend': 'bullish',
                 'volatility': 0.06,
@@ -989,7 +1049,7 @@ class TestSignalValidatorRegimeFilter(unittest.TestCase):
             signal_type='buy',
             price=50000,
             strength=50,
-            strategies_triggered=['MACD'],
+            strategies_triggered=['MACD', 'RSI'],
             market_context={
                 'trend': 'bullish',
                 'volatility': 0.025,

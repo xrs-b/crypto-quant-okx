@@ -369,6 +369,8 @@
   - Step 1 先做 `effective_validation_snapshot + hints + observability`，默认保持 `validator_enforcement_enabled=false`，不直接改变 pass / block 结果
   - Step 2 才进入 `validator conservative enforcement`，并要求 rollout symbol、conservative-only、防呆与回滚开关齐全
   - 详细任务拆分见：[`docs/adaptive-market-regime-m3-step1-implementation.md`](./adaptive-market-regime-m3-step1-implementation.md)
+- **Status（2026-03-26 / M3 Step 1）**：done
+- **Notes**：`signals/validator.py` 已接入 validator-level `adaptive_validation_snapshot / adaptive_validation_hints / adaptive_validation_observability`；当前仍以 baseline validator 为真实判定，adaptive 只输出 `baseline vs effective`、`applied/ignored`、`would_block`、`hint_codes`、`observe_only/effective_state` 等观测字段；未修改 risk / execution 生效逻辑。
 
 ### AR-M3-02｜risk budget 支持 conservative overrides
 

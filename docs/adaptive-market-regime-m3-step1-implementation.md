@@ -536,6 +536,28 @@ Step 1 必须做到 **配置可回退、代码无需热修才可止血**。
 
 ---
 
+## 13.1 当前实现进度（2026-03-26）
+
+本轮已完成 Step 1 的最小可交付实现：
+
+- `core/regime_policy.py`
+  - 新增 validator baseline/effective snapshot helper
+  - 新增 conservative-only validation override merge
+  - 接入 `validation_overrides` 解析，仍与 decision/risk/execution 生效边界分离
+- `signals/validator.py`
+  - 新增 `adaptive_validation_snapshot`
+  - 新增 `adaptive_validation_hints`
+  - 新增 `adaptive_validation_observability`
+  - 默认保持 hints-only / observe-only，不改变 validator baseline pass/block 结果
+- 测试
+  - 覆盖 baseline vs effective、applied/ignored、observe-only 不改结果、rollout mismatch / non-conservative ignored reasons、JSON serializable
+
+仍明确 **未进入 Step 2**：
+
+- 未启用 validator enforcement
+- 未改变 risk budget / execution 生效逻辑
+- 未把 effective validator 阈值接管真实 pass/block 结果
+
 ## 14. 相关文档
 
 - 主计划：[`docs/adaptive-market-regime-framework-plan.md`](./adaptive-market-regime-framework-plan.md)

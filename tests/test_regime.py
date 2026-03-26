@@ -20,7 +20,7 @@ from core.regime import (
     detect_regime,
     normalize_regime_snapshot,
 )
-from core.regime_policy import ADAPTIVE_POLICY_VERSION, resolve_regime_policy
+from core.regime_policy import ADAPTIVE_POLICY_VERSION, resolve_regime_policy, build_validation_baseline_snapshot, build_validation_effective_snapshot
 
 
 def generate_test_data(regime_type: str, n: int = 100) -> pd.DataFrame:
@@ -141,6 +141,79 @@ class TestRegimeSnapshotSchema(unittest.TestCase):
         self.assertEqual(snapshot['regime'], 'high_vol')
         self.assertEqual(snapshot['family'], 'vol')
         self.assertEqual(snapshot['direction'], 'down')
+
+
+class TestValidationEffectiveSnapshot(unittest.TestCase):
+    def test_validation_snapshot_keeps_baseline_when_no_override(self):
+        cfg = Config()
+        baseline = build_validation_baseline_snapshot(cfg, 'BTC/USDT')
+        snapshot = build_validation_effective_snapshot(cfg, 'BTC/USDT')
+        self.assertEqual(snapshot['baseline'], baseline)
+        self.assertEqual(snapshot['effective'], baseline)
+        self.assertEqual(snapshot['effective_state'], 'hints_only')
+        self.assertEqual(snapshot['applied_overrides'], {})
+
+    def test_validation_snapshot_applies_only_conservative_numeric_tightening(self):
+        cfg = Config()
+        cfg._config['adaptive_regime'] = {
+            'enabled': True,
+            'mode': 'guarded_execute',
+            'regimes': {
+                'high_vol': {
+                    'validation_overrides': {
+                        'min_strength': 99,
+                        'min_strategy_count': 3,
+                    }
+                }
+            }
+        }
+        snapshot = build_validation_effective_snapshot(
+            cfg,
+            'BTC/USDT',
+            regime_snapshot=build_regime_snapshot('high_vol', 0.8, {'volatility': 0.06}, '高波动')
+        )
+        self.assertEqual(snapshot['effective']['min_strength'], max(snapshot['baseline']['min_strength'], 99))
+        self.assertEqual(snapshot['effective']['min_strategy_count'], max(snapshot['baseline']['min_strategy_count'], 3))
+        self.assertIn('min_strength', snapshot['applied_overrides'])
+        self.assertIn('min_strategy_count', snapshot['applied_overrides'])
+
+    def test_validation_snapshot_records_ignored_non_conservative_overrides_reason(self):
+        cfg = Config()
+        cfg._config['market_filters'] = {'block_counter_trend': True}
+        cfg._config['strategies'] = {'composite': {'min_strength': 28, 'min_strategy_count': 2}}
+        cfg._config['adaptive_regime'] = {
+            'enabled': True,
+            'mode': 'guarded_execute',
+            'regimes': {
+                'trend': {
+                    'validation_overrides': {
+                        'min_strength': 20,
+                        'block_counter_trend': False,
+                    }
+                }
+            }
+        }
+        snapshot = build_validation_effective_snapshot(
+            cfg,
+            'BTC/USDT',
+            regime_snapshot=build_regime_snapshot('trend', 0.8, {'ema_gap': 0.03}, '趋势')
+        )
+        ignored = snapshot['ignored_overrides']
+        self.assertTrue(any(item['key'] == 'min_strength' and item['reason'] == 'non_conservative_override' for item in ignored))
+        self.assertTrue(any(item['key'] == 'block_counter_trend' and item['reason'] == 'non_conservative_override' for item in ignored))
+
+    def test_validation_snapshot_includes_regime_and_policy_metadata(self):
+        cfg = Config()
+        snapshot = build_validation_effective_snapshot(
+            cfg,
+            'BTC/USDT',
+            regime_snapshot=build_regime_snapshot('risk_anomaly', 0.91, {'volatility': 0.12}, '异常'),
+        )
+        self.assertEqual(snapshot['regime_name'], 'risk_anomaly')
+        self.assertEqual(snapshot['policy_mode'], 'observe_only')
+        self.assertIn('policy_version', snapshot)
+        self.assertIn('stability_score', snapshot)
+        self.assertIn('transition_risk', snapshot)
 
 
 class TestAdaptiveRegimeConfigAndPolicy(unittest.TestCase):

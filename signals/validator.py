@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from core.config import Config
 from core.exchange import Exchange
 from core.risk_budget import get_risk_budget_config, summarize_margin_usage, compute_entry_plan
-from core.regime_policy import build_observe_only_payload
+from core.regime_policy import build_observe_only_payload, build_validation_effective_snapshot
 
 
 class SignalValidator:
@@ -58,6 +58,14 @@ class SignalValidator:
             'group': meta.get('group', 'other'),
             'action_hint': meta.get('action_hint', ''),
         }
+        hints = details.get('adaptive_validation_hints') or {}
+        hints['baseline_result'] = 'block'
+        hints['would_change_result'] = hints.get('hinted_result') != 'block'
+        details['adaptive_validation_hints'] = hints
+        observability = details.get('adaptive_validation_observability') or {}
+        observability['baseline_result'] = 'block'
+        observability['effective_result'] = hints.get('hinted_result', observability.get('effective_result', 'pass'))
+        details['adaptive_validation_observability'] = observability
         return False, reason, details
 
     def _get_latest_positions_view(self, current_positions: Dict = None) -> Dict:
@@ -78,6 +86,71 @@ class SignalValidator:
             latest_positions = current_positions or {}
         return latest_positions, used_exchange
 
+    def _build_validation_hints(self, signal, snapshot: Dict) -> Dict:
+        baseline = dict(snapshot.get('baseline') or {})
+        effective = dict(snapshot.get('effective') or {})
+        context = getattr(signal, 'market_context', {}) or {}
+        hint_codes = []
+        would_block_reasons = []
+        would_tighten_fields = []
+        notes = ['validator still uses baseline thresholds in step1']
+
+        def add_hint(code: str, field: str = None, message: str = None, would_block: bool = False):
+            if code not in hint_codes:
+                hint_codes.append(code)
+            if field and field not in would_tighten_fields:
+                would_tighten_fields.append(field)
+            if message:
+                would_block_reasons.append({'code': code, 'message': message, 'would_block': would_block})
+
+        if float(effective.get('min_strength', 0) or 0) > float(baseline.get('min_strength', 0) or 0):
+            add_hint('WOULD_RAISE_MIN_STRENGTH', 'min_strength', f"adaptive effective snapshot would raise min_strength to {effective.get('min_strength')}", signal.strength < effective.get('min_strength', 0))
+        if int(effective.get('min_strategy_count', 0) or 0) > int(baseline.get('min_strategy_count', 0) or 0):
+            add_hint('WOULD_RAISE_MIN_STRATEGY_COUNT', 'min_strategy_count', f"adaptive effective snapshot would raise min_strategy_count to {effective.get('min_strategy_count')}", len(signal.strategies_triggered) < effective.get('min_strategy_count', 0))
+        if effective.get('block_counter_trend') and not baseline.get('block_counter_trend'):
+            add_hint('WOULD_BLOCK_COUNTER_TREND', 'block_counter_trend', 'adaptive effective snapshot would block counter-trend entry', (signal.signal_type == 'buy' and context.get('trend') == 'bearish') or (signal.signal_type == 'sell' and context.get('trend') == 'bullish'))
+        if effective.get('block_high_volatility') and not baseline.get('block_high_volatility'):
+            add_hint('WOULD_BLOCK_HIGH_VOL', 'block_high_volatility', 'adaptive effective snapshot would block high-vol entry', bool(context.get('volatility_too_high')))
+        if effective.get('block_low_volatility') and not baseline.get('block_low_volatility'):
+            add_hint('WOULD_BLOCK_LOW_VOL', 'block_low_volatility', 'adaptive effective snapshot would block low-vol entry', bool(context.get('volatility_too_low')))
+
+        regime = context.get('regime', 'unknown')
+        confidence = float(context.get('regime_confidence', 0.0) or 0.0)
+        transition_risk = float(snapshot.get('transition_risk', 0.0) or 0.0)
+        would_block_risk_anomaly = regime == 'risk_anomaly' and confidence >= 0.5
+        would_block_transition_risk = transition_risk >= 0.8
+        if would_block_risk_anomaly:
+            add_hint('WOULD_BLOCK_RISK_ANOMALY', 'regime_guard', 'adaptive effective snapshot would block risk-anomaly regime', True)
+        if would_block_transition_risk:
+            add_hint('WOULD_BLOCK_TRANSITION_RISK', 'transition_risk', 'adaptive effective snapshot would block high transition-risk regime', True)
+
+        for ignored in snapshot.get('ignored_overrides') or []:
+            if (ignored.get('code') or '').startswith('IGNORED_') and ignored.get('code') not in hint_codes:
+                hint_codes.append(ignored.get('code'))
+
+        hinted_result = 'block' if any(row.get('would_block') for row in would_block_reasons) else 'pass'
+        return {
+            'enabled': bool(snapshot.get('hints_enabled', True)),
+            'effective_state': snapshot.get('effective_state', 'hints_only'),
+            'baseline_result': 'pass',
+            'hinted_result': hinted_result,
+            'would_change_result': hinted_result != 'pass',
+            'hint_codes': hint_codes,
+            'would_block_reasons': would_block_reasons,
+            'would_tighten_fields': would_tighten_fields,
+            'would_fail_min_strength': signal.strength < effective.get('min_strength', 0),
+            'would_fail_min_strategy_count': len(signal.strategies_triggered) < effective.get('min_strategy_count', 0),
+            'would_block_counter_trend': (signal.signal_type == 'buy' and context.get('trend') == 'bearish') or (signal.signal_type == 'sell' and context.get('trend') == 'bullish'),
+            'would_block_high_volatility': bool(context.get('volatility_too_high')),
+            'would_block_low_volatility': bool(context.get('volatility_too_low')),
+            'would_block_risk_anomaly': would_block_risk_anomaly,
+            'would_block_transition_risk': would_block_transition_risk,
+            'notes': notes,
+            'applied': list((snapshot.get('applied_overrides') or {}).keys()),
+            'ignored': list(snapshot.get('ignored_overrides') or []),
+            'observe_only': bool(snapshot.get('observe_only', True)),
+        }
+
     def validate(self, signal, current_positions: Dict = None,
                  tracking_data: Dict = None) -> tuple:
         """验证信号，返回 (passed, reason, details)"""
@@ -94,6 +167,27 @@ class SignalValidator:
             'notes': list(observe_only_payload.get('observe_only_notes') or []),
             'regime': observe_only_payload.get('regime_observe_only') or {},
             'policy': observe_only_payload.get('adaptive_policy_observe_only') or {},
+        }
+        validation_snapshot = build_validation_effective_snapshot(
+            self.config,
+            getattr(signal, 'symbol', None),
+            signal=signal,
+            regime_snapshot=observe_only_payload.get('regime_snapshot'),
+            policy_snapshot=observe_only_payload.get('adaptive_policy_snapshot'),
+        )
+        validation_hints = self._build_validation_hints(signal, validation_snapshot)
+        details['adaptive_validation_snapshot'] = validation_snapshot
+        details['adaptive_validation_hints'] = validation_hints
+        details['adaptive_validation_observability'] = {
+            'phase': 'm3_step1',
+            'state': validation_snapshot.get('effective_state', 'hints_only'),
+            'mode': validation_snapshot.get('policy_mode', 'observe_only'),
+            'rollout_match': validation_snapshot.get('rollout_match', True),
+            'enforcement_enabled': validation_snapshot.get('enforcement_enabled', False),
+            'conservative_only': validation_snapshot.get('conservative_only', True),
+            'observe_only': validation_snapshot.get('observe_only', True),
+            'baseline_result': 'pending',
+            'effective_result': validation_hints.get('hinted_result', 'pass'),
         }
         latest_positions, used_exchange_positions = self._get_latest_positions_view(current_positions)
 
@@ -412,6 +506,14 @@ class SignalValidator:
             'strength': signal.strength
         }
 
+        hints = details.get('adaptive_validation_hints') or {}
+        hints['baseline_result'] = 'pass'
+        hints['would_change_result'] = hints.get('hinted_result') != 'pass'
+        details['adaptive_validation_hints'] = hints
+        observability = details.get('adaptive_validation_observability') or {}
+        observability['baseline_result'] = 'pass'
+        observability['effective_result'] = hints.get('hinted_result', observability.get('effective_result', 'pass'))
+        details['adaptive_validation_observability'] = observability
         return True, None, details
 
     def get_filter_summary(self, details: dict) -> str:

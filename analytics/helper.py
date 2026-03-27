@@ -234,6 +234,11 @@ def build_workflow_approval_records(payload: Dict) -> List[Dict]:
             'owner_hint': row.get('owner_hint'),
             'approval_roles': row.get('approval_roles') or [],
             'execution_window': row.get('execution_window') or {},
+            'rollout_stage': row.get('rollout_stage'),
+            'target_rollout_stage': row.get('target_rollout_stage'),
+            'stage_model': row.get('stage_model') or {},
+            'queue_progression': row.get('queue_progression') or {},
+            'scheduled_review': row.get('scheduled_review') or {},
             'preconditions': row.get('preconditions') or [],
             'rollback_plan': row.get('rollback_plan') or {},
             'auto_approval_decision': row.get('auto_approval_decision'),
@@ -358,7 +363,10 @@ def _build_controlled_rollout_action_details(action_type: str, row: Dict, workfl
         previous_stage = str(row.get('current_rollout_stage') or workflow_item.get('current_rollout_stage') or row.get('rollout_stage') or workflow_item.get('rollout_stage') or 'pending').strip().lower() or 'pending'
         details.update({
             'rollout_stage': target_stage,
+            'target_rollout_stage': target_stage,
             'stage_transition': {'from': previous_stage, 'to': target_stage},
+            'stage_model': workflow_item.get('stage_model') or row.get('stage_model') or {},
+            'queue_progression': workflow_item.get('queue_progression') or row.get('queue_progression') or {},
         })
     elif action_type == 'joint_review_schedule':
         review_after_hours = int(row.get('review_after_hours') or workflow_item.get('review_after_hours') or settings.get('default_review_after_hours') or 24)
@@ -371,6 +379,10 @@ def _build_controlled_rollout_action_details(action_type: str, row: Dict, workfl
             'review_scheduled_at': now_iso,
             'review_due_at': due_at,
             'review_after_hours': review_after_hours,
+            'scheduled_review': workflow_item.get('scheduled_review') or row.get('scheduled_review') or {
+                'type': 'time_window',
+                'target_trade_count': row.get('target_trade_count') or workflow_item.get('target_trade_count'),
+            },
         })
     elif action_type == 'joint_metadata_annotate':
         annotations = row.get('annotations') or workflow_item.get('annotations') or row.get('metadata_annotations') or workflow_item.get('metadata_annotations') or {}

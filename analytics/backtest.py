@@ -702,7 +702,14 @@ def _build_joint_action_playbook(items: List[Dict]) -> Dict:
     by_bucket = {}
     for item in items or []:
         risk_level = _decision_risk_level((item.get('final_governance_decision') or {}).get('decision'), (item.get('conflict_resolution') or {}).get('blocking_precedence'))
-        execution_window = _execution_window_for_item(item)
+        execution_window = _build_execution_window_semantics(
+            decision=(item.get('final_governance_decision') or {}).get('decision'),
+            priority=item.get('priority') or 'low',
+            blocking=bool(((item.get('final_governance_decision') or {}).get('blocking'))),
+            next_review_after=max(int((item.get('evidence') or {}).get('min_sample_size') or 0), int((item.get('evidence') or {}).get('trade_count') or 0)),
+            trade_count=int((item.get('evidence') or {}).get('trade_count') or 0),
+        )
+        conflict = item.get('conflict_resolution') or {}
         bucket_actions = []
         for index, action in enumerate(item.get('combined_actions') or [], start=1):
             action_type = action.get('type') or f'action_{index}'
@@ -711,6 +718,24 @@ def _build_joint_action_playbook(items: List[Dict]) -> Dict:
             owner_hint = action.get('owner') or ('ops' if risk_level in {'critical', 'high'} else 'research')
             preconditions = _joint_item_preconditions(item, action)
             rollback_plan = _joint_item_rollback_plan(item, action)
+            stage_model = _build_rollout_stage_model(
+                decision=(item.get('final_governance_decision') or {}).get('decision'),
+                recommendation_type=action_type,
+                blocking=bool((conflict.get('blocking_issues') or [])),
+                approval_required=approval_required,
+                trade_count=int((item.get('evidence') or {}).get('trade_count') or 0),
+                next_review_after=max(int((item.get('evidence') or {}).get('min_sample_size') or 0), int((item.get('evidence') or {}).get('trade_count') or 0)),
+                execution_window=execution_window,
+            )
+            queue_progression = _build_queue_progression(
+                bucket_id=item.get('bucket_id'),
+                stage_model=stage_model,
+                blockers=[{'value': issue, 'resolved': False} for issue in (conflict.get('blocking_issues') or [])],
+                next_actions=[{'id': playbook_id}],
+                action_queue=[{'id': playbook_id}],
+                decision=(item.get('final_governance_decision') or {}).get('decision'),
+                priority=item.get('priority') or 'low',
+            )
             playbook_row = {
                 'playbook_id': playbook_id,
                 'bucket_id': item.get('bucket_id'),
@@ -729,6 +754,11 @@ def _build_joint_action_playbook(items: List[Dict]) -> Dict:
                 'approval_required': approval_required,
                 'approval_roles': _approval_roles_for_risk(risk_level) if approval_required else [],
                 'execution_window': execution_window,
+                'rollout_stage': stage_model.get('current_stage'),
+                'target_rollout_stage': stage_model.get('target_stage'),
+                'stage_model': stage_model,
+                'queue_progression': queue_progression,
+                'scheduled_review': (execution_window.get('scheduled_review') or {}),
                 'preconditions': preconditions,
                 'rollback_plan': rollback_plan,
                 'status': 'pending_approval' if approval_required else 'ready_for_review',
@@ -754,6 +784,11 @@ def _build_joint_action_playbook(items: List[Dict]) -> Dict:
                     'approval_roles': _approval_roles_for_risk(risk_level),
                     'status': 'awaiting_manual_approval',
                     'execution_window': execution_window,
+                    'rollout_stage': stage_model.get('current_stage'),
+                    'target_rollout_stage': stage_model.get('target_stage'),
+                    'stage_model': stage_model,
+                    'queue_progression': queue_progression,
+                    'scheduled_review': (execution_window.get('scheduled_review') or {}),
                     'preconditions': preconditions,
                     'rollback_plan': rollback_plan,
                 })
@@ -795,6 +830,122 @@ def _priority_rank(value: Optional[str]) -> int:
 def _confidence_rank(value: Optional[str]) -> int:
     return {'high': 0, 'medium': 1, 'low': 2}.get(_normalize_bucket_tag(value), 9)
 
+
+
+
+def _build_rollout_stage_model(*, decision: str, recommendation_type: str, blocking: bool, approval_required: bool, trade_count: int, next_review_after: Optional[int], execution_window: Optional[Dict] = None) -> Dict:
+    execution_window = execution_window or {}
+    if decision == 'rollback':
+        current_stage = 'rollback_review'
+        target_stage = 'rollback_prepare'
+    elif decision == 'tighten':
+        current_stage = 'guardrail_review'
+        target_stage = 'guardrail_prepare'
+    elif decision == 'expand':
+        current_stage = 'candidate'
+        target_stage = 'guarded_prepare'
+    else:
+        current_stage = 'observe'
+        target_stage = 'review_pending' if blocking or recommendation_type == 'collect_more_samples' else 'observe'
+
+    if blocking:
+        readiness = 'blocked'
+    elif approval_required:
+        readiness = 'awaiting_approval'
+    elif target_stage in {'guarded_prepare', 'guardrail_prepare', 'rollback_prepare'}:
+        readiness = 'ready_for_stage_prepare'
+    else:
+        readiness = 'observe_only'
+
+    review_remaining = max(int(next_review_after or trade_count) - trade_count, 0) if next_review_after is not None else 0
+    return {
+        'current_stage': current_stage,
+        'target_stage': target_stage,
+        'readiness': readiness,
+        'stage_order': ['observe', 'candidate', 'guarded_prepare', 'guarded_execution_window', 'review_pending', 'rollback_review', 'rollback_prepare', 'rolled_back'],
+        'transition_model': {
+            'advance': target_stage,
+            'on_block': 'review_pending',
+            'on_review_due': 'review_pending',
+            'on_rollback': 'rollback_prepare' if decision in {'expand', 'tighten', 'rollback'} else 'observe',
+        },
+        'review_trade_count_remaining': review_remaining,
+        'execution_window': execution_window,
+    }
+
+
+def _build_execution_window_semantics(*, decision: str, priority: str, blocking: bool, next_review_after: Optional[int], trade_count: int) -> Dict:
+    if decision == 'rollback':
+        window_type = 'containment'
+        start = 'immediate'
+        review_by = 'same_day'
+    elif decision == 'tighten':
+        window_type = 'guardrail'
+        start = 'next_rebalance_window'
+        review_by = '24h'
+    elif decision == 'expand':
+        window_type = 'guarded_rollout'
+        start = 'next_low_risk_window'
+        review_by = 'post_3_trades_or_24h'
+    else:
+        window_type = 'observation'
+        start = 'after_next_review_checkpoint'
+        review_by = 'after_more_samples'
+    review_trade_count = max(int(next_review_after or trade_count), trade_count)
+    return {
+        'window_type': window_type,
+        'start': start,
+        'review_by': review_by,
+        'priority': priority,
+        'blocking': bool(blocking),
+        'scheduled_review': {
+            'type': 'trade_count_checkpoint' if next_review_after is not None else 'event_driven',
+            'target_trade_count': review_trade_count,
+            'remaining_trades': max(review_trade_count - trade_count, 0),
+        },
+    }
+
+
+def _build_queue_progression(*, bucket_id: str, stage_model: Dict, blockers: List[Dict], next_actions: List[Dict], action_queue: List[Dict], decision: str, priority: str) -> Dict:
+    active_blockers = [row.get('value') for row in blockers if not row.get('resolved')]
+    if active_blockers:
+        state = 'blocked'
+    elif next_actions:
+        state = 'ready'
+    else:
+        state = 'idle'
+    return {
+        'bucket_id': bucket_id,
+        'state': state,
+        'decision': decision,
+        'priority': priority,
+        'current_stage': stage_model.get('current_stage'),
+        'target_stage': stage_model.get('target_stage'),
+        'pending_blockers': active_blockers,
+        'ready_action_ids': [row.get('id') for row in next_actions],
+        'queued_action_ids': [row.get('id') for row in action_queue],
+        'queue_depth': len(action_queue),
+        'promote_action': 'joint_queue_promote_safe' if state == 'ready' and decision in {'expand', 'tighten', 'rollback'} else 'joint_observe',
+    }
+
+
+def _build_orchestration_summary(items: List[Dict]) -> Dict:
+    queue_rows = [item.get('orchestration', {}).get('queue_progression') or {} for item in items]
+    stage_counts = {}
+    readiness_counts = {}
+    for item in items:
+        stage_model = item.get('orchestration', {}).get('stage_model') or {}
+        stage = stage_model.get('target_stage') or 'unknown'
+        readiness = stage_model.get('readiness') or 'unknown'
+        stage_counts[stage] = stage_counts.get(stage, 0) + 1
+        readiness_counts[readiness] = readiness_counts.get(readiness, 0) + 1
+    return {
+        'stage_counts': dict(sorted(stage_counts.items())),
+        'readiness_counts': dict(sorted(readiness_counts.items())),
+        'blocked_queue_count': sum(1 for row in queue_rows if row.get('state') == 'blocked'),
+        'ready_queue_count': sum(1 for row in queue_rows if row.get('state') == 'ready'),
+        'scheduled_review_count': sum(1 for item in items if (item.get('orchestration', {}).get('execution_window') or {}).get('scheduled_review')),
+    }
 
 def _build_orchestration_plan(item: Dict) -> Dict:
     recommendation = item.get('recommendation') or {}
@@ -895,6 +1046,32 @@ def _build_orchestration_plan(item: Dict) -> Dict:
             'delta_win_rate': baseline.get('delta_win_rate'),
         })
 
+    execution_window = _build_execution_window_semantics(
+        decision=item.get('gate', {}).get('decision'),
+        priority=recommendation.get('priority') or 'low',
+        blocking=bool(blockers),
+        next_review_after=next_review_after,
+        trade_count=trade_count,
+    )
+    stage_model = _build_rollout_stage_model(
+        decision=item.get('gate', {}).get('decision'),
+        recommendation_type=recommendation.get('type'),
+        blocking=bool(blockers),
+        approval_required=False,
+        trade_count=trade_count,
+        next_review_after=next_review_after,
+        execution_window=execution_window,
+    )
+    queue_progression = _build_queue_progression(
+        bucket_id=bucket_id,
+        stage_model=stage_model,
+        blockers=blockers,
+        next_actions=next_actions,
+        action_queue=action_queue,
+        decision=item.get('gate', {}).get('decision'),
+        priority=recommendation.get('priority') or 'low',
+    )
+
     rollback_candidate = {
         'eligible': bool(recommendation.get('rollout_plan', {}).get('requires_fast_rollback')),
         'reason': recommendation.get('blocking_issue') or item.get('gate', {}).get('reason'),
@@ -907,10 +1084,19 @@ def _build_orchestration_plan(item: Dict) -> Dict:
         'confidence_rank': _confidence_rank(recommendation.get('confidence')),
         'blockers': blockers,
         'blocking_chain': blockers,
+        'stage_model': stage_model,
+        'queue_progression': queue_progression,
+        'execution_window': execution_window,
         'action_queue': action_queue,
         'next_actions': next_actions,
         'review_checkpoints': review_checkpoints,
         'rollback_candidate': rollback_candidate,
+        'summary': {
+            'current_stage': stage_model.get('current_stage'),
+            'target_stage': stage_model.get('target_stage'),
+            'queue_state': queue_progression.get('state'),
+            'scheduled_review_type': ((execution_window.get('scheduled_review') or {}).get('type')),
+        },
     }
 
 def _build_calibration_delivery_payload(
@@ -1024,8 +1210,12 @@ def _build_calibration_delivery_payload(
             'summary_line': item['recommendation']['summary_line'],
             'next_actions': item['orchestration']['next_actions'],
             'blocking_chain': item['orchestration']['blocking_chain'],
+            'stage_model': item['orchestration']['stage_model'],
+            'queue_progression': item['orchestration']['queue_progression'],
             'review_checkpoints': item['orchestration']['review_checkpoints'],
             'rollback_candidate': item['orchestration']['rollback_candidate'],
+            'execution_window': item['orchestration']['execution_window'],
+            'orchestration_summary': item['orchestration']['summary'],
         }
         for item in items
     ]
@@ -1051,6 +1241,8 @@ def _build_calibration_delivery_payload(
             'action_queue': item['orchestration']['action_queue'],
             'next_actions': item['orchestration']['next_actions'],
             'blocking_chain': item['orchestration']['blocking_chain'],
+            'stage_model': item['orchestration']['stage_model'],
+            'queue_progression': item['orchestration']['queue_progression'],
         }
         for item in items
         if item['orchestration']['next_actions']
@@ -1062,6 +1254,8 @@ def _build_calibration_delivery_payload(
             'policy_version': item['policy_version'],
             'decision': item['gate']['decision'],
             'blocking_chain': item['orchestration']['blocking_chain'],
+            'stage_model': item['orchestration']['stage_model'],
+            'queue_progression': item['orchestration']['queue_progression'],
         }
         for item in items
         if item['orchestration']['blocking_chain']
@@ -1073,6 +1267,8 @@ def _build_calibration_delivery_payload(
             'policy_version': item['policy_version'],
             'decision': item['gate']['decision'],
             'checkpoints': item['orchestration']['review_checkpoints'],
+            'scheduled_review': item['orchestration']['execution_window'].get('scheduled_review'),
+            'stage_model': item['orchestration']['stage_model'],
         }
         for item in items
         if item['orchestration']['review_checkpoints']
@@ -1102,6 +1298,7 @@ def _build_calibration_delivery_payload(
             'blocking_chain_count': len(blocking_chain),
             'next_action_bucket_count': len(next_actions),
             'rollback_candidate_count': len(rollback_candidates),
+            'orchestration_summary': _build_orchestration_summary(items),
         },
         'views': {
             'items': items,
@@ -1173,6 +1370,24 @@ def _build_calibration_delivery_payload(
             'joint_next_actions': (joint_governance or {}).get('next_actions') or [],
             'joint_action_playbook': ((joint_governance or {}).get('action_playbook') or {}).get('items') or [],
             'joint_approval_queue': ((joint_governance or {}).get('action_playbook') or {}).get('approval_queue') or [],
+            'stage_transitions': [
+                {
+                    'bucket_id': item['bucket_id'],
+                    'current_stage': (item['orchestration']['stage_model'] or {}).get('current_stage'),
+                    'target_stage': (item['orchestration']['stage_model'] or {}).get('target_stage'),
+                    'readiness': (item['orchestration']['stage_model'] or {}).get('readiness'),
+                }
+                for item in items
+            ],
+            'queue_progression': [item['orchestration']['queue_progression'] for item in items],
+            'execution_windows': [
+                {
+                    'bucket_id': item['bucket_id'],
+                    **(item['orchestration']['execution_window'] or {}),
+                }
+                for item in items
+            ],
+            'orchestration_summary': _build_orchestration_summary(items),
         },
     }
     delivery['governance_ready'] = build_joint_governance_ready_payload({
@@ -1769,6 +1984,8 @@ def _build_strategy_governance_delivery(strategy_recommendations: List[Dict]) ->
             'summary_line': item['recommendation']['summary_line'],
             'next_actions': item['orchestration']['next_actions'],
             'blocking_chain': item['orchestration']['blocking_chain'],
+            'stage_model': item['orchestration']['stage_model'],
+            'queue_progression': item['orchestration']['queue_progression'],
             'review_checkpoints': item['orchestration']['review_checkpoints'],
         }
         for item in items
@@ -1787,6 +2004,8 @@ def _build_strategy_governance_delivery(strategy_recommendations: List[Dict]) ->
                 'next_actions': item['orchestration']['next_actions'],
                 'action_queue': item['orchestration']['action_queue'],
                 'blocking_chain': item['orchestration']['blocking_chain'],
+            'stage_model': item['orchestration']['stage_model'],
+            'queue_progression': item['orchestration']['queue_progression'],
             }
             for item in items
             if item['orchestration']['next_actions']
@@ -1994,6 +2213,11 @@ def _build_workflow_state_layer(
             'execution_window': action.get('execution_window') or {},
             'preconditions': action.get('preconditions') or [],
             'rollback_plan': action.get('rollback_plan') or {},
+            'rollout_stage': action.get('rollout_stage'),
+            'target_rollout_stage': action.get('target_rollout_stage'),
+            'stage_model': action.get('stage_model') or {},
+            'queue_progression': action.get('queue_progression') or {},
+            'scheduled_review': action.get('scheduled_review') or {},
         }
         item_states.append(item_state)
         action_states.append(item_state)
@@ -2028,6 +2252,11 @@ def _build_workflow_state_layer(
             'preconditions': approval.get('preconditions') or [],
             'rollback_plan': approval.get('rollback_plan') or {},
             'status': approval.get('status'),
+            'rollout_stage': approval.get('rollout_stage'),
+            'target_rollout_stage': approval.get('target_rollout_stage'),
+            'stage_model': approval.get('stage_model') or {},
+            'queue_progression': approval.get('queue_progression') or {},
+            'scheduled_review': approval.get('scheduled_review') or {},
         }
         approval_states.append(approval_state)
         approval_state_by_id[approval_state['approval_id']] = approval_state
@@ -2087,6 +2316,7 @@ def _build_workflow_state_layer(
             'pending_approval_count': sum(1 for row in approval_states if row.get('approval_state') == 'pending'),
             'execution_ready_count': sum(1 for row in item_states if (row.get('execution_readiness') or {}).get('ready')),
             'rollback_ready_count': sum(1 for row in item_states if (row.get('rollback_readiness') or {}).get('ready')),
+            'stage_counts': dict(sorted({stage: sum(1 for row in item_states if row.get('target_rollout_stage') == stage) for stage in {row.get('target_rollout_stage') for row in item_states if row.get('target_rollout_stage')}}.items())),
         },
         'queues': {
             'priority': priority_queue,
@@ -2176,6 +2406,7 @@ def build_governance_workflow_ready_payload(source: Dict) -> Dict:
         'priority_queue_size': len(priority_queue),
         'next_action_bucket_count': len(next_actions),
         'blocking_item_count': len(blocking_items),
+        'orchestration_summary': orchestration_ready.get('orchestration_summary') or {},
         'workflow_state_summary': (state_layer.get('workflow_state') or {}).get('summary') or {},
         'approval_state_summary': (state_layer.get('approval_state') or {}).get('summary') or {},
         'filters': {key: len(value) for key, value in filters.items()},

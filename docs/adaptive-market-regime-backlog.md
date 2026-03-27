@@ -120,6 +120,28 @@
   - `decision` 保持原值（通常仍是 `pending`），避免把 state-apply 冒充人工批准；
   - 若 item 已在终态（approved/rejected/deferred/expired），则必须跳过。
 
+### AR-M5-07｜rollout stage orchestration / queue progression / scheduled review semantics
+
+- **阶段 / 优先级**：M5 / P0
+- **生效范围**：默认仅生成 orchestration / workflow / persistence-ready 结构；受控 state-apply 仅允许写 very-safe stage / review / queue 元数据，**不做真实交易执行**
+- **目标**：在已有 `governance_ready / workflow_ready / approval_state / controlled rollout action types` 之上，把“自动 rollout”从松散 action list 推进到更明确的 stage orchestration 语义：
+  1. 为每个 bucket / playbook item 生成 `stage_model`（current/target/readiness/transition_model）；
+  2. 为 orchestration queue 增加 `queue_progression`（queue depth / ready actions / pending blockers / promote action）；
+  3. 为 execution window 增加 `scheduled_review` 语义（trade-count checkpoint / remaining trades / review trigger）；
+  4. 在 delivery / workflow / approval persistence 链路透传 `rollout_stage / target_rollout_stage / stage_model / queue_progression / scheduled_review`；
+  5. 为 orchestration summary 增加 stage/readiness/queue 聚合，方便 dashboard / agent 后续做低干预巡检与自动推进。
+- **涉及模块**：`analytics/backtest.py`、`analytics/helper.py`、`dashboard/api.py`、`tests/`
+- **新增语义**：
+  - `stage_model`：表达 observe / candidate / guarded_prepare / rollback_prepare / review_pending 等阶段，以及 advance / on_block / on_review_due / on_rollback transition；
+  - `queue_progression`：表达 bucket 是否 blocked/ready/idle、可推进 action id、queue depth、推荐 safe promote action；
+  - `execution_window.scheduled_review`：表达按样本数或事件驱动的 review checkpoint，而不是模糊的“稍后复核”；
+  - `orchestration_summary`：表达全局 stage counts / readiness counts / blocked queue count / scheduled review count。
+- **安全边界**：
+  - 所有新增字段都必须可序列化、可审计、可回放；
+  - 默认只增强 orchestrator 语义，不新增真实 rollout 执行；
+  - 即使受控 state-apply 开启，也只允许 `joint_stage_prepare / joint_review_schedule / joint_queue_promote_safe` 这类 very-safe 元数据/状态动作；
+  - 保持 terminal state preserve 语义，不允许后续 replay 覆盖终态。
+
 ### AR-M5-05｜approval audit / stale cleanup / decision diff layer
 
 - **阶段 / 优先级**：M5 / P0

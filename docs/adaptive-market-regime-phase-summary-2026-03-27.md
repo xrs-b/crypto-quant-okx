@@ -55,6 +55,7 @@
 - `workflow_ready` 工作流直出层（含 `actions` / `approval_queue` / `queues` / `filters` / `by_bucket`，供 dashboard/agent/人工治理直接消费）
 - orchestration semantics（action queue / next actions / blocking chain / rollback candidates）
 - controlled rollout state-apply execution layer（默认关闭；除 `joint_observe` 外，已扩到 `joint_queue_promote_safe` / `joint_stage_prepare` / `joint_review_schedule` / `joint_metadata_annotate` 等 very-safe 动作；全部只写持久化 state / workflow / metadata / audit，不触发真实交易执行）
+- rollout stage orchestration 首版（新增 `stage_model` / `queue_progression` / `scheduled_review` / `orchestration_summary`，并把 stage/queue/review semantics 透传到 delivery、workflow-ready、approval persistence，继续保持默认安全关闭）
 
 ---
 

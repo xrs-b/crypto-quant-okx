@@ -4281,11 +4281,17 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
         self.assertIn('orchestration', first_item)
         self.assertTrue(first_item['orchestration']['action_queue'])
         self.assertIn('review_checkpoints', first_item['orchestration'])
+        self.assertIn('stage_model', first_item['orchestration'])
+        self.assertIn('queue_progression', first_item['orchestration'])
+        self.assertIn('execution_window', first_item['orchestration'])
         first_queue = delivery['orchestration_ready']['queue'][0]
         self.assertIn('primary_action', first_queue)
         self.assertIn('next_actions', first_queue)
         self.assertIn('blocking_chain', first_queue)
         self.assertIn('rollback_candidate', first_queue)
+        self.assertIn('stage_model', first_queue)
+        self.assertIn('queue_progression', first_queue)
+        self.assertIn('execution_window', first_queue)
         self.assertIn(first_queue['decision'], {'expand', 'tighten', 'rollback', 'hold'})
         self.assertIn('expand', delivery['orchestration_ready']['queues'])
         self.assertIn('rollback', delivery['orchestration_ready']['queues'])
@@ -4293,6 +4299,9 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
         self.assertTrue(delivery['orchestration_ready']['next_actions'])
         self.assertTrue(delivery['orchestration_ready']['review_checkpoints'])
         self.assertIn('repricing_review', delivery['orchestration_ready']['action_catalog'])
+        self.assertTrue(delivery['orchestration_ready']['stage_transitions'])
+        self.assertTrue(delivery['orchestration_ready']['queue_progression'])
+        self.assertTrue(delivery['orchestration_ready']['execution_windows'])
         self.assertEqual(report['summary']['delivery_ready']['schema_version'], 'm5_delivery_v1')
         self.assertGreaterEqual(report['summary']['delivery_ready']['priority_queue_size'], 1)
         self.assertGreaterEqual(report['summary']['delivery_ready']['next_action_bucket_count'], 1)
@@ -4336,6 +4345,9 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
         review_row = next(row for row in delivery['orchestration_ready']['review_checkpoints'] if row['bucket_id'] == rollback_item['bucket_id'])
         self.assertTrue(any(checkpoint['type'] == 'trade_count' for checkpoint in review_row['checkpoints']))
         self.assertTrue(any(checkpoint['type'] == 'thresholds' for checkpoint in review_row['checkpoints']))
+        self.assertIn('scheduled_review', review_row)
+        self.assertEqual(rollback_item['orchestration']['stage_model']['target_stage'], 'rollback_prepare')
+        self.assertIn(rollback_item['orchestration']['queue_progression']['state'], {'ready', 'blocked'})
         rollback_candidates = delivery['orchestration_ready']['rollback_candidates']
         self.assertTrue(any(row['bucket_id'] == rollback_item['bucket_id'] for row in rollback_candidates))
 
@@ -4401,6 +4413,9 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
         self.assertIn('preconditions', playbook_row)
         self.assertIn('rollback_plan', playbook_row)
         self.assertIn('execution_window', playbook_row)
+        self.assertIn('stage_model', playbook_row)
+        self.assertIn('queue_progression', playbook_row)
+        self.assertIn('scheduled_review', playbook_row)
         approval_row = delivery['orchestration_ready']['joint_approval_queue'][0]
         self.assertEqual(approval_row['status'], 'awaiting_manual_approval')
         self.assertGreaterEqual(report['summary']['delivery_ready']['joint_priority_queue_size'], 1)
@@ -4548,6 +4563,9 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
         self.assertIn('preconditions', playbook_row)
         self.assertIn('rollback_plan', playbook_row)
         self.assertIn('execution_window', playbook_row)
+        self.assertIn('stage_model', playbook_row)
+        self.assertIn('queue_progression', playbook_row)
+        self.assertIn('scheduled_review', playbook_row)
         self.assertTrue(payload['approval_ready']['summary']['approver_roles'])
         approval_row = payload['approval_ready']['items'][0]
         bucket_ready = payload['approval_ready']['by_bucket'][approval_row['bucket_id']]
@@ -4585,6 +4603,7 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
         self.assertTrue(payload['workflow_state']['item_states'])
         self.assertTrue(payload['approval_state']['items'])
         self.assertEqual(payload['workflow_state']['summary']['item_count'], len(payload['workflow_state']['item_states']))
+        self.assertTrue(payload['summary']['orchestration_summary'])
         self.assertEqual(payload['approval_state']['summary']['approval_count'], len(payload['approval_state']['items']))
         approval_row = payload['approval_queue'][0]
         self.assertTrue(any(
@@ -4592,6 +4611,10 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
             for row in payload['by_bucket'][approval_row['bucket_id']]['approvals']['actions']
         ))
         self.assertIn('state', payload['by_bucket'][approval_row['bucket_id']])
+        workflow_item = payload['workflow_state']['item_states'][0]
+        self.assertIn('stage_model', workflow_item)
+        self.assertIn('queue_progression', workflow_item)
+        self.assertIn('scheduled_review', workflow_item)
 
     def test_governance_workflow_ready_payload_exposes_auto_approval_policy(self):
         report = build_regime_policy_calibration_report([
@@ -5256,6 +5279,9 @@ class TestApprovalPersistence(unittest.TestCase):
             }
         ]))
         approval_record = build_workflow_approval_records(payload)[0]
+        self.assertIn('stage_model', approval_record)
+        self.assertIn('queue_progression', approval_record)
+        self.assertIn('scheduled_review', approval_record)
         merged = merge_persisted_approval_state(payload, [{
             'item_id': approval_record['item_id'],
             'state': 'approved',
@@ -5535,6 +5561,7 @@ class TestApprovalPersistence(unittest.TestCase):
             self.assertEqual(stage_row['details']['rollout_stage'], 'prepared')
             self.assertEqual(stage_row['details']['stage_transition']['from'], 'observe')
             self.assertEqual(stage_row['details']['stage_transition']['to'], 'prepared')
+            self.assertIn('stage_model', stage_row['details'])
 
             review_row = db.get_approval_state('approval::review')
             self.assertEqual(review_row['state'], 'pending')
@@ -5542,6 +5569,7 @@ class TestApprovalPersistence(unittest.TestCase):
             self.assertEqual(review_row['details']['review_status'], 'scheduled')
             self.assertEqual(review_row['details']['review_after_hours'], 4)
             self.assertIn('T', review_row['details']['review_due_at'])
+            self.assertIn('scheduled_review', review_row['details'])
             review_timeline = db.get_approval_timeline(item_id='approval::review', ascending=True)
             self.assertEqual(review_timeline[-1]['event_type'], 'controlled_rollout_review_schedule')
 

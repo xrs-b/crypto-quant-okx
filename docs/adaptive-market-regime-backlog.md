@@ -184,6 +184,11 @@
   - queue-only action 补充 `queue_plan`（queue_name / queue_priority / next_action / blocked_reason）；
   - `summary` 新增 `dry_run_count / error_count / by_disposition / by_status`，方便后续 dashboard/executor capability 扩展；
   - 继续保持 `real_trade_execution=false`、`dangerous_live_parameter_change=false`，不触发真实交易或 live 参数修改。
+- **2026-03-27 skeleton+2 / queue-transition + approval-hook 增量**：
+  - queue-only path 新增 `approval_hook`，显式串起 `approval_state / workflow_state / auto_approval_decision / requires_manual / blocked_by`；
+  - `queue_plan` 新增 `queue_transition` 与 `queue_progression.status`，把 queue disposition 细化成 `ready_to_queue / blocked_by_approval / deferred`；
+  - queue-only dispatcher 不再一律返回 `queued`，而会按审批 gate 返回 `queued / blocked_by_approval / deferred`，方便后续 queue executor / dashboard / audit 直接消费；
+  - 仍保持安全边界：只做 queue semantics 与审批钩子，不触发真实交易执行，不做 live 参数 apply。
 
 ### AR-M5-05｜approval audit / stale cleanup / decision diff layer
 

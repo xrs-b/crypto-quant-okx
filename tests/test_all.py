@@ -5600,6 +5600,99 @@ class TestApprovalPersistence(unittest.TestCase):
             self.assertFalse(item['plan']['queue_plan']['real_trade_execution'])
             self.assertEqual(executor['summary']['by_disposition']['queued'], 1)
 
+    def test_rollout_executor_skeleton_marks_queue_only_items_as_blocked_by_approval_when_manual_gate_remains(self):
+        class StubConfig:
+            def __init__(self, values=None):
+                self.values = values or {}
+
+            def get(self, key, default=None):
+                return self.values.get(key, default)
+
+        config = StubConfig({
+            'governance.rollout_executor': {
+                'enabled': True,
+                'mode': 'controlled',
+                'actor': 'system:test-rollout-executor',
+                'source': 'unit_test_rollout_executor',
+                'reason_prefix': 'unit-test rollout executor',
+                'allowed_action_types': ['joint_expand_guarded'],
+            }
+        })
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(str(Path(tmpdir) / 'rollout_executor_queue_gate.db'))
+            payload = {
+                'workflow_state': {'item_states': [{
+                    'item_id': 'playbook::expand-manual', 'title': 'Guarded expand manual', 'action_type': 'joint_expand_guarded',
+                    'decision': 'expand', 'governance_mode': 'rollout', 'risk_level': 'medium', 'approval_required': True,
+                    'blocking_reasons': [], 'preconditions': [], 'workflow_state': 'pending', 'confidence': 'high',
+                    'queue_name': 'manual_rollout_review',
+                    'queue_progression': {'status': 'awaiting_approval', 'reason': 'manual_approval_pending'}}], 'summary': {}},
+                'approval_state': {'items': [{
+                    'approval_id': 'approval::expand-manual', 'playbook_id': 'playbook::expand-manual', 'title': 'Guarded expand manual',
+                    'action_type': 'joint_expand_guarded', 'approval_state': 'pending', 'decision_state': 'pending',
+                    'risk_level': 'medium', 'approval_required': True, 'blocked_by': []}], 'summary': {}},
+            }
+            payload = attach_auto_approval_policy(payload)
+            db.sync_approval_items(build_workflow_approval_records(payload), replay_source='unit-test')
+            result = execute_rollout_executor(payload, db, config=config, replay_source='unit-test-replay')
+            item = result['rollout_executor']['items'][0]
+            queue_plan = item['plan']['queue_plan']
+            self.assertEqual(item['status'], 'blocked_by_approval')
+            self.assertEqual(item['result']['disposition'], 'blocked_by_approval')
+            self.assertEqual(item['dispatch']['code'], 'APPROVAL_GATED_QUEUE')
+            self.assertEqual(queue_plan['approval_hook']['status'], 'blocked_by_approval')
+            self.assertEqual(queue_plan['approval_hook']['next_action'], 'await_manual_approval')
+            self.assertEqual(queue_plan['queue_transition']['to_queue_status'], 'blocked_by_approval')
+            self.assertEqual(queue_plan['queue_progression']['status'], 'blocked_by_approval')
+            self.assertEqual(queue_plan['queue_priority'], 'approval_blocked')
+            self.assertEqual(result['rollout_executor']['summary']['by_disposition']['blocked_by_approval'], 1)
+
+    def test_rollout_executor_skeleton_marks_queue_only_items_as_deferred_when_preconditions_are_open(self):
+        class StubConfig:
+            def __init__(self, values=None):
+                self.values = values or {}
+
+            def get(self, key, default=None):
+                return self.values.get(key, default)
+
+        config = StubConfig({
+            'governance.rollout_executor': {
+                'enabled': True,
+                'mode': 'controlled',
+                'actor': 'system:test-rollout-executor',
+                'source': 'unit_test_rollout_executor',
+                'reason_prefix': 'unit-test rollout executor',
+                'allowed_action_types': ['joint_expand_guarded'],
+            }
+        })
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(str(Path(tmpdir) / 'rollout_executor_queue_deferred.db'))
+            payload = {
+                'workflow_state': {'item_states': [{
+                    'item_id': 'playbook::expand-deferred', 'title': 'Guarded expand deferred', 'action_type': 'joint_expand_guarded',
+                    'decision': 'expand', 'governance_mode': 'rollout', 'risk_level': 'low', 'approval_required': False,
+                    'blocking_reasons': ['waiting_metrics'], 'preconditions': [{'type': 'wait', 'value': 'more_samples', 'status': 'open'}],
+                    'workflow_state': 'pending', 'confidence': 'medium', 'queue_name': 'manual_rollout_review'}], 'summary': {}},
+                'approval_state': {'items': [{
+                    'approval_id': 'approval::expand-deferred', 'playbook_id': 'playbook::expand-deferred', 'title': 'Guarded expand deferred',
+                    'action_type': 'joint_expand_guarded', 'approval_state': 'pending', 'decision_state': 'pending',
+                    'risk_level': 'low', 'approval_required': False, 'blocked_by': ['waiting_metrics', 'more_samples']}], 'summary': {}},
+            }
+            payload = attach_auto_approval_policy(payload)
+            db.sync_approval_items(build_workflow_approval_records(payload), replay_source='unit-test')
+            result = execute_rollout_executor(payload, db, config=config, replay_source='unit-test-replay')
+            item = result['rollout_executor']['items'][0]
+            queue_plan = item['plan']['queue_plan']
+            self.assertEqual(item['status'], 'deferred')
+            self.assertEqual(item['result']['disposition'], 'deferred')
+            self.assertEqual(item['dispatch']['code'], 'QUEUE_DEFERRED')
+            self.assertEqual(queue_plan['approval_hook']['status'], 'deferred')
+            self.assertEqual(queue_plan['approval_hook']['next_action'], 'wait_for_preconditions')
+            self.assertEqual(queue_plan['queue_transition']['to_queue_status'], 'deferred')
+            self.assertTrue(queue_plan['queue_transition']['transition_reason'].startswith('blocked_by:'))
+            self.assertEqual(queue_plan['queue_priority'], 'deferred_review')
+            self.assertEqual(result['rollout_executor']['summary']['by_disposition']['deferred'], 1)
+
     def test_rollout_executor_skeleton_marks_idempotent_safe_apply_as_skip(self):
         class StubConfig:
             def __init__(self, values=None):

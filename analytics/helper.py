@@ -887,15 +887,84 @@ def _build_rollout_result_envelope(*, disposition: str, status: str, reason: Opt
     return result
 
 
-def _build_rollout_queue_plan(action_type: str, row: Dict[str, Any], workflow_item: Dict[str, Any], spec: Dict[str, Any]) -> Dict[str, Any]:
+def _build_rollout_approval_hook(*, row: Dict[str, Any], workflow_item: Dict[str, Any], current_state: str,
+                                 current_workflow_state: str, auto_decision: str, eligible: bool,
+                                 approval_required: bool, requires_manual: bool,
+                                 blocked_by: Optional[List[str]] = None) -> Dict[str, Any]:
+    blocked = _dedupe_strings(blocked_by or [])
+    persisted_decision = str(row.get('persisted_decision') or row.get('approval_state') or current_state or 'pending').strip().lower() or 'pending'
+    existing_progression = dict(workflow_item.get('queue_progression') or row.get('queue_progression') or {})
+    existing_status = str(existing_progression.get('status') or '').strip().lower()
+    hook_status = 'ready_to_queue'
+    gate_reason = None
+    next_action = 'queue_for_followup'
+
+    if current_state in TERMINAL_APPROVAL_STATES:
+        hook_status = 'terminal'
+        gate_reason = f'terminal_state:{current_state}'
+        next_action = 'preserve_terminal_state'
+    elif existing_status in {'awaiting_approval', 'blocked_by_approval'}:
+        hook_status = 'blocked_by_approval'
+        gate_reason = existing_progression.get('reason') or existing_progression.get('blocked_reason') or 'approval_progression_pending'
+        next_action = 'await_manual_approval'
+    elif blocked:
+        hook_status = 'deferred'
+        gate_reason = 'blocked_by:' + ','.join(blocked)
+        next_action = 'wait_for_preconditions'
+    elif auto_decision == 'defer' or auto_decision == 'freeze':
+        hook_status = 'deferred'
+        gate_reason = 'auto_approval_deferred' if auto_decision == 'defer' else 'freeze_guardrail'
+        next_action = 'hold_queue_progression'
+    elif approval_required or requires_manual or auto_decision == 'manual_review':
+        hook_status = 'ready_to_queue'
+        gate_reason = 'manual_review_required'
+        next_action = 'queue_for_manual_review'
+
+    return {
+        'status': hook_status,
+        'approval_state': current_state,
+        'workflow_state': current_workflow_state,
+        'decision': persisted_decision,
+        'auto_approval_decision': auto_decision,
+        'eligible': bool(eligible),
+        'approval_required': bool(approval_required),
+        'requires_manual': bool(requires_manual),
+        'blocked_by': blocked,
+        'gate_reason': gate_reason,
+        'next_action': next_action,
+    }
+
+
+
+def _build_rollout_queue_plan(action_type: str, row: Dict[str, Any], workflow_item: Dict[str, Any], spec: Dict[str, Any],
+                              approval_hook: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     queue_name = row.get('target_queue') or workflow_item.get('queue_name') or row.get('bucket_id') or workflow_item.get('bucket_id') or 'manual_review_queue'
+    hook = dict(approval_hook or {})
+    queue_status = hook.get('status') or 'ready_to_queue'
+    queue_priority = row.get('queue_priority') or workflow_item.get('queue_priority') or ('approval_blocked' if queue_status == 'blocked_by_approval' else 'deferred_review' if queue_status == 'deferred' else 'needs_human_review')
+    queue_progression = {
+        'status': queue_status,
+        'approval_state': hook.get('approval_state'),
+        'workflow_state': hook.get('workflow_state'),
+        'decision': hook.get('decision'),
+        'gate_reason': hook.get('gate_reason') or spec.get('blocked_reason'),
+        'next_action': hook.get('next_action') or action_type,
+    }
     return {
         'queue_name': queue_name,
         'queue_action': 'manual_followup',
-        'queue_priority': row.get('queue_priority') or workflow_item.get('queue_priority') or 'needs_human_review',
+        'queue_priority': queue_priority,
         'next_action': action_type,
         'blocked_reason': spec.get('blocked_reason'),
         'requires_approval': bool(spec.get('requires_approval', False)),
+        'approval_hook': hook,
+        'queue_transition': {
+            'from_state': hook.get('approval_state'),
+            'from_workflow_state': hook.get('workflow_state'),
+            'to_queue_status': queue_status,
+            'transition_reason': queue_progression['gate_reason'],
+        },
+        'queue_progression': queue_progression,
         'real_trade_execution': False,
         'dangerous_live_parameter_change': False,
     }
@@ -1051,15 +1120,44 @@ def execute_rollout_executor(payload: Dict, db: Any, *, config: Any = None, sett
         elif action_type not in allowlisted:
             skip_reason, skip_code = f'action_type_not_allowlisted:{action_type or "unknown"}', 'ACTION_NOT_ALLOWLISTED'
         elif dispatch_mode == 'queue_only':
-            queue_plan = _build_rollout_queue_plan(action_type, row, workflow_item, spec)
+            approval_hook = _build_rollout_approval_hook(
+                row=row,
+                workflow_item=workflow_item,
+                current_state=current_state,
+                current_workflow_state=current_workflow_state,
+                auto_decision=auto_decision,
+                eligible=eligible,
+                approval_required=approval_required,
+                requires_manual=requires_manual,
+                blocked_by=blocked_by,
+            )
+            queue_plan = _build_rollout_queue_plan(action_type, row, workflow_item, spec, approval_hook=approval_hook)
             result_row['plan']['queue_plan'] = queue_plan
-            result_row['dispatch'] = _build_rollout_dispatch_envelope(mode=dispatch_mode, executor_class=executor_class, handler_key=handler_key, allowed=True, status='queued', reason='queue_only', code='QUEUE_ONLY', queue_name=queue_plan['queue_name'])
-            result_row['apply'] = _build_rollout_apply_envelope(status='queued', operation='queue_plan_only', idempotency_key=idempotency_key)
-            result_row['result'] = _build_rollout_result_envelope(disposition='queued', status='queued', reason=spec.get('blocked_reason') or 'queue_only_action', code='QUEUE_ONLY')
-            result_row['status'] = 'queued'
-            result['summary']['queued_count'] += 1
-            result['items'].append(result_row)
-            bump('queued', 'queued')
+            queue_status = queue_plan['queue_progression']['status']
+            if queue_status == 'ready_to_queue':
+                result_row['dispatch'] = _build_rollout_dispatch_envelope(mode=dispatch_mode, executor_class=executor_class, handler_key=handler_key, allowed=True, status='queued', reason='queue_only', code='QUEUE_ONLY', queue_name=queue_plan['queue_name'])
+                result_row['apply'] = _build_rollout_apply_envelope(status='queued', operation='queue_plan_only', idempotency_key=idempotency_key)
+                result_row['result'] = _build_rollout_result_envelope(disposition='queued', status='queued', reason=spec.get('blocked_reason') or 'queue_only_action', code='QUEUE_ONLY')
+                result_row['status'] = 'queued'
+                result['summary']['queued_count'] += 1
+                result['items'].append(result_row)
+                bump('queued', 'queued')
+            elif queue_status == 'blocked_by_approval':
+                result_row['dispatch'] = _build_rollout_dispatch_envelope(mode=dispatch_mode, executor_class=executor_class, handler_key=handler_key, allowed=True, status='blocked_by_approval', reason=approval_hook.get('gate_reason') or 'approval_gated_dispatch', code='APPROVAL_GATED_QUEUE', queue_name=queue_plan['queue_name'])
+                result_row['apply'] = _build_rollout_apply_envelope(status='approval_gated', operation='queue_plan_only', idempotency_key=idempotency_key)
+                result_row['result'] = _build_rollout_result_envelope(disposition='blocked_by_approval', status='blocked_by_approval', reason=approval_hook.get('gate_reason') or 'approval_gated_dispatch', code='APPROVAL_GATED_QUEUE')
+                result_row['status'] = 'blocked_by_approval'
+                result['summary']['skipped_count'] += 1
+                result['items'].append(result_row)
+                bump('blocked_by_approval', 'blocked_by_approval')
+            else:
+                result_row['dispatch'] = _build_rollout_dispatch_envelope(mode=dispatch_mode, executor_class=executor_class, handler_key=handler_key, allowed=True, status='deferred', reason=approval_hook.get('gate_reason') or 'queue_deferred', code='QUEUE_DEFERRED', queue_name=queue_plan['queue_name'])
+                result_row['apply'] = _build_rollout_apply_envelope(status='deferred', operation='queue_plan_only', idempotency_key=idempotency_key)
+                result_row['result'] = _build_rollout_result_envelope(disposition='deferred', status='deferred', reason=approval_hook.get('gate_reason') or 'queue_deferred', code='QUEUE_DEFERRED')
+                result_row['status'] = 'deferred'
+                result['summary']['skipped_count'] += 1
+                result['items'].append(result_row)
+                bump('deferred', 'deferred')
             continue
         elif approval_required:
             skip_reason, skip_code = 'approval_required', 'APPROVAL_REQUIRED'

@@ -541,6 +541,9 @@
   - delivery / report-ready payload 亦同步暴露 strategy fit 表格与 `top_strategy` headline，方便后续 dashboard / report / agent 直接消费，而唔需要再自己由原始 trade reasons 横向拼装。
   - 现进一步把治理建议从 `regime × policy_version` 扩展到 `regime × strategy`：基于现有 `by_regime_strategy + regime_strategy_fit` 输出 `strategy_recommendations / strategy_governance`，可直接回答某 strategy 在某 regime 下应扩张、降权、冻结、观察、补样、repricing/review 的治理动作。
   - strategy governance 保持与既有 rollout gate / recommendation 风格一致，统一给出 `type / governance_mode / priority / confidence / blocking / actions / summary_line / orchestration`，并在聚合级 delivery 中补 `strategy_priority_queue / strategy_next_actions / strategy_blocking_items`，方便后续 report / orchestration 直接消费。
+  - 本轮再补 `joint_governance` 联合治理层：基于既有 `recommendations + strategy_governance + strategy_policy_fit + rollout_gates + policy_ab_diffs` 对 `regime × policy_version × strategy` 输出稳定结构，明确 `conflict_resolution / combined_actions / final_governance_decision`，回答当 policy 想 expand、但 strategy 想 freeze/deweight（反之亦然）时，应该由谁优先、点样 freeze / 降权 / 继续观察 / guarded expand。
+  - 联合治理明确加上 `conflict_category / priority_resolution / blocking_precedence / fallback_decision`：默认以已有 gate/diff/recommendation 结果为证据，不额外拍脑袋；当 policy 层出现 rollback/tighten blocker，会优先压住 strategy 扩张；当 policy 可 expand 但 strategy fit 明显 underperform，则先冻结或降权到 strategy 粒度；若 strategy 自己有更优 policy fit，亦会把它作为 guarded rollout 的额外 guardrail。
+  - `delivery` / `orchestration_ready` 同步补 `joint_priority_queue / joint_next_actions`，让 dashboard/report/agent 后续可以直接消费联合治理队列，而唔需要再自己横向 join policy queue 同 strategy queue。
 - **阶段 / 优先级**：M5 / P1
 - **生效范围**：不直接生效
 - **目标**：形成 `strategy × regime` 的二维统计，为后续 policy 调整提供数据依据。

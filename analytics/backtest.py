@@ -296,6 +296,279 @@ def _delivery_bucket_id(regime: str, policy_version: str) -> str:
 def _delivery_strategy_bucket_id(regime: str, strategy: str) -> str:
     return f'strategy::{_normalize_bucket_tag(regime)}::{_normalize_bucket_tag(strategy)}'
 
+def _delivery_joint_bucket_id(regime: str, policy_version: str, strategy: str) -> str:
+    return f'joint::{_normalize_bucket_tag(regime)}::{_normalize_bucket_tag(policy_version)}::{_normalize_bucket_tag(strategy)}'
+
+
+def _recommendation_decision_rank(value: Optional[str]) -> int:
+    return {'rollback': 0, 'tighten': 1, 'hold': 2, 'expand': 3}.get(_normalize_bucket_tag(value), 9)
+
+
+def _recommendation_mode_rank(value: Optional[str]) -> int:
+    return {'rollback': 0, 'tighten': 1, 'review': 2, 'observe': 3, 'rollout': 4}.get(_normalize_bucket_tag(value), 9)
+
+
+def _strategy_policy_preference_lookup(rows: List[Dict]) -> Dict[str, Dict]:
+    return {
+        _normalize_bucket_tag(row.get('strategy')): row
+        for row in (rows or [])
+    }
+
+
+def _build_regime_policy_strategy_rows(trades: List[Dict]) -> List[Dict]:
+    buckets: Dict[Tuple[str, str, str], List[Dict]] = defaultdict(list)
+    for trade in trades or []:
+        regime = _normalize_bucket_tag(trade.get('regime_tag'))
+        policy = _normalize_bucket_tag(trade.get('policy_tag'))
+        strategies = _normalize_strategy_tags(trade.get('strategy_tags')) or ['unknown']
+        for strategy in strategies:
+            buckets[(regime, policy, strategy)].append(trade)
+
+    rows = []
+    for (regime, policy, strategy), bucket_trades in sorted(buckets.items()):
+        returns = [float(t.get('return_pct', 0) or 0) for t in bucket_trades]
+        wins = sum(1 for value in returns if value > 0)
+        losses = sum(1 for value in returns if value < 0)
+        avg_return = sum(returns) / len(returns) if returns else 0.0
+        rows.append({
+            'regime': regime,
+            'policy_version': policy,
+            'strategy': strategy,
+            'trade_count': len(bucket_trades),
+            'wins': wins,
+            'losses': losses,
+            'win_rate': round((wins / len(bucket_trades) * 100), 2) if bucket_trades else 0.0,
+            'total_return_pct': round(sum(returns), 4),
+            'avg_return_pct': round(avg_return, 4),
+            'avg_abs_return_pct': round(sum(abs(v) for v in returns) / len(returns), 4) if returns else 0.0,
+        })
+    rows.sort(key=lambda row: (-row['trade_count'], row['regime'], row['policy_version'], row['strategy']))
+    return rows
+
+
+def _dedupe_actions(actions: List[Dict]) -> List[Dict]:
+    deduped = []
+    seen = set()
+    for action in actions or []:
+        key = (action.get('type'), action.get('title'))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(action)
+    return deduped
+
+
+def _build_joint_governance_item(
+    row: Dict,
+    policy_recommendation: Dict,
+    strategy_recommendation: Dict,
+    strategy_policy_fit: Optional[Dict],
+    *,
+    min_sample_size: int,
+) -> Dict:
+    regime = _normalize_bucket_tag(row.get('regime'))
+    policy = _normalize_bucket_tag(row.get('policy_version'))
+    strategy = _normalize_bucket_tag(row.get('strategy'))
+    trade_count = int(row.get('trade_count') or 0)
+    policy_type = _normalize_bucket_tag(policy_recommendation.get('type'))
+    strategy_type = _normalize_bucket_tag(strategy_recommendation.get('type'))
+    policy_mode = _normalize_bucket_tag(policy_recommendation.get('governance_mode'))
+    strategy_mode = _normalize_bucket_tag(strategy_recommendation.get('governance_mode'))
+    preferred_policy = _normalize_bucket_tag((strategy_policy_fit or {}).get('best_policy_version'))
+    strategy_prefers_other_policy = bool(preferred_policy and preferred_policy != 'unknown' and preferred_policy != policy and (strategy_policy_fit or {}).get('sample_ready'))
+
+    conflict_category = 'aligned'
+    blocking_precedence = 'none'
+    priority_resolution = 'aligned_expand' if policy_mode == 'rollout' and strategy_mode == 'rollout' else 'aligned_hold'
+    resolution_reason = 'policy 与 strategy 建议方向一致，可按既有治理节奏执行。'
+    final_decision = 'observe'
+    final_mode = 'observe'
+    fallback_decision = policy_mode or 'observe'
+
+    policy_mode_rank = _recommendation_mode_rank(policy_mode)
+    strategy_mode_rank = _recommendation_mode_rank(strategy_mode)
+
+    if policy_mode_rank < strategy_mode_rank and policy_mode in {'rollback', 'tighten', 'review', 'observe'}:
+        conflict_category = 'policy_blocking_precedence'
+        blocking_precedence = 'policy'
+        priority_resolution = 'policy_blocking_precedence'
+        resolution_reason = 'policy bucket 的治理结论比 strategy 更保守，联合治理先服从 policy blocker。'
+        if policy_mode == 'rollback':
+            final_decision = 'freeze'
+        elif policy_mode == 'tighten':
+            final_decision = 'deweight'
+        else:
+            final_decision = 'observe'
+        final_mode = policy_mode
+    elif strategy_mode_rank < policy_mode_rank and strategy_mode in {'rollback', 'tighten', 'review'}:
+        conflict_category = 'strategy_blocking_precedence'
+        blocking_precedence = 'strategy'
+        priority_resolution = 'strategy_blocking_precedence'
+        resolution_reason = 'strategy fit 的治理结论比 policy 更保守，联合治理先服从 strategy blocker。'
+        final_decision = 'freeze' if strategy_mode == 'rollback' else 'deweight' if strategy_mode == 'tighten' else 'observe'
+        final_mode = strategy_mode
+    elif policy_mode == 'rollout' and strategy_mode in {'rollback', 'tighten', 'review'}:
+        conflict_category = 'strategy_blocks_policy_expand'
+        blocking_precedence = 'strategy'
+        priority_resolution = 'strategy_blocking_precedence'
+        resolution_reason = '虽然 policy bucket 可扩，但 strategy fit 未确认稳定，先限制到 strategy 级冻结/降权/复核。'
+        final_decision = 'freeze' if strategy_mode == 'rollback' else 'deweight' if strategy_mode == 'tighten' else 'observe'
+        final_mode = strategy_mode
+    elif strategy_prefers_other_policy and policy_mode == 'rollout':
+        conflict_category = 'policy_strategy_preference_mismatch'
+        blocking_precedence = 'strategy_policy_fit'
+        priority_resolution = 'policy_preference_guardrail'
+        resolution_reason = f'{strategy} 的最佳 policy 倾向 {preferred_policy}，当前 policy 仅适合 guarded/limited rollout。'
+        final_decision = 'deweight'
+        final_mode = 'tighten'
+    elif policy_mode == 'observe' and strategy_mode == 'rollout':
+        conflict_category = 'policy_hold_strategy_expand'
+        blocking_precedence = 'policy'
+        priority_resolution = 'policy_hold_caps_strategy_expand'
+        resolution_reason = 'strategy fit 虽正向，但 policy 层未放行；只可维持观察或小范围白名单验证。'
+        final_decision = 'observe'
+        final_mode = 'observe'
+    elif policy_mode == 'rollout' and strategy_mode == 'rollout':
+        final_decision = 'expand'
+        final_mode = 'rollout'
+    elif policy_mode == 'rollback' or strategy_mode == 'rollback':
+        final_decision = 'freeze'
+        final_mode = 'rollback'
+    elif policy_mode == 'tighten' or strategy_mode == 'tighten':
+        final_decision = 'deweight'
+        final_mode = 'tighten'
+
+    combined_actions = []
+    if final_decision == 'freeze':
+        combined_actions.append(_governance_action('joint_freeze', '联合冻结', '联合治理判定需要先冻结该 policy × strategy 组合的新增 rollout/权重。', owner='ops', urgency='immediate'))
+    elif final_decision == 'deweight':
+        combined_actions.append(_governance_action('joint_deweight', '联合降权', '联合治理判定先收缩该组合的 rollout 或 strategy 权重，再继续复核。', owner='ops', urgency='high'))
+    elif final_decision == 'expand':
+        combined_actions.append(_governance_action('joint_expand_guarded', '联合小步扩张', 'policy 与 strategy 同时支持扩量，可在 guardrail 下对白名单组合做小步扩张。', owner='ops', urgency='normal'))
+    else:
+        combined_actions.append(_governance_action('joint_observe', '联合观察', '联合治理判定先保持观察，不做自动扩量。', owner='research', urgency='normal'))
+
+    if strategy_prefers_other_policy:
+        combined_actions.append(_governance_action('prefer_strategy_best_policy', '优先对齐 strategy 最优 policy', f'该 strategy 当前更匹配 {preferred_policy}，扩量前应优先对齐最优 policy 组合。', owner='research', urgency='high', preferred_policy_version=preferred_policy))
+    combined_actions.extend(policy_recommendation.get('actions') or [])
+    combined_actions.extend(strategy_recommendation.get('actions') or [])
+    combined_actions = _dedupe_actions(combined_actions)[:8]
+
+    blocking_reasons = []
+    for issue in [policy_recommendation.get('blocking_issue'), strategy_recommendation.get('blocking_issue')]:
+        if issue and issue not in blocking_reasons:
+            blocking_reasons.append(issue)
+    if strategy_prefers_other_policy and 'strategy_prefers_other_policy' not in blocking_reasons:
+        blocking_reasons.append('strategy_prefers_other_policy')
+
+    priority = min(policy_recommendation.get('priority'), strategy_recommendation.get('priority'), key=lambda v: _priority_rank(v))
+    confidence = min(policy_recommendation.get('confidence'), strategy_recommendation.get('confidence'), key=lambda v: _confidence_rank(v))
+
+    return {
+        'bucket_id': _delivery_joint_bucket_id(regime, policy, strategy),
+        'scope': 'joint',
+        'regime': regime,
+        'policy_version': policy,
+        'strategy': strategy,
+        'type': 'joint_governance',
+        'priority': priority,
+        'confidence': confidence,
+        'conflict_resolution': {
+            'category': conflict_category,
+            'priority_resolution': priority_resolution,
+            'blocking_precedence': blocking_precedence,
+            'fallback_decision': fallback_decision,
+            'resolution_reason': resolution_reason,
+            'strategy_preferred_policy_version': preferred_policy or None,
+            'strategy_prefers_other_policy': strategy_prefers_other_policy,
+            'blocking_issues': blocking_reasons,
+        },
+        'combined_actions': combined_actions,
+        'final_governance_decision': {
+            'decision': final_decision,
+            'governance_mode': final_mode,
+            'summary_line': f'{regime} × {policy} × {strategy}: {final_decision} via {priority_resolution}',
+            'blocking': bool(blocking_reasons or conflict_category != 'aligned'),
+        },
+        'policy_recommendation': policy_recommendation,
+        'strategy_recommendation': strategy_recommendation,
+        'evidence': {
+            'trade_count': trade_count,
+            'wins': int(row.get('wins') or 0),
+            'losses': int(row.get('losses') or 0),
+            'win_rate': float(row.get('win_rate') or 0.0),
+            'avg_return_pct': float(row.get('avg_return_pct') or 0.0),
+            'total_return_pct': float(row.get('total_return_pct') or 0.0),
+            'policy_trade_count': (policy_recommendation.get('evidence') or {}).get('trade_count'),
+            'strategy_trade_count': (strategy_recommendation.get('evidence') or {}).get('trade_count'),
+            'strategy_policy_fit': strategy_policy_fit or {},
+            'min_sample_size': min_sample_size,
+        },
+    }
+
+
+def _build_joint_governance_summary(items: List[Dict]) -> Dict:
+    categories = sorted({(item.get('conflict_resolution') or {}).get('category') for item in items})
+    decisions = sorted({(item.get('final_governance_decision') or {}).get('decision') for item in items})
+    return {
+        'item_count': len(items),
+        'blocking': sum(1 for item in items if (item.get('final_governance_decision') or {}).get('blocking')),
+        'by_conflict_category': {category: sum(1 for item in items if (item.get('conflict_resolution') or {}).get('category') == category) for category in categories if category},
+        'by_final_decision': {decision: sum(1 for item in items if (item.get('final_governance_decision') or {}).get('decision') == decision) for decision in decisions if decision},
+        'top_priority_items': [
+            {
+                'regime': item.get('regime'),
+                'policy_version': item.get('policy_version'),
+                'strategy': item.get('strategy'),
+                'decision': (item.get('final_governance_decision') or {}).get('decision'),
+                'summary_line': (item.get('final_governance_decision') or {}).get('summary_line'),
+            }
+            for item in sorted(items, key=lambda item: (_priority_rank(item.get('priority')), _confidence_rank(item.get('confidence')), -(item.get('evidence') or {}).get('trade_count', 0)))[:5]
+        ],
+    }
+
+
+def _build_joint_governance_delivery(items: List[Dict]) -> Dict:
+    ordered = sorted(items, key=lambda item: (_priority_rank(item.get('priority')), _confidence_rank(item.get('confidence')), -((item.get('evidence') or {}).get('trade_count') or 0), item.get('regime') or '', item.get('policy_version') or '', item.get('strategy') or ''))
+    priority_queue = [
+        {
+            'bucket_id': item['bucket_id'],
+            'scope': 'joint',
+            'regime': item['regime'],
+            'policy_version': item['policy_version'],
+            'strategy': item['strategy'],
+            'priority': item['priority'],
+            'confidence': item['confidence'],
+            'conflict_category': item['conflict_resolution']['category'],
+            'blocking_precedence': item['conflict_resolution']['blocking_precedence'],
+            'final_decision': item['final_governance_decision']['decision'],
+            'governance_mode': item['final_governance_decision']['governance_mode'],
+            'summary_line': item['final_governance_decision']['summary_line'],
+            'combined_actions': item['combined_actions'][:3],
+        }
+        for item in ordered
+    ]
+    next_actions = [
+        {
+            'bucket_id': item['bucket_id'],
+            'regime': item['regime'],
+            'policy_version': item['policy_version'],
+            'strategy': item['strategy'],
+            'final_decision': item['final_governance_decision']['decision'],
+            'combined_actions': item['combined_actions'],
+            'conflict_resolution': item['conflict_resolution'],
+        }
+        for item in ordered if item.get('combined_actions')
+    ]
+    return {
+        'items': ordered,
+        'priority_queue': priority_queue,
+        'blocking': [row for row in priority_queue if row.get('blocking_precedence') != 'none' or row.get('final_decision') in {'freeze', 'deweight'}],
+        'next_actions': next_actions,
+        'summary': _build_joint_governance_summary(ordered),
+    }
+
+
 
 def _priority_rank(value: Optional[str]) -> int:
     return {'critical': 0, 'high': 1, 'medium': 2, 'low': 3}.get(_normalize_bucket_tag(value), 9)
@@ -433,6 +706,7 @@ def _build_calibration_delivery_payload(
     rollout_gates: List[Dict],
     recommendations: List[Dict],
     strategy_governance: Optional[Dict] = None,
+    joint_governance: Optional[Dict] = None,
 ) -> Dict:
     gate_lookup = {
         (_normalize_bucket_tag(row.get('regime')), _normalize_bucket_tag(row.get('policy_version'))): row
@@ -626,6 +900,7 @@ def _build_calibration_delivery_payload(
                 'rollout_gates': rollout_gates,
                 'recommendations': recommendations[:50],
                 'strategy_recommendations': (strategy_governance or {}).get('items') or [],
+                'joint_governance': (joint_governance or {}).get('items') or [],
             },
         },
         'render_ready': {
@@ -647,6 +922,8 @@ def _build_calibration_delivery_payload(
                 'review_checkpoints': review_checkpoints[:10],
                 'strategy_priority_queue': ((strategy_governance or {}).get('priority_queue') or [])[:10],
                 'strategy_blocking_items': ((strategy_governance or {}).get('blocking') or [])[:10],
+                'joint_priority_queue': ((joint_governance or {}).get('priority_queue') or [])[:10],
+                'joint_blocking_items': ((joint_governance or {}).get('blocking') or [])[:10],
             },
         },
         'orchestration_ready': {
@@ -674,6 +951,8 @@ def _build_calibration_delivery_payload(
             }.items())),
             'strategy_priority_queue': (strategy_governance or {}).get('priority_queue') or [],
             'strategy_next_actions': (strategy_governance or {}).get('next_actions') or [],
+            'joint_priority_queue': (joint_governance or {}).get('priority_queue') or [],
+            'joint_next_actions': (joint_governance or {}).get('next_actions') or [],
         },
     }
 
@@ -1357,6 +1636,7 @@ def build_regime_policy_calibration_report(symbol_results: List[Dict]) -> Dict:
         )
     )
     strategy_governance = _build_strategy_governance_delivery(strategy_recommendations)
+    strategy_policy_lookup = _strategy_policy_preference_lookup(strategy_fit['strategy_policy_fit'])
     rollout_gates = []
     bucket_lookup = {}
     for row in by_regime_policy:
@@ -1379,6 +1659,32 @@ def build_regime_policy_calibration_report(symbol_results: List[Dict]) -> Dict:
         recommendations.append(
             _build_calibration_recommendation(gate, bucket_row, ab_row, min_sample_size=min_sample_size)
         )
+
+    regime_policy_strategy_rows = _build_regime_policy_strategy_rows(all_trades)
+    strategy_rec_lookup = {
+        (_normalize_bucket_tag(item.get('regime')), _normalize_bucket_tag(item.get('strategy'))): item
+        for item in strategy_recommendations
+    }
+    policy_rec_lookup = {
+        (_normalize_bucket_tag(item.get('regime')), _normalize_bucket_tag(item.get('policy_version'))): item
+        for item in recommendations
+    }
+    joint_governance_items = []
+    for row in regime_policy_strategy_rows:
+        policy_rec = policy_rec_lookup.get((_normalize_bucket_tag(row.get('regime')), _normalize_bucket_tag(row.get('policy_version'))))
+        strategy_rec = strategy_rec_lookup.get((_normalize_bucket_tag(row.get('regime')), _normalize_bucket_tag(row.get('strategy'))))
+        if not policy_rec or not strategy_rec:
+            continue
+        joint_governance_items.append(
+            _build_joint_governance_item(
+                row,
+                policy_rec,
+                strategy_rec,
+                strategy_policy_lookup.get(_normalize_bucket_tag(row.get('strategy'))),
+                min_sample_size=min_sample_size,
+            )
+        )
+    joint_governance = _build_joint_governance_delivery(joint_governance_items)
 
     recommendations.sort(
         key=lambda item: (
@@ -1446,6 +1752,7 @@ def build_regime_policy_calibration_report(symbol_results: List[Dict]) -> Dict:
         'rollout_gate_summary': rollout_gate_summary,
         'recommendation_summary': recommendation_summary,
         'strategy_governance_summary': strategy_governance['summary'],
+        'joint_governance_summary': joint_governance['summary'],
     }
     delivery = _build_calibration_delivery_payload(
         summary=summary,
@@ -1457,6 +1764,7 @@ def build_regime_policy_calibration_report(symbol_results: List[Dict]) -> Dict:
         rollout_gates=rollout_gates,
         recommendations=recommendations[:50],
         strategy_governance=strategy_governance,
+        joint_governance=joint_governance,
     )
     summary['delivery_ready'] = {
         'schema_version': delivery['schema_version'],
@@ -1468,6 +1776,8 @@ def build_regime_policy_calibration_report(symbol_results: List[Dict]) -> Dict:
         'rollback_candidate_count': len(delivery['orchestration_ready']['rollback_candidates']),
         'strategy_priority_queue_size': len(delivery['orchestration_ready']['strategy_priority_queue']),
         'strategy_next_action_bucket_count': len(delivery['orchestration_ready']['strategy_next_actions']),
+        'joint_priority_queue_size': len(delivery['orchestration_ready']['joint_priority_queue']),
+        'joint_next_action_bucket_count': len(delivery['orchestration_ready']['joint_next_actions']),
     }
     return {
         'summary': summary,
@@ -1483,6 +1793,7 @@ def build_regime_policy_calibration_report(symbol_results: List[Dict]) -> Dict:
             'strategy_recommendations': strategy_recommendations[:50],
             'strategy_governance': strategy_governance,
         },
+        'joint_governance': joint_governance,
         'policy_ab_diffs': policy_ab_diffs,
         'rollout_gates': rollout_gates,
         'recommendations': recommendations[:50],

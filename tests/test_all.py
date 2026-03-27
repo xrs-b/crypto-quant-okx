@@ -4338,6 +4338,87 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
         rollback_candidates = delivery['orchestration_ready']['rollback_candidates']
         self.assertTrue(any(row['bucket_id'] == rollback_item['bucket_id'] for row in rollback_candidates))
 
+    def test_calibration_report_builds_joint_governance_and_conflict_resolution(self):
+        report = build_regime_policy_calibration_report([
+            {
+                'symbol': 'BTC/USDT',
+                'all_trades': [
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 0.4},
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 0.3},
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 0.2},
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v2', 'strategy_tags': ['Breakout'], 'return_pct': 1.4},
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v2', 'strategy_tags': ['Breakout'], 'return_pct': 1.2},
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v2', 'strategy_tags': ['Breakout'], 'return_pct': 1.1},
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v2', 'strategy_tags': ['MeanRevert'], 'return_pct': -0.7},
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v2', 'strategy_tags': ['MeanRevert'], 'return_pct': -0.5},
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v2', 'strategy_tags': ['MeanRevert'], 'return_pct': -0.4},
+                ],
+            }
+        ])
+        joint = report['joint_governance']
+        self.assertTrue(joint['items'])
+        breakout = next(item for item in joint['items'] if item['policy_version'] == 'policy_v2' and item['strategy'] == 'Breakout')
+        mean_revert = next(item for item in joint['items'] if item['policy_version'] == 'policy_v2' and item['strategy'] == 'MeanRevert')
+        self.assertEqual(breakout['conflict_resolution']['category'], 'policy_blocking_precedence')
+        self.assertEqual(breakout['conflict_resolution']['blocking_precedence'], 'policy')
+        self.assertEqual(breakout['final_governance_decision']['decision'], 'observe')
+        self.assertEqual(mean_revert['conflict_resolution']['category'], 'strategy_blocking_precedence')
+        self.assertEqual(mean_revert['conflict_resolution']['blocking_precedence'], 'strategy')
+        self.assertEqual(mean_revert['final_governance_decision']['decision'], 'freeze')
+        self.assertEqual(mean_revert['combined_actions'][0]['type'], 'joint_freeze')
+        joint_summary = report['summary']['joint_governance_summary']
+        self.assertGreaterEqual(joint_summary['by_conflict_category']['strategy_blocking_precedence'], 1)
+        self.assertGreaterEqual(joint_summary['by_conflict_category']['policy_blocking_precedence'], 1)
+        self.assertGreaterEqual(joint_summary['by_final_decision']['freeze'], 1)
+
+    def test_calibration_report_exposes_joint_governance_delivery_for_consumers(self):
+        report = build_regime_policy_calibration_report([
+            {
+                'symbol': 'BTC/USDT',
+                'all_trades': [
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 0.3},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 0.2},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 0.1},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v2', 'strategy_tags': ['Breakout'], 'return_pct': -1.4},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v2', 'strategy_tags': ['Breakout'], 'return_pct': -1.0},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v2', 'strategy_tags': ['Breakout'], 'return_pct': -0.8},
+                ],
+            }
+        ])
+        delivery = report['delivery']
+        self.assertIn('joint_governance', delivery['views']['tables'])
+        self.assertTrue(delivery['render_ready']['sections']['joint_priority_queue'])
+        self.assertTrue(delivery['orchestration_ready']['joint_priority_queue'])
+        joint_row = delivery['orchestration_ready']['joint_priority_queue'][0]
+        self.assertIn('conflict_category', joint_row)
+        self.assertIn('final_decision', joint_row)
+        next_action_row = delivery['orchestration_ready']['joint_next_actions'][0]
+        self.assertTrue(next_action_row['combined_actions'])
+        self.assertGreaterEqual(report['summary']['delivery_ready']['joint_priority_queue_size'], 1)
+        self.assertGreaterEqual(report['summary']['delivery_ready']['joint_next_action_bucket_count'], 1)
+
+    def test_joint_governance_prefers_policy_blocking_and_strategy_policy_fit_guardrails(self):
+        report = build_regime_policy_calibration_report([
+            {
+                'symbol': 'BTC/USDT',
+                'all_trades': [
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 1.0},
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 0.9},
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 0.8},
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v2', 'strategy_tags': ['Breakout'], 'return_pct': -0.4},
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v2', 'strategy_tags': ['Breakout'], 'return_pct': -0.3},
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v2', 'strategy_tags': ['Breakout'], 'return_pct': -0.2},
+                ],
+            }
+        ])
+        joint = report['joint_governance']
+        conflict = next(item for item in joint['items'] if item['policy_version'] == 'policy_v2' and item['strategy'] == 'Breakout')
+        self.assertEqual(conflict['conflict_resolution']['category'], 'policy_blocking_precedence')
+        self.assertEqual(conflict['conflict_resolution']['blocking_precedence'], 'policy')
+        self.assertEqual(conflict['final_governance_decision']['decision'], 'freeze')
+        self.assertEqual(conflict['conflict_resolution']['strategy_preferred_policy_version'], 'policy_v1')
+        self.assertTrue(any(action['type'] == 'prefer_strategy_best_policy' for action in conflict['combined_actions']))
+
     def test_calibration_report_exposes_strategy_governance_delivery_for_report_and_orchestration(self):
         report = build_regime_policy_calibration_report([
             {

@@ -512,6 +512,7 @@ python3 bot/run.py --reconcile-positions
 ```bash
 python3 bot/run.py --notify-test
 python3 bot/run.py --relay-outbox --once
+python3 bot/run.py --approval-hygiene
 ```
 
 ---

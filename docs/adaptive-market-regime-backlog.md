@@ -371,6 +371,11 @@
   - 能回答“最近 decision 有什么变化”；
   - 能回答“某 item 的 timeline 概览/摘要如何”；
   - 测试覆盖 cleanup / diff / timeline summary 语义。
+- **2026-03-27 runtime hygiene integration**：已把 approval stale cleanup 从“只在 API/手工调用时可见”推进到运行态卫生层：
+  - `bot/run.py` 新增 `build_approval_hygiene_summary(...)` / `maybe_run_approval_hygiene(...)`，守护周期会固定产出 stale + decision diff 摘要；
+  - 当 `runtime.approval_hygiene.auto_cleanup_enabled=true` 时，daemon 会在每轮结束后自动把 stale `pending/ready/replayed` 安全标记为 `expired`，并保留既有 immutable `stale_cleanup` 审计事件；
+  - 每日 `health_summary` 已直接暴露 approval hygiene 状态（mode / stale count / diff count / last run / last expired count），让低干预巡检唔使再额外钻 approvals API；
+  - CLI 新增 `python3 bot/run.py --approval-hygiene`，方便人工/agent 手工触发 audit 或 dry-run 验证。
 
 ## 3. M0：基础定义与观测位（只观察不生效）
 

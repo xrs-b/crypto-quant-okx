@@ -145,6 +145,13 @@ runtime:
   health_summary:
     enabled: true
     hour: 20   # 每日几时发一份健康汇总（24 小时制）
+  approval_hygiene:
+    enabled: true
+    auto_cleanup_enabled: false   # 默认先 audit-only；显式开启后守护周期会把 stale pending/ready/replayed 安全标记为 expired
+    stale_after_minutes: 180
+    limit: 20
+    approval_type: ''
+    actor: system:approval-hygiene
 
 runtime_meta:
   current_preset: btc-focused

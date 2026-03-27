@@ -27,7 +27,7 @@ from trading import TradingExecutor, RiskManager
 from trading.executor import build_observability_context
 from analytics.backtest import StrategyBacktester, build_regime_policy_calibration_report, build_calibration_report_ready_payload, build_joint_governance_ready_payload, build_governance_workflow_ready_payload, export_calibration_payload
 from strategies.strategy_library import StrategyManager
-from bot.run import build_exchange_diagnostics, build_exchange_smoke_plan, build_runtime_health_summary, maybe_send_daily_health_summary, execute_exchange_smoke, reconcile_exchange_positions
+from bot.run import build_exchange_diagnostics, build_exchange_smoke_plan, build_approval_hygiene_summary, build_runtime_health_summary, maybe_run_approval_hygiene, maybe_send_daily_health_summary, execute_exchange_smoke, reconcile_exchange_positions
 from dashboard.api import app
 from core.risk_budget import get_risk_budget_config, compute_entry_plan, summarize_margin_usage, summarize_risk_hint_changes
 from core.presets import PresetManager
@@ -1851,6 +1851,16 @@ class FakeHealthNotifier:
         self.calls.append(payload)
         return {'delivered': False, 'message': '\n'.join(lines), 'title': title}
 
+    def notify_runtime(self, event_type, lines, details=None):
+        payload = {
+            'event_type': event_type,
+            'title': event_type,
+            'lines': lines,
+            'details': details or {},
+        }
+        self.calls.append(payload)
+        return {'delivered': False, 'message': '\n'.join(lines), 'title': event_type}
+
 
 class TestDashboardApi(unittest.TestCase):
     def test_daily_summary_handles_null_pnl(self):
@@ -2620,6 +2630,78 @@ class TestDiagnostics(unittest.TestCase):
 
 
 class TestHealthSummary(unittest.TestCase):
+    def test_build_approval_hygiene_summary_reports_stale_counts(self):
+        cfg = Config()
+        cfg._config.setdefault('runtime', {}).setdefault('approval_hygiene', {}).update({
+            'enabled': True,
+            'auto_cleanup_enabled': False,
+            'stale_after_minutes': 60,
+            'limit': 10,
+        })
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / 'approval_hygiene_summary.db'
+            db = Database(str(db_path))
+            item_id = 'pool_switch::btc-focused'
+            db.sync_approval_items([
+                {
+                    'item_id': item_id,
+                    'approval_type': 'pool_switch',
+                    'target': 'btc-focused',
+                    'title': '切换主池',
+                    'approval_state': 'pending',
+                    'workflow_state': 'pending',
+                }
+            ], replay_source='workflow_replay')
+            with sqlite3.connect(db_path) as conn:
+                conn.execute("UPDATE approval_state SET created_at = datetime('now', '-180 minutes'), updated_at = datetime('now', '-180 minutes'), last_seen_at = datetime('now', '-180 minutes') WHERE item_id = ?", (item_id,))
+                conn.commit()
+            summary = build_approval_hygiene_summary(cfg, db)
+            self.assertEqual(summary['stale_count'], 1)
+            self.assertEqual(summary['decision_diff_count'], 0)
+            self.assertEqual(summary['audit_overview']['stale_pending']['count'], 1)
+            self.assertEqual(summary['stale_items'][0]['item_id'], item_id)
+
+    def test_maybe_run_approval_hygiene_auto_cleanup_expires_stale_items(self):
+        import bot.run as bot_run
+        cfg = Config()
+        cfg._config.setdefault('runtime', {}).setdefault('approval_hygiene', {}).update({
+            'enabled': True,
+            'auto_cleanup_enabled': True,
+            'stale_after_minutes': 60,
+            'limit': 10,
+            'actor': 'system:test-approval-hygiene',
+        })
+        notifier = FakeHealthNotifier()
+        old_runtime_path = bot_run.RUNTIME_STATE_PATH
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bot_run.RUNTIME_STATE_PATH = Path(tmpdir) / 'runtime_state.json'
+            db_path = Path(tmpdir) / 'approval_hygiene_cleanup.db'
+            db = Database(str(db_path))
+            item_id = 'pool_switch::btc-focused'
+            db.sync_approval_items([
+                {
+                    'item_id': item_id,
+                    'approval_type': 'pool_switch',
+                    'target': 'btc-focused',
+                    'title': '切换主池',
+                    'approval_state': 'pending',
+                    'workflow_state': 'pending',
+                }
+            ], replay_source='workflow_replay')
+            with sqlite3.connect(db_path) as conn:
+                conn.execute("UPDATE approval_state SET created_at = datetime('now', '-180 minutes'), updated_at = datetime('now', '-180 minutes'), last_seen_at = datetime('now', '-180 minutes') WHERE item_id = ?", (item_id,))
+                conn.commit()
+            try:
+                result = maybe_run_approval_hygiene(cfg, db, notifier)
+                self.assertTrue(result['ran_cleanup'])
+                self.assertEqual(result['cleanup']['expired_count'], 1)
+                self.assertEqual(db.get_approval_state(item_id)['state'], 'expired')
+                self.assertTrue(any(call['event_type'] == 'approval_hygiene' for call in notifier.calls))
+                state = json.loads(bot_run.RUNTIME_STATE_PATH.read_text())
+                self.assertEqual(state['approval_hygiene']['expired_count'], 1)
+            finally:
+                bot_run.RUNTIME_STATE_PATH = old_runtime_path
+
     def test_build_runtime_health_summary_contains_core_sections(self):
         cfg = Config()
         db = Database('data/test_health_summary.db')
@@ -2632,6 +2714,8 @@ class TestHealthSummary(unittest.TestCase):
             self.assertTrue(any('最近一轮' in line for line in summary['lines']))
             self.assertTrue(any('Adaptive Regime' in line for line in summary['lines']))
             self.assertTrue(any('observe-only' in line for line in summary['lines']))
+            self.assertTrue(any('Approval Hygiene' in line for line in summary['lines']))
+            self.assertIn('approval_hygiene', summary['details'])
         finally:
             if os.path.exists('data/test_health_summary.db'):
                 os.remove('data/test_health_summary.db')

@@ -27,7 +27,7 @@ from core.paths import DATA_DIR
 from signals import SignalDetector, SignalValidator, SignalRecorder, EntryDecider
 from trading import TradingExecutor, RiskManager
 from ml.engine import MLEngine, ModelTrainer, DataCollector
-from analytics import StrategyBacktester, SignalQualityAnalyzer, ParameterOptimizer, GovernanceEngine
+from analytics import StrategyBacktester, SignalQualityAnalyzer, ParameterOptimizer, GovernanceEngine, build_approval_audit_overview
 from validation import format_validation_report_markdown, run_shadow_validation_case, run_shadow_validation_replay
 
 
@@ -84,6 +84,95 @@ def append_runtime_history(event: dict, limit: int = 20):
     save_runtime_state(state)
 
 
+def build_approval_hygiene_summary(cfg: Config, db: Database, limit: int = 20) -> dict:
+    hygiene_cfg = cfg.get('runtime.approval_hygiene', {}) or {}
+    enabled = bool(hygiene_cfg.get('enabled', True))
+    auto_cleanup_enabled = bool(hygiene_cfg.get('auto_cleanup_enabled', False))
+    stale_after_minutes = max(1, int(hygiene_cfg.get('stale_after_minutes', 180) or 180))
+    approval_type = hygiene_cfg.get('approval_type') or None
+    sample_limit = max(1, int(hygiene_cfg.get('limit', limit) or limit))
+    stale_rows = db.get_stale_approval_states(
+        stale_after_minutes=stale_after_minutes,
+        approval_type=approval_type,
+        limit=sample_limit,
+    )
+    decision_diffs = db.get_recent_approval_decision_diff(
+        limit=max(5, min(sample_limit, 50)),
+        approval_type=approval_type,
+    )
+    overview = build_approval_audit_overview(stale_rows=stale_rows, decision_diffs=decision_diffs)
+    return {
+        'enabled': enabled,
+        'auto_cleanup_enabled': auto_cleanup_enabled,
+        'stale_after_minutes': stale_after_minutes,
+        'approval_type': approval_type,
+        'limit': sample_limit,
+        'stale_count': len(stale_rows),
+        'decision_diff_count': len(decision_diffs),
+        'stale_items': stale_rows,
+        'decision_diffs': decision_diffs,
+        'audit_overview': overview,
+    }
+
+
+def maybe_run_approval_hygiene(cfg: Config, db: Database, notifier: NotificationManager = None, force: bool = False) -> dict:
+    runtime = load_runtime_state()
+    hygiene = build_approval_hygiene_summary(cfg, db)
+    hygiene_cfg = cfg.get('runtime.approval_hygiene', {}) or {}
+    enabled = bool(hygiene.get('enabled', True))
+    auto_cleanup_enabled = bool(hygiene.get('auto_cleanup_enabled', False))
+    actor = hygiene_cfg.get('actor') or 'system:approval-hygiene'
+
+    result = {
+        'enabled': enabled,
+        'auto_cleanup_enabled': auto_cleanup_enabled,
+        'force': bool(force),
+        'summary': hygiene,
+        'cleanup': None,
+        'ran_cleanup': False,
+    }
+    if not enabled and not force:
+        result['reason'] = 'disabled'
+        return result
+
+    if auto_cleanup_enabled or force:
+        cleanup_result = db.cleanup_stale_approval_states(
+            stale_after_minutes=hygiene['stale_after_minutes'],
+            approval_type=hygiene.get('approval_type'),
+            limit=hygiene.get('limit', 20),
+            dry_run=not auto_cleanup_enabled and force,
+            actor=actor,
+        )
+        result['cleanup'] = cleanup_result
+        result['ran_cleanup'] = True
+        if cleanup_result.get('expired_count', 0) > 0 and notifier is not None:
+            notifier.notify_runtime(
+                'approval_hygiene',
+                [
+                    f"过期审批自动收口：{cleanup_result.get('expired_count', 0)} 项",
+                    f"stale 阈值：{cleanup_result.get('stale_after_minutes', hygiene['stale_after_minutes'])} 分钟",
+                ],
+                cleanup_result,
+            )
+        hygiene = build_approval_hygiene_summary(cfg, db)
+        result['summary'] = hygiene
+
+    runtime['approval_hygiene'] = {
+        'last_run_at': datetime.now().isoformat(),
+        'enabled': enabled,
+        'auto_cleanup_enabled': auto_cleanup_enabled,
+        'stale_after_minutes': hygiene.get('stale_after_minutes'),
+        'approval_type': hygiene.get('approval_type'),
+        'stale_count': hygiene.get('stale_count', 0),
+        'decision_diff_count': hygiene.get('decision_diff_count', 0),
+        'expired_count': ((result.get('cleanup') or {}).get('expired_count', 0)),
+        'matched_count': ((result.get('cleanup') or {}).get('matched_count', 0)),
+        'result': result.get('cleanup') or {},
+    }
+    save_runtime_state(runtime)
+    return result
+
+
 def build_runtime_health_summary(cfg: Config, db: Database) -> dict:
     runtime = load_runtime_state()
     risk = RiskManager(cfg, db).get_risk_status()
@@ -105,6 +194,9 @@ def build_runtime_health_summary(cfg: Config, db: Database) -> dict:
     adaptive_defaults = adaptive_cfg.get('defaults', {}) if isinstance(adaptive_cfg, dict) else {}
     adaptive_mode = adaptive_cfg.get('mode', 'observe_only') if isinstance(adaptive_cfg, dict) else 'observe_only'
     adaptive_enabled = bool(adaptive_cfg.get('enabled', False)) if isinstance(adaptive_cfg, dict) else False
+    approval_hygiene = build_approval_hygiene_summary(cfg, db)
+    approval_runtime = runtime.get('approval_hygiene', {}) if isinstance(runtime.get('approval_hygiene'), dict) else {}
+    approval_mode = 'auto-cleanup' if approval_hygiene.get('auto_cleanup_enabled') else 'audit-only'
     lines = [
         f'环境：{cfg.exchange_mode}',
         f'监听币种：{", ".join(cfg.symbols) or "--"}',
@@ -118,6 +210,9 @@ def build_runtime_health_summary(cfg: Config, db: Database) -> dict:
         '---',
         f'Adaptive Regime：mode={adaptive_mode} ｜ enabled={"yes" if adaptive_enabled else "no"} ｜ policy={adaptive_defaults.get("policy_version") or "--"}',
         '说明：当前仍为 observe-only 展示层，不改真实交易行为。',
+        '---',
+        f'Approval Hygiene：mode={approval_mode} ｜ stale={approval_hygiene.get("stale_count", 0)} ｜ decision diff={approval_hygiene.get("decision_diff_count", 0)}',
+        f'审批卫生：stale>{approval_hygiene.get("stale_after_minutes", 0)} 分钟 ｜ 上次处理 {approval_runtime.get("last_run_at") or "--"} ｜ 上次过期收口 {approval_runtime.get("expired_count", 0)}',
     ]
     if risk.get('loss_streak_locked'):
         lines.extend(['---', f'连亏熔断：{risk.get("consecutive_losses", 0)}/{risk.get("max_consecutive_losses", 0)} ｜ 自动恢复 {risk.get("loss_streak_recover_at") or "--"}'])
@@ -135,6 +230,7 @@ def build_runtime_health_summary(cfg: Config, db: Database) -> dict:
             'risk': risk,
             'mode': mode,
             'models': model_rows,
+            'approval_hygiene': approval_hygiene,
         }
     }
 
@@ -962,6 +1058,7 @@ def main():
     parser.add_argument('--mode-status', action='store_true', help='显示当前模式状态')
     parser.add_argument('--daily-summary', action='store_true', help='生成日报摘要')
     parser.add_argument('--health-summary', action='store_true', help='立即生成一份健康汇总并发送通知')
+    parser.add_argument('--approval-hygiene', action='store_true', help='执行审批卫生检查；开启 auto_cleanup 时会自动收口 stale 审批')
     parser.add_argument('--cleanup-runtime-records', action='store_true', help='清理重复的治理/日报运行记录')
     parser.add_argument('--exchange-diagnose', action='store_true', help='只读诊断交易所/合约参数，不执行下单')
     parser.add_argument('--notify-test', action='store_true', help='测试 Discord/webhook 通知链路')
@@ -1033,6 +1130,10 @@ def main():
             state = load_runtime_state()
             state.update({'next_run_at': datetime.fromtimestamp(time.time() + interval).isoformat(), 'interval_seconds': interval})
             save_runtime_state(state)
+            try:
+                maybe_run_approval_hygiene(cfg, Database(cfg.db_path), notifier)
+            except Exception as e:
+                logger.error(f'执行 approval hygiene 失败: {e}')
             try:
                 maybe_send_daily_health_summary(cfg, Database(cfg.db_path), notifier)
             except Exception as e:
@@ -1164,6 +1265,14 @@ def main():
         notifier = NotificationManager(cfg, db, logger)
         result = maybe_send_daily_health_summary(cfg, db, notifier, force=True)
         print("\n🩺 健康汇总:\n")
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+
+    elif args.approval_hygiene:
+        cfg = Config()
+        db = Database(cfg.db_path)
+        notifier = NotificationManager(cfg, db, logger)
+        result = maybe_run_approval_hygiene(cfg, db, notifier, force=True)
+        print("\n🧼 审批卫生结果:\n")
         print(json.dumps(result, ensure_ascii=False, indent=2))
 
     elif args.cleanup_runtime_records:

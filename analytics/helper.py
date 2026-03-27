@@ -813,17 +813,20 @@ def _build_rollout_executor_catalog(allowed_action_types: Optional[List[str]] = 
     executable = []
     queue_only = []
     unsupported = []
+    handlers = {}
     for action_type, spec in ROLLOUT_EXECUTOR_ACTION_SPECS.items():
         row = {
             'action_type': action_type,
             'dispatch_mode': spec.get('dispatch_mode'),
             'executor_class': spec.get('executor_class'),
+            'handler_key': f"{spec.get('dispatch_mode') or 'unsupported'}::{spec.get('executor_class') or 'unknown'}",
             'allowlisted': action_type in allow,
             'audit_code': spec.get('audit_code'),
             'rollback_capable': bool(spec.get('rollback_capable', False)),
         }
         if spec.get('blocked_reason'):
             row['blocked_reason'] = spec.get('blocked_reason')
+        handlers[action_type] = dict(row)
         if spec.get('dispatch_mode') == 'apply':
             executable.append(row)
         elif spec.get('dispatch_mode') == 'queue_only':
@@ -834,6 +837,67 @@ def _build_rollout_executor_catalog(allowed_action_types: Optional[List[str]] = 
         'executable': executable,
         'queue_only': queue_only,
         'unsupported': unsupported,
+        'handlers': handlers,
+    }
+
+
+def _build_rollout_dispatch_envelope(*, mode: str, executor_class: str, handler_key: str, allowed: bool = False,
+                                     status: str = 'pending', reason: Optional[str] = None, code: Optional[str] = None,
+                                     queue_name: Optional[str] = None) -> Dict[str, Any]:
+    envelope = {
+        'mode': mode,
+        'executor_class': executor_class,
+        'handler_key': handler_key,
+        'allowed': bool(allowed),
+        'status': status,
+        'reason': reason,
+        'code': code,
+    }
+    if queue_name:
+        envelope['queue_name'] = queue_name
+    return envelope
+
+
+def _build_rollout_apply_envelope(*, attempted: bool = False, persisted: bool = False, status: str = 'pending',
+                                  operation: str = 'noop', idempotency_key: Optional[str] = None,
+                                  effect_applied: bool = False) -> Dict[str, Any]:
+    return {
+        'attempted': bool(attempted),
+        'persisted': bool(persisted),
+        'status': status,
+        'operation': operation,
+        'idempotency_key': idempotency_key,
+        'effect_applied': bool(effect_applied),
+    }
+
+
+def _build_rollout_result_envelope(*, disposition: str, status: str, reason: Optional[str] = None,
+                                   code: Optional[str] = None, state: Optional[str] = None,
+                                   workflow_state: Optional[str] = None) -> Dict[str, Any]:
+    result = {
+        'disposition': disposition,
+        'status': status,
+        'reason': reason,
+        'code': code,
+    }
+    if state is not None:
+        result['state'] = state
+    if workflow_state is not None:
+        result['workflow_state'] = workflow_state
+    return result
+
+
+def _build_rollout_queue_plan(action_type: str, row: Dict[str, Any], workflow_item: Dict[str, Any], spec: Dict[str, Any]) -> Dict[str, Any]:
+    queue_name = row.get('target_queue') or workflow_item.get('queue_name') or row.get('bucket_id') or workflow_item.get('bucket_id') or 'manual_review_queue'
+    return {
+        'queue_name': queue_name,
+        'queue_action': 'manual_followup',
+        'queue_priority': row.get('queue_priority') or workflow_item.get('queue_priority') or 'needs_human_review',
+        'next_action': action_type,
+        'blocked_reason': spec.get('blocked_reason'),
+        'requires_approval': bool(spec.get('requires_approval', False)),
+        'real_trade_execution': False,
+        'dangerous_live_parameter_change': False,
     }
 
 
@@ -849,7 +913,7 @@ def execute_rollout_executor(payload: Dict, db: Any, *, config: Any = None, sett
     catalog = _build_rollout_executor_catalog(execution_settings.get('allowed_action_types'))
 
     result = {
-        'schema_version': 'm5_rollout_executor_skeleton_v1',
+        'schema_version': 'm5_rollout_executor_skeleton_v2',
         'enabled': execution_settings.get('enabled', False),
         'mode': execution_settings.get('mode'),
         'dry_run': execution_settings.get('dry_run', False),
@@ -863,24 +927,37 @@ def execute_rollout_executor(payload: Dict, db: Any, *, config: Any = None, sett
             'applied_count': 0,
             'queued_count': 0,
             'skipped_count': 0,
+            'dry_run_count': 0,
+            'error_count': 0,
+            'by_disposition': {},
+            'by_status': {},
         },
         'supported_action_map': catalog,
         'items': [],
     }
     payload['rollout_executor'] = result
 
+    def bump(disposition: str, status: str):
+        result['summary']['by_disposition'][disposition] = result['summary']['by_disposition'].get(disposition, 0) + 1
+        result['summary']['by_status'][status] = result['summary']['by_status'].get(status, 0) + 1
+
     if not approval_items:
         result['status'] = 'idle'
         return payload
     if not result['enabled'] or result['mode'] == 'disabled':
         result['summary']['skipped_count'] = len(approval_items)
-        result['items'] = [{
-            'item_id': row.get('approval_id') or row.get('item_id') or row.get('playbook_id'),
-            'playbook_id': row.get('playbook_id'),
-            'action_type': str(row.get('action_type') or '').strip().lower(),
-            'status': 'disabled',
-            'result': {'disposition': 'disabled', 'reason': 'rollout_executor_disabled'},
-        } for row in approval_items]
+        for row in approval_items:
+            item = {
+                'item_id': row.get('approval_id') or row.get('item_id') or row.get('playbook_id'),
+                'playbook_id': row.get('playbook_id'),
+                'action_type': str(row.get('action_type') or '').strip().lower(),
+                'status': 'disabled',
+                'dispatch': _build_rollout_dispatch_envelope(mode='disabled', executor_class='disabled', handler_key='disabled::disabled', status='disabled', reason='rollout_executor_disabled', code='EXECUTOR_DISABLED'),
+                'apply': _build_rollout_apply_envelope(status='disabled', operation='noop'),
+                'result': _build_rollout_result_envelope(disposition='disabled', status='disabled', reason='rollout_executor_disabled', code='EXECUTOR_DISABLED'),
+            }
+            result['items'].append(item)
+            bump('disabled', 'disabled')
         return payload
 
     result['status'] = 'dry_run' if result['dry_run'] else 'ready'
@@ -900,13 +977,17 @@ def execute_rollout_executor(payload: Dict, db: Any, *, config: Any = None, sett
         requires_manual = bool(row.get('requires_manual'))
         approval_required = bool(row.get('approval_required') if row.get('approval_required') is not None else workflow_item.get('approval_required'))
         eligible = bool(row.get('auto_approval_eligible'))
+        dispatch_mode = (spec or {}).get('dispatch_mode') or 'unsupported'
+        executor_class = (spec or {}).get('executor_class') or 'unsupported'
+        handler_key = f'{dispatch_mode}::{executor_class}'
+        idempotency_key = f'rollout_executor::{approval_id}::{action_type}::{(spec or {}).get("state") or current_state}::{(spec or {}).get("workflow_state") or current_workflow_state}'
 
         plan = {
             'item_id': approval_id,
             'playbook_id': row.get('playbook_id'),
             'title': row.get('title') or workflow_item.get('title'),
             'action_type': action_type,
-            'dispatch_mode': (spec or {}).get('dispatch_mode') or 'unsupported',
+            'dispatch_mode': dispatch_mode,
             'current_state': current_state,
             'current_workflow_state': current_workflow_state,
             'target_state': (spec or {}).get('state'),
@@ -918,8 +999,10 @@ def execute_rollout_executor(payload: Dict, db: Any, *, config: Any = None, sett
             'blocked_by': blocked_by,
             'dry_run': result['dry_run'],
             'allowlisted': action_type in allowlisted,
-            'executor_class': (spec or {}).get('executor_class') or 'unsupported',
+            'executor_class': executor_class,
+            'handler_key': handler_key,
             'rollback_capable': bool((spec or {}).get('rollback_capable', False)),
+            'idempotency_key': idempotency_key,
         }
 
         audit = {
@@ -943,51 +1026,69 @@ def execute_rollout_executor(payload: Dict, db: Any, *, config: Any = None, sett
             'item_id': approval_id,
             'playbook_id': row.get('playbook_id'),
             'action_type': action_type,
+            'status': 'planned',
             'plan': plan,
-            'dispatch': {'mode': plan['dispatch_mode'], 'allowed': False, 'reason': None},
-            'apply': {'attempted': False, 'persisted': False},
-            'result': {'disposition': 'skipped', 'reason': None},
+            'dispatch': _build_rollout_dispatch_envelope(mode=dispatch_mode, executor_class=executor_class, handler_key=handler_key),
+            'apply': _build_rollout_apply_envelope(idempotency_key=idempotency_key),
+            'result': _build_rollout_result_envelope(disposition='skipped', status='planned'),
             'audit': audit,
         }
         result['summary']['planned_count'] += 1
 
         skip_reason = None
+        skip_code = None
+        already_applied = (
+            persisted_details.get('execution_layer') == 'rollout_executor_skeleton'
+            and persisted_details.get('action_type') == action_type
+            and persisted_details.get('effect') == (spec or {}).get('effect')
+            and current_state == str((spec or {}).get('state') or current_state)
+            and current_workflow_state == str((spec or {}).get('workflow_state') or current_workflow_state)
+        )
         if current_state in TERMINAL_APPROVAL_STATES:
-            skip_reason = f'terminal_state:{current_state}'
+            skip_reason, skip_code = f'terminal_state:{current_state}', 'TERMINAL_STATE'
         elif not spec:
-            skip_reason = f'action_type_not_supported:{action_type or "unknown"}'
+            skip_reason, skip_code = f'action_type_not_supported:{action_type or "unknown"}', 'ACTION_NOT_SUPPORTED'
         elif action_type not in allowlisted:
-            skip_reason = f'action_type_not_allowlisted:{action_type or "unknown"}'
-        elif spec.get('dispatch_mode') == 'queue_only':
-            skip_reason = spec.get('blocked_reason') or 'queue_only_action'
-            result_row['dispatch']['allowed'] = True
-            result_row['dispatch']['reason'] = 'queue_only'
-            result_row['result'] = {'disposition': 'queued', 'reason': skip_reason}
+            skip_reason, skip_code = f'action_type_not_allowlisted:{action_type or "unknown"}', 'ACTION_NOT_ALLOWLISTED'
+        elif dispatch_mode == 'queue_only':
+            queue_plan = _build_rollout_queue_plan(action_type, row, workflow_item, spec)
+            result_row['plan']['queue_plan'] = queue_plan
+            result_row['dispatch'] = _build_rollout_dispatch_envelope(mode=dispatch_mode, executor_class=executor_class, handler_key=handler_key, allowed=True, status='queued', reason='queue_only', code='QUEUE_ONLY', queue_name=queue_plan['queue_name'])
+            result_row['apply'] = _build_rollout_apply_envelope(status='queued', operation='queue_plan_only', idempotency_key=idempotency_key)
+            result_row['result'] = _build_rollout_result_envelope(disposition='queued', status='queued', reason=spec.get('blocked_reason') or 'queue_only_action', code='QUEUE_ONLY')
+            result_row['status'] = 'queued'
             result['summary']['queued_count'] += 1
             result['items'].append(result_row)
+            bump('queued', 'queued')
             continue
         elif approval_required:
-            skip_reason = 'approval_required'
+            skip_reason, skip_code = 'approval_required', 'APPROVAL_REQUIRED'
         elif requires_manual:
-            skip_reason = 'requires_manual'
+            skip_reason, skip_code = 'requires_manual', 'REQUIRES_MANUAL'
         elif not eligible:
-            skip_reason = 'not_eligible'
+            skip_reason, skip_code = 'not_eligible', 'NOT_ELIGIBLE'
         elif auto_decision != 'auto_approve':
-            skip_reason = f'judgement:{auto_decision}'
+            skip_reason, skip_code = f'judgement:{auto_decision}', 'AUTO_APPROVAL_REJECTED'
         elif risk_level != 'low':
-            skip_reason = f'risk_level:{risk_level or "unknown"}'
+            skip_reason, skip_code = f'risk_level:{risk_level or "unknown"}', 'RISK_NOT_LOW'
         elif blocked_by:
-            skip_reason = 'blocked_by:' + ','.join(blocked_by)
-        elif persisted_details.get('execution_layer') == 'rollout_executor_skeleton' and current_state == str(spec.get('state') or current_state):
-            skip_reason = 'already_applied'
+            skip_reason, skip_code = 'blocked_by:' + ','.join(blocked_by), 'BLOCKED_BY'
+        elif already_applied:
+            skip_reason, skip_code = 'already_applied', 'IDEMPOTENT_ALREADY_APPLIED'
+            result_row['apply'] = _build_rollout_apply_envelope(status='idempotent_skip', operation='noop', idempotency_key=idempotency_key)
 
         if skip_reason:
-            result_row['result'] = {'disposition': 'skipped', 'reason': skip_reason}
+            result_row['dispatch']['status'] = 'skipped'
+            result_row['dispatch']['reason'] = skip_reason
+            result_row['dispatch']['code'] = skip_code
+            result_row['result'] = _build_rollout_result_envelope(disposition='skipped', status='skipped', reason=skip_reason, code=skip_code)
+            result_row['status'] = 'skipped'
             result['summary']['skipped_count'] += 1
             result['items'].append(result_row)
+            bump('skipped', 'skipped')
             continue
 
-        result_row['dispatch'] = {'mode': plan['dispatch_mode'], 'allowed': True, 'reason': 'safe_apply_candidate'}
+        result_row['dispatch'] = _build_rollout_dispatch_envelope(mode=dispatch_mode, executor_class=executor_class, handler_key=handler_key, allowed=True, status='dispatch_ready', reason='safe_apply_candidate', code='SAFE_APPLY_CANDIDATE')
         reason = f"{execution_settings['reason_prefix']}: {row.get('reason') or 'safe rollout executor action'}"
         details = {
             'item_id': approval_id,
@@ -1012,54 +1113,63 @@ def execute_rollout_executor(payload: Dict, db: Any, *, config: Any = None, sett
             'action_type': action_type,
             'execution_layer': 'rollout_executor_skeleton',
             'execution_mode': execution_settings['mode'],
-            'dispatch_mode': spec.get('dispatch_mode'),
+            'dispatch_mode': dispatch_mode,
+            'handler_key': handler_key,
             'rollback_capable': bool(spec.get('rollback_capable', False)),
+            'idempotency_key': idempotency_key,
             'real_trade_execution': False,
             'dangerous_live_parameter_change': False,
         }
         details.update(_build_controlled_rollout_action_details(action_type, row, workflow_item, spec, execution_settings))
-        result_row['apply']['attempted'] = True
+        result_row['apply'] = _build_rollout_apply_envelope(attempted=True, persisted=False, status='applying', operation='upsert_approval_state', idempotency_key=idempotency_key)
         if result['dry_run']:
-            result_row['result'] = {
-                'disposition': 'dry_run',
-                'reason': reason,
-                'state': spec.get('state'),
-                'workflow_state': spec.get('workflow_state'),
-            }
+            result_row['apply']['status'] = 'dry_run'
+            result_row['result'] = _build_rollout_result_envelope(disposition='dry_run', status='dry_run', reason=reason, code='DRY_RUN_ONLY', state=spec.get('state'), workflow_state=spec.get('workflow_state'))
+            result_row['status'] = 'dry_run'
             result['summary']['applied_count'] += 1
+            result['summary']['dry_run_count'] += 1
             result['items'].append(result_row)
+            bump('dry_run', 'dry_run')
             continue
 
-        db.upsert_approval_state(
-            item_id=approval_id,
-            approval_type=row.get('action_type') or workflow_item.get('action_type') or 'workflow_approval',
-            target=row.get('playbook_id'),
-            title=row.get('title') or workflow_item.get('title'),
-            decision=row.get('persisted_decision') or row.get('approval_state') or 'pending',
-            state=spec.get('state'),
-            workflow_state=spec.get('workflow_state'),
-            reason=reason,
-            actor=execution_settings['actor'],
-            replay_source=replay_source,
-            details=details,
-            preserve_terminal=True,
-            event_type=str(spec.get('event_type') or 'rollout_executor_apply'),
-            append_event=True,
-        )
-        executed_rows.append(db.get_approval_state(approval_id))
-        result_row['apply']['persisted'] = True
-        result_row['result'] = {
-            'disposition': 'applied',
-            'reason': reason,
-            'state': spec.get('state'),
-            'workflow_state': spec.get('workflow_state'),
-        }
-        result['summary']['applied_count'] += 1
-        result['items'].append(result_row)
+        try:
+            db.upsert_approval_state(
+                item_id=approval_id,
+                approval_type=row.get('action_type') or workflow_item.get('action_type') or 'workflow_approval',
+                target=row.get('playbook_id'),
+                title=row.get('title') or workflow_item.get('title'),
+                decision=row.get('persisted_decision') or row.get('approval_state') or 'pending',
+                state=spec.get('state'),
+                workflow_state=spec.get('workflow_state'),
+                reason=reason,
+                actor=execution_settings['actor'],
+                replay_source=replay_source,
+                details=details,
+                preserve_terminal=True,
+                event_type=str(spec.get('event_type') or 'rollout_executor_apply'),
+                append_event=True,
+            )
+            executed_rows.append(db.get_approval_state(approval_id))
+            result_row['apply'] = _build_rollout_apply_envelope(attempted=True, persisted=True, status='applied', operation='upsert_approval_state', idempotency_key=idempotency_key, effect_applied=True)
+            result_row['result'] = _build_rollout_result_envelope(disposition='applied', status='applied', reason=reason, code='SAFE_APPLIED', state=spec.get('state'), workflow_state=spec.get('workflow_state'))
+            result_row['status'] = 'applied'
+            result['summary']['applied_count'] += 1
+            result['items'].append(result_row)
+            bump('applied', 'applied')
+        except Exception as exc:
+            result_row['apply'] = _build_rollout_apply_envelope(attempted=True, persisted=False, status='error', operation='upsert_approval_state', idempotency_key=idempotency_key)
+            result_row['result'] = _build_rollout_result_envelope(disposition='error', status='error', reason=str(exc), code='APPLY_EXCEPTION')
+            result_row['status'] = 'error'
+            result['summary']['error_count'] += 1
+            result['items'].append(result_row)
+            bump('error', 'error')
 
     if executed_rows:
         merge_persisted_approval_state(payload, executed_rows)
-    result['status'] = 'executed' if result['summary']['applied_count'] and not result['dry_run'] else result['status']
+    if result['summary']['error_count']:
+        result['status'] = 'error'
+    elif result['summary']['applied_count'] and not result['dry_run']:
+        result['status'] = 'executed'
     return payload
 
 def build_approval_audit_overview(*, stale_rows: Optional[List[Dict]] = None,

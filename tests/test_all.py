@@ -5556,6 +5556,91 @@ class TestApprovalPersistence(unittest.TestCase):
             self.assertEqual(state_row['details']['execution_mode'], 'controlled')
             self.assertEqual(timeline[-1]['event_type'], 'controlled_rollout_stage_prepare')
 
+    def test_rollout_executor_skeleton_exposes_handler_map_and_queue_plan(self):
+        class StubConfig:
+            def __init__(self, values=None):
+                self.values = values or {}
+
+            def get(self, key, default=None):
+                return self.values.get(key, default)
+
+        config = StubConfig({
+            'governance.rollout_executor': {
+                'enabled': True,
+                'mode': 'controlled',
+                'actor': 'system:test-rollout-executor',
+                'source': 'unit_test_rollout_executor',
+                'reason_prefix': 'unit-test rollout executor',
+                'allowed_action_types': ['joint_expand_guarded'],
+            }
+        })
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(str(Path(tmpdir) / 'rollout_executor_queue_plan.db'))
+            payload = {
+                'workflow_state': {'item_states': [{
+                    'item_id': 'playbook::expand', 'title': 'Guarded expand item', 'action_type': 'joint_expand_guarded',
+                    'decision': 'expand', 'governance_mode': 'rollout', 'risk_level': 'low', 'approval_required': False,
+                    'blocking_reasons': [], 'preconditions': [], 'workflow_state': 'pending', 'confidence': 'high',
+                    'queue_name': 'manual_rollout_review'}], 'summary': {}},
+                'approval_state': {'items': [{
+                    'approval_id': 'approval::expand', 'playbook_id': 'playbook::expand', 'title': 'Guarded expand item',
+                    'action_type': 'joint_expand_guarded', 'approval_state': 'pending', 'decision_state': 'pending',
+                    'risk_level': 'low', 'approval_required': False, 'blocked_by': []}], 'summary': {}},
+            }
+            payload = attach_auto_approval_policy(payload)
+            db.sync_approval_items(build_workflow_approval_records(payload), replay_source='unit-test')
+            result = execute_rollout_executor(payload, db, config=config, replay_source='unit-test-replay')
+            executor = result['rollout_executor']
+            item = executor['items'][0]
+            handler = executor['supported_action_map']['handlers']['joint_expand_guarded']
+            self.assertEqual(handler['handler_key'], 'queue_only::live_trading_change')
+            self.assertEqual(item['status'], 'queued')
+            self.assertEqual(item['dispatch']['code'], 'QUEUE_ONLY')
+            self.assertEqual(item['plan']['queue_plan']['queue_name'], 'manual_rollout_review')
+            self.assertFalse(item['plan']['queue_plan']['real_trade_execution'])
+            self.assertEqual(executor['summary']['by_disposition']['queued'], 1)
+
+    def test_rollout_executor_skeleton_marks_idempotent_safe_apply_as_skip(self):
+        class StubConfig:
+            def __init__(self, values=None):
+                self.values = values or {}
+
+            def get(self, key, default=None):
+                return self.values.get(key, default)
+
+        config = StubConfig({
+            'governance.rollout_executor': {
+                'enabled': True,
+                'mode': 'controlled',
+                'actor': 'system:test-rollout-executor',
+                'source': 'unit_test_rollout_executor',
+                'reason_prefix': 'unit-test rollout executor',
+                'allowed_action_types': ['joint_observe'],
+            }
+        })
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(str(Path(tmpdir) / 'rollout_executor_idempotent.db'))
+            payload = {
+                'workflow_state': {'item_states': [{
+                    'item_id': 'playbook::observe', 'title': 'Safe observe item', 'action_type': 'joint_observe',
+                    'decision': 'expand', 'governance_mode': 'rollout', 'risk_level': 'low', 'approval_required': False,
+                    'blocking_reasons': [], 'preconditions': [], 'workflow_state': 'pending', 'confidence': 'high'}], 'summary': {}},
+                'approval_state': {'items': [{
+                    'approval_id': 'approval::observe', 'playbook_id': 'playbook::observe', 'title': 'Safe observe item',
+                    'action_type': 'joint_observe', 'approval_state': 'pending', 'decision_state': 'pending',
+                    'risk_level': 'low', 'approval_required': False, 'blocked_by': []}], 'summary': {}},
+            }
+            payload = attach_auto_approval_policy(payload)
+            db.sync_approval_items(build_workflow_approval_records(payload), replay_source='unit-test')
+            first = execute_rollout_executor(payload, db, config=config, replay_source='unit-test-replay')
+            second = execute_rollout_executor(first, db, config=config, replay_source='unit-test-replay-2')
+            item = second['rollout_executor']['items'][0]
+            self.assertEqual(item['status'], 'skipped')
+            self.assertEqual(item['result']['code'], 'IDEMPOTENT_ALREADY_APPLIED')
+            self.assertEqual(item['apply']['status'], 'idempotent_skip')
+            self.assertTrue(item['apply']['idempotency_key'].startswith('rollout_executor::approval::observe::joint_observe'))
+            self.assertEqual(second['rollout_executor']['summary']['by_disposition']['skipped'], 1)
+
     def test_controlled_rollout_execution_defaults_to_disabled(self):
         class StubConfig:
             def __init__(self, values=None):

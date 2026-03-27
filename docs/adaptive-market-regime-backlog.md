@@ -177,6 +177,13 @@
   - 可执行 action 会生成 plan+audit 并按 controlled 模式安全落库；
   - 敏感 action 即使 allowlist 命中，也只会 queue，不会自动 apply；
   - 测试覆盖 supported action map、dispatch/result envelope、审计字段、dry-run no-op 语义。
+- **2026-03-27 skeleton+1 增量**：
+  - `supported_action_map` 补充 `handlers` 视图，统一 `handler_key=dispatch_mode::executor_class`；
+  - `dispatch / apply / result` envelope 补充 `status/code` 标准字段；
+  - safe apply 增加 `idempotency_key` 与 `already_applied -> idempotent_skip` 语义；
+  - queue-only action 补充 `queue_plan`（queue_name / queue_priority / next_action / blocked_reason）；
+  - `summary` 新增 `dry_run_count / error_count / by_disposition / by_status`，方便后续 dashboard/executor capability 扩展；
+  - 继续保持 `real_trade_execution=false`、`dangerous_live_parameter_change=false`，不触发真实交易或 live 参数修改。
 
 ### AR-M5-05｜approval audit / stale cleanup / decision diff layer
 

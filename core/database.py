@@ -67,6 +67,74 @@ class Database:
         data['notional_value'] = coin_quantity * (exit_price or entry_price or 0.0)
         data['pnl_percent'] = (pnl / margin * 100) if pnl is not None and margin > 0 else None
         return data
+
+    def _normalize_event_type(self, event_type: Optional[str], category: str = 'approval') -> str:
+        normalized = str(event_type or '').strip().lower()
+        if normalized:
+            return normalized
+        fallback = str(category or 'unknown').strip().lower() or 'unknown'
+        return f"{fallback}_event"
+
+    def _build_event_provenance(self, *, origin: str, source: Optional[str] = None, family: Optional[str] = None,
+                                phase: Optional[str] = None, producer: Optional[str] = None,
+                                replay_source: Optional[str] = None, synthetic: bool = False) -> Dict[str, Any]:
+        normalized_origin = str(origin or 'unknown').strip().lower() or 'unknown'
+        normalized_source = str(source or '').strip() or normalized_origin
+        normalized_family = str(family or normalized_origin).strip().lower() or normalized_origin
+        normalized_phase = str(phase or normalized_family).strip().lower() or normalized_family
+        normalized_producer = str(producer or normalized_source).strip() or normalized_source
+        normalized_replay = str(replay_source or '').strip() or None
+        return {
+            'schema_version': 'm5_event_provenance_v1',
+            'origin': normalized_origin,
+            'source': normalized_source,
+            'family': normalized_family,
+            'phase': normalized_phase,
+            'producer': normalized_producer,
+            'replay_source': normalized_replay,
+            'synthetic': bool(synthetic),
+        }
+
+    def _build_event_timestamp(self, *, value: Optional[str], source: Optional[str], phase: Optional[str],
+                               field: Optional[str], fallback_fields: Optional[List[str]] = None) -> Dict[str, Any]:
+        normalized_value = str(value or '').strip() or None
+        normalized_source = str(source or '').strip() or ('missing' if normalized_value is None else 'observed')
+        normalized_phase = str(phase or normalized_source).strip().lower() or normalized_source
+        normalized_field = str(field or '').strip() or None
+        return {
+            'schema_version': 'm5_event_provenance_v1',
+            'value': normalized_value,
+            'source': normalized_source,
+            'phase': normalized_phase,
+            'field': normalized_field,
+            'fallback_fields': [str(item).strip() for item in (fallback_fields or []) if str(item).strip()],
+            'present': normalized_value is not None,
+        }
+
+    def _attach_approval_event_metadata(self, row: Dict[str, Any]) -> Dict[str, Any]:
+        payload = dict(row or {})
+        details = self._safe_json_dict(payload.get('details'))
+        payload['details'] = details
+        normalized_event_type = self._normalize_event_type(payload.get('event_type'), 'approval')
+        payload['normalized_event_type'] = normalized_event_type
+        payload['provenance'] = self._build_event_provenance(
+            origin='approval_db',
+            source='approval_timeline',
+            family='approval',
+            phase='approval_db',
+            producer=payload.get('source') or payload.get('replay_source') or 'approval_db',
+            replay_source=payload.get('source') if str(payload.get('source') or '').strip().startswith('workflow') else details.get('replay_source'),
+            synthetic=False,
+        )
+        payload['timestamp_info'] = self._build_event_timestamp(
+            value=payload.get('created_at') or payload.get('updated_at'),
+            source='approval_event_created_at' if payload.get('created_at') else ('approval_event_updated_at' if payload.get('updated_at') else 'approval_event_missing'),
+            phase='approval_db',
+            field='created_at' if payload.get('created_at') else ('updated_at' if payload.get('updated_at') else None),
+            fallback_fields=['updated_at'],
+        )
+        payload['timestamp'] = payload['timestamp_info'].get('value')
+        return payload
     
     def _init_db(self):
         """初始化数据库表"""
@@ -1587,7 +1655,7 @@ class Database:
         conn.close()
         if not df.empty:
             df['details'] = df['details'].apply(lambda x: json.loads(x) if x else {})
-        return df.to_dict('records')
+        return [self._attach_approval_event_metadata(row) for row in df.to_dict('records')]
 
     def get_stale_approval_states(self, stale_after_minutes: int = 60, approval_type: str = None,
                                   limit: int = 100) -> List[Dict]:
@@ -1744,13 +1812,29 @@ class Database:
         last_event = timeline[-1]
         state_counts: Dict[str, int] = {}
         event_counts: Dict[str, int] = {}
+        normalized_event_types: List[str] = []
+        provenance_origins: List[str] = []
+        provenance_sources: List[str] = []
+        timestamp_sources: List[str] = []
+        timestamp_phases: List[str] = []
         decision_path = []
         last_decision_key = None
         for event in timeline:
             state_value = event.get('state') or 'pending'
             event_type = event.get('event_type') or 'unknown'
+            normalized_event_type = event.get('normalized_event_type') or self._normalize_event_type(event_type, 'approval')
             state_counts[state_value] = state_counts.get(state_value, 0) + 1
             event_counts[event_type] = event_counts.get(event_type, 0) + 1
+            if normalized_event_type not in normalized_event_types:
+                normalized_event_types.append(normalized_event_type)
+            provenance = event.get('provenance') or {}
+            for value, bucket in ((provenance.get('origin'), provenance_origins), (provenance.get('source'), provenance_sources)):
+                if value and value not in bucket:
+                    bucket.append(value)
+            timestamp_info = event.get('timestamp_info') or {}
+            for value, bucket in ((timestamp_info.get('source'), timestamp_sources), (timestamp_info.get('phase'), timestamp_phases)):
+                if value and value not in bucket:
+                    bucket.append(value)
             decision_key = (event.get('decision') or 'pending', state_value, event.get('workflow_state') or 'pending')
             if decision_key != last_decision_key:
                 decision_path.append({
@@ -1758,7 +1842,11 @@ class Database:
                     'state': decision_key[1],
                     'workflow_state': decision_key[2],
                     'event_type': event_type,
+                    'normalized_event_type': normalized_event_type,
                     'created_at': event.get('created_at'),
+                    'timestamp': event.get('timestamp'),
+                    'timestamp_info': event.get('timestamp_info') or {},
+                    'provenance': provenance,
                     'actor': event.get('actor'),
                     'reason': event.get('reason'),
                 })
@@ -1787,6 +1875,11 @@ class Database:
             'event_count': len(timeline),
             'state_counts': state_counts,
             'event_counts': event_counts,
+            'normalized_event_types': normalized_event_types,
+            'provenance_origins': provenance_origins,
+            'provenance_sources': provenance_sources,
+            'timestamp_sources': timestamp_sources,
+            'timestamp_phases': timestamp_phases,
             'decision_path': decision_path,
             'stale': stale,
             'stale_minutes': stale_minutes,

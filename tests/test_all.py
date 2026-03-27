@@ -6060,9 +6060,18 @@ class TestApprovalPersistence(unittest.TestCase):
         self.assertEqual(merged['summary']['event_count'], 7)
         self.assertEqual(merged['events'][0]['source'], 'approval_timeline')
         self.assertEqual(merged['events'][0]['event_type'], 'snapshot_sync')
+        self.assertEqual(merged['events'][0]['provenance']['origin'], 'approval_db')
+        self.assertEqual(merged['events'][0]['timestamp_info']['source'], 'approval_event_created_at')
         self.assertEqual(merged['events'][-1]['source'], 'executor_timeline')
+        self.assertEqual(merged['events'][-1]['provenance']['origin'], 'executor')
+        self.assertEqual(merged['events'][-1]['normalized_event_type'], 'executor_result_recorded')
         self.assertIn('approval_db', merged['summary']['phases'])
         self.assertIn('dispatch', merged['summary']['phases'])
+        self.assertIn('approval_db', merged['summary']['provenance_origins'])
+        self.assertIn('executor', merged['summary']['provenance_origins'])
+        self.assertIn('approval_timeline', merged['summary']['provenance_sources'])
+        self.assertIn('executor_timeline', merged['summary']['provenance_sources'])
+        self.assertIn('snapshot_sync', merged['summary']['normalized_event_types'])
 
     def test_build_workbench_timeline_summary_aggregation_groups_bucket_and_action_views(self):
         payload = {
@@ -6140,12 +6149,16 @@ class TestApprovalPersistence(unittest.TestCase):
         self.assertEqual(manual_bucket['item_count'], 1)
         self.assertIn('manual_review_queue', manual_bucket['timeline_summary']['dispatch_routes'])
         self.assertEqual(manual_bucket['merged_timeline_summary']['approval_event_count_total'], 2)
+        self.assertIn('approval_db', manual_bucket['merged_timeline_summary']['provenance_origins'])
+        self.assertIn('approval_timeline', manual_bucket['merged_timeline_summary']['provenance_sources'])
         action_group = next(group for group in aggregation['groups']['by_action_type'] if group['group_id'] == 'joint_expand_guarded')
         self.assertEqual(action_group['item_count'], 1)
         self.assertIn('approval_db', action_group['merged_timeline_summary']['phases'])
         self.assertIn('executor_dispatch_decided', action_group['merged_timeline_summary']['event_types'])
+        self.assertIn('executor_dispatch_decided', action_group['merged_timeline_summary']['normalized_event_types'])
         ready_item = next(row for row in aggregation['items'] if row['item_id'] == 'playbook::ready')
         self.assertEqual(ready_item['timeline']['dispatch_route'], 'safe_state_apply')
+        self.assertIn('executor', ready_item['timeline']['provenance_origins'])
         self.assertEqual(ready_item['merged_timeline']['approval_event_count'], 0)
 
     def test_build_workflow_attention_view_groups_manual_and_blocked_items(self):
@@ -6308,7 +6321,12 @@ class TestApprovalPersistence(unittest.TestCase):
             timeline = db.get_approval_timeline(item_id=item_id, ascending=True)
             self.assertEqual(len(timeline), 2)
             self.assertEqual(timeline[0]['event_type'], 'snapshot_sync')
+            self.assertEqual(timeline[0]['normalized_event_type'], 'snapshot_sync')
+            self.assertEqual(timeline[0]['provenance']['origin'], 'approval_db')
+            self.assertEqual(timeline[0]['provenance']['source'], 'approval_timeline')
+            self.assertEqual(timeline[0]['timestamp_info']['source'], 'approval_event_created_at')
             self.assertEqual(timeline[1]['event_type'], 'decision_recorded')
+            self.assertEqual(timeline[1]['normalized_event_type'], 'decision_recorded')
             self.assertEqual(timeline[1]['decision'], 'approved')
             self.assertEqual(timeline[1]['actor'], 'tester')
 
@@ -6410,7 +6428,13 @@ class TestApprovalPersistence(unittest.TestCase):
             summary = db.get_approval_timeline_summary(item_id)
             self.assertEqual(summary['current']['state'], 'expired')
             self.assertIn('stale_cleanup', summary['event_counts'])
+            self.assertIn('stale_cleanup', summary['normalized_event_types'])
+            self.assertIn('approval_db', summary['provenance_origins'])
+            self.assertIn('approval_timeline', summary['provenance_sources'])
+            self.assertIn('approval_event_created_at', summary['timestamp_sources'])
             self.assertTrue(any(step['state'] == 'expired' for step in summary['decision_path']))
+            self.assertIn('provenance', summary['decision_path'][-1])
+            self.assertIn('timestamp_info', summary['decision_path'][-1])
 
     def test_recent_approval_decision_diff_tracks_state_transitions(self):
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -246,6 +246,66 @@ def _normalize_auto_approval_confidence(value: Optional[str]) -> str:
     return normalized if normalized in {'high', 'medium', 'low'} else 'low'
 
 
+EVENT_PROVENANCE_SCHEMA_VERSION = 'm5_event_provenance_v1'
+
+
+def _build_event_provenance(*, origin: str, source: Optional[str] = None, family: Optional[str] = None, phase: Optional[str] = None, producer: Optional[str] = None, replay_source: Optional[str] = None, synthetic: bool = False, schema_version: str = EVENT_PROVENANCE_SCHEMA_VERSION) -> Dict[str, Any]:
+    normalized_origin = str(origin or 'unknown').strip().lower() or 'unknown'
+    normalized_source = str(source or '').strip() or None
+    normalized_family = str(family or normalized_origin).strip().lower() or normalized_origin
+    normalized_phase = str(phase or normalized_family).strip().lower() or normalized_family
+    normalized_producer = str(producer or normalized_source or normalized_origin).strip() or normalized_origin
+    normalized_replay = str(replay_source or '').strip() or None
+    return {
+        'schema_version': schema_version,
+        'origin': normalized_origin,
+        'source': normalized_source or normalized_origin,
+        'family': normalized_family,
+        'phase': normalized_phase,
+        'producer': normalized_producer,
+        'replay_source': normalized_replay,
+        'synthetic': bool(synthetic),
+    }
+
+
+def _build_event_timestamp(*, value: Optional[str] = None, source: Optional[str] = None, phase: Optional[str] = None, field: Optional[str] = None, fallback_fields: Optional[List[str]] = None, schema_version: str = EVENT_PROVENANCE_SCHEMA_VERSION) -> Dict[str, Any]:
+    normalized_value = str(value or '').strip() or None
+    normalized_source = str(source or '').strip() or None
+    normalized_phase = str(phase or normalized_source or 'observed').strip().lower() or 'observed'
+    normalized_field = str(field or '').strip() or None
+    fallbacks = [str(item).strip() for item in (fallback_fields or []) if str(item).strip()]
+    return {
+        'schema_version': schema_version,
+        'value': normalized_value,
+        'source': normalized_source or ('missing' if normalized_value is None else 'observed'),
+        'phase': normalized_phase,
+        'field': normalized_field,
+        'fallback_fields': fallbacks,
+        'present': normalized_value is not None,
+    }
+
+
+def _normalize_event_type(event_type: Optional[str], *, category: Optional[str] = None) -> str:
+    normalized = str(event_type or '').strip().lower()
+    if normalized:
+        return normalized
+    fallback_category = str(category or 'unknown').strip().lower()
+    return f'{fallback_category}_event' if fallback_category else 'unknown_event'
+
+
+def _attach_unified_event_metadata(event: Dict[str, Any], *, normalized_event_type: Optional[str] = None, provenance: Optional[Dict[str, Any]] = None, timestamp: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    payload = dict(event or {})
+    normalized_type = _normalize_event_type(normalized_event_type or payload.get('event_type'), category=payload.get('phase') or payload.get('path_type'))
+    payload['normalized_event_type'] = normalized_type
+    if provenance is not None:
+        payload['provenance'] = dict(provenance)
+        payload.setdefault('source', payload['provenance'].get('source'))
+    if timestamp is not None:
+        payload['timestamp_info'] = dict(timestamp)
+        payload['timestamp'] = payload['timestamp_info'].get('value')
+    return payload
+
+
 def _dedupe_strings(values: Optional[List[Any]]) -> List[str]:
     seen = set()
     deduped: List[str] = []
@@ -2772,14 +2832,30 @@ def _normalize_workbench_approval_timeline_event(event: Dict[str, Any], *, item:
     state = event.get('state') or current.get('state') or approval_item.get('approval_state') or 'pending'
     workflow_state = event.get('workflow_state') or current.get('workflow_state') or workflow_item.get('workflow_state') or approval_item.get('workflow_state') or 'pending'
     decision = event.get('decision') or current.get('decision') or approval_item.get('decision_state') or state
-    return {
-        'event_key': f"approval_db::{event.get('id') or event.get('event_type') or state}",
-        'event_type': event.get('event_type') or 'approval_timeline_event',
+    event_type = _normalize_event_type(event.get('event_type'), category='approval_db')
+    timestamp = _build_event_timestamp(
+        value=event.get('created_at') or event.get('updated_at') or current.get('updated_at'),
+        source='approval_event_created_at' if (event.get('created_at') or event.get('updated_at')) else 'approval_event_fallback',
+        phase='approval_db',
+        field='created_at' if event.get('created_at') else ('updated_at' if event.get('updated_at') else 'current.updated_at'),
+        fallback_fields=['updated_at', 'current.updated_at'],
+    )
+    provenance = _build_event_provenance(
+        origin='approval_db',
+        source='approval_timeline',
+        family='approval',
+        phase='approval_db',
+        producer=event.get('source') or event.get('replay_source') or 'approval_db',
+        replay_source=event.get('replay_source') or details.get('replay_source'),
+        synthetic=False,
+    )
+    return _attach_unified_event_metadata({
+        'event_key': f"approval_db::{event.get('id') or event_type or state}",
+        'event_type': event_type,
         'phase': 'approval_db',
         'status': state,
         'path_type': 'approval_db',
-        'summary': event.get('reason') or current.get('reason') or event.get('event_type') or 'approval timeline event',
-        'timestamp': event.get('created_at') or event.get('updated_at') or current.get('updated_at'),
+        'summary': event.get('reason') or current.get('reason') or event_type or 'approval timeline event',
         'sequence': event.get('id'),
         'source': 'approval_timeline',
         'detail': {
@@ -2794,7 +2870,7 @@ def _normalize_workbench_approval_timeline_event(event: Dict[str, Any], *, item:
             'source': event.get('source') or event.get('replay_source'),
             'details': details,
         },
-    }
+    }, normalized_event_type=event_type, provenance=provenance, timestamp=timestamp)
 
 
 def build_workbench_merged_timeline(item: Dict[str, Any], workflow_item: Dict[str, Any], approval_item: Dict[str, Any],
@@ -2821,7 +2897,12 @@ def build_workbench_merged_timeline(item: Dict[str, Any], workflow_item: Dict[st
 
     merged_events.sort(key=_sort_key)
     event_types = _dedupe_strings([row.get('event_type') for row in merged_events])
+    normalized_event_types = _dedupe_strings([row.get('normalized_event_type') for row in merged_events])
     phases = _dedupe_strings([row.get('phase') for row in merged_events])
+    provenance_origins = _dedupe_strings([(row.get('provenance') or {}).get('origin') for row in merged_events])
+    provenance_sources = _dedupe_strings([(row.get('provenance') or {}).get('source') for row in merged_events])
+    timestamp_sources = _dedupe_strings([(row.get('timestamp_info') or {}).get('source') for row in merged_events])
+    timestamp_phases = _dedupe_strings([(row.get('timestamp_info') or {}).get('phase') for row in merged_events])
     timestamp_range = {
         'first': next((row.get('timestamp') for row in merged_events if row.get('timestamp')), None),
         'last': next((row.get('timestamp') for row in reversed(merged_events) if row.get('timestamp')), None),
@@ -2841,8 +2922,13 @@ def build_workbench_merged_timeline(item: Dict[str, Any], workflow_item: Dict[st
         'approval_event_count': len(approval_events),
         'executor_event_count': len(executor_timeline.get('events') or []),
         'event_types': event_types,
+        'normalized_event_types': normalized_event_types,
         'phases': phases,
+        'provenance_origins': provenance_origins,
+        'provenance_sources': provenance_sources,
         'timestamp_range': timestamp_range,
+        'timestamp_sources': timestamp_sources,
+        'timestamp_phases': timestamp_phases,
         'decision_path': executor_summary.get('decision_path') or {},
         'blocking_points': executor_summary.get('blocking_points') or [],
         'result_summary': executor_summary.get('result_summary') or {},
@@ -2854,8 +2940,8 @@ def build_workbench_merged_timeline(item: Dict[str, Any], workflow_item: Dict[st
         'summary': summary,
         'events': merged_events,
         'sources': {
-            'approval_timeline': {'event_count': len(approval_events), 'enabled': bool(approval_timeline)},
-            'executor_timeline': {'event_count': len(executor_timeline.get('events') or [])},
+            'approval_timeline': {'event_count': len(approval_events), 'enabled': bool(approval_timeline), 'provenance': _build_event_provenance(origin='approval_db', source='approval_timeline', family='approval', phase='approval_db', producer='approval_db')},
+            'executor_timeline': {'event_count': len(executor_timeline.get('events') or []), 'provenance': _build_event_provenance(origin='executor', source='executor_timeline', family='workflow_execution', phase='workflow', producer='workbench_executor_action_timeline', synthetic=True)},
         },
         'raw': {
             'approval_timeline': approval_timeline,
@@ -2892,32 +2978,69 @@ def _build_workbench_executor_action_timeline(item: Dict[str, Any], workflow_ite
         queue_progression.get('status'),
     ])
 
+    event_timestamp_value = (
+        ((item.get('scheduled_review') or workflow_item.get('scheduled_review') or approval_item.get('scheduled_review') or {}).get('last_transition_at'))
+        or ((item.get('scheduled_review') or workflow_item.get('scheduled_review') or approval_item.get('scheduled_review') or {}).get('scheduled_at'))
+        or ((item.get('scheduled_review') or workflow_item.get('scheduled_review') or approval_item.get('scheduled_review') or {}).get('next_recheck_at'))
+    )
+
+    def _executor_event(event_key: str, event_type: str, phase: str, status: str, path_type: str, summary: str, detail: Dict[str, Any], sequence: int) -> Dict[str, Any]:
+        return _attach_unified_event_metadata({
+            'event_key': event_key,
+            'event_type': event_type,
+            'phase': phase,
+            'status': status,
+            'path_type': path_type,
+            'summary': summary,
+            'source': 'executor_timeline',
+            'sequence': sequence,
+            'detail': detail,
+        }, normalized_event_type=event_type, provenance=_build_event_provenance(
+            origin='executor',
+            source='executor_timeline',
+            family='workflow_execution',
+            phase=phase,
+            producer='workbench_executor_action_timeline',
+            synthetic=True,
+        ), timestamp=_build_event_timestamp(
+            value=event_timestamp_value,
+            source='workflow_scheduled_review' if event_timestamp_value else 'synthetic_timeline_order',
+            phase=phase,
+            field='scheduled_review.last_transition_at' if ((item.get('scheduled_review') or workflow_item.get('scheduled_review') or approval_item.get('scheduled_review') or {}).get('last_transition_at')) else ('scheduled_review.scheduled_at' if ((item.get('scheduled_review') or workflow_item.get('scheduled_review') or approval_item.get('scheduled_review') or {}).get('scheduled_at')) else ('scheduled_review.next_recheck_at' if ((item.get('scheduled_review') or workflow_item.get('scheduled_review') or approval_item.get('scheduled_review') or {}).get('next_recheck_at')) else None)),
+            fallback_fields=['scheduled_review.last_transition_at', 'scheduled_review.scheduled_at', 'scheduled_review.next_recheck_at'],
+        ))
+
     events = [
-        {
-            'event_key': 'action_selected', 'event_type': 'workflow_action_selected', 'phase': 'workflow', 'status': workflow_state,
-            'path_type': 'decision', 'summary': workflow_item.get('title') or item.get('title') or item.get('item_id'), 'source': 'executor_timeline',
-            'detail': {'action_type': item.get('action_type') or workflow_item.get('action_type') or approval_item.get('action_type'), 'risk_level': item.get('risk_level') or workflow_item.get('risk_level') or approval_item.get('risk_level') or 'unknown', 'queue_progression': queue_progression, 'scheduled_review': item.get('scheduled_review') or workflow_item.get('scheduled_review') or approval_item.get('scheduled_review') or {}},
-        },
-        {
-            'event_key': 'approval_gate', 'event_type': 'approval_gate_evaluated', 'phase': 'approval', 'status': approval_state,
-            'path_type': 'approval', 'summary': approval_hook.get('gate_reason') or ('manual review required' if item.get('requires_manual') else 'approval state evaluated'), 'source': 'executor_timeline',
-            'detail': {'approval_required': bool(item.get('approval_required')), 'requires_manual': bool(item.get('requires_manual')), 'approval_state': approval_state, 'decision_state': item.get('decision_state') or approval_item.get('decision_state') or workflow_state, 'auto_approval_decision': item.get('auto_approval_decision') or approval_item.get('auto_approval_decision') or workflow_item.get('auto_approval_decision'), 'approval_hook': approval_hook, 'blocked_by': blocked_by},
-        },
-        {
-            'event_key': 'executor_plan', 'event_type': 'executor_plan_built', 'phase': 'executor_plan', 'status': 'planned' if plan else 'missing',
-            'path_type': 'execution', 'summary': plan.get('handler_key') or dispatch.get('handler_key') or 'executor plan unresolved', 'source': 'executor_timeline',
-            'detail': {'handler_key': plan.get('handler_key') or dispatch.get('handler_key'), 'executor_class': plan.get('executor_class') or dispatch.get('executor_class'), 'dispatch_mode': plan.get('dispatch_mode') or dispatch.get('mode'), 'dispatch_route': route, 'transition_rule': plan.get('transition_rule') or dispatch.get('transition_rule') or result.get('transition_rule'), 'next_transition': plan.get('next_transition') or dispatch.get('next_transition') or result.get('next_transition'), 'readiness': plan.get('readiness') or workflow_state, 'queue_plan': queue_plan},
-        },
-        {
-            'event_key': 'executor_dispatch', 'event_type': 'executor_dispatch_decided', 'phase': 'dispatch', 'status': dispatch.get('status') or execution_status,
-            'path_type': 'dispatch', 'summary': dispatch.get('reason') or result.get('reason') or 'dispatch decision recorded', 'source': 'executor_timeline',
-            'detail': {'route': route, 'dispatch_mode': dispatch.get('mode') or plan.get('dispatch_mode'), 'code': dispatch.get('code'), 'retryable': dispatch.get('retryable', result.get('retryable', True)), 'rollback_hint': dispatch.get('rollback_hint') or result.get('rollback_hint') or plan.get('rollback_hint')},
-        },
-        {
-            'event_key': 'executor_result', 'event_type': 'executor_result_recorded', 'phase': 'result', 'status': result.get('status') or execution_status,
-            'path_type': 'result', 'summary': result.get('reason') or 'executor result recorded', 'source': 'executor_timeline',
-            'detail': {'disposition': result.get('disposition') or executor_item.get('status'), 'code': result.get('code'), 'state': result.get('state') or approval_state, 'workflow_state': result.get('workflow_state') or workflow_state, 'transition_rule': result.get('transition_rule') or dispatch.get('transition_rule') or plan.get('transition_rule'), 'next_transition': result.get('next_transition') or dispatch.get('next_transition') or plan.get('next_transition')},
-        },
+        _executor_event(
+            'action_selected', 'workflow_action_selected', 'workflow', workflow_state, 'decision',
+            workflow_item.get('title') or item.get('title') or item.get('item_id'),
+            {'action_type': item.get('action_type') or workflow_item.get('action_type') or approval_item.get('action_type'), 'risk_level': item.get('risk_level') or workflow_item.get('risk_level') or approval_item.get('risk_level') or 'unknown', 'queue_progression': queue_progression, 'scheduled_review': item.get('scheduled_review') or workflow_item.get('scheduled_review') or approval_item.get('scheduled_review') or {}},
+            1,
+        ),
+        _executor_event(
+            'approval_gate', 'approval_gate_evaluated', 'approval', approval_state, 'approval',
+            approval_hook.get('gate_reason') or ('manual review required' if item.get('requires_manual') else 'approval state evaluated'),
+            {'approval_required': bool(item.get('approval_required')), 'requires_manual': bool(item.get('requires_manual')), 'approval_state': approval_state, 'decision_state': item.get('decision_state') or approval_item.get('decision_state') or workflow_state, 'auto_approval_decision': item.get('auto_approval_decision') or approval_item.get('auto_approval_decision') or workflow_item.get('auto_approval_decision'), 'approval_hook': approval_hook, 'blocked_by': blocked_by},
+            2,
+        ),
+        _executor_event(
+            'executor_plan', 'executor_plan_built', 'executor_plan', 'planned' if plan else 'missing', 'execution',
+            plan.get('handler_key') or dispatch.get('handler_key') or 'executor plan unresolved',
+            {'handler_key': plan.get('handler_key') or dispatch.get('handler_key'), 'executor_class': plan.get('executor_class') or dispatch.get('executor_class'), 'dispatch_mode': plan.get('dispatch_mode') or dispatch.get('mode'), 'dispatch_route': route, 'transition_rule': plan.get('transition_rule') or dispatch.get('transition_rule') or result.get('transition_rule'), 'next_transition': plan.get('next_transition') or dispatch.get('next_transition') or result.get('next_transition'), 'readiness': plan.get('readiness') or workflow_state, 'queue_plan': queue_plan},
+            3,
+        ),
+        _executor_event(
+            'executor_dispatch', 'executor_dispatch_decided', 'dispatch', dispatch.get('status') or execution_status, 'dispatch',
+            dispatch.get('reason') or result.get('reason') or 'dispatch decision recorded',
+            {'route': route, 'dispatch_mode': dispatch.get('mode') or plan.get('dispatch_mode'), 'code': dispatch.get('code'), 'retryable': dispatch.get('retryable', result.get('retryable', True)), 'rollback_hint': dispatch.get('rollback_hint') or result.get('rollback_hint') or plan.get('rollback_hint')},
+            4,
+        ),
+        _executor_event(
+            'executor_result', 'executor_result_recorded', 'result', result.get('status') or execution_status, 'result',
+            result.get('reason') or 'executor result recorded',
+            {'disposition': result.get('disposition') or executor_item.get('status'), 'code': result.get('code'), 'state': result.get('state') or approval_state, 'workflow_state': result.get('workflow_state') or workflow_state, 'transition_rule': result.get('transition_rule') or dispatch.get('transition_rule') or plan.get('transition_rule'), 'next_transition': result.get('next_transition') or dispatch.get('next_transition') or plan.get('next_transition')},
+            5,
+        ),
     ]
 
     summary = {
@@ -2928,6 +3051,11 @@ def _build_workbench_executor_action_timeline(item: Dict[str, Any], workflow_ite
         'audit_event_types': audit_event_types,
         'result_summary': {'reason': result.get('reason') or dispatch.get('reason'), 'code': result.get('code') or dispatch.get('code'), 'retryable': bool(result.get('retryable', dispatch.get('retryable', True))), 'rollback_hint': result.get('rollback_hint') or dispatch.get('rollback_hint') or plan.get('rollback_hint')},
         'blocking_points': blocked_by, 'event_count': len(events),
+        'provenance_origins': _dedupe_strings([(row.get('provenance') or {}).get('origin') for row in events]),
+        'provenance_sources': _dedupe_strings([(row.get('provenance') or {}).get('source') for row in events]),
+        'normalized_event_types': _dedupe_strings([row.get('normalized_event_type') for row in events]),
+        'timestamp_sources': _dedupe_strings([(row.get('timestamp_info') or {}).get('source') for row in events]),
+        'timestamp_phases': _dedupe_strings([(row.get('timestamp_info') or {}).get('phase') for row in events]),
     }
 
     return {'schema_version': 'm5_workbench_executor_action_timeline_v1', 'locator': {'item_id': item.get('item_id'), 'approval_id': item.get('approval_id'), 'lane_id': item.get('lane_id'), 'action_type': summary['action_type']}, 'summary': summary, 'events': events, 'stage_model': stage_model, 'raw': {'workflow_item': workflow_item, 'approval_item': approval_item, 'executor_item': executor_item}}
@@ -3167,14 +3295,24 @@ def build_workbench_timeline_summary_aggregation(payload: Optional[Dict] = None,
                 'decision_path': timeline.get('decision_path') or {},
                 'result_summary': timeline.get('result_summary') or {},
                 'event_count': timeline.get('event_count', 0),
+                'normalized_event_types': timeline.get('normalized_event_types') or [],
+                'provenance_origins': timeline.get('provenance_origins') or [],
+                'provenance_sources': timeline.get('provenance_sources') or [],
+                'timestamp_sources': timeline.get('timestamp_sources') or [],
+                'timestamp_phases': timeline.get('timestamp_phases') or [],
             },
             'merged_timeline': {
                 'event_count': merged_timeline.get('event_count', 0),
                 'approval_event_count': merged_timeline.get('approval_event_count', 0),
                 'executor_event_count': merged_timeline.get('executor_event_count', 0),
                 'event_types': merged_timeline.get('event_types') or [],
+                'normalized_event_types': merged_timeline.get('normalized_event_types') or [],
                 'phases': merged_timeline.get('phases') or [],
+                'provenance_origins': merged_timeline.get('provenance_origins') or [],
+                'provenance_sources': merged_timeline.get('provenance_sources') or [],
                 'timestamp_range': merged_timeline.get('timestamp_range') or {},
+                'timestamp_sources': merged_timeline.get('timestamp_sources') or [],
+                'timestamp_phases': merged_timeline.get('timestamp_phases') or [],
             },
         }
 
@@ -3191,7 +3329,12 @@ def build_workbench_timeline_summary_aggregation(payload: Optional[Dict] = None,
         target_stage_set = _dedupe_strings([row.get('target_rollout_stage') for row in rows])
         next_steps = _dedupe_strings([row.get('next_step') for row in rows])
         event_types = _dedupe_strings([event_type for row in rows for event_type in (row.get('merged_timeline', {}).get('event_types') or [])])
+        normalized_event_types = _dedupe_strings([event_type for row in rows for event_type in (row.get('merged_timeline', {}).get('normalized_event_types') or [])])
         phases = _dedupe_strings([phase for row in rows for phase in (row.get('merged_timeline', {}).get('phases') or [])])
+        provenance_origins = _dedupe_strings([value for row in rows for value in (row.get('merged_timeline', {}).get('provenance_origins') or [])])
+        provenance_sources = _dedupe_strings([value for row in rows for value in (row.get('merged_timeline', {}).get('provenance_sources') or [])])
+        timestamp_sources = _dedupe_strings([value for row in rows for value in (row.get('merged_timeline', {}).get('timestamp_sources') or [])])
+        timestamp_phases = _dedupe_strings([value for row in rows for value in (row.get('merged_timeline', {}).get('timestamp_phases') or [])])
         audit_event_types = _dedupe_strings([event_type for row in rows for event_type in (row.get('timeline', {}).get('audit_event_types') or [])])
         timeline_event_total = sum(int(row.get('timeline', {}).get('event_count') or 0) for row in rows)
         merged_event_total = sum(int(row.get('merged_timeline', {}).get('event_count') or 0) for row in rows)
@@ -3227,11 +3370,16 @@ def build_workbench_timeline_summary_aggregation(payload: Optional[Dict] = None,
                 'approval_event_count_total': approval_event_total,
                 'executor_event_count_total': executor_event_total,
                 'event_types': event_types,
+                'normalized_event_types': normalized_event_types,
                 'phases': phases,
+                'provenance_origins': provenance_origins,
+                'provenance_sources': provenance_sources,
                 'timestamp_range': {
                     'first': min(ts_first) if ts_first else None,
                     'last': max(ts_last) if ts_last else None,
                 },
+                'timestamp_sources': timestamp_sources,
+                'timestamp_phases': timestamp_phases,
             },
         }
 

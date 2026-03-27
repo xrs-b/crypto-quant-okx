@@ -137,6 +137,11 @@
   - 每个 item 会固定回挂 `timeline` 与 `merged_timeline` 的稳定摘要；每个 group 会给出 `item_count / filters / timeline_summary / merged_timeline_summary`，方便 dashboard / agent / 人工巡检快速看某 bucket 或某类 item 的整体 timeline 状态，而不用逐个点 detail；
   - dashboard/API 新增 `GET /api/backtest/workbench-governance-timeline-summary`，支持沿用 lane/action/risk/stage/bucket/owner/q 过滤条件，并补 `max_groups / max_items_per_group` 控制输出体积；
   - 输出保持稳定、可序列化，不做前端绑定，优先服务后端消费与低干预巡检。
+- **2026-03-27 provenance / timestamp 口径统一补强**：为 `approval timeline / executor action timeline / merged timeline / timeline summary aggregation` 补统一事件元数据，继续保持后向兼容：
+  - 单条 event 统一补 `normalized_event_type / provenance / timestamp_info`，优先回答“这个事件究竟来自 approval DB、executor、workflow replay，定系 synthetic summary”；
+  - `provenance` 固定表达 `origin / source / family / phase / producer / replay_source / synthetic`，避免调用方再靠 `source` 字符串猜来源；
+  - `timestamp_info` 固定表达 `value / source / phase / field / fallback_fields / present`，把“时间取自 created_at、scheduled_review，定系纯 synthetic 顺序”讲清楚；
+  - summary / aggregation 层同步补 `provenance_origins / provenance_sources / normalized_event_types / timestamp_sources / timestamp_phases`，方便上层直接做筛选、审计同聚合，而唔需要重新逐条扫 event。
 
 ### AR-M5-10｜workflow attention view / manual approval + blocked follow-up API
 

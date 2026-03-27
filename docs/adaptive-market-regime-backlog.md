@@ -249,6 +249,28 @@
   - `/api/backtest/calibration-report?view=operator_digest` 可直接复用同一摘要层；
   - 测试覆盖 helper + API 双入口。
 
+### AR-M5-10｜dashboard backend summary cards / low-intervention dashboard digest API
+
+- **阶段 / 优先级**：M5 / P0
+- **生效范围**：只读聚合；**不触发真实执行、不改审批结论、不改 live 参数**
+- **目标**：在已有 `workflow-consumer-view / workflow-attention-view / workflow-operator-digest / calibration-report` 之上，再补一层更适合 dashboard summary cards 的后端聚合入口，让低干预治理入口更收口：
+  1. 一眼看到 `manual / blocked / ready / queued / deferred / auto-advance` 等核心计数；
+  2. 直接给出 `key alerts / next actions / executor-bridge status / rollout stage progression`；
+  3. 保持结构稳定、可序列化、可被 dashboard/backend/agent/人工巡检共同消费；
+  4. 通过独立 API 与 `calibration-report?view=dashboard_summary_cards` 双入口暴露。
+- **涉及模块**：`analytics/helper.py`、`analytics/__init__.py`、`dashboard/api.py`、`tests/`
+- **输出契约**：`schema_version = m5_dashboard_summary_cards_v1`
+- **输出骨架**：
+  - `headline / summary`：聚合 workflow + approval + executor + bridge 的主状态；
+  - `cards[] / card_index{}`：稳定卡片结构，当前包含 `workflow_overview / key_alerts / next_actions / execution_status / stage_progression`；
+  - `key_alerts / next_actions / attention / execution / stage_progression`：保留给 agent/backend 直接消费的顶层捷径；
+  - `workflow_consumer_view / workflow_attention_view / workflow_operator_digest`：回挂底层来源，方便排查与扩展。
+- **验收重点**：
+  - `/api/backtest/dashboard-summary-cards` 返回稳定 summary card payload；
+  - `/api/backtest/calibration-report?view=dashboard_summary_cards` 复用同一聚合层；
+  - helper 能覆盖 counts / key alerts / next actions / blocked/manual/ready/executor/bridge 状态；
+  - 测试覆盖 helper + 独立 API + calibration-report 复用入口。
+
 ### VEP-01 / VEP-04｜Shadow Validation Entry Pack（step 2 已落地）
 
 - **阶段 / 优先级**：Validation Entry Pack / P0

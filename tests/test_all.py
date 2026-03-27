@@ -4992,6 +4992,87 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
         finally:
             dashboard_api.backtester = old_backtester
 
+    def test_backtest_dashboard_summary_cards_api_returns_backend_card_payload(self):
+        import dashboard.api as dashboard_api
+
+        report = build_regime_policy_calibration_report([
+            {
+                'symbol': 'BTC/USDT',
+                'all_trades': [
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 0.3},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 0.2},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 0.1},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v2', 'strategy_tags': ['Breakout'], 'return_pct': -1.4},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v2', 'strategy_tags': ['Breakout'], 'return_pct': -1.0},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v2', 'strategy_tags': ['Breakout'], 'return_pct': -0.8},
+                ],
+            }
+        ])
+
+        class StubBacktester:
+            def run_all(self, symbols):
+                return {
+                    'summary': {'symbols': len(symbols)},
+                    'symbols': [{'symbol': 'BTC/USDT'}],
+                    'calibration_report': report,
+                }
+
+        old_backtester = dashboard_api.backtester
+        dashboard_api.backtester = StubBacktester()
+        try:
+            client = app.test_client()
+            response = client.get('/api/backtest/dashboard-summary-cards?max_items=2')
+            self.assertEqual(response.status_code, 200)
+            payload = response.get_json()
+            self.assertTrue(payload['success'])
+            self.assertEqual(payload['view'], 'dashboard_summary_cards')
+            self.assertEqual(payload['data']['schema_version'], 'm5_dashboard_summary_cards_v1')
+            self.assertIn('cards', payload['data'])
+            self.assertIn('card_index', payload['data'])
+            self.assertIn('workflow_overview', payload['data']['card_index'])
+            self.assertEqual(payload['summary'], payload['data']['summary'])
+        finally:
+            dashboard_api.backtester = old_backtester
+
+    def test_backtest_calibration_report_api_supports_dashboard_summary_cards_view(self):
+        import dashboard.api as dashboard_api
+
+        report = build_regime_policy_calibration_report([
+            {
+                'symbol': 'BTC/USDT',
+                'all_trades': [
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 0.3},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 0.2},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 0.1},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v2', 'strategy_tags': ['Breakout'], 'return_pct': -1.4},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v2', 'strategy_tags': ['Breakout'], 'return_pct': -1.0},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v2', 'strategy_tags': ['Breakout'], 'return_pct': -0.8},
+                ],
+            }
+        ])
+
+        class StubBacktester:
+            def run_all(self, symbols):
+                return {
+                    'summary': {'symbols': len(symbols)},
+                    'symbols': [{'symbol': 'BTC/USDT'}],
+                    'calibration_report': report,
+                }
+
+        old_backtester = dashboard_api.backtester
+        dashboard_api.backtester = StubBacktester()
+        try:
+            client = app.test_client()
+            response = client.get('/api/backtest/calibration-report?view=dashboard_summary_cards')
+            self.assertEqual(response.status_code, 200)
+            payload = response.get_json()
+            self.assertEqual(payload['view'], 'dashboard_summary_cards')
+            self.assertEqual(payload['data']['schema_version'], 'm5_dashboard_summary_cards_v1')
+            self.assertEqual(payload['summary']['dashboard_summary_cards'], payload['data']['summary'])
+            self.assertIn('workflow_overview', payload['data']['card_index'])
+        finally:
+            dashboard_api.backtester = old_backtester
+
     def test_backtest_calibration_report_api_supports_governance_ready_view(self):
         import dashboard.api as dashboard_api
 
@@ -5300,7 +5381,7 @@ class TestExecutionObservability(unittest.TestCase):
             self.assertIn('recent_decisions', snapshot['summary'])
             self.assertTrue(snapshot['summary']['observe_only_banner'])
 
-from analytics.helper import build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, attach_auto_approval_policy, execute_controlled_rollout_layer, execute_controlled_auto_approval_layer, execute_rollout_executor, build_workflow_attention_view, build_workflow_operator_digest
+from analytics.helper import build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, attach_auto_approval_policy, execute_controlled_rollout_layer, execute_controlled_auto_approval_layer, execute_rollout_executor, build_workflow_attention_view, build_workflow_operator_digest, build_dashboard_summary_cards
 
 
 class TestApprovalPersistence(unittest.TestCase):
@@ -5370,6 +5451,75 @@ class TestApprovalPersistence(unittest.TestCase):
         self.assertEqual(payload['attention']['manual_approval'][0]['item_id'], 'playbook::manual')
         self.assertEqual(payload['attention']['ready'][0]['item_id'], 'playbook::ready')
         self.assertTrue(payload['next_actions'])
+
+    def test_build_dashboard_summary_cards_aggregates_digest_attention_and_execution(self):
+        payload = build_dashboard_summary_cards({
+            'workflow_state': {
+                'item_states': [
+                    {
+                        'item_id': 'playbook::manual',
+                        'title': 'Manual gate item',
+                        'action_type': 'joint_expand_guarded',
+                        'risk_level': 'medium',
+                        'approval_required': True,
+                        'requires_manual': True,
+                        'workflow_state': 'blocked_by_approval',
+                        'blocking_reasons': [],
+                    },
+                    {
+                        'item_id': 'playbook::queued',
+                        'title': 'Queued observe item',
+                        'action_type': 'joint_stage_prepare',
+                        'risk_level': 'low',
+                        'approval_required': False,
+                        'requires_manual': False,
+                        'workflow_state': 'queued',
+                        'blocking_reasons': [],
+                    },
+                    {
+                        'item_id': 'playbook::ready',
+                        'title': 'Ready observe item',
+                        'action_type': 'joint_observe',
+                        'risk_level': 'low',
+                        'approval_required': False,
+                        'requires_manual': False,
+                        'workflow_state': 'ready',
+                        'blocking_reasons': [],
+                    },
+                ],
+                'summary': {'queued_count': 1},
+            },
+            'approval_state': {
+                'items': [
+                    {
+                        'approval_id': 'approval::manual',
+                        'playbook_id': 'playbook::manual',
+                        'title': 'Manual gate item',
+                        'action_type': 'joint_expand_guarded',
+                        'approval_state': 'pending',
+                        'decision_state': 'pending',
+                        'risk_level': 'medium',
+                        'approval_required': True,
+                        'requires_manual': True,
+                        'blocked_by': [],
+                    },
+                ],
+                'summary': {'pending_count': 1, 'roles': ['operator']},
+            },
+            'rollout_executor': {'status': 'controlled', 'summary': {'by_disposition': {'queued': 1}}},
+            'controlled_rollout_execution': {'mode': 'state_apply', 'executed_count': 1, 'skipped_count': 2},
+            'auto_approval_execution': {'mode': 'dry_run', 'executed_count': 0, 'skipped_count': 1},
+        }, max_items=2)
+        self.assertEqual(payload['schema_version'], 'm5_dashboard_summary_cards_v1')
+        self.assertEqual(payload['summary']['manual_approval_count'], 1)
+        self.assertEqual(payload['summary']['queued_count'], 1)
+        self.assertEqual(payload['summary']['ready_count'], 1)
+        self.assertEqual(payload['summary']['bridge_mode'], 'state_apply')
+        self.assertEqual(payload['summary']['approval_roles'], ['operator'])
+        self.assertEqual(payload['card_index']['workflow_overview']['metrics']['manual'], 1)
+        self.assertEqual(payload['card_index']['execution_status']['metrics']['bridge_executed'], 1)
+        self.assertLessEqual(len(payload['card_index']['key_alerts']['items']), 2)
+        self.assertLessEqual(len(payload['card_index']['stage_progression']['items']), 2)
 
     def test_build_workflow_attention_view_groups_manual_and_blocked_items(self):
         payload = build_workflow_attention_view({

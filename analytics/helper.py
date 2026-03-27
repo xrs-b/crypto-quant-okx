@@ -2204,6 +2204,152 @@ def build_workflow_operator_digest(payload: Optional[Dict] = None, *, max_items:
     payload['operator_digest'] = digest
     return digest
 
+def build_dashboard_summary_cards(payload: Optional[Dict] = None, *, max_items: int = 3) -> Dict[str, Any]:
+    payload = payload or {}
+    consumer_view = payload.get('consumer_view') or build_workflow_consumer_view(payload)
+    attention_view = payload.get('attention_view') or build_workflow_attention_view(payload, max_items=max_items)
+    operator_digest = payload.get('operator_digest') or build_workflow_operator_digest(payload, max_items=max_items)
+
+    workflow_summary = (consumer_view.get('workflow_state') or {}).get('summary') or {}
+    approval_summary = (consumer_view.get('approval_state') or {}).get('summary') or {}
+    stage_summary = (consumer_view.get('rollout_stage_progression') or {}).get('summary') or {}
+    rollout_executor = consumer_view.get('rollout_executor') or {}
+    auto_approval = consumer_view.get('auto_approval_execution') or {}
+    controlled_rollout = consumer_view.get('controlled_rollout_execution') or {}
+    digest_summary = operator_digest.get('summary') or {}
+    attention_summary = attention_view.get('summary') or {}
+
+    cards = [
+        {
+            'card_id': 'workflow_overview',
+            'title': 'Workflow overview',
+            'status': operator_digest.get('headline', {}).get('status') or 'steady',
+            'headline': operator_digest.get('headline', {}).get('message') or '',
+            'metrics': {
+                'manual': digest_summary.get('manual_approval_count', 0),
+                'blocked': digest_summary.get('blocked_count', 0),
+                'ready': digest_summary.get('ready_count', 0),
+                'queued': digest_summary.get('queued_count', 0),
+                'deferred': digest_summary.get('deferred_count', 0),
+                'auto_advance': digest_summary.get('auto_advance_candidate_count', 0),
+            },
+            'highlights': [
+                f"workflow={digest_summary.get('workflow_item_count', 0)}",
+                f"approvals={digest_summary.get('approval_item_count', 0)}",
+                f"pending={approval_summary.get('pending_count', 0)}",
+            ],
+        },
+        {
+            'card_id': 'key_alerts',
+            'title': 'Key alerts',
+            'status': 'attention_required' if attention_summary.get('attention_item_count', 0) else 'steady',
+            'headline': attention_view.get('headline', {}).get('message') or 'No manual/blocking alerts',
+            'metrics': {
+                'attention': attention_summary.get('attention_item_count', 0),
+                'manual': attention_summary.get('manual_approval_count', 0),
+                'blocked': attention_summary.get('blocked_follow_up_count', 0),
+                'overlap': attention_summary.get('overlap_count', 0),
+            },
+            'items': attention_view.get('items') or [],
+        },
+        {
+            'card_id': 'next_actions',
+            'title': 'Next actions',
+            'status': 'attention_required' if operator_digest.get('next_actions') else 'steady',
+            'headline': f"{len(operator_digest.get('next_actions') or [])} action lane(s)" if operator_digest.get('next_actions') else 'No pending next action lanes',
+            'metrics': {
+                'lane_count': len(operator_digest.get('next_actions') or []),
+                'top_priority_count': sum(1 for row in (operator_digest.get('next_actions') or []) if row.get('priority') == 'high'),
+            },
+            'items': operator_digest.get('next_actions') or [],
+        },
+        {
+            'card_id': 'execution_status',
+            'title': 'Executor / bridge status',
+            'status': rollout_executor.get('status') or 'disabled',
+            'headline': f"executor={rollout_executor.get('status') or 'disabled'} / auto={auto_approval.get('mode') or 'disabled'} / bridge={controlled_rollout.get('mode') or 'disabled'}",
+            'metrics': {
+                'executor_items': len(rollout_executor.get('items') or []),
+                'executor_applied': stage_summary.get('applied_count', 0),
+                'executor_blocked': stage_summary.get('blocked_count', 0),
+                'executor_queued': stage_summary.get('queued_count', 0),
+                'bridge_executed': controlled_rollout.get('executed_count', 0),
+                'bridge_skipped': controlled_rollout.get('skipped_count', 0),
+                'auto_executed': auto_approval.get('executed_count', 0),
+                'auto_skipped': auto_approval.get('skipped_count', 0),
+            },
+            'details': {
+                'rollout_executor': {
+                    'status': rollout_executor.get('status') or 'disabled',
+                    'summary': rollout_executor.get('summary') or {},
+                },
+                'controlled_rollout_execution': controlled_rollout,
+                'auto_approval_execution': auto_approval,
+            },
+        },
+        {
+            'card_id': 'stage_progression',
+            'title': 'Rollout stage progression',
+            'status': 'attention_required' if stage_summary.get('blocked_count', 0) else ('in_progress' if stage_summary.get('queued_count', 0) else 'steady'),
+            'headline': f"applied={stage_summary.get('applied_count', 0)} / queued={stage_summary.get('queued_count', 0)} / blocked={stage_summary.get('blocked_count', 0)}",
+            'metrics': {
+                'item_count': stage_summary.get('item_count', 0),
+                'ready_stage_count': stage_summary.get('ready_stage_count', 0),
+                'applied': stage_summary.get('applied_count', 0),
+                'queued': stage_summary.get('queued_count', 0),
+                'blocked': stage_summary.get('blocked_count', 0),
+                'deferred': stage_summary.get('deferred_count', 0),
+            },
+            'items': (consumer_view.get('rollout_stage_progression') or {}).get('items') or [],
+        },
+    ]
+
+    payload_cards = {card['card_id']: card for card in cards}
+    summary_cards = {
+        'schema_version': 'm5_dashboard_summary_cards_v1',
+        'headline': operator_digest.get('headline') or {},
+        'summary': {
+            'card_count': len(cards),
+            'workflow_item_count': digest_summary.get('workflow_item_count', 0),
+            'approval_item_count': digest_summary.get('approval_item_count', 0),
+            'manual_approval_count': digest_summary.get('manual_approval_count', 0),
+            'blocked_count': digest_summary.get('blocked_count', 0),
+            'ready_count': digest_summary.get('ready_count', 0),
+            'queued_count': digest_summary.get('queued_count', 0),
+            'deferred_count': digest_summary.get('deferred_count', 0),
+            'auto_advance_candidate_count': digest_summary.get('auto_advance_candidate_count', 0),
+            'executor_status': rollout_executor.get('status') or 'disabled',
+            'bridge_mode': controlled_rollout.get('mode') or 'disabled',
+            'auto_approval_mode': auto_approval.get('mode') or 'disabled',
+            'attention_item_count': attention_summary.get('attention_item_count', 0),
+            'pending_approval_count': approval_summary.get('pending_count', 0),
+            'approval_roles': approval_summary.get('roles') or [],
+            'stage_progression': stage_summary,
+            'workflow_state_summary': workflow_summary,
+            'approval_state_summary': approval_summary,
+        },
+        'cards': cards,
+        'card_index': payload_cards,
+        'key_alerts': attention_view.get('items') or [],
+        'next_actions': operator_digest.get('next_actions') or [],
+        'attention': operator_digest.get('attention') or {},
+        'execution': {
+            'rollout_executor': {
+                'status': rollout_executor.get('status') or 'disabled',
+                'summary': rollout_executor.get('summary') or {},
+            },
+            'controlled_rollout_execution': controlled_rollout,
+            'auto_approval_execution': auto_approval,
+        },
+        'stage_progression': consumer_view.get('rollout_stage_progression') or {},
+        'workflow_consumer_view': consumer_view,
+        'workflow_attention_view': attention_view,
+        'workflow_operator_digest': operator_digest,
+    }
+    payload['dashboard_summary_cards'] = summary_cards
+    return summary_cards
+
+
 def build_approval_audit_overview(*, stale_rows: Optional[List[Dict]] = None,
                                   decision_diffs: Optional[List[Dict]] = None,
                                   timeline_summary: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:

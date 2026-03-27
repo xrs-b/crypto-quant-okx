@@ -121,6 +121,7 @@
 - **细化消费能力**：workbench item catalog 统一标准化 `lane_id / action_type / risk_level / approval_state / workflow_state / current_rollout_stage / target_rollout_stage / bucket_tags / why / next_step`，让调用方可以直接回答“某类 item 具体有哪些、为什么在这里、下一步是什么”。
 - **兼容性**：不替换现有 consumer / attention / digest / summary-cards 视图；只是往更集中、更适合 approval+rollout 工作台消费的方向补一层聚合入口，并把 filter/detail 复用同一份序列化稳定的 item catalog。
 - **测试**：覆盖 helper 聚合 payload、独立 API、calibration-report view，并补 filter/detail API 用例，确保 lane / rollout / recent adjustment / why / next-step 结构稳定存在。
+- **2026-03-27 workbench 明细层补强**：`workbench-governance-detail` 继续向下补 `queue / approval / rollout` 三段 drill-down，统一输出 `queue_name / route / handler / transition_rule / next_transition / blocking_points / rollback_hints / why_summary`，让调用方可以直接回答“当前在哪条 queue/handler/route、为什么进这条路、下一步 transition 是什么、阻塞点/回滚提示是什么”，并保持 JSON 结构稳定、可序列化、适合 dashboard / agent / 人工巡检直接消费。
 
 ### AR-M5-10｜workflow attention view / manual approval + blocked follow-up API
 

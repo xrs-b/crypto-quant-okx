@@ -5239,11 +5239,16 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             payload = response.get_json()
             self.assertEqual(payload['view'], 'workbench_governance_detail_view')
-            self.assertEqual(payload['data']['schema_version'], 'm5_workbench_governance_detail_view_v1')
+            self.assertEqual(payload['data']['schema_version'], 'm5_workbench_governance_detail_view_v2')
             self.assertTrue(payload['data']['found'])
             self.assertEqual(payload['data']['item']['item_id'], item['item_id'])
             self.assertTrue(payload['data']['item']['why'])
             self.assertTrue(payload['data']['item']['next_step'])
+            self.assertIn('drilldown', payload['data'])
+            self.assertIn('queue', payload['data']['drilldown'])
+            self.assertIn('approval', payload['data']['drilldown'])
+            self.assertIn('rollout', payload['data']['drilldown'])
+            self.assertTrue(payload['data']['summary']['next_transition'])
         finally:
             dashboard_api.backtester = old_backtester
 
@@ -5555,7 +5560,7 @@ class TestExecutionObservability(unittest.TestCase):
             self.assertIn('recent_decisions', snapshot['summary'])
             self.assertTrue(snapshot['summary']['observe_only_banner'])
 
-from analytics.helper import build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, attach_auto_approval_policy, execute_controlled_rollout_layer, execute_controlled_auto_approval_layer, execute_rollout_executor, build_workflow_attention_view, build_workflow_operator_digest, build_dashboard_summary_cards, build_workbench_governance_view
+from analytics.helper import build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, attach_auto_approval_policy, execute_controlled_rollout_layer, execute_controlled_auto_approval_layer, execute_rollout_executor, build_workflow_attention_view, build_workflow_operator_digest, build_dashboard_summary_cards, build_workbench_governance_view, build_workbench_governance_detail_view
 
 
 class TestApprovalPersistence(unittest.TestCase):
@@ -5818,7 +5823,7 @@ class TestApprovalPersistence(unittest.TestCase):
                 ],
             },
         }, max_items=2, max_adjustments=5)
-        self.assertEqual(payload['schema_version'], 'm5_workbench_governance_view_v1')
+        self.assertEqual(payload['schema_version'], 'm5_workbench_governance_view_v2')
         self.assertEqual(payload['summary']['auto_batch_count'], 2)
         self.assertEqual(payload['summary']['blocked_count'], 1)
         self.assertEqual(payload['summary']['queued_count'], 1)
@@ -5828,6 +5833,118 @@ class TestApprovalPersistence(unittest.TestCase):
         self.assertTrue(payload['rollout']['frontier'])
         self.assertEqual(payload['recent_adjustments'][0]['source'], 'auto_approval_execution')
         self.assertGreaterEqual(payload['summary']['recent_adjustment_count'], 2)
+
+    def test_build_workbench_governance_detail_view_adds_queue_approval_rollout_drilldown(self):
+        payload = {
+            'workflow_state': {
+                'item_states': [
+                    {
+                        'item_id': 'playbook::manual',
+                        'title': 'Manual gate item',
+                        'action_type': 'joint_expand_guarded',
+                        'risk_level': 'high',
+                        'approval_required': True,
+                        'requires_manual': True,
+                        'workflow_state': 'blocked_by_approval',
+                        'blocking_reasons': ['missing_operator_ack'],
+                        'queue_progression': {
+                            'status': 'blocked_by_approval',
+                            'gate_reason': 'manual_review_required',
+                            'next_action': 'queue_for_manual_review',
+                            'dispatch_route': 'manual_review_queue',
+                        },
+                        'stage_model': {'next_on_approval': 'expand_guarded'},
+                        'current_rollout_stage': 'guarded',
+                        'target_rollout_stage': 'expanded',
+                    }
+                ],
+                'summary': {},
+            },
+            'approval_state': {
+                'items': [
+                    {
+                        'approval_id': 'approval::manual',
+                        'playbook_id': 'playbook::manual',
+                        'title': 'Manual gate item',
+                        'action_type': 'joint_expand_guarded',
+                        'approval_state': 'pending',
+                        'decision_state': 'pending',
+                        'risk_level': 'high',
+                        'approval_required': True,
+                        'requires_manual': True,
+                        'blocked_by': ['missing_operator_ack'],
+                    }
+                ],
+                'summary': {},
+            },
+            'rollout_executor': {
+                'status': 'controlled',
+                'summary': {'by_status': {'blocked_by_approval': 1}},
+                'items': [
+                    {
+                        'item_id': 'approval::manual',
+                        'playbook_id': 'playbook::manual',
+                        'action_type': 'joint_expand_guarded',
+                        'status': 'blocked_by_approval',
+                        'plan': {
+                            'handler_key': 'queue_only::live_trading_change',
+                            'executor_class': 'live_trading_change',
+                            'dispatch_mode': 'queue_only',
+                            'dispatch_route': 'manual_review_queue',
+                            'transition_rule': 'manual_gate_before_dispatch',
+                            'next_transition': 'await_manual_approval',
+                            'rollback_hint': 'revert_to_previous_stage_if_manual_review_rejects',
+                            'rollout_stage': 'guarded',
+                            'target_rollout_stage': 'expanded',
+                            'queue_plan': {
+                                'queue_name': 'manual_review_queue',
+                                'queue_priority': 'approval_blocked',
+                                'dispatch_route': 'manual_review_queue',
+                                'next_transition': 'await_manual_approval',
+                                'queue_transition': {
+                                    'rollback_hint': 'revert_to_previous_stage_if_manual_review_rejects',
+                                },
+                                'approval_hook': {
+                                    'status': 'blocked_by_approval',
+                                    'gate_reason': 'manual_review_required',
+                                    'next_action': 'queue_for_manual_review',
+                                },
+                            },
+                        },
+                        'dispatch': {
+                            'handler_key': 'queue_only::live_trading_change',
+                            'executor_class': 'live_trading_change',
+                            'mode': 'queue_only',
+                            'dispatch_route': 'manual_review_queue',
+                            'transition_rule': 'manual_gate_before_dispatch',
+                            'next_transition': 'await_manual_approval',
+                            'rollback_hint': 'revert_to_previous_stage_if_manual_review_rejects',
+                        },
+                        'result': {
+                            'disposition': 'blocked_by_approval',
+                            'status': 'blocked_by_approval',
+                            'dispatch_route': 'manual_review_queue',
+                            'transition_rule': 'manual_gate_before_dispatch',
+                            'next_transition': 'await_manual_approval',
+                            'rollback_hint': 'revert_to_previous_stage_if_manual_review_rejects',
+                        },
+                    }
+                ],
+            },
+            'controlled_rollout_execution': {'mode': 'disabled', 'items': []},
+            'auto_approval_execution': {'mode': 'disabled', 'items': []},
+        }
+        detail = build_workbench_governance_detail_view(payload, item_id='playbook::manual', lane_id='manual_approval')
+        self.assertTrue(detail['found'])
+        self.assertEqual(detail['schema_version'], 'm5_workbench_governance_detail_view_v2')
+        self.assertEqual(detail['drilldown']['queue']['queue_name'], 'manual_review_queue')
+        self.assertEqual(detail['drilldown']['queue']['route'], 'manual_review_queue')
+        self.assertEqual(detail['drilldown']['approval']['current_transition'], 'manual_gate_before_dispatch')
+        self.assertEqual(detail['drilldown']['approval']['next_transition'], 'await_manual_approval')
+        self.assertEqual(detail['drilldown']['rollout']['handler']['handler_key'], 'queue_only::live_trading_change')
+        self.assertEqual(detail['drilldown']['decision_path']['next_transition'], 'await_manual_approval')
+        self.assertIn('missing_operator_ack', detail['summary']['blocking_points'])
+        self.assertTrue(detail['summary']['rollback_hints'])
 
     def test_build_workflow_attention_view_groups_manual_and_blocked_items(self):
         payload = build_workflow_attention_view({

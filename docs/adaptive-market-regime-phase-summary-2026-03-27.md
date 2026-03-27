@@ -148,3 +148,6 @@
 - 强回滚边界
 
 而不是“一次性大爆改”。
+
+
+- 2026-03-27 dual-layer approval update：审批持久化从单层 latest state 扩展成 `approval_events`（immutable event log）+ `approval_state`（latest snapshot）双层模型；新增稳定事件字段 `item_id / event_type / decision / actor / reason / created_at / source / details`，并补齐 timeline 查询与基于 event log 的 snapshot recovery，仍保持 no-op，不触发真实自动 rollout / execution。

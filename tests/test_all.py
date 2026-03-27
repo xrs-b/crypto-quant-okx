@@ -4,6 +4,7 @@ OKX量化交易系统 - 测试套件
 import sys
 import os
 import json
+import sqlite3
 import tempfile
 from pathlib import Path
 import yaml
@@ -5120,6 +5121,72 @@ class TestApprovalPersistence(unittest.TestCase):
             history = db.get_approval_history(limit=5)
             self.assertEqual(history[0]['decision'], 'approved')
 
+
+    def test_approval_event_log_and_timeline_query(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(str(Path(tmpdir) / 'approval_events.db'))
+            item_id = 'pool_switch::btc-focused'
+            db.sync_approval_items([
+                {
+                    'item_id': item_id,
+                    'approval_type': 'pool_switch',
+                    'target': 'btc-focused',
+                    'title': '切换主池',
+                    'approval_state': 'pending',
+                    'workflow_state': 'pending',
+                }
+            ], replay_source='workflow_replay')
+            db.record_approval('pool_switch', 'btc-focused', 'approved', {
+                'item_id': item_id,
+                'state': 'approved',
+                'workflow_state': 'ready',
+                'reason': 'manual approve',
+                'actor': 'tester',
+                'replay_source': 'manual_review',
+            })
+            timeline = db.get_approval_timeline(item_id=item_id, ascending=True)
+            self.assertEqual(len(timeline), 2)
+            self.assertEqual(timeline[0]['event_type'], 'snapshot_sync')
+            self.assertEqual(timeline[1]['event_type'], 'decision_recorded')
+            self.assertEqual(timeline[1]['decision'], 'approved')
+            self.assertEqual(timeline[1]['actor'], 'tester')
+
+    def test_approval_snapshot_rebuild_and_recovery_from_events(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(str(Path(tmpdir) / 'approval_recovery.db'))
+            item_id = 'pool_switch::btc-focused'
+            db.sync_approval_items([
+                {
+                    'item_id': item_id,
+                    'approval_type': 'pool_switch',
+                    'target': 'btc-focused',
+                    'title': '切换主池',
+                    'approval_state': 'pending',
+                    'workflow_state': 'pending',
+                }
+            ], replay_source='workflow_replay')
+            db.record_approval('pool_switch', 'btc-focused', 'approved', {
+                'item_id': item_id,
+                'state': 'approved',
+                'workflow_state': 'ready',
+                'reason': 'looks good',
+                'actor': 'tester',
+                'replay_source': 'manual_review',
+            })
+            rebuilt = db.rebuild_approval_snapshot(item_id)
+            self.assertEqual(rebuilt['state'], 'approved')
+            self.assertEqual(rebuilt['decision'], 'approved')
+            self.assertEqual(rebuilt['reason'], 'looks good')
+
+            sqlite_path = Path(tmpdir) / 'approval_recovery.db'
+            with sqlite3.connect(sqlite_path) as conn:
+                conn.execute('DELETE FROM approval_state WHERE item_id = ?', (item_id,))
+                conn.commit()
+            recovered = db.recover_approval_state(item_id)
+            self.assertEqual(recovered['item_id'], item_id)
+            self.assertEqual(recovered['state'], 'approved')
+            self.assertEqual(recovered['decision'], 'approved')
+
     def test_workflow_helper_merges_persisted_decision_back_into_payload(self):
         payload = build_governance_workflow_ready_payload(build_regime_policy_calibration_report([
             {
@@ -5204,6 +5271,20 @@ class TestApprovalPersistence(unittest.TestCase):
                 state_payload = state_resp.get_json()
                 self.assertEqual(state_payload['summary']['deferred'], 1)
                 self.assertEqual(state_payload['data'][0]['item_id'], approval_item['approval_id'])
+
+                timeline_resp = client.get(f"/api/approvals/timeline?item_id={approval_item['approval_id']}")
+                self.assertEqual(timeline_resp.status_code, 200)
+                timeline_payload = timeline_resp.get_json()
+                self.assertGreaterEqual(timeline_payload['summary']['count'], 2)
+                self.assertEqual(timeline_payload['data'][0]['event_type'], 'decision_recorded')
+
+                with sqlite3.connect(Path(tmpdir) / 'api_approval_state.db') as conn:
+                    conn.execute('DELETE FROM approval_state WHERE item_id = ?', (approval_item['approval_id'],))
+                    conn.commit()
+                recover_resp = client.post('/api/approvals/recover', json={'item_id': approval_item['approval_id']})
+                self.assertEqual(recover_resp.status_code, 200)
+                recover_payload = recover_resp.get_json()
+                self.assertEqual(recover_payload['data']['state'], 'deferred')
             finally:
                 dashboard_api.db = old_db
                 dashboard_api.backtester = old_backtester

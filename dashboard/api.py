@@ -2636,6 +2636,30 @@ def get_approval_state_list():
     }})
 
 
+@app.route('/api/approvals/timeline')
+def get_approval_timeline_api():
+    """获取 approval immutable event timeline。"""
+    limit = int(request.args.get('limit', 100))
+    item_id = request.args.get('item_id')
+    approval_type = request.args.get('type')
+    target = request.args.get('target')
+    rows = db.get_approval_timeline(item_id=item_id, approval_type=approval_type, target=target, limit=limit)
+    return jsonify({'success': True, 'data': rows, 'summary': {'count': len(rows), 'item_id': item_id, 'type': approval_type, 'target': target}})
+
+
+@app.route('/api/approvals/recover', methods=['POST'])
+def recover_approval_state_api():
+    """根据 immutable event timeline 重建 latest snapshot。"""
+    payload = request.get_json(silent=True) or {}
+    item_id = payload.get('item_id') or request.args.get('item_id')
+    if not item_id:
+        return jsonify({'success': False, 'error': 'missing item_id'}), 400
+    row = db.recover_approval_state(item_id)
+    if not row:
+        return jsonify({'success': False, 'error': 'approval item not found'}), 404
+    return jsonify({'success': True, 'data': row})
+
+
 @app.route('/api/approvals/replay')
 def replay_approval_state():
     """返回 workflow-ready 视图并叠加已持久化审批状态，用于恢复/审计。"""

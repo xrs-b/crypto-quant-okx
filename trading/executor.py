@@ -111,6 +111,14 @@ def enrich_observability_with_snapshots(config_helper: Any, symbol: Optional[str
         'execution_profile_really_enforced': bool(execution_snapshot.get('execution_profile_really_enforced', False)),
         'layering_profile_really_enforced': bool(execution_snapshot.get('layering_profile_really_enforced', False)),
         'plan_shape_really_enforced': bool(execution_snapshot.get('plan_shape_really_enforced', False)),
+        'plan_shape_enforced_fields': list(execution_snapshot.get('plan_shape_enforced_fields') or []),
+        'plan_shape_ignored_fields': list(execution_snapshot.get('plan_shape_ignored_fields') or []),
+        'live_layer_shape_source': execution_snapshot.get('live_layer_shape_source') or 'baseline',
+        'shape_guardrail_decisions': list(execution_snapshot.get('shape_guardrail_decisions') or []),
+        'plan_shape_validation': dict(execution_snapshot.get('plan_shape_validation') or {}),
+        'shape_live_rollout_match': bool(execution_snapshot.get('shape_live_rollout_match', False)),
+        'shape_rollout_symbol_match': bool(execution_snapshot.get('shape_rollout_symbol_match', False)),
+        'shape_rollout_fraction_match': bool(execution_snapshot.get('shape_rollout_fraction_match', False)),
         'rollout_match': bool(execution_snapshot.get('rollout_match', True)),
         'would_change_execution_profile': bool(execution_snapshot.get('would_tighten')),
         'would_tighten_fields': list(execution_snapshot.get('would_tighten_fields') or []),
@@ -430,8 +438,8 @@ class TradingExecutor:
         state = self.db.get_layer_plan_state(symbol, side)
         plan_data = dict(state.get('plan_data') or {})
         layer_ratios = plan_data.get('layer_ratios') or layering.get('layer_ratios') or [0.06, 0.06, 0.04]
-        layer_count = int(layering.get('layer_count') or len(layer_ratios))
-        layer_ratios = [float(x) for x in layer_ratios[:layer_count]]
+        layer_ratios = [float(x) for x in layer_ratios]
+        layer_count = len(layer_ratios)
         filled_layers = sorted(int(x) for x in (plan_data.get('filled_layers') or []))
         pending_layers = sorted(int(x) for x in (plan_data.get('pending_layers') or []))
         consumed = set(filled_layers) | set(pending_layers)
@@ -520,8 +528,15 @@ class TradingExecutor:
         layer_plan.setdefault('baseline_layering', live_execution_profile.get('baseline') or {})
         layer_plan.setdefault('effective_layering', live_execution_profile.get('effective') or {})
         layer_plan['live_layering'] = live_layering
-        if 'layer_ratios' not in layer_plan:
+        snapshot = dict(live_execution_profile.get('snapshot') or {})
+        use_live_shape = bool(snapshot.get('plan_shape_really_enforced'))
+        if use_live_shape:
             layer_plan['layer_ratios'] = list(live_layering.get('layer_ratios') or layer_plan.get('layer_ratios') or [])
+        elif 'layer_ratios' not in layer_plan:
+            layer_plan['layer_ratios'] = list(live_layering.get('layer_ratios') or layer_plan.get('layer_ratios') or [])
+        layer_plan['layer_count'] = len(layer_plan.get('layer_ratios') or [])
+        if layer_plan.get('eligible', True) and layer_plan.get('layer_no') and layer_plan['layer_count'] >= int(layer_plan.get('layer_no') or 0) > 0:
+            layer_plan['layer_ratio'] = float((layer_plan.get('layer_ratios') or [])[int(layer_plan.get('layer_no')) - 1])
         existing_max_total_ratio = layer_plan.get('plan_data', {}).get('max_total_ratio')
         live_max_total_ratio = live_layering.get('layer_max_total_ratio')
         if existing_max_total_ratio is not None and live_max_total_ratio is not None:

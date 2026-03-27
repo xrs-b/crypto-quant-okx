@@ -485,6 +485,14 @@ adaptive_regime:
 
 ---
 
+## 实施状态更新（2026-03-27 / 第二批前半段）
+
+- 已完成 plan-shape snapshot / validation helper：`merge_layer_ratios_conservatively(...)`、`derive_layer_count_from_ratios(...)`、`build_layering_plan_shape_snapshot(...)`。
+- `layer_count` 已明确收口为 derived / audit 字段：baseline / effective / live 全部由 `layer_ratios` 长度派生，`execution_overrides.layer_count` 会被显式忽略并记录原因。
+- executor 已开始在严格 gated 条件下消费 live `layer_ratios`：要求 Step 3 guardrails 已 live、`layering_plan_shape_enforcement_enabled=true`、plan-shape rollout 命中、override conservative-only 且总和不超过 live `layer_max_total_ratio`；否则 fail-closed 回 baseline shape。
+- 当前仍保持 conservative-only 与默认安全关闭；未触碰 partial TP / trailing / reconcile / self-heal / intent lifecycle / direction lock 语义。
+- observability 已补齐 baseline / effective / live / enforced / applied / ignored、field decisions、plan-shape validation、shape rollout 命中情况、`live_layer_shape_source`、`plan_shape_really_enforced`。
+
 ## 12. 一句话收尾
 
 > **M4 Step 4 第二批的正确打法，不是急住放开 adaptive layering，而是先把 `layer_ratios` 从“可见的 hints”稳稳推进到“可回滚、可解释、只更保守的 plan shape live”；其余 guardrails 继续做 guardrails，唔好混线。**

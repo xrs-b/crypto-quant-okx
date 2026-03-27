@@ -272,6 +272,11 @@ adaptive_regime:
     layering_profile_hints_enabled: true
     layering_profile_enforcement_enabled: false
     layering_plan_shape_enforcement_enabled: false
+    layering_plan_shape_rollout_symbols: []
+    layering_plan_shape_rollout_fraction: 0.0
+    layering_plan_shape_require_guardrails_live: true
+    layering_plan_shape_fail_closed: true
+    layering_plan_shape_force_baseline_on_invalid: true
     risk_hints_enabled: false
     risk_enforcement_enabled: false
     conservative_only: true

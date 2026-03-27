@@ -1,6 +1,7 @@
 """Adaptive regime policy resolver (M0/M1 observe-only scaffold)."""
 from __future__ import annotations
 
+import hashlib
 from typing import Any, Dict, List, Optional
 
 from core.regime import build_regime_snapshot, normalize_regime_snapshot
@@ -392,14 +393,53 @@ def build_risk_baseline_snapshot(config_helper: Any, symbol: Optional[str]) -> D
     return baseline
 
 
+def derive_layer_count_from_ratios(layer_ratios: Optional[List[Any]]) -> int:
+    try:
+        return len([float(x) for x in (layer_ratios or [])])
+    except Exception:
+        return 0
+
+
+def merge_layer_ratios_conservatively(
+    baseline_ratios: Optional[List[Any]],
+    requested_ratios: Any,
+    *,
+    conservative_only: bool = True,
+    live_total_ratio_cap: Optional[float] = None,
+) -> Dict[str, Any]:
+    baseline_values = [float(x) for x in (baseline_ratios or [])]
+    if not isinstance(requested_ratios, list) or not requested_ratios:
+        return {'accepted': False, 'reason': 'override_not_list', 'code': 'IGNORED_INVALID_OVERRIDE', 'baseline': baseline_values}
+    try:
+        requested_values = [float(x) for x in requested_ratios]
+    except Exception:
+        return {'accepted': False, 'reason': 'override_not_numeric', 'code': 'IGNORED_INVALID_OVERRIDE', 'baseline': baseline_values}
+    if any(x <= 0 for x in requested_values):
+        return {'accepted': False, 'reason': 'layer_ratio_not_positive', 'code': 'IGNORED_INVALID_OVERRIDE', 'baseline': baseline_values, 'requested': requested_values}
+    if len(requested_values) > len(baseline_values):
+        return {'accepted': False, 'reason': 'layer_ratio_length_expands', 'code': 'IGNORED_NON_CONSERVATIVE_OVERRIDE', 'baseline': baseline_values, 'requested': requested_values}
+    for idx, req in enumerate(requested_values):
+        base = baseline_values[idx]
+        if conservative_only and req > base + 1e-12:
+            return {'accepted': False, 'reason': 'non_conservative_override', 'code': 'IGNORED_NON_CONSERVATIVE_OVERRIDE', 'baseline': baseline_values, 'requested': requested_values}
+    if conservative_only and sum(requested_values) > sum(baseline_values) + 1e-12:
+        return {'accepted': False, 'reason': 'non_conservative_override', 'code': 'IGNORED_NON_CONSERVATIVE_OVERRIDE', 'baseline': baseline_values, 'requested': requested_values}
+    if live_total_ratio_cap is not None and sum(requested_values) > float(live_total_ratio_cap) + 1e-12:
+        return {'accepted': False, 'reason': 'layer_ratio_exceeds_total_cap', 'code': 'IGNORED_INVALID_OVERRIDE', 'baseline': baseline_values, 'requested': requested_values, 'live_total_ratio_cap': float(live_total_ratio_cap)}
+    return {'accepted': True, 'effective': requested_values, 'requested': requested_values, 'baseline': baseline_values}
+
+
+
 def build_execution_baseline_snapshot(config_helper: Any, symbol: Optional[str]) -> Dict[str, Any]:
     layering = config_helper.get_layering_config(symbol) if hasattr(config_helper, 'get_layering_config') else {}
     trading_cfg = config_helper.get_symbol_section(symbol, 'trading') if hasattr(config_helper, 'get_symbol_section') else {}
     leverage_cap = int(trading_cfg.get('leverage', 10) or 10)
+    ratios = [float(x) for x in (layering.get('layer_ratios') or [0.06, 0.06, 0.04])]
     return {
-        'layer_ratios': [float(x) for x in (layering.get('layer_ratios') or [0.06, 0.06, 0.04])],
+        'layer_ratios': ratios,
+        'layer_count': derive_layer_count_from_ratios(ratios),
         'layer_max_total_ratio': float(layering.get('layer_max_total_ratio') or 0.16),
-        'max_layers_per_signal': int(layering.get('max_layers_per_signal') or len(layering.get('layer_ratios') or [0.06, 0.06, 0.04])),
+        'max_layers_per_signal': int(layering.get('max_layers_per_signal') or len(ratios)),
         'min_add_interval_seconds': int(layering.get('min_add_interval_seconds') or 0),
         'profit_only_add': bool(layering.get('profit_only_add', False)),
         'allow_same_bar_multiple_adds': bool(layering.get('allow_same_bar_multiple_adds', False)),
@@ -415,24 +455,22 @@ def merge_execution_overrides_conservatively(baseline_snapshot: Dict[str, Any], 
 
     for key, requested in dict(execution_overrides or {}).items():
         baseline = baseline_snapshot.get(key)
+        if key == 'layer_count':
+            ignored_overrides.append({'key': key, 'requested': requested, 'baseline': baseline, 'reason': 'layer_count_derived_only', 'code': 'IGNORED_DERIVED_ONLY_FIELD'})
+            continue
         if key == 'layer_ratios':
-            if not isinstance(requested, list) or not requested:
-                ignored_overrides.append({'key': key, 'requested': requested, 'reason': 'override_not_list', 'code': 'IGNORED_INVALID_OVERRIDE'})
+            merge_result = merge_layer_ratios_conservatively(
+                baseline,
+                requested,
+                conservative_only=conservative_only,
+                live_total_ratio_cap=effective.get('layer_max_total_ratio'),
+            )
+            if not merge_result.get('accepted'):
+                ignored_overrides.append({'key': key, 'requested': merge_result.get('requested', requested), 'baseline': merge_result.get('baseline', baseline), 'reason': merge_result.get('reason'), 'code': merge_result.get('code'), 'live_total_ratio_cap': merge_result.get('live_total_ratio_cap')})
                 continue
-            try:
-                requested_values = [float(x) for x in requested]
-            except Exception:
-                ignored_overrides.append({'key': key, 'requested': requested, 'reason': 'override_not_numeric', 'code': 'IGNORED_INVALID_OVERRIDE'})
-                continue
-            baseline_values = [float(x) for x in (baseline or [])]
-            if len(requested_values) != len(baseline_values):
-                ignored_overrides.append({'key': key, 'requested': requested, 'baseline': baseline, 'reason': 'layer_ratio_length_mismatch', 'code': 'IGNORED_INVALID_OVERRIDE'})
-                continue
-            non_conservative = any(req > base + 1e-12 for req, base in zip(requested_values, baseline_values)) or (sum(requested_values) > sum(baseline_values) + 1e-12)
-            if conservative_only and non_conservative:
-                ignored_overrides.append({'key': key, 'requested': requested_values, 'baseline': baseline_values, 'reason': 'non_conservative_override', 'code': 'IGNORED_NON_CONSERVATIVE_OVERRIDE'})
-                continue
-            if any(abs(req - base) > 1e-12 for req, base in zip(requested_values, baseline_values)):
+            requested_values = list(merge_result.get('effective') or [])
+            baseline_values = list(merge_result.get('baseline') or [])
+            if requested_values != baseline_values:
                 effective[key] = requested_values
                 applied_overrides[key] = {'baseline': baseline_values, 'effective': requested_values, 'requested': requested_values, 'source': f'execution_overrides.{key}'}
             continue
@@ -495,8 +533,7 @@ def merge_execution_overrides_conservatively(baseline_snapshot: Dict[str, Any], 
             continue
         ignored_overrides.append({'key': key, 'requested': requested, 'reason': 'unsupported_execution_field', 'code': 'IGNORED_UNSUPPORTED_EXECUTION_FIELD'})
 
-    if sum(effective.get('layer_ratios') or []) > float(effective.get('layer_max_total_ratio') or 0) + 1e-12:
-        effective['layer_max_total_ratio'] = float(sum(effective.get('layer_ratios') or []))
+    effective['layer_count'] = derive_layer_count_from_ratios(effective.get('layer_ratios'))
     return {
         'effective': effective,
         'applied_overrides': applied_overrides,
@@ -555,6 +592,156 @@ def merge_risk_overrides_conservatively(baseline_snapshot: Dict[str, Any], risk_
     }
 
 
+def _matches_symbol_rollout(symbol: Optional[str], explicit_symbols: Optional[List[str]], fraction: float) -> Dict[str, Any]:
+    symbol = str(symbol or '')
+    explicit = [str(item) for item in (explicit_symbols or []) if str(item).strip()]
+    symbol_match = (not explicit) or (symbol in explicit)
+    fraction = max(0.0, min(1.0, float(fraction or 0.0)))
+    if fraction >= 1.0:
+        fraction_match = True
+    elif fraction <= 0.0:
+        fraction_match = False if explicit else False
+    else:
+        bucket = (int(hashlib.sha256(symbol.encode('utf-8')).hexdigest()[:8], 16) % 10000) / 10000.0 if symbol else 1.0
+        fraction_match = bucket < fraction
+    return {
+        'symbol_match': symbol_match,
+        'fraction_match': fraction_match,
+        'rollout_match': symbol_match and (fraction_match if fraction > 0 else bool(explicit and symbol_match)),
+        'fraction': fraction,
+    }
+
+
+
+def build_layering_plan_shape_snapshot(
+    baseline: Dict[str, Any],
+    effective: Dict[str, Any],
+    *,
+    symbol: Optional[str],
+    mode: str,
+    conservative_only: bool,
+    layering_enforcement_enabled: bool,
+    layering_plan_shape_enforcement_enabled: bool,
+    guardrails_live: bool,
+    rollout_symbols: Optional[List[str]] = None,
+    rollout_fraction: float = 0.0,
+    require_guardrails_live: bool = True,
+    fail_closed: bool = True,
+    force_baseline_on_invalid: bool = True,
+) -> Dict[str, Any]:
+    baseline_shape = list(baseline.get('layer_ratios') or [])
+    effective_shape = list(effective.get('layer_ratios') or baseline_shape)
+    rollout = _matches_symbol_rollout(symbol, rollout_symbols, rollout_fraction)
+    live_shape = list(baseline_shape)
+    enforced_fields: List[str] = []
+    ignored_fields: List[str] = []
+    decisions: List[Dict[str, Any]] = []
+    validation = {'valid': True, 'accepted': False, 'reason': 'shape_not_applied', 'ignored_fields': [], 'enforced_fields': []}
+    really_enforced = False
+    source = 'baseline'
+
+    shape_applied = effective_shape != baseline_shape
+    gating_reason = None
+    if mode not in {'guarded_execute', 'full'}:
+        gating_reason = 'policy_mode_not_live'
+    elif not layering_enforcement_enabled:
+        gating_reason = 'layering_profile_enforcement_disabled'
+    elif not layering_plan_shape_enforcement_enabled:
+        gating_reason = 'layering_plan_shape_enforcement_disabled'
+    elif require_guardrails_live and not guardrails_live:
+        gating_reason = 'layering_guardrails_not_live'
+    elif not rollout.get('rollout_match'):
+        gating_reason = 'plan_shape_rollout_miss'
+
+    if shape_applied and gating_reason is None:
+        merged_shape = merge_layer_ratios_conservatively(
+            baseline_shape,
+            effective_shape,
+            conservative_only=conservative_only,
+            live_total_ratio_cap=effective.get('layer_max_total_ratio'),
+        )
+        if merged_shape.get('accepted'):
+            live_shape = list(merged_shape.get('effective') or baseline_shape)
+            source = 'adaptive_live'
+            enforced_fields.append('layer_ratios')
+            really_enforced = live_shape != baseline_shape
+            validation = {
+                'valid': True,
+                'accepted': really_enforced,
+                'reason': 'conservative_tighten_enforced' if really_enforced else 'no_change',
+                'baseline_sum': float(sum(baseline_shape)),
+                'effective_sum': float(sum(effective_shape)),
+                'live_sum': float(sum(live_shape)),
+                'layer_max_total_ratio': float(effective.get('layer_max_total_ratio') or 0.0),
+                'baseline_layer_count': derive_layer_count_from_ratios(baseline_shape),
+                'effective_layer_count': derive_layer_count_from_ratios(effective_shape),
+                'live_layer_count': derive_layer_count_from_ratios(live_shape),
+                'enforced_fields': ['layer_ratios'] if really_enforced else [],
+                'ignored_fields': [],
+            }
+        else:
+            ignored_fields.append('layer_ratios')
+            validation = {
+                'valid': False,
+                'accepted': False,
+                'reason': merged_shape.get('reason') or 'invalid_layer_ratios',
+                'baseline_sum': float(sum(baseline_shape)),
+                'effective_sum': float(sum(effective_shape)),
+                'live_sum': float(sum(baseline_shape)),
+                'layer_max_total_ratio': float(effective.get('layer_max_total_ratio') or 0.0),
+                'baseline_layer_count': derive_layer_count_from_ratios(baseline_shape),
+                'effective_layer_count': derive_layer_count_from_ratios(effective_shape),
+                'live_layer_count': derive_layer_count_from_ratios(baseline_shape),
+                'enforced_fields': [],
+                'ignored_fields': ['layer_ratios'],
+                'fail_closed': bool(fail_closed),
+                'force_baseline_on_invalid': bool(force_baseline_on_invalid),
+            }
+    elif shape_applied:
+        ignored_fields.append('layer_ratios')
+        validation = {
+            'valid': True,
+            'accepted': False,
+            'reason': gating_reason,
+            'baseline_sum': float(sum(baseline_shape)),
+            'effective_sum': float(sum(effective_shape)),
+            'live_sum': float(sum(baseline_shape)),
+            'layer_max_total_ratio': float(effective.get('layer_max_total_ratio') or 0.0),
+            'baseline_layer_count': derive_layer_count_from_ratios(baseline_shape),
+            'effective_layer_count': derive_layer_count_from_ratios(effective_shape),
+            'live_layer_count': derive_layer_count_from_ratios(baseline_shape),
+            'enforced_fields': [],
+            'ignored_fields': ['layer_ratios'],
+        }
+
+    decisions.append({
+        'field': 'layer_ratios',
+        'baseline': baseline_shape,
+        'effective': effective_shape,
+        'live': live_shape,
+        'enforced': really_enforced,
+        'applied': shape_applied,
+        'ignored': 'layer_ratios' in ignored_fields,
+        'decision': 'enforced' if really_enforced else ('ignored' if shape_applied else 'unchanged'),
+        'reason': validation.get('reason') if shape_applied else 'no_change',
+    })
+    return {
+        'baseline': {'layer_ratios': baseline_shape, 'layer_count': derive_layer_count_from_ratios(baseline_shape)},
+        'effective': {'layer_ratios': effective_shape, 'layer_count': derive_layer_count_from_ratios(effective_shape)},
+        'live': {'layer_ratios': live_shape, 'layer_count': derive_layer_count_from_ratios(live_shape)},
+        'plan_shape_really_enforced': really_enforced,
+        'plan_shape_enforced_fields': enforced_fields,
+        'plan_shape_ignored_fields': ignored_fields,
+        'live_layer_shape_source': source,
+        'shape_guardrail_decisions': decisions,
+        'shape_rollout_symbol_match': rollout.get('symbol_match'),
+        'shape_rollout_fraction_match': rollout.get('fraction_match'),
+        'shape_live_rollout_match': rollout.get('rollout_match'),
+        'plan_shape_validation': validation,
+    }
+
+
+
 def build_execution_effective_snapshot(config_helper: Any, symbol: Optional[str], *, signal: Any = None, regime_snapshot: Optional[Dict[str, Any]] = None, policy_snapshot: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     observe_payload = build_observe_only_payload(config_helper, symbol, signal=signal, regime_snapshot=regime_snapshot, policy_snapshot=policy_snapshot)
     adaptive_cfg = config_helper.get_adaptive_regime_config(symbol) if hasattr(config_helper, 'get_adaptive_regime_config') else {}
@@ -570,7 +757,18 @@ def build_execution_effective_snapshot(config_helper: Any, symbol: Optional[str]
     layering_plan_shape_enforcement_enabled = bool(guarded_cfg.get('layering_plan_shape_enforcement_enabled', False))
     rollout_symbols = list(guarded_cfg.get('rollout_symbols') or [])
     rollout_match = (not rollout_symbols) or (symbol in rollout_symbols)
+    plan_shape_rollout_symbols = list(guarded_cfg.get('layering_plan_shape_rollout_symbols') or [])
+    plan_shape_rollout_fraction = float(guarded_cfg.get('layering_plan_shape_rollout_fraction') or 0.0)
+    plan_shape_require_guardrails_live = bool(guarded_cfg.get('layering_plan_shape_require_guardrails_live', True))
+    plan_shape_fail_closed = bool(guarded_cfg.get('layering_plan_shape_fail_closed', True))
+    plan_shape_force_baseline_on_invalid = bool(guarded_cfg.get('layering_plan_shape_force_baseline_on_invalid', True))
     mode = str(normalized_policy.get('mode') or adaptive_cfg.get('mode') or 'observe_only')
+    if not bool(adaptive_cfg.get('enabled', False)) or mode in {'observe_only', 'disabled'}:
+        hints_enabled = False
+        enforcement_enabled = False
+        layering_hints_enabled = False
+        layering_enforcement_enabled = False
+        layering_plan_shape_enforcement_enabled = False
     merged = merge_execution_overrides_conservatively(
         baseline,
         dict(normalized_policy.get('execution_overrides') or {}),
@@ -677,6 +875,42 @@ def build_execution_effective_snapshot(config_helper: Any, symbol: Optional[str]
         if code and code not in hint_codes:
             hint_codes.append(code)
 
+    baseline['layer_count'] = derive_layer_count_from_ratios(baseline.get('layer_ratios'))
+    merged['effective']['layer_count'] = derive_layer_count_from_ratios(merged['effective'].get('layer_ratios'))
+    live_effective['layer_count'] = derive_layer_count_from_ratios(live_effective.get('layer_ratios'))
+    enforced_effective['layer_count'] = derive_layer_count_from_ratios(enforced_effective.get('layer_ratios'))
+    plan_shape_snapshot = build_layering_plan_shape_snapshot(
+        baseline,
+        merged['effective'],
+        symbol=symbol,
+        mode=mode,
+        conservative_only=conservative_only,
+        layering_enforcement_enabled=layering_enforcement_enabled,
+        layering_plan_shape_enforcement_enabled=layering_plan_shape_enforcement_enabled,
+        guardrails_live=bool(layering_enforced_fields),
+        rollout_symbols=plan_shape_rollout_symbols,
+        rollout_fraction=plan_shape_rollout_fraction,
+        require_guardrails_live=plan_shape_require_guardrails_live,
+        fail_closed=plan_shape_fail_closed,
+        force_baseline_on_invalid=plan_shape_force_baseline_on_invalid,
+    )
+    if any(item.get('key') == 'layer_ratios' for item in ignored_overrides):
+        if 'layer_ratios' not in (plan_shape_snapshot.get('plan_shape_ignored_fields') or []):
+            plan_shape_snapshot['plan_shape_ignored_fields'] = list(plan_shape_snapshot.get('plan_shape_ignored_fields') or []) + ['layer_ratios']
+        if not plan_shape_snapshot.get('plan_shape_validation'):
+            plan_shape_snapshot['plan_shape_validation'] = {}
+        if not plan_shape_snapshot['plan_shape_validation'].get('accepted'):
+            first_ignored = next(item for item in ignored_overrides if item.get('key') == 'layer_ratios')
+            plan_shape_snapshot['plan_shape_validation']['reason'] = plan_shape_snapshot['plan_shape_validation'].get('reason') or first_ignored.get('reason')
+    live_effective['layer_ratios'] = list((plan_shape_snapshot.get('live') or {}).get('layer_ratios') or live_effective.get('layer_ratios') or [])
+    live_effective['layer_count'] = int((plan_shape_snapshot.get('live') or {}).get('layer_count') or derive_layer_count_from_ratios(live_effective.get('layer_ratios')))
+    enforced_effective['layer_ratios'] = list(live_effective.get('layer_ratios') or [])
+    enforced_effective['layer_count'] = int(live_effective.get('layer_count') or derive_layer_count_from_ratios(live_effective.get('layer_ratios')))
+    if plan_shape_snapshot.get('plan_shape_really_enforced') and 'layer_ratios' not in enforced_fields:
+        enforced_fields.append('layer_ratios')
+
+    field_decisions = [item for item in field_decisions if item.get('field') != 'layer_ratios'] + list(plan_shape_snapshot.get('shape_guardrail_decisions') or [])
+
     return {
         'enabled': bool(hints_enabled or enforcement_enabled),
         'baseline': baseline,
@@ -689,7 +923,15 @@ def build_execution_effective_snapshot(config_helper: Any, symbol: Optional[str]
         'layering_enforced_fields': layering_enforced_fields,
         'execution_profile_really_enforced': bool(enforced_fields),
         'layering_profile_really_enforced': bool(layering_enforced_fields),
-        'plan_shape_really_enforced': 'layer_ratios' in enforced_fields,
+        'plan_shape_really_enforced': bool(plan_shape_snapshot.get('plan_shape_really_enforced', False)),
+        'plan_shape_enforced_fields': list(plan_shape_snapshot.get('plan_shape_enforced_fields') or []),
+        'plan_shape_ignored_fields': list(plan_shape_snapshot.get('plan_shape_ignored_fields') or []),
+        'live_layer_shape_source': plan_shape_snapshot.get('live_layer_shape_source') or 'baseline',
+        'shape_guardrail_decisions': list(plan_shape_snapshot.get('shape_guardrail_decisions') or []),
+        'plan_shape_validation': dict(plan_shape_snapshot.get('plan_shape_validation') or {}),
+        'shape_live_rollout_match': bool(plan_shape_snapshot.get('shape_live_rollout_match', False)),
+        'shape_rollout_symbol_match': bool(plan_shape_snapshot.get('shape_rollout_symbol_match', False)),
+        'shape_rollout_fraction_match': bool(plan_shape_snapshot.get('shape_rollout_fraction_match', False)),
         'effective_state': effective_state,
         'policy_mode': mode,
         'policy_version': normalized_policy.get('policy_version') or ADAPTIVE_POLICY_VERSION,

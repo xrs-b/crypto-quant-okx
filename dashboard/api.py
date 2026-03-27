@@ -52,7 +52,7 @@ from signals.validator import SignalValidator
 from bot.run import execute_exchange_smoke, reconcile_exchange_positions, load_runtime_state
 from ml.engine import MLEngine
 from core.regime import RegimeDetector, detect_regime, Regime
-from analytics import StrategyBacktester, SignalQualityAnalyzer, ParameterOptimizer, GovernanceEngine, build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, attach_auto_approval_policy, execute_controlled_rollout_layer, execute_controlled_auto_approval_layer, execute_rollout_executor, build_workflow_consumer_view, build_workflow_attention_view, build_workflow_operator_digest, build_dashboard_summary_cards, build_workbench_governance_view, build_workbench_governance_filter_view, build_workbench_governance_detail_view
+from analytics import StrategyBacktester, SignalQualityAnalyzer, ParameterOptimizer, GovernanceEngine, build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, attach_auto_approval_policy, execute_controlled_rollout_layer, execute_controlled_auto_approval_layer, execute_rollout_executor, build_workflow_consumer_view, build_workflow_attention_view, build_workflow_operator_digest, build_dashboard_summary_cards, build_workbench_governance_view, build_workbench_governance_filter_view, build_workbench_governance_detail_view, build_workbench_merged_timeline
 from analytics.backtest import export_calibration_payload
 from analytics.mfe_mae import MFEAnalyzer, get_mfe_mae_analysis
 from core.regime_policy import summarize_observe_only_collection
@@ -2607,10 +2607,36 @@ def get_backtest_workbench_governance_detail():
     calibration_report = backtest_result.get('calibration_report') or {}
     payload = export_calibration_payload(calibration_report, view='workflow_ready')
     payload = _persist_workflow_approval_payload(payload, replay_source='workbench_governance_detail_api')
-    detail = build_workbench_governance_detail_view(payload, item_id=item_id, approval_id=approval_id, lane_id=lane_id)
+    approval_timeline = db.get_approval_timeline(item_id=approval_id, limit=200, ascending=True) if approval_id else []
+    detail = build_workbench_governance_detail_view(payload, item_id=item_id, approval_id=approval_id, lane_id=lane_id, approval_timeline=approval_timeline)
     if not detail.get('found'):
         return jsonify({'success': False, 'error': 'workbench item not found', 'data': detail}), 404
     return jsonify({'success': True, 'view': 'workbench_governance_detail_view', 'data': detail, 'summary': detail.get('summary') or {}})
+
+
+@app.route('/api/backtest/workbench-governance-merged-timeline')
+def get_backtest_workbench_governance_merged_timeline():
+    """返回指定 item 的 approval DB timeline + executor timeline 合并视图。"""
+    item_id = request.args.get('item_id')
+    approval_id = request.args.get('approval_id')
+    lane_id = request.args.get('lane') or request.args.get('lane_id')
+    if not item_id and not approval_id:
+        return jsonify({'success': False, 'error': 'item_id or approval_id is required'}), 400
+    backtest_result = backtester.run_all(config.symbols)
+    calibration_report = backtest_result.get('calibration_report') or {}
+    payload = export_calibration_payload(calibration_report, view='workflow_ready')
+    payload = _persist_workflow_approval_payload(payload, replay_source='workbench_governance_merged_timeline_api')
+    detail = build_workbench_governance_detail_view(
+        payload,
+        item_id=item_id,
+        approval_id=approval_id,
+        lane_id=lane_id,
+        approval_timeline=db.get_approval_timeline(item_id=approval_id, limit=200, ascending=True) if approval_id else [],
+    )
+    if not detail.get('found'):
+        return jsonify({'success': False, 'error': 'workbench item not found', 'data': detail}), 404
+    merged_timeline = ((detail.get('drilldown') or {}).get('merged_timeline') or {})
+    return jsonify({'success': True, 'view': 'workbench_merged_timeline', 'data': merged_timeline, 'summary': merged_timeline.get('summary') or {}})
 
 
 @app.route('/api/signal-quality')

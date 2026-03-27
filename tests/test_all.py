@@ -5254,6 +5254,41 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
         finally:
             dashboard_api.backtester = old_backtester
 
+    def test_backtest_workbench_governance_merged_timeline_api_returns_combined_view(self):
+        import dashboard.api as dashboard_api
+
+        report = build_regime_policy_calibration_report([{
+            'symbol': 'BTC/USDT',
+            'all_trades': [
+                {'regime_tag': 'panic', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 0.3},
+                {'regime_tag': 'panic', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 0.2},
+                {'regime_tag': 'panic', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 0.1},
+                {'regime_tag': 'panic', 'policy_tag': 'policy_v2', 'strategy_tags': ['Breakout'], 'return_pct': -1.4},
+                {'regime_tag': 'panic', 'policy_tag': 'policy_v2', 'strategy_tags': ['Breakout'], 'return_pct': -1.0},
+                {'regime_tag': 'panic', 'policy_tag': 'policy_v2', 'strategy_tags': ['Breakout'], 'return_pct': -0.8},
+            ],
+        }])
+
+        class StubBacktester:
+            def run_all(self, symbols):
+                return {'summary': {'symbols': len(symbols)}, 'symbols': [{'symbol': 'BTC/USDT'}], 'calibration_report': report}
+
+        old_backtester = dashboard_api.backtester
+        dashboard_api.backtester = StubBacktester()
+        try:
+            client = app.test_client()
+            list_response = client.get('/api/backtest/workbench-governance-items?lane=manual_approval&limit=1')
+            item = list_response.get_json()['data']['items'][0]
+            response = client.get(f"/api/backtest/workbench-governance-merged-timeline?item_id={item['item_id']}&approval_id={item['approval_id']}&lane={item['lane_id']}")
+            self.assertEqual(response.status_code, 200)
+            payload = response.get_json()
+            self.assertEqual(payload['view'], 'workbench_merged_timeline')
+            self.assertEqual(payload['data']['schema_version'], 'm5_workbench_merged_timeline_v1')
+            self.assertGreaterEqual(payload['summary']['event_count'], payload['summary']['executor_event_count'])
+            self.assertIn('approval_db', payload['summary']['phases'])
+        finally:
+            dashboard_api.backtester = old_backtester
+
     def test_backtest_calibration_report_api_supports_governance_ready_view(self):
         import dashboard.api as dashboard_api
 
@@ -5562,7 +5597,7 @@ class TestExecutionObservability(unittest.TestCase):
             self.assertIn('recent_decisions', snapshot['summary'])
             self.assertTrue(snapshot['summary']['observe_only_banner'])
 
-from analytics.helper import build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, attach_auto_approval_policy, execute_controlled_rollout_layer, execute_controlled_auto_approval_layer, execute_rollout_executor, build_workflow_attention_view, build_workflow_operator_digest, build_dashboard_summary_cards, build_workbench_governance_view, build_workbench_governance_detail_view
+from analytics.helper import build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, attach_auto_approval_policy, execute_controlled_rollout_layer, execute_controlled_auto_approval_layer, execute_rollout_executor, build_workflow_attention_view, build_workflow_operator_digest, build_dashboard_summary_cards, build_workbench_governance_view, build_workbench_governance_detail_view, build_workbench_merged_timeline
 
 
 class TestApprovalPersistence(unittest.TestCase):
@@ -5954,6 +5989,42 @@ class TestApprovalPersistence(unittest.TestCase):
         self.assertEqual(detail['summary']['timeline']['event_count'], 5)
         self.assertEqual(detail['summary']['timeline']['current_status'], 'blocked_by_approval')
         self.assertTrue(detail['summary']['rollback_hints'])
+
+    def test_build_workbench_merged_timeline_combines_approval_db_and_executor_events(self):
+        item = {
+            'item_id': 'playbook::manual', 'approval_id': 'approval::manual', 'lane_id': 'manual_approval',
+            'action_type': 'joint_expand_guarded', 'approval_state': 'pending', 'workflow_state': 'blocked_by_approval',
+            'current_rollout_stage': 'guarded', 'target_rollout_stage': 'expanded', 'blocked_by': ['missing_operator_ack'],
+        }
+        workflow_item = {
+            'item_id': 'playbook::manual', 'title': 'Manual gate item', 'action_type': 'joint_expand_guarded',
+            'workflow_state': 'blocked_by_approval', 'blocking_reasons': ['missing_operator_ack'],
+            'queue_progression': {'status': 'awaiting_approval', 'dispatch_route': 'manual_review_queue', 'next_action': 'queue_for_manual_review'},
+        }
+        approval_item = {
+            'approval_id': 'approval::manual', 'playbook_id': 'playbook::manual', 'title': 'Manual gate item',
+            'action_type': 'joint_expand_guarded', 'approval_state': 'pending', 'decision_state': 'pending', 'blocked_by': ['missing_operator_ack'],
+        }
+        executor_item = {
+            'status': 'blocked_by_approval',
+            'plan': {'handler_key': 'queue_only::live_trading_change', 'executor_class': 'live_trading_change', 'dispatch_mode': 'queue_only', 'dispatch_route': 'manual_review_queue', 'transition_rule': 'manual_gate_before_dispatch', 'next_transition': 'await_manual_approval'},
+            'dispatch': {'status': 'blocked_by_approval', 'handler_key': 'queue_only::live_trading_change', 'executor_class': 'live_trading_change', 'mode': 'queue_only', 'dispatch_route': 'manual_review_queue', 'reason': 'manual_review_required', 'code': 'APPROVAL_GATED_QUEUE'},
+            'result': {'status': 'blocked_by_approval', 'disposition': 'blocked_by_approval', 'dispatch_route': 'manual_review_queue', 'reason': 'manual_review_required', 'code': 'APPROVAL_GATED_QUEUE'},
+        }
+        approval_timeline = [
+            {'id': 1, 'item_id': 'approval::manual', 'event_type': 'snapshot_sync', 'state': 'pending', 'workflow_state': 'pending', 'decision': 'pending', 'reason': 'initial sync', 'created_at': '2026-03-27T10:00:00Z'},
+            {'id': 2, 'item_id': 'approval::manual', 'event_type': 'rollout_executor_queue_blocked', 'state': 'pending', 'workflow_state': 'blocked_by_approval', 'decision': 'pending', 'reason': 'manual_review_required', 'created_at': '2026-03-27T10:01:00Z'},
+        ]
+        merged = build_workbench_merged_timeline(item, workflow_item, approval_item, executor_item, approval_timeline=approval_timeline)
+        self.assertEqual(merged['schema_version'], 'm5_workbench_merged_timeline_v1')
+        self.assertEqual(merged['summary']['approval_event_count'], 2)
+        self.assertEqual(merged['summary']['executor_event_count'], 5)
+        self.assertEqual(merged['summary']['event_count'], 7)
+        self.assertEqual(merged['events'][0]['source'], 'approval_timeline')
+        self.assertEqual(merged['events'][0]['event_type'], 'snapshot_sync')
+        self.assertEqual(merged['events'][-1]['source'], 'executor_timeline')
+        self.assertIn('approval_db', merged['summary']['phases'])
+        self.assertIn('dispatch', merged['summary']['phases'])
 
     def test_build_workflow_attention_view_groups_manual_and_blocked_items(self):
         payload = build_workflow_attention_view({

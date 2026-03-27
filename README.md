@@ -77,6 +77,7 @@ M4 Step 4 batch2 status: 已补第二批可直接开工实施稿，明确区分 
 - 支持分层开仓（layering）
 - 通过本地数据库、日志、Dashboard 和通知系统提升可观察性
 - 新增 workflow attention API（manual approval / blocked follow-up），便于 dashboard、agent、人工低干预巡检直接拉取待处理项
+- 新增 merged timeline 后端视图，可直接查看同一 item 的 approval DB timeline + workflow/executor timeline 合并结果，方便 dashboard、agent、人工巡检统一追踪
 - 为回测、信号质量分析、参数优化预留接口
 
 当前项目围绕 **OKX 合约** 场景设计，默认支持：

@@ -122,6 +122,11 @@
 - **兼容性**：不替换现有 consumer / attention / digest / summary-cards 视图；只是往更集中、更适合 approval+rollout 工作台消费的方向补一层聚合入口，并把 filter/detail 复用同一份序列化稳定的 item catalog。
 - **测试**：覆盖 helper 聚合 payload、独立 API、calibration-report view，并补 filter/detail API 用例，确保 lane / rollout / recent adjustment / why / next-step 结构稳定存在。
 - **2026-03-27 workbench 明细层补强**：`workbench-governance-detail` 继续向下补 `queue / approval / rollout` 三段 drill-down，统一输出 `queue_name / route / handler / transition_rule / next_transition / blocking_points / rollback_hints / why_summary`，让调用方可以直接回答“当前在哪条 queue/handler/route、为什么进这条路、下一步 transition 是什么、阻塞点/回滚提示是什么”，并保持 JSON 结构稳定、可序列化、适合 dashboard / agent / 人工巡检直接消费。
+- **2026-03-27 merged timeline 增量**：在既有 `approval timeline`（DB immutable event log）与 `workbench detail executor/action timeline` 之上，新增统一 `merged_timeline`：
+  - 以后调用方可直接看到同一 item 的 `approval DB events + workflow/executor events` 合并时间线，不需要自己 join 两套结构；
+  - 输出统一包含 `schema_version / locator / summary / events / sources / raw`，其中 `summary` 会固定给出 `approval_event_count / executor_event_count / event_count / event_types / phases / timestamp_range`；
+  - `build_workbench_governance_detail_view(...)` 已把 `merged_timeline` 作为 drill-down 的一部分输出，并在 `summary.merged_timeline` 回挂摘要；
+  - dashboard/API 新增独立后端入口 `GET /api/backtest/workbench-governance-merged-timeline`，优先服务 dashboard / agent / 人工巡检，不做前端绑定。
 - **2026-03-27 executor/action timeline detail 增量**：在上述 detail drill-down 之上，继续补 `timeline` 视图，统一产出 `summary + events + raw` 三层：
   - `summary`：直接给出 `current_status / workflow_state / approval_state / current_stage / target_stage / dispatch_route / handler_key / executor_class / decision_path / key_timestamps / audit_event_types / result_summary / blocking_points`；
   - `events`：按 `workflow -> approval -> executor_plan -> dispatch -> result` 固定 phase 串出动作执行轨迹，回答“做过哪些 action、每一步状态、走了哪条审批/调度/执行路径”；

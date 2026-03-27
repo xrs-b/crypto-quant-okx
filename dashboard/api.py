@@ -52,7 +52,7 @@ from signals.validator import SignalValidator
 from bot.run import execute_exchange_smoke, reconcile_exchange_positions, load_runtime_state
 from ml.engine import MLEngine
 from core.regime import RegimeDetector, detect_regime, Regime
-from analytics import StrategyBacktester, SignalQualityAnalyzer, ParameterOptimizer, GovernanceEngine, build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview
+from analytics import StrategyBacktester, SignalQualityAnalyzer, ParameterOptimizer, GovernanceEngine, build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, attach_auto_approval_policy
 from analytics.backtest import export_calibration_payload
 from analytics.mfe_mae import MFEAnalyzer, get_mfe_mae_analysis
 from core.regime_policy import summarize_observe_only_collection
@@ -84,13 +84,14 @@ smoke_execution_state = {
 
 
 def _persist_workflow_approval_payload(payload: Dict[str, Any], replay_source: str = 'workflow_ready') -> Dict[str, Any]:
+    payload = attach_auto_approval_policy(payload)
     approval_records = build_workflow_approval_records(payload)
     if not approval_records:
         return payload
     db.sync_approval_items(approval_records, replay_source=replay_source, preserve_terminal=True)
     persisted_rows = [db.get_approval_state(row.get('item_id')) for row in approval_records if row.get('item_id')]
     persisted_rows = [row for row in persisted_rows if row]
-    return merge_persisted_approval_state(payload, persisted_rows)
+    return attach_auto_approval_policy(merge_persisted_approval_state(payload, persisted_rows))
 
 
 def _get_exchange_client():

@@ -17,6 +17,7 @@ from core.database import Database
 from signals.detector import SignalDetector
 from signals.validator import SignalValidator
 from core.regime_policy import normalize_observe_only_view, summarize_observe_only_collection
+from analytics.helper import attach_auto_approval_policy
 
 
 def _normalize_bucket_tag(value: Optional[str], fallback: str = 'unknown') -> str:
@@ -2179,7 +2180,7 @@ def build_governance_workflow_ready_payload(source: Dict) -> Dict:
         'approval_state_summary': (state_layer.get('approval_state') or {}).get('summary') or {},
         'filters': {key: len(value) for key, value in filters.items()},
     }
-    return {
+    return attach_auto_approval_policy({
         'schema_version': 'm5_governance_workflow_ready_v2',
         'governance_schema_version': governance_ready.get('schema_version'),
         'delivery_schema_version': governance_ready.get('delivery_schema_version'),
@@ -2212,7 +2213,7 @@ def build_governance_workflow_ready_payload(source: Dict) -> Dict:
             'workflow_state': state_layer.get('workflow_state') or {},
             'approval_state': state_layer.get('approval_state') or {},
         },
-    }
+    })
 
 
 def build_calibration_report_ready_payload(source: Dict) -> Dict:

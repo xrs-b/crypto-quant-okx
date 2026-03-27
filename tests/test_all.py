@@ -4593,6 +4593,32 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
         ))
         self.assertIn('state', payload['by_bucket'][approval_row['bucket_id']])
 
+    def test_governance_workflow_ready_payload_exposes_auto_approval_policy(self):
+        report = build_regime_policy_calibration_report([
+            {
+                'symbol': 'BTC/USDT',
+                'all_trades': [
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 0.3},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 0.2},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 0.1},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v2', 'strategy_tags': ['Breakout'], 'return_pct': -1.4},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v2', 'strategy_tags': ['Breakout'], 'return_pct': -1.0},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v2', 'strategy_tags': ['Breakout'], 'return_pct': -0.8},
+                ],
+            }
+        ])
+        payload = build_governance_workflow_ready_payload(report)
+        approval_item = payload['approval_state']['items'][0]
+        workflow_item = payload['workflow_state']['item_states'][0]
+        self.assertIn(approval_item['auto_approval_decision'], {'freeze', 'manual_review', 'defer', 'auto_approve'})
+        self.assertIn('requires_manual', approval_item)
+        self.assertIn('auto_approval_eligible', approval_item)
+        self.assertIn('blocked_by', approval_item)
+        self.assertEqual(payload['auto_approval_policy']['schema_version'], 'm5_auto_approval_policy_v1')
+        self.assertIn('auto_approval', payload['approval_state']['summary'])
+        self.assertIn('auto_approval', payload['workflow_state']['summary'])
+        self.assertEqual(workflow_item['auto_approval_decision'], approval_item['auto_approval_decision'])
+
     def test_export_calibration_payload_supports_delivery_governance_ready_and_full_views(self):
         report = build_regime_policy_calibration_report([
             {
@@ -4725,6 +4751,8 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
             self.assertEqual(payload['data']['approval_queue'], report['delivery']['governance_ready']['approval_ready']['items'])
             self.assertTrue(payload['data']['workflow_state']['item_states'])
             self.assertTrue(payload['data']['approval_state']['items'])
+            self.assertIn('auto_approval_policy', payload['data'])
+            self.assertIn('auto_approval_decision', payload['data']['approval_state']['items'][0])
             self.assertEqual(payload['summary']['workflow_ready'], payload['data']['summary'])
             self.assertEqual(payload['summary']['governance_ready'], report['summary']['governance_ready'])
         finally:
@@ -5079,10 +5107,36 @@ class TestExecutionObservability(unittest.TestCase):
             self.assertIn('recent_decisions', snapshot['summary'])
             self.assertTrue(snapshot['summary']['observe_only_banner'])
 
-from analytics.helper import build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview
+from analytics.helper import build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, attach_auto_approval_policy
 
 
 class TestApprovalPersistence(unittest.TestCase):
+    def test_attach_auto_approval_policy_marks_low_risk_items_auto_approvable(self):
+        payload = attach_auto_approval_policy({
+            'workflow_state': {
+                'item_states': [{
+                    'item_id': 'playbook::observe',
+                    'action_type': 'joint_observe',
+                    'decision': 'expand',
+                    'governance_mode': 'rollout',
+                    'risk_level': 'low',
+                    'approval_required': False,
+                    'blocking_reasons': [],
+                    'preconditions': [],
+                    'confidence': 'medium',
+                }],
+                'summary': {},
+            },
+            'approval_state': {
+                'items': [],
+                'summary': {},
+            },
+        })
+        row = payload['workflow_state']['item_states'][0]
+        self.assertEqual(row['auto_approval_decision'], 'auto_approve')
+        self.assertTrue(row['auto_approval_eligible'])
+        self.assertFalse(row['requires_manual'])
+
     def test_approval_state_persists_terminal_decision_across_replay(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             db = Database(str(Path(tmpdir) / 'approval_state.db'))

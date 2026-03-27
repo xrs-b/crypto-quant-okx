@@ -2766,6 +2766,170 @@ def _build_workbench_rollout_handler_drilldown(item: Dict[str, Any], workflow_it
     }
 
 
+def _build_workbench_executor_action_timeline(item: Dict[str, Any], workflow_item: Dict[str, Any], approval_item: Dict[str, Any],
+                                             executor_item: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    executor_item = executor_item or {}
+    plan = executor_item.get('plan') or {}
+    dispatch = executor_item.get('dispatch') or {}
+    apply = executor_item.get('apply') or {}
+    result = executor_item.get('result') or {}
+    audit = executor_item.get('audit') or {}
+    queue_progression = workflow_item.get('queue_progression') or approval_item.get('queue_progression') or {}
+    queue_plan = plan.get('queue_plan') or result.get('queue_plan') or dispatch.get('queue_plan') or {}
+    approval_hook = queue_plan.get('approval_hook') or {}
+    stage_model = workflow_item.get('stage_model') or approval_item.get('stage_model') or item.get('stage_model') or {}
+
+    route = dispatch.get('dispatch_route') or result.get('dispatch_route') or plan.get('dispatch_route') or queue_progression.get('dispatch_route') or 'unknown_route'
+    current_stage = item.get('current_rollout_stage') or workflow_item.get('current_rollout_stage') or approval_item.get('rollout_stage') or plan.get('rollout_stage') or 'pending'
+    target_stage = item.get('target_rollout_stage') or workflow_item.get('target_rollout_stage') or approval_item.get('target_rollout_stage') or plan.get('target_rollout_stage') or current_stage
+    approval_state = item.get('approval_state') or approval_item.get('approval_state') or 'not_required'
+    workflow_state = item.get('workflow_state') or workflow_item.get('workflow_state') or approval_item.get('workflow_state') or 'pending'
+    execution_status = executor_item.get('status') or result.get('status') or dispatch.get('status') or apply.get('status') or workflow_state
+    blocked_by = _dedupe_strings((item.get('blocked_by') or []) + (approval_item.get('blocked_by') or []) + (workflow_item.get('blocking_reasons') or []))
+    audit_event_types = _dedupe_strings([
+        audit.get('audit_code'),
+        result.get('code'),
+        dispatch.get('code'),
+        approval_hook.get('status'),
+        queue_progression.get('status'),
+    ])
+
+    events = [
+        {
+            'event_key': 'action_selected',
+            'event_type': 'workflow_action_selected',
+            'phase': 'workflow',
+            'status': workflow_state,
+            'path_type': 'decision',
+            'summary': workflow_item.get('title') or item.get('title') or item.get('item_id'),
+            'detail': {
+                'action_type': item.get('action_type') or workflow_item.get('action_type') or approval_item.get('action_type'),
+                'risk_level': item.get('risk_level') or workflow_item.get('risk_level') or approval_item.get('risk_level') or 'unknown',
+                'queue_progression': queue_progression,
+                'scheduled_review': item.get('scheduled_review') or workflow_item.get('scheduled_review') or approval_item.get('scheduled_review') or {},
+            },
+        },
+        {
+            'event_key': 'approval_gate',
+            'event_type': 'approval_gate_evaluated',
+            'phase': 'approval',
+            'status': approval_state,
+            'path_type': 'approval',
+            'summary': approval_hook.get('gate_reason') or ('manual review required' if item.get('requires_manual') else 'approval state evaluated'),
+            'detail': {
+                'approval_required': bool(item.get('approval_required')),
+                'requires_manual': bool(item.get('requires_manual')),
+                'approval_state': approval_state,
+                'decision_state': item.get('decision_state') or approval_item.get('decision_state') or workflow_state,
+                'auto_approval_decision': item.get('auto_approval_decision') or approval_item.get('auto_approval_decision') or workflow_item.get('auto_approval_decision'),
+                'approval_hook': approval_hook,
+                'blocked_by': blocked_by,
+            },
+        },
+        {
+            'event_key': 'executor_plan',
+            'event_type': 'executor_plan_built',
+            'phase': 'executor_plan',
+            'status': 'planned' if plan else 'missing',
+            'path_type': 'execution',
+            'summary': plan.get('handler_key') or dispatch.get('handler_key') or 'executor plan unresolved',
+            'detail': {
+                'handler_key': plan.get('handler_key') or dispatch.get('handler_key'),
+                'executor_class': plan.get('executor_class') or dispatch.get('executor_class'),
+                'dispatch_mode': plan.get('dispatch_mode') or dispatch.get('mode'),
+                'dispatch_route': route,
+                'transition_rule': plan.get('transition_rule') or dispatch.get('transition_rule') or result.get('transition_rule'),
+                'next_transition': plan.get('next_transition') or dispatch.get('next_transition') or result.get('next_transition'),
+                'readiness': plan.get('readiness') or workflow_state,
+                'queue_plan': queue_plan,
+            },
+        },
+        {
+            'event_key': 'executor_dispatch',
+            'event_type': 'executor_dispatch_decided',
+            'phase': 'dispatch',
+            'status': dispatch.get('status') or execution_status,
+            'path_type': 'dispatch',
+            'summary': dispatch.get('reason') or result.get('reason') or 'dispatch decision recorded',
+            'detail': {
+                'route': route,
+                'dispatch_mode': dispatch.get('mode') or plan.get('dispatch_mode'),
+                'code': dispatch.get('code'),
+                'retryable': dispatch.get('retryable', result.get('retryable', True)),
+                'rollback_hint': dispatch.get('rollback_hint') or result.get('rollback_hint') or plan.get('rollback_hint'),
+            },
+        },
+        {
+            'event_key': 'executor_result',
+            'event_type': 'executor_result_recorded',
+            'phase': 'result',
+            'status': result.get('status') or execution_status,
+            'path_type': 'result',
+            'summary': result.get('reason') or 'executor result recorded',
+            'detail': {
+                'disposition': result.get('disposition') or executor_item.get('status'),
+                'code': result.get('code'),
+                'state': result.get('state') or approval_state,
+                'workflow_state': result.get('workflow_state') or workflow_state,
+                'transition_rule': result.get('transition_rule') or dispatch.get('transition_rule') or plan.get('transition_rule'),
+                'next_transition': result.get('next_transition') or dispatch.get('next_transition') or plan.get('next_transition'),
+            },
+        },
+    ]
+
+    summary = {
+        'item_id': item.get('item_id'),
+        'approval_id': item.get('approval_id'),
+        'action_type': item.get('action_type') or workflow_item.get('action_type') or approval_item.get('action_type') or 'unknown',
+        'current_status': execution_status,
+        'workflow_state': workflow_state,
+        'approval_state': approval_state,
+        'current_stage': current_stage,
+        'target_stage': target_stage,
+        'dispatch_route': route,
+        'handler_key': plan.get('handler_key') or dispatch.get('handler_key') or (((approval_item.get('safe_handler_key') if isinstance(approval_item, dict) else None)) or 'unresolved'),
+        'executor_class': plan.get('executor_class') or dispatch.get('executor_class') or 'unknown',
+        'decision_path': {
+            'scheduled_review_path': queue_progression.get('next_action') or item.get('next_step') or 'observe',
+            'approval_path': approval_hook.get('status') or approval_state,
+            'dispatch_path': dispatch.get('mode') or plan.get('dispatch_mode') or 'observe',
+            'execution_path': result.get('disposition') or execution_status,
+        },
+        'key_timestamps': {
+            'scheduled_review_at': ((item.get('scheduled_review') or workflow_item.get('scheduled_review') or approval_item.get('scheduled_review') or {}).get('scheduled_at')),
+            'next_recheck_at': ((item.get('scheduled_review') or workflow_item.get('scheduled_review') or approval_item.get('scheduled_review') or {}).get('next_recheck_at')),
+            'last_transition_at': ((item.get('scheduled_review') or workflow_item.get('scheduled_review') or approval_item.get('scheduled_review') or {}).get('last_transition_at')),
+        },
+        'audit_event_types': audit_event_types,
+        'result_summary': {
+            'reason': result.get('reason') or dispatch.get('reason'),
+            'code': result.get('code') or dispatch.get('code'),
+            'retryable': bool(result.get('retryable', dispatch.get('retryable', True))),
+            'rollback_hint': result.get('rollback_hint') or dispatch.get('rollback_hint') or plan.get('rollback_hint'),
+        },
+        'blocking_points': blocked_by,
+        'event_count': len(events),
+    }
+
+    return {
+        'schema_version': 'm5_workbench_executor_action_timeline_v1',
+        'locator': {
+            'item_id': item.get('item_id'),
+            'approval_id': item.get('approval_id'),
+            'lane_id': item.get('lane_id'),
+            'action_type': summary['action_type'],
+        },
+        'summary': summary,
+        'events': events,
+        'stage_model': stage_model,
+        'raw': {
+            'workflow_item': workflow_item,
+            'approval_item': approval_item,
+            'executor_item': executor_item,
+        },
+    }
+
+
 def _build_workbench_governance_drilldown(item: Dict[str, Any], payload: Optional[Dict] = None) -> Dict[str, Any]:
     payload = payload or {}
     consumer_view = payload.get('consumer_view') or build_workflow_consumer_view(payload)
@@ -2783,6 +2947,7 @@ def _build_workbench_governance_drilldown(item: Dict[str, Any], payload: Optiona
     queue = _build_workbench_queue_handler_drilldown(item, workflow_item, approval_item, executor_item)
     approval = _build_workbench_approval_handler_drilldown(item, workflow_item, approval_item, executor_item)
     rollout = _build_workbench_rollout_handler_drilldown(item, workflow_item, approval_item, executor_item)
+    timeline = _build_workbench_executor_action_timeline(item, workflow_item, approval_item, executor_item)
     next_transition = rollout.get('next_transition') or approval.get('next_transition') or item.get('next_step')
     blocking_points = _dedupe_strings((item.get('blocked_by') or []) + (approval.get('blocking_points') or []) + (rollout.get('blocking_points') or []))
     rollback_hints = _dedupe_strings([
@@ -2799,7 +2964,7 @@ def _build_workbench_governance_drilldown(item: Dict[str, Any], payload: Optiona
         'rollback_hints': rollback_hints,
     }
     return {
-        'schema_version': 'm5_workbench_governance_drilldown_v1',
+        'schema_version': 'm5_workbench_governance_drilldown_v2',
         'item_locator': {
             'item_id': item.get('item_id'),
             'approval_id': item.get('approval_id'),
@@ -2810,6 +2975,7 @@ def _build_workbench_governance_drilldown(item: Dict[str, Any], payload: Optiona
         'approval': approval,
         'rollout': rollout,
         'decision_path': decision_path,
+        'timeline': timeline,
     }
 
 
@@ -2824,9 +2990,55 @@ def build_workbench_governance_detail_view(payload: Optional[Dict] = None, *, it
         candidates = [row for row in candidates if row.get('approval_id') == approval_id]
     if lane_id:
         candidates = [row for row in candidates if row.get('lane_id') == lane_id]
+    if not candidates and (item_id or approval_id):
+        consumer_view = payload.get('consumer_view') or build_workflow_consumer_view(payload)
+        workflow_items = ((consumer_view.get('workflow_state') or {}).get('item_states') or [])
+        approval_items = ((consumer_view.get('approval_state') or {}).get('items') or [])
+        workflow_item = next((row for row in workflow_items if row.get('item_id') == item_id or row.get('item_id') == approval_id), {})
+        approval_item = next((row for row in approval_items if row.get('approval_id') == approval_id or row.get('playbook_id') == item_id or row.get('item_id') == item_id), {})
+        fallback_item_id = item_id or workflow_item.get('item_id') or approval_item.get('playbook_id') or approval_item.get('item_id')
+        fallback_lane = lane_id or ('manual_approval' if bool(approval_item.get('approval_required') or workflow_item.get('approval_required') or workflow_item.get('requires_manual')) else 'ready')
+        if fallback_item_id:
+            blocked_by = _dedupe_strings((workflow_item.get('blocking_reasons') or []) + (approval_item.get('blocked_by') or []))
+            current_stage = workflow_item.get('current_rollout_stage') or approval_item.get('rollout_stage') or 'pending'
+            target_stage = workflow_item.get('target_rollout_stage') or approval_item.get('target_rollout_stage') or current_stage
+            fallback = {
+                'item_id': fallback_item_id,
+                'approval_id': approval_item.get('approval_id') or approval_id,
+                'title': workflow_item.get('title') or approval_item.get('title') or fallback_item_id,
+                'action_type': workflow_item.get('action_type') or approval_item.get('action_type') or 'unknown',
+                'workflow_state': workflow_item.get('workflow_state') or approval_item.get('workflow_state') or 'pending',
+                'approval_state': approval_item.get('approval_state') or 'not_required',
+                'decision_state': approval_item.get('decision_state') or workflow_item.get('decision_state') or workflow_item.get('workflow_state') or 'pending',
+                'risk_level': workflow_item.get('risk_level') or approval_item.get('risk_level') or 'unknown',
+                'auto_approval_decision': workflow_item.get('auto_approval_decision') or approval_item.get('auto_approval_decision') or 'manual_review',
+                'auto_approval_eligible': bool(workflow_item.get('auto_approval_eligible', approval_item.get('auto_approval_eligible'))),
+                'requires_manual': bool(workflow_item.get('requires_manual', approval_item.get('requires_manual'))),
+                'approval_required': bool(workflow_item.get('approval_required', approval_item.get('approval_required'))),
+                'blocked_by': blocked_by,
+                'owner_hint': workflow_item.get('owner_hint') or approval_item.get('owner_hint'),
+                'queue_progression': workflow_item.get('queue_progression') or approval_item.get('queue_progression') or {},
+                'stage_model': workflow_item.get('stage_model') or approval_item.get('stage_model') or {},
+                'current_rollout_stage': current_stage,
+                'target_rollout_stage': target_stage,
+                'scheduled_review': workflow_item.get('scheduled_review') or approval_item.get('scheduled_review') or {},
+                'lane_id': fallback_lane,
+                'lane_title': fallback_lane.replace('_', ' '),
+                'bucket_tags': [fallback_lane],
+                'why': ['fallback_detail_lookup'],
+                'why_summary': 'fallback_detail_lookup',
+                'next_step': (workflow_item.get('queue_progression') or {}).get('next_action') or ('await_manual_approval' if approval_item.get('approval_state') == 'pending' else 'observe'),
+                'detail': {
+                    'workflow_item': workflow_item,
+                    'approval_item': approval_item,
+                    'attention_buckets': [fallback_lane],
+                },
+            }
+            candidates = [fallback]
     matched = sorted(candidates, key=_workbench_item_sort_key)
     item = matched[0] if matched else None
     drilldown = _build_workbench_governance_drilldown(item, payload) if item else None
+    timeline_summary = ((drilldown or {}).get('timeline') or {}).get('summary') or {}
     summary = {
         'item_id': (item or {}).get('item_id'),
         'approval_id': (item or {}).get('approval_id'),
@@ -2841,9 +3053,21 @@ def build_workbench_governance_detail_view(payload: Optional[Dict] = None, *, it
         'next_transition': ((drilldown or {}).get('decision_path') or {}).get('next_transition'),
         'blocking_points': ((drilldown or {}).get('decision_path') or {}).get('blocking_points') or [],
         'rollback_hints': ((drilldown or {}).get('decision_path') or {}).get('rollback_hints') or [],
+        'timeline': {
+            'current_status': timeline_summary.get('current_status'),
+            'workflow_state': timeline_summary.get('workflow_state'),
+            'approval_state': timeline_summary.get('approval_state'),
+            'current_stage': timeline_summary.get('current_stage'),
+            'target_stage': timeline_summary.get('target_stage'),
+            'dispatch_route': timeline_summary.get('dispatch_route'),
+            'audit_event_types': timeline_summary.get('audit_event_types') or [],
+            'result_summary': timeline_summary.get('result_summary') or {},
+            'decision_path': timeline_summary.get('decision_path') or {},
+            'event_count': timeline_summary.get('event_count', 0),
+        },
     }
     return {
-        'schema_version': 'm5_workbench_governance_detail_view_v2',
+        'schema_version': 'm5_workbench_governance_detail_view_v3',
         'found': bool(item),
         'item': item,
         'drilldown': drilldown,

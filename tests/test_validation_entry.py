@@ -86,8 +86,12 @@ class TestShadowValidationEntry(unittest.TestCase):
         self.assertEqual(report['status'], 'pass')
         self.assertEqual(report['diff']['executor']['planned_count'], 1)
         self.assertEqual(report['diff']['executor']['dry_run_count'], 1)
+        self.assertEqual(report['diff']['executor']['timeline_summary']['route'], 'manual_review_queue')
+        self.assertIn('DRY_RUN_ONLY', report['diff']['executor']['timeline_summary']['event_types'])
         self.assertEqual(report['artifacts']['rollout_executor']['status'], 'dry_run')
         self.assertEqual(report['artifacts']['rollout_executor']['items'][0]['plan']['queue_plan']['dispatch_route'], 'manual_review_queue')
+        self.assertEqual(report['artifacts']['workbench_governance_detail_view']['schema_version'], 'm5_workbench_governance_detail_view_v3')
+        self.assertEqual(report['artifacts']['workbench_governance_detail_view']['drilldown']['timeline']['summary']['dispatch_route'], 'manual_review_queue')
 
     def test_shadow_workflow_runner_supports_testnet_bridge_plan_fixture(self):
         report = run_shadow_validation_case(WORKFLOW_TESTNET_BRIDGE_FIXTURE)

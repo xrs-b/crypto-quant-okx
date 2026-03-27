@@ -9,7 +9,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 import yaml
 
 from analytics.backtest import build_governance_workflow_ready_payload, build_regime_policy_calibration_report
-from analytics.helper import attach_auto_approval_policy, build_workflow_approval_records, execute_rollout_executor, merge_persisted_approval_state, build_workflow_consumer_view
+from analytics.helper import attach_auto_approval_policy, build_workflow_approval_records, execute_rollout_executor, merge_persisted_approval_state, build_workflow_consumer_view, build_workbench_governance_detail_view
 from core.config import Config, DEFAULT_ADAPTIVE_REGIME_CONFIG
 from core.database import Database
 from core.regime import build_regime_snapshot, normalize_regime_snapshot
@@ -601,10 +601,19 @@ def _build_workflow_diff(workflow_ready: Dict[str, Any], replay_result: Dict[str
     executor_summary = executed.get('summary') or {}
     stage_progression = (executed.get('stage_progression') or {}).get('summary') or {}
     bridge_result = bridge_result or {}
+    executor_items = executed.get('items') or []
+    first_executor = executor_items[0] if executor_items else {}
+    timeline_summary = {
+        'item_id': first_executor.get('playbook_id') or first_executor.get('item_id'),
+        'approval_id': first_executor.get('item_id'),
+        'status': first_executor.get('status'),
+        'route': ((first_executor.get('dispatch') or {}).get('dispatch_route')),
+        'event_types': [value for value in [((first_executor.get('audit') or {}).get('audit_code')), ((first_executor.get('dispatch') or {}).get('code')), ((first_executor.get('result') or {}).get('code'))] if value],
+    }
     return {
         'workflow': {'action_count': len(actions), 'approval_count': len(approvals), 'pending_approval_count': sum(1 for row in approvals if row.get('approval_state') == 'pending'), 'blocked_count': sum(1 for row in (workflow_ready.get('workflow_state') or {}).get('item_states', []) if row.get('workflow_state') == 'blocked'), 'ready_count': sum(1 for row in (workflow_ready.get('workflow_state') or {}).get('item_states', []) if row.get('workflow_state') == 'ready')},
         'replay': {'synced_count': replay_result.get('synced_count', 0), 'timeline_events': len(replay_result.get('timeline') or []), 'replayed_state_count': len(replay_states), 'pending_state_count': sum(1 for row in replay_states if row.get('state') == 'pending')},
-        'executor': {'enabled': bool((executor_result or {}).get('enabled')), 'mode': (executor_result or {}).get('mode') or 'disabled', 'planned_count': executor_summary.get('planned_count', 0), 'queued_count': executor_summary.get('queued_count', 0), 'dry_run_count': executor_summary.get('dry_run_count', 0), 'applied_count': executor_summary.get('applied_count', 0), 'error_count': executor_summary.get('error_count', 0), 'stage_ready_count': stage_progression.get('ready_stage_count', 0), 'blocked_count': stage_progression.get('blocked_count', 0)},
+        'executor': {'enabled': bool((executor_result or {}).get('enabled')), 'mode': (executor_result or {}).get('mode') or 'disabled', 'planned_count': executor_summary.get('planned_count', 0), 'queued_count': executor_summary.get('queued_count', 0), 'dry_run_count': executor_summary.get('dry_run_count', 0), 'applied_count': executor_summary.get('applied_count', 0), 'error_count': executor_summary.get('error_count', 0), 'stage_ready_count': stage_progression.get('ready_stage_count', 0), 'blocked_count': stage_progression.get('blocked_count', 0), 'timeline_summary': timeline_summary},
         'testnet_bridge': {'enabled': bool(bridge_result.get('enabled')), 'mode': bridge_result.get('mode') or 'disabled', 'status': bridge_result.get('status') or ('disabled' if not bridge_result.get('enabled') else 'plan_only'), 'plan_only': bool(bridge_result.get('plan_only', True)), 'execute_ready': bool((bridge_result.get('plan') or {}).get('execute_ready', False)), 'pending_approval_count': (bridge_result.get('gating') or {}).get('workflow_pending_approvals', 0), 'executor_applied_count': (bridge_result.get('gating') or {}).get('executor_applied_count', 0), 'blocked': bool(bridge_result.get('status') == 'blocked'), 'cleanup_needed': bool(bridge_result.get('cleanup_needed', False)), 'residual_position_detected': bool(bridge_result.get('residual_position_detected', False)), 'open_status': bridge_result.get('open_status'), 'close_status': bridge_result.get('close_status'), 'failure_compensation_hint': bridge_result.get('failure_compensation_hint'), 'error': bridge_result.get('error')},
     }
 
@@ -690,10 +699,17 @@ def _run_workflow_case(case: ValidationCase, *, case_path: Optional[str] = None,
         'controlled_rollout_execution': {},
         'auto_approval_execution': {},
     })
+    detail_view = build_workbench_governance_detail_view({
+        **copy.deepcopy(workflow_ready),
+        'consumer_view': consumer_view,
+        'rollout_executor': (executor_result or {}).get('executed') or {},
+        'controlled_rollout_execution': {},
+        'auto_approval_execution': {},
+    }, item_id=((workflow_ready.get('actions') or [{}])[0]).get('item_id')) if (workflow_ready.get('actions') or []) else {'found': False}
     diff = _build_workflow_diff(workflow_ready, replay_result, executor_result, bridge_result)
     passed, assertions = _evaluate_assertions(case.raw, None, diff, workflow_ready=workflow_ready, replay_result=replay_result)
     bridge_summary = _build_testnet_bridge_summary(bridge_result, case_id=case.case_id, case_path=str(case_path) if case_path else None)
-    return {'case_id': case.case_id, 'case_type': case.case_type, 'mode': case.raw.get('mode') or 'workflow_dry_run', 'status': 'pass' if passed else 'fail', 'baseline': None, 'adaptive': None, 'diff': diff, 'assertions': assertions, 'artifacts': {'workflow_ready': workflow_ready, 'approval_replay': replay_result, 'rollout_executor': executor_result.get('executed'), 'workflow_consumer_view': consumer_view, 'testnet_bridge': bridge_result, 'testnet_bridge_summary': bridge_summary}, 'audit': {'generated_at': datetime.now().isoformat(), 'real_trade_execution': bool((bridge_result.get('audit') or {}).get('real_trade_execution', False)), 'dangerous_live_parameter_change': False, 'exchange_mode': (bridge_result.get('audit') or {}).get('exchange_mode', 'shadow'), 'case_path': str(case_path) if case_path else None, 'replay_source': ((replay_result.get('states') or [{}])[0]).get('replay_source') if replay_result.get('states') else None}}
+    return {'case_id': case.case_id, 'case_type': case.case_type, 'mode': case.raw.get('mode') or 'workflow_dry_run', 'status': 'pass' if passed else 'fail', 'baseline': None, 'adaptive': None, 'diff': diff, 'assertions': assertions, 'artifacts': {'workflow_ready': workflow_ready, 'approval_replay': replay_result, 'rollout_executor': executor_result.get('executed'), 'workflow_consumer_view': consumer_view, 'workbench_governance_detail_view': detail_view, 'testnet_bridge': bridge_result, 'testnet_bridge_summary': bridge_summary}, 'audit': {'generated_at': datetime.now().isoformat(), 'real_trade_execution': bool((bridge_result.get('audit') or {}).get('real_trade_execution', False)), 'dangerous_live_parameter_change': False, 'exchange_mode': (bridge_result.get('audit') or {}).get('exchange_mode', 'shadow'), 'case_path': str(case_path) if case_path else None, 'replay_source': ((replay_result.get('states') or [{}])[0]).get('replay_source') if replay_result.get('states') else None}}
 
 def run_shadow_validation_case(case_path: str, *, base_config: Config = None) -> Dict[str, Any]:
     case = load_validation_case(case_path)

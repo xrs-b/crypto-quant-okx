@@ -569,6 +569,222 @@ def _build_joint_governance_delivery(items: List[Dict]) -> Dict:
     }
 
 
+def _dedupe_strings(values: List[str]) -> List[str]:
+    ordered = []
+    seen = set()
+    for value in values or []:
+        norm = str(value or '').strip()
+        if not norm or norm in seen:
+            continue
+        seen.add(norm)
+        ordered.append(norm)
+    return ordered
+
+
+def _decision_risk_level(final_decision: str, blocking_precedence: str) -> str:
+    if final_decision == 'freeze':
+        return 'critical'
+    if final_decision == 'deweight':
+        return 'high'
+    if final_decision == 'expand':
+        return 'high' if blocking_precedence != 'none' else 'medium'
+    return 'medium' if blocking_precedence != 'none' else 'low'
+
+
+def _approval_required_for_action(action_type: str, risk_level: str) -> bool:
+    if risk_level in {'critical', 'high'}:
+        return True
+    return action_type in {'joint_expand_guarded', 'joint_freeze', 'joint_deweight', 'prefer_strategy_best_policy'}
+
+
+def _approval_roles_for_risk(risk_level: str) -> List[str]:
+    if risk_level == 'critical':
+        return ['ops_lead', 'strategy_owner', 'risk_owner']
+    if risk_level == 'high':
+        return ['ops_lead', 'strategy_owner']
+    if risk_level == 'medium':
+        return ['strategy_owner']
+    return ['research_owner']
+
+
+def _execution_window_for_item(item: Dict) -> Dict:
+    final_decision = ((item.get('final_governance_decision') or {}).get('decision')) or 'observe'
+    priority = item.get('priority') or 'low'
+    if final_decision == 'freeze':
+        start = 'immediate'
+        review = 'same_day'
+    elif final_decision == 'deweight':
+        start = 'next_rebalance_window'
+        review = '24h'
+    elif final_decision == 'expand':
+        start = 'next_low_risk_window'
+        review = 'post_3_trades_or_24h'
+    else:
+        start = 'after_next_review_checkpoint'
+        review = 'after_more_samples'
+    return {
+        'start': start,
+        'review_by': review,
+        'priority': priority,
+    }
+
+
+def _joint_item_preconditions(item: Dict, action: Dict) -> List[Dict]:
+    conflict = item.get('conflict_resolution') or {}
+    evidence = item.get('evidence') or {}
+    policy_rec = item.get('policy_recommendation') or {}
+    strategy_rec = item.get('strategy_recommendation') or {}
+    preconditions = []
+    for issue in conflict.get('blocking_issues') or []:
+        preconditions.append({
+            'type': 'blocking_issue',
+            'status': 'open',
+            'value': issue,
+            'source': 'joint_governance',
+        })
+    if evidence.get('trade_count') is not None and evidence.get('min_sample_size') is not None:
+        preconditions.append({
+            'type': 'sample_size',
+            'status': 'satisfied' if int(evidence.get('trade_count') or 0) >= int(evidence.get('min_sample_size') or 0) else 'pending',
+            'value': f"{int(evidence.get('trade_count') or 0)}/{int(evidence.get('min_sample_size') or 0)}",
+            'source': 'evidence',
+        })
+    for guardrail in (policy_rec.get('guardrails') or []) + (strategy_rec.get('guardrails') or []):
+        preconditions.append({
+            'type': 'guardrail',
+            'status': 'required',
+            'value': guardrail,
+            'source': 'recommendation',
+        })
+    if conflict.get('strategy_prefers_other_policy'):
+        preconditions.append({
+            'type': 'policy_alignment',
+            'status': 'pending',
+            'value': f"prefer_{conflict.get('strategy_preferred_policy_version')}",
+            'source': 'strategy_policy_fit',
+        })
+    if action.get('type') == 'joint_expand_guarded':
+        preconditions.append({
+            'type': 'manual_whitelist',
+            'status': 'required',
+            'value': 'confirm_limited_rollout_scope',
+            'source': 'approval_workflow',
+        })
+    return preconditions[:8]
+
+
+def _joint_item_rollback_plan(item: Dict, action: Dict) -> Dict:
+    conflict = item.get('conflict_resolution') or {}
+    evidence = item.get('evidence') or {}
+    preferred_policy = conflict.get('strategy_preferred_policy_version') or (((item.get('policy_recommendation') or {}).get('baseline_comparison') or {}).get('baseline_policy_version'))
+    trigger = 'if pnl_deteriorates_or_guardrail_breaks'
+    if action.get('type') == 'joint_freeze':
+        trigger = 'if unauthorized_rollout_detected'
+    elif action.get('type') == 'joint_expand_guarded':
+        trigger = 'if 1-3 review trades underperform or blocker reappears'
+    return {
+        'trigger': trigger,
+        'target_state': preferred_policy or 'previous_safe_policy_or_hold',
+        'steps': [
+            'freeze_new_rollout_changes',
+            'restore_previous_safe_weight_or_policy',
+            'open_repricing_or_fit_review_ticket',
+        ],
+        'max_review_trades': max(int(evidence.get('min_sample_size') or 0), 3),
+    }
+
+
+def _build_joint_action_playbook(items: List[Dict]) -> Dict:
+    playbook_items = []
+    approval_queue = []
+    by_bucket = {}
+    for item in items or []:
+        risk_level = _decision_risk_level((item.get('final_governance_decision') or {}).get('decision'), (item.get('conflict_resolution') or {}).get('blocking_precedence'))
+        execution_window = _execution_window_for_item(item)
+        bucket_actions = []
+        for index, action in enumerate(item.get('combined_actions') or [], start=1):
+            action_type = action.get('type') or f'action_{index}'
+            playbook_id = f"{item.get('bucket_id')}::playbook::{action_type}::{index}"
+            approval_required = _approval_required_for_action(action_type, risk_level)
+            owner_hint = action.get('owner') or ('ops' if risk_level in {'critical', 'high'} else 'research')
+            preconditions = _joint_item_preconditions(item, action)
+            rollback_plan = _joint_item_rollback_plan(item, action)
+            playbook_row = {
+                'playbook_id': playbook_id,
+                'bucket_id': item.get('bucket_id'),
+                'scope': 'joint',
+                'regime': item.get('regime'),
+                'policy_version': item.get('policy_version'),
+                'strategy': item.get('strategy'),
+                'action_type': action_type,
+                'title': action.get('title'),
+                'description': action.get('description'),
+                'sequence': index,
+                'priority': item.get('priority'),
+                'confidence': item.get('confidence'),
+                'risk_level': risk_level,
+                'owner_hint': owner_hint,
+                'approval_required': approval_required,
+                'approval_roles': _approval_roles_for_risk(risk_level) if approval_required else [],
+                'execution_window': execution_window,
+                'preconditions': preconditions,
+                'rollback_plan': rollback_plan,
+                'status': 'pending_approval' if approval_required else 'ready_for_review',
+                'governance_mode': (item.get('final_governance_decision') or {}).get('governance_mode'),
+                'decision': (item.get('final_governance_decision') or {}).get('decision'),
+                'blocking_precedence': (item.get('conflict_resolution') or {}).get('blocking_precedence'),
+                'blocking_issues': (item.get('conflict_resolution') or {}).get('blocking_issues') or [],
+            }
+            playbook_items.append(playbook_row)
+            bucket_actions.append(playbook_row)
+            if approval_required:
+                approval_queue.append({
+                    'approval_id': f"approve::{playbook_id}",
+                    'bucket_id': item.get('bucket_id'),
+                    'playbook_id': playbook_id,
+                    'regime': item.get('regime'),
+                    'policy_version': item.get('policy_version'),
+                    'strategy': item.get('strategy'),
+                    'action_type': action_type,
+                    'title': action.get('title'),
+                    'risk_level': risk_level,
+                    'owner_hint': owner_hint,
+                    'approval_roles': _approval_roles_for_risk(risk_level),
+                    'status': 'awaiting_manual_approval',
+                    'execution_window': execution_window,
+                    'preconditions': preconditions,
+                    'rollback_plan': rollback_plan,
+                })
+        by_bucket[item.get('bucket_id')] = {
+            'bucket_id': item.get('bucket_id'),
+            'final_decision': (item.get('final_governance_decision') or {}).get('decision'),
+            'risk_level': risk_level,
+            'owner_hint': bucket_actions[0].get('owner_hint') if bucket_actions else None,
+            'execution_window': execution_window,
+            'actions': bucket_actions,
+        }
+    playbook_items.sort(key=lambda row: (_priority_rank(row.get('priority')), _confidence_rank(row.get('confidence')), row.get('sequence', 0), row.get('bucket_id') or ''))
+    approval_queue.sort(key=lambda row: ({'critical': 0, 'high': 1, 'medium': 2, 'low': 3}.get(row.get('risk_level'), 9), row.get('bucket_id') or '', row.get('playbook_id') or ''))
+    return {
+        'items': playbook_items,
+        'by_bucket': by_bucket,
+        'approval_queue': approval_queue,
+        'summary': {
+            'playbook_item_count': len(playbook_items),
+            'approval_required_count': len(approval_queue),
+            'risk_levels': {
+                level: sum(1 for row in playbook_items if row.get('risk_level') == level)
+                for level in ['critical', 'high', 'medium', 'low']
+                if any(row.get('risk_level') == level for row in playbook_items)
+            },
+            'owners': {
+                owner: sum(1 for row in playbook_items if row.get('owner_hint') == owner)
+                for owner in sorted({row.get('owner_hint') for row in playbook_items if row.get('owner_hint')})
+            },
+        },
+    }
+
+
 
 def _priority_rank(value: Optional[str]) -> int:
     return {'critical': 0, 'high': 1, 'medium': 2, 'low': 3}.get(_normalize_bucket_tag(value), 9)
@@ -953,6 +1169,8 @@ def _build_calibration_delivery_payload(
             'strategy_next_actions': (strategy_governance or {}).get('next_actions') or [],
             'joint_priority_queue': (joint_governance or {}).get('priority_queue') or [],
             'joint_next_actions': (joint_governance or {}).get('next_actions') or [],
+            'joint_action_playbook': ((joint_governance or {}).get('action_playbook') or {}).get('items') or [],
+            'joint_approval_queue': ((joint_governance or {}).get('action_playbook') or {}).get('approval_queue') or [],
         },
     }
     delivery['governance_ready'] = build_joint_governance_ready_payload({
@@ -1595,6 +1813,26 @@ def build_joint_governance_ready_payload(source: Dict) -> Dict:
     priority_queue = orchestration_ready.get('joint_priority_queue') or joint_governance.get('priority_queue') or []
     next_actions = orchestration_ready.get('joint_next_actions') or joint_governance.get('next_actions') or []
     blocking_items = (render_ready.get('sections') or {}).get('joint_blocking_items') or joint_governance.get('blocking') or []
+    action_playbook = joint_governance.get('action_playbook') or _build_joint_action_playbook(items)
+    approval_ready = {
+        'items': action_playbook.get('approval_queue') or [],
+        'by_bucket': {
+            bucket_id: {
+                'bucket_id': bucket_id,
+                'actions': [row for row in (bucket.get('actions') or []) if row.get('approval_required')],
+                'risk_level': bucket.get('risk_level'),
+                'owner_hint': bucket.get('owner_hint'),
+                'execution_window': bucket.get('execution_window'),
+            }
+            for bucket_id, bucket in (action_playbook.get('by_bucket') or {}).items()
+            if any(row.get('approval_required') for row in (bucket.get('actions') or []))
+        },
+        'summary': {
+            'approval_required_count': len(action_playbook.get('approval_queue') or []),
+            'bucket_count': sum(1 for bucket in (action_playbook.get('by_bucket') or {}).values() if any(row.get('approval_required') for row in (bucket.get('actions') or []))),
+            'approver_roles': sorted({role for row in (action_playbook.get('approval_queue') or []) for role in (row.get('approval_roles') or [])}),
+        },
+    }
     bucket_index = {
         item.get('bucket_id'): item
         for item in items
@@ -1602,7 +1840,7 @@ def build_joint_governance_ready_payload(source: Dict) -> Dict:
     }
 
     return {
-        'schema_version': 'm5_joint_governance_ready_v1',
+        'schema_version': 'm5_joint_governance_ready_v2',
         'delivery_schema_version': delivery.get('schema_version'),
         'summary': {
             'trade_count': int(summary.get('trade_count') or 0),
@@ -1612,17 +1850,23 @@ def build_joint_governance_ready_payload(source: Dict) -> Dict:
             'priority_queue_size': len(priority_queue),
             'next_action_bucket_count': len(next_actions),
             'blocking_item_count': len(blocking_items),
+            'playbook_item_count': len(action_playbook.get('items') or []),
+            'approval_required_count': len(approval_ready.get('items') or []),
         },
         'items': items,
         'priority_queue': priority_queue,
         'next_actions': next_actions,
         'blocking_items': blocking_items,
+        'action_playbook': action_playbook,
+        'approval_ready': approval_ready,
         'bucket_index': bucket_index,
         'tables': {
             'joint_governance': items,
             'joint_priority_queue': priority_queue,
             'joint_next_actions': next_actions,
             'joint_blocking_items': blocking_items,
+            'joint_action_playbook': action_playbook.get('items') or [],
+            'joint_approval_ready': approval_ready.get('items') or [],
         },
     }
 
@@ -1648,6 +1892,8 @@ def build_calibration_report_ready_payload(source: Dict) -> Dict:
         'priority_queue': governance_ready.get('priority_queue') or [],
         'next_actions': governance_ready.get('next_actions') or [],
         'blocking_items': governance_ready.get('blocking_items') or [],
+        'action_playbook': governance_ready.get('action_playbook') or {},
+        'approval_ready': governance_ready.get('approval_ready') or {},
         'bucket_index': governance_ready.get('bucket_index') or {},
         'tables': {
             **(views.get('tables') or {}),
@@ -1748,6 +1994,7 @@ def build_regime_policy_calibration_report(symbol_results: List[Dict]) -> Dict:
             )
         )
     joint_governance = _build_joint_governance_delivery(joint_governance_items)
+    joint_governance['action_playbook'] = _build_joint_action_playbook(joint_governance.get('items') or [])
 
     recommendations.sort(
         key=lambda item: (
@@ -1841,6 +2088,8 @@ def build_regime_policy_calibration_report(symbol_results: List[Dict]) -> Dict:
         'strategy_next_action_bucket_count': len(delivery['orchestration_ready']['strategy_next_actions']),
         'joint_priority_queue_size': len(delivery['orchestration_ready']['joint_priority_queue']),
         'joint_next_action_bucket_count': len(delivery['orchestration_ready']['joint_next_actions']),
+        'joint_action_playbook_size': len(delivery['orchestration_ready']['joint_action_playbook']),
+        'joint_approval_required_count': len(delivery['orchestration_ready']['joint_approval_queue']),
     }
     delivery['governance_ready'] = build_joint_governance_ready_payload({
         'summary': summary,

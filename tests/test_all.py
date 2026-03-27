@@ -4389,13 +4389,23 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
         self.assertIn('joint_governance', delivery['views']['tables'])
         self.assertTrue(delivery['render_ready']['sections']['joint_priority_queue'])
         self.assertTrue(delivery['orchestration_ready']['joint_priority_queue'])
+        self.assertTrue(delivery['orchestration_ready']['joint_action_playbook'])
+        self.assertTrue(delivery['orchestration_ready']['joint_approval_queue'])
         joint_row = delivery['orchestration_ready']['joint_priority_queue'][0]
         self.assertIn('conflict_category', joint_row)
         self.assertIn('final_decision', joint_row)
         next_action_row = delivery['orchestration_ready']['joint_next_actions'][0]
         self.assertTrue(next_action_row['combined_actions'])
+        playbook_row = delivery['orchestration_ready']['joint_action_playbook'][0]
+        self.assertIn('preconditions', playbook_row)
+        self.assertIn('rollback_plan', playbook_row)
+        self.assertIn('execution_window', playbook_row)
+        approval_row = delivery['orchestration_ready']['joint_approval_queue'][0]
+        self.assertEqual(approval_row['status'], 'awaiting_manual_approval')
         self.assertGreaterEqual(report['summary']['delivery_ready']['joint_priority_queue_size'], 1)
         self.assertGreaterEqual(report['summary']['delivery_ready']['joint_next_action_bucket_count'], 1)
+        self.assertGreaterEqual(report['summary']['delivery_ready']['joint_action_playbook_size'], 1)
+        self.assertGreaterEqual(report['summary']['delivery_ready']['joint_approval_required_count'], 1)
 
     def test_joint_governance_prefers_policy_blocking_and_strategy_policy_fit_guardrails(self):
         report = build_regime_policy_calibration_report([
@@ -4477,6 +4487,8 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
         self.assertEqual(payload['priority_queue'], report['delivery']['governance_ready']['priority_queue'])
         self.assertEqual(payload['next_actions'], report['delivery']['governance_ready']['next_actions'])
         self.assertEqual(payload['blocking_items'], report['delivery']['governance_ready']['blocking_items'])
+        self.assertEqual(payload['action_playbook'], report['delivery']['governance_ready']['action_playbook'])
+        self.assertEqual(payload['approval_ready'], report['delivery']['governance_ready']['approval_ready'])
         self.assertEqual(payload['bucket_index'], report['delivery']['governance_ready']['bucket_index'])
         self.assertEqual(payload['tables']['governance_ready'], report['delivery']['governance_ready'])
         self.assertEqual(payload['tables']['joint_governance'], report['delivery']['views']['tables']['joint_governance'])
@@ -4496,16 +4508,47 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
             }
         ])
         payload = build_joint_governance_ready_payload(report)
-        self.assertEqual(payload['schema_version'], 'm5_joint_governance_ready_v1')
+        self.assertEqual(payload['schema_version'], 'm5_joint_governance_ready_v2')
         self.assertEqual(payload['delivery_schema_version'], 'm5_delivery_v1')
         self.assertEqual(payload['items'], report['joint_governance']['items'])
         self.assertEqual(payload['priority_queue'], report['delivery']['orchestration_ready']['joint_priority_queue'])
         self.assertEqual(payload['next_actions'], report['delivery']['orchestration_ready']['joint_next_actions'])
         self.assertEqual(payload['blocking_items'], report['delivery']['render_ready']['sections']['joint_blocking_items'])
+        self.assertTrue(payload['action_playbook']['items'])
+        self.assertTrue(payload['approval_ready']['items'])
         self.assertEqual(payload['tables']['joint_priority_queue'], payload['priority_queue'])
+        self.assertEqual(payload['tables']['joint_action_playbook'], payload['action_playbook']['items'])
         self.assertIn(payload['priority_queue'][0]['bucket_id'], payload['bucket_index'])
         self.assertEqual(report['summary']['governance_ready']['schema_version'], payload['schema_version'])
         self.assertEqual(report['summary']['governance_ready']['item_count'], payload['summary']['item_count'])
+
+    def test_joint_governance_ready_payload_exposes_action_playbook_and_approval_ready(self):
+        report = build_regime_policy_calibration_report([
+            {
+                'symbol': 'BTC/USDT',
+                'all_trades': [
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 1.0},
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 0.9},
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 0.8},
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v2', 'strategy_tags': ['Breakout'], 'return_pct': -0.4},
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v2', 'strategy_tags': ['Breakout'], 'return_pct': -0.3},
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v2', 'strategy_tags': ['Breakout'], 'return_pct': -0.2},
+                ],
+            }
+        ])
+        payload = build_joint_governance_ready_payload(report)
+        self.assertTrue(payload['action_playbook']['items'])
+        self.assertTrue(payload['approval_ready']['items'])
+        playbook_row = payload['action_playbook']['items'][0]
+        self.assertIn(playbook_row['risk_level'], {'critical', 'high', 'medium', 'low'})
+        self.assertIn('preconditions', playbook_row)
+        self.assertIn('rollback_plan', playbook_row)
+        self.assertIn('execution_window', playbook_row)
+        self.assertTrue(payload['approval_ready']['summary']['approver_roles'])
+        approval_row = payload['approval_ready']['items'][0]
+        bucket_ready = payload['approval_ready']['by_bucket'][approval_row['bucket_id']]
+        self.assertTrue(bucket_ready['actions'])
+        self.assertEqual(bucket_ready['actions'][0]['playbook_id'], approval_row['playbook_id'])
 
     def test_export_calibration_payload_supports_delivery_governance_ready_and_full_views(self):
         report = build_regime_policy_calibration_report([
@@ -4633,7 +4676,7 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             payload = response.get_json()
             self.assertEqual(payload['view'], 'governance_ready')
-            self.assertEqual(payload['data']['schema_version'], 'm5_joint_governance_ready_v1')
+            self.assertEqual(payload['data']['schema_version'], 'm5_joint_governance_ready_v2')
             self.assertEqual(payload['data']['priority_queue'], report['delivery']['governance_ready']['priority_queue'])
             self.assertEqual(payload['summary']['governance_ready'], report['summary']['governance_ready'])
             self.assertEqual(payload['summary']['joint_governance_summary'], report['summary']['joint_governance_summary'])

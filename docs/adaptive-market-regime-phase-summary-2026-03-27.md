@@ -51,6 +51,7 @@
 - delivery payload
 - report-ready API：`/api/backtest/calibration-report`
 - `governance_ready` 直出入口（含 `priority_queue` / `next_actions` / `blocking_items` / `bucket_index`）
+- `action_playbook` / `approval_ready` 准备层（含 `preconditions` / `approval_required` / `rollback_plan` / `risk_level` / `owner_hint` / `execution_window`）
 - orchestration semantics（action queue / next actions / blocking chain / rollback candidates）
 
 ---

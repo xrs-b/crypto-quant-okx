@@ -572,6 +572,8 @@
   - 建议对象继续优先从既有 `rollout_gates + policy_ab_diffs` 推导，而不是拍脑袋：样本不足升级为更可执行的 `collect_more_samples` + `rollout_freeze`；负收益类拆成 `tighten_thresholds`、`rollout_freeze`、`repricing_review`；正向桶统一落到带 guardrail 的 `expand_guarded`；正收益但稳定性不足则归到 `repricing_review` / instability review 流程。
   - M5 orchestration 再往前推一步：每个 `views.items[*]` 现已附带 `orchestration.action_queue / next_actions / blocking_chain / review_checkpoints / rollback_candidate`，把原本只有 queue 的结果升级成带动作顺序、依赖关系、复核检查点、快速回退候选的执行语义。这样下游无论系 dashboard、报告生成，定系 agent/人工治理，都可以更直接回答“下一步先 freeze 还是 collect samples、repricing review 要唔要等 rollback 后、expand 之前仲有咩 blocker 未解”。
   - 聚合级 `delivery.orchestration_ready` 亦同步补 `prioritized_queue / next_actions / blocking_chain / review_checkpoints / rollback_candidates`，并把 `summary.delivery_ready` 扩展到 next action / blocking chain / rollback candidate 计数，方便外层快速判断呢批 calibration 输出是否已经接近可执行闭环，而唔止系静态展示。
+  - 再向前推进一层可执行准备：`joint_governance` 现补 `action_playbook`，把 `combined_actions` 展开成稳定、可序列化的逐项动作卡片，统一附带 `risk_level / owner_hint / execution_window / preconditions / rollback_plan / approval_required / approval_roles`，方便 dashboard / agent / 人工审批流直接回答“下一步具体做咩、边个批、失败点样退”。
+  - `build_joint_governance_ready_payload()` / `delivery.orchestration_ready` 同步新增 `approval_ready`、`joint_action_playbook`、`joint_approval_queue`，令治理输出唔止系 queue/summary，而系接近审批工作台可直接消费的 prepared action set；仍保持 no-op，不触发真实自动执行。
   - `summary.recommendation_summary` 现除 critical/high/medium/low tally 外，也补 `by_type / by_governance_mode / blocked / aligned_with_rollout_gate / top_actions / top_priority_items`，方便后续 dashboard/report 直接做治理面板与 rollout 队列。
 - **阶段 / 优先级**：M5 / P1
 - **生效范围**：不直接生效

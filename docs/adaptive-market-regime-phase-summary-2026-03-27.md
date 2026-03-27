@@ -50,6 +50,7 @@
 - structured `recommendations`
 - delivery payload
 - report-ready API：`/api/backtest/calibration-report`
+- `governance_ready` 直出入口（含 `priority_queue` / `next_actions` / `blocking_items` / `bucket_index`）
 - orchestration semantics（action queue / next actions / blocking chain / rollback candidates）
 
 ---

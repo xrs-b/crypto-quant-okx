@@ -869,7 +869,7 @@ def _build_calibration_delivery_payload(
         for item in items
         if item['orchestration']['rollback_candidate'].get('eligible')
     ]
-    return {
+    delivery = {
         'schema_version': 'm5_delivery_v1',
         'summary': {
             'trade_count': summary.get('trade_count', 0),
@@ -955,6 +955,12 @@ def _build_calibration_delivery_payload(
             'joint_next_actions': (joint_governance or {}).get('next_actions') or [],
         },
     }
+    delivery['governance_ready'] = build_joint_governance_ready_payload({
+        'summary': summary,
+        'delivery': delivery,
+        'joint_governance': joint_governance or {},
+    })
+    return delivery
 
 
 def _recommendation_priority(decision: str, reason: str, ab_row: Optional[Dict]) -> str:
@@ -1576,6 +1582,51 @@ def _coerce_calibration_report_source(source: Dict) -> Dict:
     return source
 
 
+def build_joint_governance_ready_payload(source: Dict) -> Dict:
+    report = _coerce_calibration_report_source(source)
+    delivery = report.get('delivery') or {}
+    summary = report.get('summary') or {}
+    orchestration_ready = delivery.get('orchestration_ready') or {}
+    render_ready = delivery.get('render_ready') or {}
+    tables = (delivery.get('views') or {}).get('tables') or {}
+    joint_governance = report.get('joint_governance') or {}
+
+    items = joint_governance.get('items') or tables.get('joint_governance') or []
+    priority_queue = orchestration_ready.get('joint_priority_queue') or joint_governance.get('priority_queue') or []
+    next_actions = orchestration_ready.get('joint_next_actions') or joint_governance.get('next_actions') or []
+    blocking_items = (render_ready.get('sections') or {}).get('joint_blocking_items') or joint_governance.get('blocking') or []
+    bucket_index = {
+        item.get('bucket_id'): item
+        for item in items
+        if item.get('bucket_id')
+    }
+
+    return {
+        'schema_version': 'm5_joint_governance_ready_v1',
+        'delivery_schema_version': delivery.get('schema_version'),
+        'summary': {
+            'trade_count': int(summary.get('trade_count') or 0),
+            'joint_governance_summary': summary.get('joint_governance_summary') or {},
+            'delivery_ready': summary.get('delivery_ready') or {},
+            'item_count': len(items),
+            'priority_queue_size': len(priority_queue),
+            'next_action_bucket_count': len(next_actions),
+            'blocking_item_count': len(blocking_items),
+        },
+        'items': items,
+        'priority_queue': priority_queue,
+        'next_actions': next_actions,
+        'blocking_items': blocking_items,
+        'bucket_index': bucket_index,
+        'tables': {
+            'joint_governance': items,
+            'joint_priority_queue': priority_queue,
+            'joint_next_actions': next_actions,
+            'joint_blocking_items': blocking_items,
+        },
+    }
+
+
 def build_calibration_report_ready_payload(source: Dict) -> Dict:
     report = _coerce_calibration_report_source(source)
     delivery = report.get('delivery') or {}
@@ -1591,6 +1642,7 @@ def build_calibration_report_ready_payload(source: Dict) -> Dict:
         },
         'render_ready': delivery.get('render_ready') or {},
         'orchestration_ready': delivery.get('orchestration_ready') or {},
+        'governance_ready': build_joint_governance_ready_payload(report),
         'tables': views.get('tables') or {},
     }
 
@@ -1599,6 +1651,8 @@ def export_calibration_payload(source: Dict, *, view: str = 'report_ready') -> D
     report = _coerce_calibration_report_source(source)
     if view == 'delivery':
         return report.get('delivery') or {}
+    if view == 'governance_ready':
+        return build_joint_governance_ready_payload(report)
     if view == 'report_ready':
         return build_calibration_report_ready_payload(report)
     return report
@@ -1779,6 +1833,11 @@ def build_regime_policy_calibration_report(symbol_results: List[Dict]) -> Dict:
         'joint_priority_queue_size': len(delivery['orchestration_ready']['joint_priority_queue']),
         'joint_next_action_bucket_count': len(delivery['orchestration_ready']['joint_next_actions']),
     }
+    delivery['governance_ready'] = build_joint_governance_ready_payload({
+        'summary': summary,
+        'delivery': delivery,
+        'joint_governance': joint_governance,
+    })
     return {
         'summary': summary,
         'by_regime': by_regime,

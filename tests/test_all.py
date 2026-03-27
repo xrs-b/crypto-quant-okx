@@ -24,7 +24,7 @@ from core.notifier import NotificationManager
 from signals import Signal, SignalDetector, SignalValidator, SignalRecorder, EntryDecider
 from trading import TradingExecutor, RiskManager
 from trading.executor import build_observability_context
-from analytics.backtest import StrategyBacktester, build_regime_policy_calibration_report, build_calibration_report_ready_payload, export_calibration_payload
+from analytics.backtest import StrategyBacktester, build_regime_policy_calibration_report, build_calibration_report_ready_payload, build_joint_governance_ready_payload, export_calibration_payload
 from strategies.strategy_library import StrategyManager
 from bot.run import build_exchange_diagnostics, build_exchange_smoke_plan, build_runtime_health_summary, maybe_send_daily_health_summary, execute_exchange_smoke, reconcile_exchange_positions
 from dashboard.api import app
@@ -4472,9 +4472,34 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
         self.assertEqual(payload['views']['items'], report['delivery']['views']['items'])
         self.assertEqual(payload['render_ready'], report['delivery']['render_ready'])
         self.assertEqual(payload['orchestration_ready'], report['delivery']['orchestration_ready'])
+        self.assertEqual(payload['governance_ready'], report['delivery']['governance_ready'])
         self.assertEqual(payload['tables'], report['delivery']['views']['tables'])
 
-    def test_export_calibration_payload_supports_delivery_and_full_views(self):
+    def test_joint_governance_ready_payload_provides_direct_consumer_entrypoint(self):
+        report = build_regime_policy_calibration_report([
+            {
+                'symbol': 'BTC/USDT',
+                'all_trades': [
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 0.3},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 0.2},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 0.1},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v2', 'strategy_tags': ['Breakout'], 'return_pct': -1.4},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v2', 'strategy_tags': ['Breakout'], 'return_pct': -1.0},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v2', 'strategy_tags': ['Breakout'], 'return_pct': -0.8},
+                ],
+            }
+        ])
+        payload = build_joint_governance_ready_payload(report)
+        self.assertEqual(payload['schema_version'], 'm5_joint_governance_ready_v1')
+        self.assertEqual(payload['delivery_schema_version'], 'm5_delivery_v1')
+        self.assertEqual(payload['items'], report['joint_governance']['items'])
+        self.assertEqual(payload['priority_queue'], report['delivery']['orchestration_ready']['joint_priority_queue'])
+        self.assertEqual(payload['next_actions'], report['delivery']['orchestration_ready']['joint_next_actions'])
+        self.assertEqual(payload['blocking_items'], report['delivery']['render_ready']['sections']['joint_blocking_items'])
+        self.assertEqual(payload['tables']['joint_priority_queue'], payload['priority_queue'])
+        self.assertIn(payload['priority_queue'][0]['bucket_id'], payload['bucket_index'])
+
+    def test_export_calibration_payload_supports_delivery_governance_ready_and_full_views(self):
         report = build_regime_policy_calibration_report([
             {
                 'symbol': 'BTC/USDT',
@@ -4486,6 +4511,7 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
             }
         ])
         self.assertEqual(export_calibration_payload(report, view='delivery'), report['delivery'])
+        self.assertEqual(export_calibration_payload(report, view='governance_ready'), report['delivery']['governance_ready'])
         self.assertEqual(export_calibration_payload(report, view='full'), report)
 
     def test_backtest_calibration_report_api_returns_report_ready_view(self):
@@ -4560,6 +4586,45 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
             self.assertEqual(payload['view'], 'delivery')
             self.assertEqual(payload['data']['schema_version'], 'm5_delivery_v1')
             self.assertEqual(payload['data']['views']['items'], report['delivery']['views']['items'])
+        finally:
+            dashboard_api.backtester = old_backtester
+
+    def test_backtest_calibration_report_api_supports_governance_ready_view(self):
+        import dashboard.api as dashboard_api
+
+        report = build_regime_policy_calibration_report([
+            {
+                'symbol': 'BTC/USDT',
+                'all_trades': [
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 0.3},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 0.2},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 0.1},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v2', 'strategy_tags': ['Breakout'], 'return_pct': -1.4},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v2', 'strategy_tags': ['Breakout'], 'return_pct': -1.0},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v2', 'strategy_tags': ['Breakout'], 'return_pct': -0.8},
+                ],
+            }
+        ])
+
+        class StubBacktester:
+            def run_all(self, symbols):
+                return {
+                    'summary': {'symbols': len(symbols)},
+                    'symbols': [{'symbol': 'BTC/USDT'}],
+                    'calibration_report': report,
+                }
+
+        old_backtester = dashboard_api.backtester
+        dashboard_api.backtester = StubBacktester()
+        try:
+            client = app.test_client()
+            response = client.get('/api/backtest/calibration-report?view=governance_ready')
+            self.assertEqual(response.status_code, 200)
+            payload = response.get_json()
+            self.assertEqual(payload['view'], 'governance_ready')
+            self.assertEqual(payload['data']['schema_version'], 'm5_joint_governance_ready_v1')
+            self.assertEqual(payload['data']['priority_queue'], report['delivery']['governance_ready']['priority_queue'])
+            self.assertEqual(payload['summary']['joint_governance_summary'], report['summary']['joint_governance_summary'])
         finally:
             dashboard_api.backtester = old_backtester
 

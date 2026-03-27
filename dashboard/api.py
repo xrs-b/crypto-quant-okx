@@ -2391,8 +2391,8 @@ def get_backtest_summary():
 def get_backtest_calibration_report():
     """获取 M5 calibration 聚合输出，默认返回 report-ready payload。"""
     view = (request.args.get('view') or 'report_ready').strip().lower()
-    if view not in {'report_ready', 'delivery', 'full'}:
-        return jsonify({'success': False, 'error': 'view must be one of report_ready|delivery|full'}), 400
+    if view not in {'report_ready', 'delivery', 'governance_ready', 'full'}:
+        return jsonify({'success': False, 'error': 'view must be one of report_ready|delivery|governance_ready|full'}), 400
 
     backtest_result = backtester.run_all(config.symbols)
     calibration_report = backtest_result.get('calibration_report') or {}
@@ -2410,6 +2410,7 @@ def get_backtest_calibration_report():
             'trade_count': summary.get('trade_count', 0),
             'calibration_ready': bool(summary.get('calibration_ready')),
             'delivery_ready': summary.get('delivery_ready') or {},
+            'joint_governance_summary': summary.get('joint_governance_summary') or {},
         }
     })
 

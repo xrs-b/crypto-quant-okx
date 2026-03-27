@@ -231,11 +231,15 @@
     - `tests/fixtures/validation/execution/high-vol-tighten-long-001.yaml`
     - `tests/fixtures/validation/workflow/governance-approval-replay-001.yaml`
   - 测试已覆盖 case schema / workflow runner / replay summary / CLI 落盘。
-- **当前未覆盖**：更深 execution guard basket、workflow safe-apply allowlist、testnet bridge。
+- **当前未覆盖**：更深 execution guard basket、workflow safe-apply allowlist、testnet bridge 真正落单执行。
+- **最新补齐（2026-03-27 / batch 2）**：
+  1. `shadow_workflow` 已新增 **testnet bridge plan-only 骨架**，可在 validation lane 内生成受控 `build_exchange_smoke_plan()` 结果、挂上 gating/executor 信息，并保持 `allow_execute=false` 默认边界；
+  2. workflow payload 已新增 **consumer view**，把 `workflow_state / approval_state / queues / rollout_executor / rollout_stage_progression` 聚成统一 API 消费对象，减少 dashboard/API 侧自行拼装；
+  3. rollout executor 已补 **stage progression summary**，把 `rollout_stage -> target_rollout_stage -> next_transition / dispatch_route / retryable / rollback_hint` 统一暴露，作为更接近自动 rollout 的下一层状态机摘要。
 - **下一步建议**：
   1. 把 direction lock / intent / layer gap / queue progression 这些高价值 regression case 补齐；
-  2. 补 `workflow safe-apply` 白名单动作；
-  3. 最后再把 case-based testnet smoke bridge 接上。
+  2. 继续扩 safe-apply / stage handler allowlist，并把 stage progression 真正喂给 queue dispatcher；
+  3. 在显式开关下，把 case-based testnet smoke bridge 从 plan-only 推到 controlled execute + reconcile/cleanup trail。
 
 ### AR-M5-05｜approval audit / stale cleanup / decision diff layer
 

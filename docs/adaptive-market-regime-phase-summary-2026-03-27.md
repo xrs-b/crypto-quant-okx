@@ -158,3 +158,5 @@
 - 2026-03-27 dual-layer approval update：审批持久化从单层 latest state 扩展成 `approval_events`（immutable event log）+ `approval_state`（latest snapshot）双层模型；新增稳定事件字段 `item_id / event_type / decision / actor / reason / created_at / source / details`，并补齐 timeline 查询与基于 event log 的 snapshot recovery，仍保持 no-op，不触发真实自动 rollout / execution。
 
 - 2026-03-27 controlled auto-approval execution layer：在既有自动审批判断层之上，新增默认关闭的受控执行层；只会把 low-risk / 无 blocker / 无需人工审批 / judgement=auto_approve / 非终态 的审批项推进到真实 `approved + ready`，并写入完整 `reason / actor / source / replay_source / event log` 审计痕迹；仍保持 no-op，不触发真实策略执行。
+
+- 2026-03-27 workflow consumer/state batch：补齐 `consumer_view` 统一 API 消费层，把 `workflow_state / approval_state / queues / rollout_executor / rollout_stage_progression / controlled_rollout / auto_approval` 聚成单一对象，减少 dashboard/API 端手拼底层结构；同时 rollout executor 新增 `stage_progression` 摘要，显式暴露 `current_stage -> target_stage -> next_transition / dispatch_route / retryable / rollback_hint`，作为更接近自动 rollout 的下一层状态机。validation lane 亦新增 testnet bridge plan-only 骨架，可在 `shadow_workflow` case 内产出受控 testnet smoke plan 与 gating 信息，但默认 `allow_execute=false`、`real_trade_execution=false`。

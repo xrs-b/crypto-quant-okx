@@ -2660,6 +2660,8 @@ class TestHealthSummary(unittest.TestCase):
             self.assertEqual(summary['decision_diff_count'], 0)
             self.assertEqual(summary['audit_overview']['stale_pending']['count'], 1)
             self.assertEqual(summary['stale_items'][0]['item_id'], item_id)
+            self.assertEqual(summary['operator_action_summary']['policy_counts']['review_schedule'], 1)
+            self.assertIn('review_schedule_queue', summary['operator_action_summary']['routes'])
 
     def test_maybe_run_approval_hygiene_auto_cleanup_expires_stale_items(self):
         import bot.run as bot_run
@@ -2715,6 +2717,7 @@ class TestHealthSummary(unittest.TestCase):
             self.assertTrue(any('Adaptive Regime' in line for line in summary['lines']))
             self.assertTrue(any('observe-only' in line for line in summary['lines']))
             self.assertTrue(any('Approval Hygiene' in line for line in summary['lines']))
+            self.assertTrue(any('Operator routing' in line for line in summary['lines']))
             self.assertIn('approval_hygiene', summary['details'])
         finally:
             if os.path.exists('data/test_health_summary.db'):
@@ -5786,8 +5789,11 @@ class TestApprovalPersistence(unittest.TestCase):
         self.assertEqual(payload['headline']['status'], 'attention_required')
         self.assertEqual(payload['summary']['manual_approval_count'], 1)
         self.assertEqual(payload['summary']['ready_count'], 1)
+        self.assertEqual(payload['summary']['operator_action_counts']['review_schedule'], 1)
         self.assertEqual(payload['attention']['manual_approval'][0]['item_id'], 'playbook::manual')
         self.assertEqual(payload['attention']['ready'][0]['item_id'], 'playbook::ready')
+        self.assertEqual(payload['next_actions'][0]['kind'], 'review_schedule')
+        self.assertEqual(payload['operator_action_policies'][0]['operator_action_policy']['action'], 'review_schedule')
         self.assertTrue(payload['next_actions'])
 
     def test_build_dashboard_summary_cards_aggregates_digest_attention_and_execution(self):
@@ -5854,6 +5860,7 @@ class TestApprovalPersistence(unittest.TestCase):
         self.assertEqual(payload['summary']['ready_count'], 1)
         self.assertEqual(payload['summary']['bridge_mode'], 'state_apply')
         self.assertEqual(payload['summary']['approval_roles'], ['operator'])
+        self.assertEqual(payload['summary']['operator_action_counts']['review_schedule'], 1)
         self.assertEqual(payload['card_index']['workflow_overview']['metrics']['manual'], 1)
         self.assertEqual(payload['card_index']['execution_status']['metrics']['bridge_executed'], 1)
         self.assertLessEqual(len(payload['card_index']['key_alerts']['items']), 2)
@@ -7790,8 +7797,10 @@ class TestUnifiedWorkflowStateMachine(unittest.TestCase):
         self.assertEqual(approval_item['state_machine']['phase'], 'queue')
         self.assertTrue(approval_item['state_machine']['retryable'])
         self.assertEqual(workflow_item['state_machine']['dispatch_route'], 'manual_review_queue')
+        self.assertEqual(workflow_item['state_machine']['operator_action_policy']['action'], 'observe_only_followup')
         self.assertEqual(merged['workflow_state']['summary']['queued_count'], 1)
         self.assertEqual(merged['workflow_state']['summary']['state_machine']['rollback_candidate_count'], 1)
+        self.assertEqual(merged['workflow_state']['summary']['state_machine']['operator_action_counts']['observe_only_followup'], 1)
 
     def test_database_get_approval_state_includes_state_machine_details(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -7817,6 +7826,7 @@ class TestUnifiedWorkflowStateMachine(unittest.TestCase):
             fetched = db.get_approval_state('approval::stage')
             self.assertEqual(fetched['details']['state_machine']['dispatch_route'], 'stage_metadata_apply')
             self.assertTrue(fetched['details']['state_machine']['rollback_candidate'])
+            self.assertEqual(fetched['details']['state_machine']['operator_action_policy']['action'], 'review_schedule')
 
     def test_approval_state_machine_api_returns_phase_summary(self):
         import dashboard.api as dashboard_api

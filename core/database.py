@@ -101,6 +101,26 @@ class Database:
             phase = 'execution'
         elif normalized_workflow in {'blocked', 'blocked_by_approval', 'review_pending'} or normalized_state in {'pending', 'ready', 'replayed'}:
             phase = 'approval'
+        terminal = normalized_state in {'approved', 'rejected', 'deferred', 'expired'} or normalized_workflow in {'approved', 'rejected', 'deferred', 'expired'}
+        retryable = bool(payload.get('retryable', queue_progression.get('retryable')))
+        if terminal:
+            action, route, follow_up = 'observe_only_followup', 'terminal_observe_only', 'observe_only'
+        elif normalized_workflow in {'execution_failed', 'retry_pending'}:
+            action, route, follow_up = ('retry', 'retry_queue', 'retry_execution') if retryable else ('escalate', 'operator_escalation', 'escalate_execution')
+        elif normalized_workflow == 'rollback_pending':
+            action, route, follow_up = 'freeze_followup', 'freeze_followup_queue', 'freeze_and_review'
+        elif normalized_workflow in {'blocked', 'blocked_by_approval', 'review_pending'} or blocked_by:
+            action, route, follow_up = 'review_schedule', 'manual_approval_queue' if normalized_workflow == 'blocked_by_approval' or normalized_state in {'pending', 'ready', 'replayed'} else 'operator_escalation', 'await_manual_approval' if normalized_workflow == 'blocked_by_approval' or normalized_state in {'pending', 'ready', 'replayed'} else 'escalate_blocked_state'
+        elif normalized_workflow == 'deferred':
+            action, route, follow_up = 'review_schedule', 'review_schedule_queue', 'scheduled_review'
+        elif normalized_workflow == 'ready' and ((not rollout_stage and not target_rollout_stage) or rollout_stage == target_rollout_stage):
+            action, route, follow_up = 'observe_only_followup', dispatch_route or 'observe_only_followup', 'observe_only_ready'
+        elif normalized_workflow == 'ready':
+            action, route, follow_up = 'review_schedule', dispatch_route or 'rollout_readiness_queue', 'review_ready_for_rollout'
+        elif normalized_workflow == 'queued':
+            action, route, follow_up = 'observe_only_followup', queue_progression.get('status') or dispatch_route or 'queue_observer', 'watch_queue_progression'
+        else:
+            action, route, follow_up = 'observe_only_followup', dispatch_route or 'observe_only_followup', 'observe_only'
         payload['state_machine'] = {
             'schema_version': 'm5_unified_state_machine_v1',
             'item_id': item_id,
@@ -114,10 +134,20 @@ class Database:
             'target_rollout_stage': target_rollout_stage,
             'phase': phase,
             'blocked_by': blocked_by,
-            'terminal': normalized_state in {'approved', 'rejected', 'deferred', 'expired'} or normalized_workflow in {'approved', 'rejected', 'deferred', 'expired'},
-            'retryable': bool(payload.get('retryable', queue_progression.get('retryable'))),
+            'terminal': terminal,
+            'retryable': retryable,
             'rollback_candidate': bool(payload.get('rollback_hint') or queue_transition.get('rollback_hint') or payload.get('rollback_capable')),
             'rollback_hint': payload.get('rollback_hint') or queue_transition.get('rollback_hint'),
+            'operator_action_policy': {
+                'schema_version': 'm5_operator_action_policy_v1',
+                'item_id': item_id,
+                'action': action,
+                'route': route,
+                'follow_up': follow_up,
+                'retryable': retryable,
+                'blocked_by': blocked_by,
+                'summary': f"{action} via {route}",
+            },
             'executor_result': {
                 'status': payload.get('execution_mode') or payload.get('queue_result_action') or payload.get('result_action'),
                 'layer': payload.get('execution_layer'),

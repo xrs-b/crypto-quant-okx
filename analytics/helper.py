@@ -274,6 +274,142 @@ def _normalize_workflow_state(value: Optional[str], *, approval_state: Optional[
     return 'pending'
 
 
+def _build_operator_action_policy(*, item_id: Optional[str] = None, approval_state: Optional[str] = None, workflow_state: Optional[str] = None, queue_status: Optional[str] = None, dispatch_route: Optional[str] = None, next_transition: Optional[str] = None, blocked_by: Optional[List[str]] = None, retryable: Optional[bool] = None, rollout_stage: Optional[str] = None, target_rollout_stage: Optional[str] = None, terminal: bool = False) -> Dict[str, Any]:
+    normalized_approval = str(approval_state or 'pending').strip().lower() or 'pending'
+    normalized_workflow = str(workflow_state or 'pending').strip().lower() or 'pending'
+    normalized_queue = str(queue_status or '').strip().lower() or None
+    current_stage = str(rollout_stage or '').strip().lower() or None
+    target_stage = str(target_rollout_stage or '').strip().lower() or current_stage
+    blockers = _dedupe_strings(blocked_by or [])
+    retry_flag = bool(retryable) if retryable is not None else normalized_workflow in {'queued', 'deferred', 'execution_failed', 'retry_pending'}
+
+    action = 'observe_only_followup'
+    route = dispatch_route or 'observe_only_followup'
+    priority = 'low'
+    owner = 'runtime'
+    follow_up = 'observe_only'
+    rationale = []
+
+    if terminal:
+        action = 'observe_only_followup'
+        route = 'terminal_observe_only'
+        follow_up = 'observe_only'
+        rationale.append('terminal_state_locked')
+    elif normalized_workflow in {'execution_failed', 'retry_pending'}:
+        action = 'retry' if retry_flag else 'escalate'
+        route = 'retry_queue' if retry_flag else 'operator_escalation'
+        priority = 'high'
+        owner = 'operator' if not retry_flag else 'runtime'
+        follow_up = 'retry_execution' if retry_flag else 'escalate_execution'
+        rationale.append('execution_recovery_required')
+    elif normalized_workflow == 'rollback_pending':
+        action = 'freeze_followup'
+        route = 'freeze_followup_queue'
+        priority = 'high'
+        owner = 'operator'
+        follow_up = 'freeze_and_review'
+        rationale.append('rollback_pending_guardrail')
+    elif normalized_workflow == 'rolled_back':
+        action = 'review_schedule'
+        route = 'review_schedule_queue'
+        priority = 'medium'
+        owner = 'operator'
+        follow_up = 'post_rollback_review'
+        rationale.append('rollback_completed_needs_review')
+    elif normalized_workflow in {'blocked', 'blocked_by_approval'} or blockers:
+        high_risk_blockers = {'critical_risk', 'live_rollout_parameter_change_not_supported', 'freeze_apply_not_automated_in_executor', 'policy_switch_not_automated_in_executor', 'rollout_freeze_not_automated_in_executor'}
+        if normalized_workflow == 'blocked_by_approval' or normalized_approval in {'pending', 'ready', 'replayed'}:
+            action = 'review_schedule'
+            route = 'manual_approval_queue'
+            priority = 'high'
+            owner = 'operator'
+            follow_up = 'await_manual_approval'
+            rationale.append('approval_gate_pending')
+        elif any(blocker in high_risk_blockers for blocker in blockers):
+            action = 'freeze_followup'
+            route = 'freeze_followup_queue'
+            priority = 'high'
+            owner = 'operator'
+            follow_up = 'freeze_and_review'
+            rationale.append('high_risk_blocker_present')
+        elif retry_flag:
+            action = 'retry'
+            route = 'retry_queue'
+            priority = 'medium'
+            owner = 'runtime'
+            follow_up = 'retry_after_blockers_clear'
+            rationale.append('retry_when_blockers_clear')
+        else:
+            action = 'escalate'
+            route = 'operator_escalation'
+            priority = 'high'
+            owner = 'operator'
+            follow_up = 'escalate_blocked_state'
+            rationale.append('blocked_requires_operator')
+    elif normalized_workflow == 'deferred':
+        action = 'review_schedule'
+        route = 'review_schedule_queue'
+        priority = 'medium'
+        owner = 'operator'
+        follow_up = 'scheduled_review'
+        rationale.append('deferred_review_window')
+    elif normalized_workflow == 'queued':
+        action = 'observe_only_followup'
+        route = normalized_queue or dispatch_route or 'queue_observer'
+        priority = 'medium'
+        owner = 'runtime'
+        follow_up = 'watch_queue_progression'
+        rationale.append('queued_waiting_progression')
+    elif normalized_workflow == 'ready':
+        if (not current_stage and not target_stage) or current_stage == target_stage or (current_stage == 'observe' and target_stage == 'observe'):
+            action = 'observe_only_followup'
+            route = dispatch_route or 'observe_only_followup'
+            priority = 'low'
+            owner = 'runtime'
+            follow_up = 'observe_only_ready'
+            rationale.append('observe_only_ready_state')
+        else:
+            action = 'review_schedule'
+            route = dispatch_route or 'rollout_readiness_queue'
+            priority = 'medium'
+            owner = 'operator'
+            follow_up = 'review_ready_for_rollout'
+            rationale.append('ready_for_guarded_rollout')
+    elif normalized_workflow == 'review_pending' or normalized_queue == 'deferred':
+        action = 'review_schedule'
+        route = 'review_schedule_queue'
+        priority = 'medium'
+        owner = 'operator'
+        follow_up = 'schedule_review'
+        rationale.append('review_pending')
+    elif next_transition and 'retry' in str(next_transition).lower() and retry_flag:
+        action = 'retry'
+        route = 'retry_queue'
+        priority = 'medium'
+        owner = 'runtime'
+        follow_up = 'retry_transition'
+        rationale.append('next_transition_retry')
+
+    return {
+        'schema_version': 'm5_operator_action_policy_v1',
+        'item_id': item_id,
+        'action': action,
+        'route': route,
+        'priority': priority,
+        'owner': owner,
+        'follow_up': follow_up,
+        'queue_status': normalized_queue,
+        'dispatch_route': dispatch_route,
+        'next_transition': next_transition,
+        'blocked_by': blockers,
+        'retryable': retry_flag,
+        'rollout_stage': current_stage,
+        'target_rollout_stage': target_stage,
+        'reason_codes': rationale or ['steady_state_observe_only'],
+        'summary': f"{action} via {route}",
+    }
+
+
 def _build_state_machine_semantics(*, item_id: Optional[str] = None, approval_state: Optional[str] = None, workflow_state: Optional[str] = None, decision_state: Optional[str] = None, queue_status: Optional[str] = None, dispatch_route: Optional[str] = None, next_transition: Optional[str] = None, executor_status: Optional[str] = None, rollout_stage: Optional[str] = None, target_rollout_stage: Optional[str] = None, blocked_by: Optional[List[str]] = None, retryable: Optional[bool] = None, rollback_hint: Optional[str] = None) -> Dict[str, Any]:
     normalized_approval = str(approval_state or decision_state or 'pending').strip().lower() or 'pending'
     normalized_workflow = _normalize_workflow_state(workflow_state, approval_state=normalized_approval, queue_status=queue_status, executor_status=executor_status)
@@ -296,6 +432,19 @@ def _build_state_machine_semantics(*, item_id: Optional[str] = None, approval_st
         lifecycle_path.append(f'route:{dispatch_route}')
     if normalized_workflow not in {phase, normalized_queue}:
         lifecycle_path.append(f'workflow:{normalized_workflow}')
+    operator_action_policy = _build_operator_action_policy(
+        item_id=item_id,
+        approval_state=normalized_approval,
+        workflow_state=normalized_workflow,
+        queue_status=normalized_queue,
+        dispatch_route=dispatch_route,
+        next_transition=next_transition,
+        blocked_by=blocked,
+        retryable=retryable,
+        rollout_stage=rollout_stage,
+        target_rollout_stage=target_rollout_stage,
+        terminal=terminal,
+    )
     return {
         'schema_version': 'm5_unified_state_machine_v1',
         'item_id': item_id,
@@ -316,6 +465,7 @@ def _build_state_machine_semantics(*, item_id: Optional[str] = None, approval_st
         'rollback_candidate': bool(rollback_hint or normalized_workflow in {'ready', 'queued', 'execution_failed', 'rollback_pending'}),
         'rollback_hint': rollback_hint,
         'lifecycle_path': lifecycle_path,
+        'operator_action_policy': operator_action_policy,
     }
 
 
@@ -688,6 +838,17 @@ def merge_persisted_approval_state(payload: Dict, persisted_rows: Optional[List[
     workflow_summary['queued_count'] = sum(1 for row in workflow_items if row.get('workflow_state') == 'queued')
     workflow_summary['retry_pending_count'] = sum(1 for row in workflow_items if row.get('workflow_state') == 'retry_pending')
     workflow_summary['execution_failed_count'] = sum(1 for row in workflow_items if row.get('workflow_state') == 'execution_failed')
+    action_counts = {}
+    route_counts = {}
+    follow_up_counts = {}
+    for row in workflow_items:
+        policy = ((row.get('state_machine') or {}).get('operator_action_policy') or {})
+        action = policy.get('action') or 'observe_only_followup'
+        route = policy.get('route') or 'observe_only_followup'
+        follow_up = policy.get('follow_up') or 'observe_only'
+        action_counts[action] = action_counts.get(action, 0) + 1
+        route_counts[route] = route_counts.get(route, 0) + 1
+        follow_up_counts[follow_up] = follow_up_counts.get(follow_up, 0) + 1
     workflow_summary['state_machine'] = {
         'schema_version': 'm5_unified_state_machine_v1',
         'terminal_count': sum(1 for row in workflow_items if (row.get('state_machine') or {}).get('terminal')),
@@ -695,6 +856,9 @@ def merge_persisted_approval_state(payload: Dict, persisted_rows: Optional[List[
         'rollback_candidate_count': sum(1 for row in workflow_items if (row.get('state_machine') or {}).get('rollback_candidate')),
         'retryable_count': sum(1 for row in workflow_items if (row.get('state_machine') or {}).get('retryable')),
         'phases': sorted({(row.get('state_machine') or {}).get('phase') or 'unknown' for row in workflow_items}),
+        'operator_action_counts': action_counts,
+        'operator_route_counts': route_counts,
+        'follow_up_counts': follow_up_counts,
     }
     workflow_state['summary'] = workflow_summary
     return payload
@@ -2283,7 +2447,21 @@ def build_workflow_operator_digest(payload: Optional[Dict] = None, *, max_items:
             'stage_model': workflow_item.get('stage_model') or {},
             'current_rollout_stage': workflow_item.get('current_rollout_stage'),
             'target_rollout_stage': workflow_item.get('target_rollout_stage'),
+            'state_machine': workflow_item.get('state_machine') or {},
         }
+        row['operator_action_policy'] = (row.get('state_machine') or {}).get('operator_action_policy') or _build_operator_action_policy(
+            item_id=item_id,
+            approval_state=row.get('approval_state'),
+            workflow_state=workflow_state,
+            queue_status=(row.get('queue_progression') or {}).get('status'),
+            dispatch_route=(row.get('queue_progression') or {}).get('dispatch_route'),
+            next_transition=(row.get('queue_progression') or {}).get('next_transition'),
+            blocked_by=blocked_by,
+            retryable=(row.get('state_machine') or {}).get('retryable'),
+            rollout_stage=row.get('current_rollout_stage'),
+            target_rollout_stage=row.get('target_rollout_stage'),
+            terminal=bool((row.get('state_machine') or {}).get('terminal')),
+        )
         if row['requires_manual'] and row['approval_state'] == 'pending':
             manual_approval_items.append(row)
         if workflow_state in {'blocked_by_approval', 'blocked', 'deferred'} or blocked_by:
@@ -2305,37 +2483,60 @@ def build_workflow_operator_digest(payload: Optional[Dict] = None, *, max_items:
     auto_advance_items.sort(key=_sort_key)
 
     next_actions = []
-    if manual_approval_items:
+    policy_rows = []
+    for row in workflow_items:
+        item_id = row.get('item_id')
+        approval_item = approval_by_playbook.get(item_id) or {}
+        policy = ((row.get('state_machine') or {}).get('operator_action_policy') or {})
+        if not policy:
+            policy = _build_operator_action_policy(
+                item_id=item_id,
+                approval_state=approval_item.get('approval_state') or row.get('approval_state'),
+                workflow_state=row.get('workflow_state'),
+                queue_status=((row.get('queue_progression') or {}).get('status') if isinstance(row.get('queue_progression'), dict) else None),
+                dispatch_route=((row.get('queue_progression') or {}).get('dispatch_route') if isinstance(row.get('queue_progression'), dict) else None),
+                next_transition=((row.get('queue_progression') or {}).get('next_transition') if isinstance(row.get('queue_progression'), dict) else None),
+                blocked_by=(row.get('blocking_reasons') or []) + (approval_item.get('blocked_by') or []),
+                retryable=(row.get('state_machine') or {}).get('retryable'),
+                rollout_stage=row.get('current_rollout_stage') or row.get('rollout_stage'),
+                target_rollout_stage=row.get('target_rollout_stage'),
+                terminal=bool((row.get('state_machine') or {}).get('terminal')),
+            )
+        enriched = {
+            'item_id': item_id,
+            'title': row.get('title') or approval_item.get('title') or item_id,
+            'action_type': row.get('action_type') or approval_item.get('action_type'),
+            'workflow_state': row.get('workflow_state') or 'pending',
+            'approval_state': approval_item.get('approval_state') or row.get('approval_state') or 'not_required',
+            'risk_level': row.get('risk_level') or approval_item.get('risk_level') or 'unknown',
+            'operator_action_policy': policy,
+        }
+        policy_rows.append(enriched)
+
+    grouped_actions = {}
+    for row in policy_rows:
+        policy = row.get('operator_action_policy') or {}
+        key = policy.get('action') or 'observe_only_followup'
+        grouped_actions.setdefault(key, []).append(row)
+    action_priority = {'escalate': 0, 'freeze_followup': 1, 'retry': 2, 'review_schedule': 3, 'observe_only_followup': 4}
+    action_messages = {
+        'review_schedule': 'item(s) should be scheduled for review / approval routing',
+        'retry': 'item(s) are safe to retry once blockers clear',
+        'escalate': 'item(s) should be escalated to operator review',
+        'freeze_followup': 'item(s) should stay frozen pending guarded follow-up',
+        'observe_only_followup': 'item(s) are observe-only and can be monitored with low intervention',
+    }
+    for kind, items in sorted(grouped_actions.items(), key=lambda kv: (action_priority.get(kv[0], 9), kv[0])):
+        sorted_items = sorted(items, key=_sort_key)
+        top_policy = (sorted_items[0].get('operator_action_policy') or {}) if sorted_items else {}
         next_actions.append({
-            'kind': 'manual_approval',
-            'priority': 'high',
-            'count': len(manual_approval_items),
-            'message': f"{len(manual_approval_items)} item(s) waiting for manual approval",
-            'items': manual_approval_items[:max_items],
-        })
-    if blocked_items:
-        next_actions.append({
-            'kind': 'blocked_followup',
-            'priority': 'high' if manual_approval_items else 'medium',
-            'count': len(blocked_items),
-            'message': f"{len(blocked_items)} item(s) still blocked or deferred",
-            'items': blocked_items[:max_items],
-        })
-    if ready_items:
-        next_actions.append({
-            'kind': 'ready_to_consume',
-            'priority': 'medium',
-            'count': len(ready_items),
-            'message': f"{len(ready_items)} item(s) already ready for rollout/governance consumption",
-            'items': ready_items[:max_items],
-        })
-    if queued_items:
-        next_actions.append({
-            'kind': 'queued_watch',
-            'priority': 'medium',
-            'count': len(queued_items),
-            'message': f"{len(queued_items)} item(s) are queued and should be watched for progression",
-            'items': queued_items[:max_items],
+            'kind': kind,
+            'priority': top_policy.get('priority') or ('high' if kind in {'escalate', 'freeze_followup'} else 'medium'),
+            'count': len(sorted_items),
+            'message': f"{len(sorted_items)} {action_messages.get(kind, 'item(s) need follow-up')}",
+            'route': top_policy.get('route'),
+            'follow_up': top_policy.get('follow_up'),
+            'items': sorted_items[:max_items],
         })
 
     headline_status = 'attention_required' if manual_approval_items or blocked_items else 'steady'
@@ -2364,6 +2565,9 @@ def build_workflow_operator_digest(payload: Optional[Dict] = None, *, max_items:
             'auto_approval_executed_count': auto_approval.get('executed_count', 0),
             'controlled_rollout_executed_count': controlled_rollout.get('executed_count', 0),
             'stage_progression': (consumer_view.get('rollout_stage_progression') or {}).get('summary') or {},
+            'operator_action_counts': {row.get('kind'): row.get('count', 0) for row in next_actions},
+            'operator_routes': sorted({row.get('route') for row in next_actions if row.get('route')}),
+            'operator_follow_ups': sorted({row.get('follow_up') for row in next_actions if row.get('follow_up')}),
         },
         'attention': {
             'manual_approval': manual_approval_items[:max_items],
@@ -2373,6 +2577,7 @@ def build_workflow_operator_digest(payload: Optional[Dict] = None, *, max_items:
             'auto_advance_candidates': auto_advance_items[:max_items],
         },
         'next_actions': next_actions,
+        'operator_action_policies': policy_rows[:max_items],
         'execution': {
             'rollout_executor': {
                 'status': rollout_executor.get('status') or 'disabled',
@@ -2512,6 +2717,9 @@ def build_dashboard_summary_cards(payload: Optional[Dict] = None, *, max_items: 
             'stage_progression': stage_summary,
             'workflow_state_summary': workflow_summary,
             'approval_state_summary': approval_summary,
+            'operator_action_counts': digest_summary.get('operator_action_counts') or {},
+            'operator_routes': digest_summary.get('operator_routes') or [],
+            'operator_follow_ups': digest_summary.get('operator_follow_ups') or [],
         },
         'cards': cards,
         'card_index': payload_cards,
@@ -2588,6 +2796,20 @@ def _build_workbench_item_catalog(payload: Optional[Dict] = None) -> Dict[str, A
         auto_decision = workflow_item.get('auto_approval_decision') or approval_item.get('auto_approval_decision') or row.get('auto_approval_decision') or 'manual_review'
         requires_manual = bool(workflow_item.get('requires_manual', approval_item.get('requires_manual', row.get('requires_manual'))))
         approval_required = bool(workflow_item.get('approval_required', approval_item.get('approval_required', row.get('approval_required'))))
+        state_machine = workflow_item.get('state_machine') or approval_item.get('state_machine') or row.get('state_machine') or {}
+        operator_action_policy = (state_machine.get('operator_action_policy') or row.get('operator_action_policy') or _build_operator_action_policy(
+            item_id=item_id,
+            approval_state=approval_state,
+            workflow_state=workflow_state,
+            queue_status=queue_progression.get('status'),
+            dispatch_route=queue_progression.get('dispatch_route'),
+            next_transition=queue_progression.get('next_transition'),
+            blocked_by=blocked_by,
+            retryable=state_machine.get('retryable'),
+            rollout_stage=current_stage,
+            target_rollout_stage=target_stage,
+            terminal=bool(state_machine.get('terminal')),
+        ))
         bucket_tags = sorted(attention_map.get(item_id) or set())
         if lane_id == 'blocked' and 'blocked' not in bucket_tags:
             bucket_tags.append('blocked')
@@ -2611,16 +2833,8 @@ def _build_workbench_item_catalog(payload: Optional[Dict] = None) -> Dict[str, A
             why_parts.append(f'auto={auto_decision}')
         if queue_progression.get('next_action'):
             next_step = queue_progression.get('next_action')
-        elif approval_required and approval_state == 'pending':
-            next_step = 'await_manual_approval'
-        elif lane_id == 'blocked':
-            next_step = 'resolve_blockers'
-        elif lane_id == 'queued':
-            next_step = 'queue_follow_up'
-        elif lane_id in {'ready', 'auto_batch'}:
-            next_step = 'ready_for_rollout_or_execution'
         else:
-            next_step = stage_model.get('next_on_approval') or 'observe'
+            next_step = operator_action_policy.get('follow_up') or stage_model.get('next_on_approval') or 'observe'
         return {
             'item_id': item_id,
             'approval_id': approval_item.get('approval_id') or row.get('approval_id'),
@@ -2644,6 +2858,10 @@ def _build_workbench_item_catalog(payload: Optional[Dict] = None) -> Dict[str, A
             'lane_id': lane_id,
             'lane_title': lane_id.replace('_', ' '),
             'bucket_tags': sorted(set(bucket_tags)),
+            'operator_action_policy': operator_action_policy,
+            'operator_action': operator_action_policy.get('action'),
+            'operator_route': operator_action_policy.get('route'),
+            'operator_follow_up': operator_action_policy.get('follow_up'),
             'why': why_parts,
             'why_summary': ' | '.join(why_parts),
             'next_step': next_step,
@@ -2685,6 +2903,9 @@ def _build_workbench_item_catalog(payload: Optional[Dict] = None) -> Dict[str, A
         'target_rollout_stages': sorted({row.get('target_rollout_stage') or 'pending' for row in items}),
         'bucket_tags': sorted({tag for row in items for tag in (row.get('bucket_tags') or [])}),
         'auto_approval_decisions': sorted({row.get('auto_approval_decision') or 'manual_review' for row in items}),
+        'operator_actions': sorted({row.get('operator_action') or 'observe_only_followup' for row in items}),
+        'operator_routes': sorted({row.get('operator_route') or 'observe_only_followup' for row in items}),
+        'operator_follow_ups': sorted({row.get('operator_follow_up') or 'observe_only' for row in items}),
         'owner_hints': sorted({row.get('owner_hint') for row in items if row.get('owner_hint')}),
     }
 

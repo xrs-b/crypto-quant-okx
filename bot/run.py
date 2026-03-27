@@ -76,6 +76,70 @@ def save_runtime_state(state: dict):
     RUNTIME_STATE_PATH.write_text(json.dumps(state or {}, ensure_ascii=False, indent=2))
 
 
+def _build_approval_hygiene_operator_action_summary(stale_rows: list, decision_diffs: list, *, auto_cleanup_enabled: bool = False) -> dict:
+    policy_counts = {
+        'review_schedule': 0,
+        'escalate': 0,
+        'freeze_followup': 0,
+        'observe_only_followup': 0,
+    }
+    routed_items = []
+
+    for row in stale_rows or []:
+        state = str(row.get('state') or row.get('approval_state') or '').strip().lower()
+        risk = str(row.get('risk_level') or '').strip().lower()
+        blocked = list(row.get('blocked_by') or [])
+        if risk in {'critical', 'high'} or blocked:
+            action = 'escalate'
+            route = 'operator_escalation'
+        elif auto_cleanup_enabled and state in {'pending', 'ready', 'replayed'}:
+            action = 'observe_only_followup'
+            route = 'stale_cleanup_audit'
+        else:
+            action = 'review_schedule'
+            route = 'review_schedule_queue'
+        policy_counts[action] = policy_counts.get(action, 0) + 1
+        routed_items.append({
+            'kind': 'stale',
+            'approval_id': row.get('approval_id'),
+            'item_id': row.get('playbook_id') or row.get('item_id'),
+            'action': action,
+            'route': route,
+            'state': state or 'pending',
+            'blocked_by': blocked,
+        })
+
+    for row in decision_diffs or []:
+        workflow_state = str(row.get('workflow_state') or row.get('to_workflow_state') or row.get('current_workflow_state') or '').strip().lower()
+        state = str(row.get('state') or row.get('to_state') or row.get('current_state') or '').strip().lower()
+        if workflow_state in {'execution_failed', 'rollback_pending'}:
+            action = 'freeze_followup'
+            route = 'freeze_followup_queue'
+        elif state in {'rejected', 'expired'}:
+            action = 'review_schedule'
+            route = 'review_schedule_queue'
+        else:
+            action = 'observe_only_followup'
+            route = 'decision_diff_audit'
+        policy_counts[action] = policy_counts.get(action, 0) + 1
+        routed_items.append({
+            'kind': 'decision_diff',
+            'approval_id': row.get('approval_id'),
+            'item_id': row.get('playbook_id') or row.get('item_id'),
+            'action': action,
+            'route': route,
+            'state': state or workflow_state or 'changed',
+            'blocked_by': list(row.get('blocked_by') or []),
+        })
+
+    return {
+        'schema_version': 'm5_approval_hygiene_operator_action_summary_v1',
+        'policy_counts': {k: v for k, v in policy_counts.items() if v},
+        'routes': sorted({row['route'] for row in routed_items if row.get('route')}),
+        'items': routed_items[:20],
+    }
+
+
 def append_runtime_history(event: dict, limit: int = 20):
     state = load_runtime_state()
     history = state.get('history', [])
@@ -100,7 +164,13 @@ def build_approval_hygiene_summary(cfg: Config, db: Database, limit: int = 20) -
         limit=max(5, min(sample_limit, 50)),
         approval_type=approval_type,
     )
+    operator_action_summary = _build_approval_hygiene_operator_action_summary(
+        stale_rows,
+        decision_diffs,
+        auto_cleanup_enabled=auto_cleanup_enabled,
+    )
     overview = build_approval_audit_overview(stale_rows=stale_rows, decision_diffs=decision_diffs)
+    overview['operator_action_summary'] = operator_action_summary
     return {
         'enabled': enabled,
         'auto_cleanup_enabled': auto_cleanup_enabled,
@@ -112,6 +182,7 @@ def build_approval_hygiene_summary(cfg: Config, db: Database, limit: int = 20) -
         'stale_items': stale_rows,
         'decision_diffs': decision_diffs,
         'audit_overview': overview,
+        'operator_action_summary': operator_action_summary,
     }
 
 
@@ -213,6 +284,7 @@ def build_runtime_health_summary(cfg: Config, db: Database) -> dict:
         '---',
         f'Approval Hygiene：mode={approval_mode} ｜ stale={approval_hygiene.get("stale_count", 0)} ｜ decision diff={approval_hygiene.get("decision_diff_count", 0)}',
         f'审批卫生：stale>{approval_hygiene.get("stale_after_minutes", 0)} 分钟 ｜ 上次处理 {approval_runtime.get("last_run_at") or "--"} ｜ 上次过期收口 {approval_runtime.get("expired_count", 0)}',
+        f'Operator routing：{approval_hygiene.get("operator_action_summary", {}).get("policy_counts") or {}}',
     ]
     if risk.get('loss_streak_locked'):
         lines.extend(['---', f'连亏熔断：{risk.get("consecutive_losses", 0)}/{risk.get("max_consecutive_losses", 0)} ｜ 自动恢复 {risk.get("loss_streak_recover_at") or "--"}'])

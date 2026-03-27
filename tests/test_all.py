@@ -4034,6 +4034,33 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
         self.assertEqual(report['rollout_gates'][0]['decision'], 'hold')
         self.assertEqual(report['rollout_gates'][0]['reason'], 'sample_gap')
 
+    def test_calibration_report_exposes_strategy_fit_views(self):
+        report = build_regime_policy_calibration_report([
+            {
+                'symbol': 'BTC/USDT',
+                'all_trades': [
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v1', 'strategy_tags': ['MACD', 'Volume'], 'return_pct': 1.4},
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v1', 'strategy_tags': ['MACD'], 'return_pct': 1.1},
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v2', 'strategy_tags': ['RSI'], 'return_pct': -0.4},
+                    {'regime_tag': 'range', 'policy_tag': 'policy_v2', 'strategy_tags': ['RSI', 'Bollinger'], 'return_pct': 0.8},
+                    {'regime_tag': 'range', 'policy_tag': 'policy_v2', 'strategy_tags': ['Bollinger'], 'return_pct': 0.7},
+                    {'regime_tag': 'range', 'policy_tag': 'policy_v2', 'strategy_tags': ['RSI'], 'return_pct': -0.2},
+                ],
+            }
+        ])
+        self.assertTrue(report['summary']['strategy_fit_ready'])
+        self.assertEqual(report['summary']['strategies'], 4)
+        self.assertEqual(report['summary']['top_strategy'], 'RSI')
+        by_strategy = {row['bucket']: row for row in report['by_strategy']}
+        self.assertEqual(by_strategy['RSI']['trade_count'], 3)
+        regime_fit = {row['regime']: row for row in report['strategy_fit']['regime_strategy_fit']}
+        self.assertEqual(regime_fit['trend_up']['best_strategy'], 'Volume')
+        self.assertEqual(regime_fit['range']['best_strategy'], 'Bollinger')
+        self.assertEqual(regime_fit['trend_up']['worst_strategy'], 'RSI')
+        self.assertEqual(report['delivery']['views']['tables']['by_strategy'], report['by_strategy'])
+        self.assertEqual(report['delivery']['views']['tables']['regime_strategy_fit'], report['strategy_fit']['regime_strategy_fit'])
+        self.assertEqual(report['delivery']['render_ready']['headline']['top_strategy'], 'RSI')
+
     def test_calibration_report_builds_policy_ab_diff_and_rollout_gate(self):
         report = build_regime_policy_calibration_report([
             {

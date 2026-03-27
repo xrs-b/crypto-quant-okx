@@ -55,6 +55,102 @@ def summarize_trade_buckets(
     return rows
 
 
+def _normalize_strategy_tags(value) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        value = [value]
+    tags = []
+    seen = set()
+    for item in value or []:
+        tag = _normalize_bucket_tag(item, '')
+        if tag and tag not in seen:
+            seen.add(tag)
+            tags.append(tag)
+    return tags
+
+
+
+def summarize_trade_list_buckets(
+    trades: List[Dict],
+    list_key: str,
+    secondary_key: Optional[str] = None,
+) -> List[Dict]:
+    expanded = []
+    for trade in trades:
+        tags = _normalize_strategy_tags(trade.get(list_key))
+        if not tags:
+            tags = ['unknown']
+        for tag in tags:
+            expanded.append({
+                **trade,
+                list_key: tag,
+            })
+    return summarize_trade_buckets(expanded, list_key, secondary_key)
+
+
+
+def build_strategy_fit_summary(trades: List[Dict], *, min_sample_size: int) -> Dict:
+    by_strategy = summarize_trade_list_buckets(trades, 'strategy_tags')
+    by_regime_strategy = summarize_trade_list_buckets(trades, 'strategy_tags', 'regime_tag')
+    by_policy_strategy = summarize_trade_list_buckets(trades, 'strategy_tags', 'policy_tag')
+
+    regime_strategy_map: Dict[str, List[Dict]] = defaultdict(list)
+    strategy_policy_map: Dict[str, List[Dict]] = defaultdict(list)
+    for row in by_regime_strategy:
+        regime_strategy_map[_normalize_bucket_tag(row.get('secondary_bucket'))].append(row)
+    for row in by_policy_strategy:
+        strategy_policy_map[_normalize_bucket_tag(row.get('bucket'))].append(row)
+
+    regime_strategy_fit = []
+    for regime, rows in sorted(regime_strategy_map.items()):
+        ranked = sorted(rows, key=lambda item: (-item['avg_return_pct'], -item['win_rate'], -item['trade_count'], item['bucket']))
+        qualified = [row for row in ranked if row['trade_count'] >= min_sample_size]
+        if not ranked:
+            continue
+        best = qualified[0] if qualified else ranked[0]
+        worst = min(ranked, key=lambda item: (item['avg_return_pct'], item['win_rate'], -item['trade_count'], item['bucket']))
+        regime_strategy_fit.append({
+            'regime': regime,
+            'best_strategy': best['bucket'],
+            'best_trade_count': best['trade_count'],
+            'best_avg_return_pct': best['avg_return_pct'],
+            'best_win_rate': best['win_rate'],
+            'worst_strategy': worst['bucket'],
+            'worst_trade_count': worst['trade_count'],
+            'worst_avg_return_pct': worst['avg_return_pct'],
+            'worst_win_rate': worst['win_rate'],
+            'sample_ready': best['trade_count'] >= min_sample_size,
+            'qualified_strategies': len(qualified),
+            'strategies_seen': len(rows),
+        })
+    regime_strategy_fit.sort(key=lambda item: (not item['sample_ready'], item['regime']))
+
+    strategy_policy_fit = []
+    for strategy, rows in sorted(strategy_policy_map.items()):
+        ranked = sorted(rows, key=lambda item: (-item['avg_return_pct'], -item['win_rate'], -item['trade_count'], item.get('secondary_bucket') or ''))
+        if not ranked:
+            continue
+        best = ranked[0]
+        strategy_policy_fit.append({
+            'strategy': strategy,
+            'best_policy_version': best.get('secondary_bucket') or 'unknown',
+            'trade_count': best['trade_count'],
+            'avg_return_pct': best['avg_return_pct'],
+            'win_rate': best['win_rate'],
+            'sample_ready': best['trade_count'] >= min_sample_size,
+        })
+    strategy_policy_fit.sort(key=lambda item: (not item['sample_ready'], -item['avg_return_pct'], -item['trade_count'], item['strategy']))
+
+    return {
+        'by_strategy': by_strategy,
+        'by_regime_strategy': by_regime_strategy,
+        'by_policy_strategy': by_policy_strategy,
+        'regime_strategy_fit': regime_strategy_fit,
+        'strategy_policy_fit': strategy_policy_fit,
+    }
+
+
 def _build_policy_regime_lookup(rows: List[Dict]) -> Dict[Tuple[str, str], Dict]:
     return {
         (_normalize_bucket_tag(row.get('bucket')), _normalize_bucket_tag(row.get('secondary_bucket'))): row
@@ -316,6 +412,7 @@ def _build_calibration_delivery_payload(
     by_regime: List[Dict],
     by_policy: List[Dict],
     by_regime_policy: List[Dict],
+    strategy_fit: Dict,
     policy_ab_diffs: List[Dict],
     rollout_gates: List[Dict],
     recommendations: List[Dict],
@@ -488,9 +585,11 @@ def _build_calibration_delivery_payload(
             'min_sample_size': summary.get('min_sample_size', 0),
             'calibration_ready': bool(summary.get('calibration_ready')),
             'policy_ab_ready': bool(summary.get('policy_ab_ready')),
+            'strategy_fit_ready': bool(summary.get('strategy_fit_ready')),
             'bucket_count': len(items),
             'regime_count': len(by_regime or []),
             'policy_count': len(by_policy or []),
+            'strategy_count': len((strategy_fit or {}).get('by_strategy') or []),
             'blocking_chain_count': len(blocking_chain),
             'next_action_bucket_count': len(next_actions),
             'rollback_candidate_count': len(rollback_candidates),
@@ -501,6 +600,11 @@ def _build_calibration_delivery_payload(
                 'by_regime': by_regime,
                 'by_policy_version': by_policy,
                 'by_regime_policy': by_regime_policy,
+                'by_strategy': (strategy_fit or {}).get('by_strategy') or [],
+                'by_regime_strategy': (strategy_fit or {}).get('by_regime_strategy') or [],
+                'by_policy_strategy': (strategy_fit or {}).get('by_policy_strategy') or [],
+                'regime_strategy_fit': (strategy_fit or {}).get('regime_strategy_fit') or [],
+                'strategy_policy_fit': (strategy_fit or {}).get('strategy_policy_fit') or [],
                 'policy_ab_diffs': policy_ab_diffs,
                 'rollout_gates': rollout_gates,
                 'recommendations': recommendations[:50],
@@ -510,6 +614,7 @@ def _build_calibration_delivery_payload(
             'headline': {
                 'top_regime': summary.get('top_regime'),
                 'top_policy_version': summary.get('top_policy_version'),
+                'top_strategy': summary.get('top_strategy'),
                 'trade_count': summary.get('trade_count', 0),
                 'bucket_count': len(items),
             },
@@ -911,6 +1016,7 @@ def build_regime_policy_calibration_report(symbol_results: List[Dict]) -> Dict:
     by_regime_policy = summarize_trade_buckets(all_trades, 'regime_tag', 'policy_tag')
 
     min_sample_size = 3
+    strategy_fit = build_strategy_fit_summary(all_trades, min_sample_size=min_sample_size)
     rollout_gates = []
     bucket_lookup = {}
     for row in by_regime_policy:
@@ -989,11 +1095,14 @@ def build_regime_policy_calibration_report(symbol_results: List[Dict]) -> Dict:
         'trade_count': len(all_trades),
         'regimes': len(by_regime),
         'policy_versions': len(by_policy),
+        'strategies': len(strategy_fit['by_strategy']),
         'top_regime': top_regime,
         'top_policy_version': top_policy,
+        'top_strategy': strategy_fit['by_strategy'][0]['bucket'] if strategy_fit['by_strategy'] else 'unknown',
         'calibration_ready': bool(all_trades),
         'min_sample_size': min_sample_size,
         'policy_ab_ready': len(by_policy) >= 2,
+        'strategy_fit_ready': bool(strategy_fit['by_strategy']),
         'rollout_gate_summary': rollout_gate_summary,
         'recommendation_summary': recommendation_summary,
     }
@@ -1002,6 +1111,7 @@ def build_regime_policy_calibration_report(symbol_results: List[Dict]) -> Dict:
         by_regime=by_regime,
         by_policy=by_policy,
         by_regime_policy=by_regime_policy,
+        strategy_fit=strategy_fit,
         policy_ab_diffs=policy_ab_diffs,
         rollout_gates=rollout_gates,
         recommendations=recommendations[:50],
@@ -1020,6 +1130,13 @@ def build_regime_policy_calibration_report(symbol_results: List[Dict]) -> Dict:
         'by_regime': by_regime,
         'by_policy_version': by_policy,
         'by_regime_policy': by_regime_policy,
+        'by_strategy': strategy_fit['by_strategy'],
+        'by_regime_strategy': strategy_fit['by_regime_strategy'],
+        'by_policy_strategy': strategy_fit['by_policy_strategy'],
+        'strategy_fit': {
+            'regime_strategy_fit': strategy_fit['regime_strategy_fit'],
+            'strategy_policy_fit': strategy_fit['strategy_policy_fit'],
+        },
         'policy_ab_diffs': policy_ab_diffs,
         'rollout_gates': rollout_gates,
         'recommendations': recommendations[:50],
@@ -1037,6 +1154,8 @@ class BacktestPosition:
     signal_strength: int
     regime_snapshot: Optional[Dict] = None
     adaptive_policy_snapshot: Optional[Dict] = None
+    reasons: Optional[List[Dict]] = None
+    strategies_triggered: Optional[List[str]] = None
 
 
 class MarketDataLoader:
@@ -1195,6 +1314,10 @@ class StrategyBacktester:
                         'reason': exit_reason,
                         'regime_tag': ((position.regime_snapshot or {}).get('name') if position.regime_snapshot else None),
                         'policy_tag': ((position.adaptive_policy_snapshot or {}).get('policy_version') if position.adaptive_policy_snapshot else None),
+                        'strategy_tags': _normalize_strategy_tags(position.strategies_triggered),
+                        'dominant_strategy': (_normalize_strategy_tags(position.strategies_triggered) or ['unknown'])[0],
+                        'strategy_count': len(_normalize_strategy_tags(position.strategies_triggered)),
+                        'strategy_reasons': list(position.reasons or []),
                         'observe_only': normalize_observe_only_view(
                             regime_snapshot=position.regime_snapshot or {},
                             policy_snapshot=position.adaptive_policy_snapshot or {},
@@ -1215,6 +1338,8 @@ class StrategyBacktester:
                     signal_strength=signal.strength,
                     regime_snapshot=dict(getattr(signal, 'regime_snapshot', {}) or getattr(signal, 'regime_info', {}) or {}),
                     adaptive_policy_snapshot=dict(getattr(signal, 'adaptive_policy_snapshot', {}) or {}),
+                    reasons=list(getattr(signal, 'reasons', []) or []),
+                    strategies_triggered=list(getattr(signal, 'strategies_triggered', []) or []),
                 )
 
         if position:
@@ -1232,6 +1357,10 @@ class StrategyBacktester:
                 'reason': 'end_of_backtest',
                 'regime_tag': ((position.regime_snapshot or {}).get('name') if position.regime_snapshot else None),
                 'policy_tag': ((position.adaptive_policy_snapshot or {}).get('policy_version') if position.adaptive_policy_snapshot else None),
+                'strategy_tags': _normalize_strategy_tags(position.strategies_triggered),
+                'dominant_strategy': (_normalize_strategy_tags(position.strategies_triggered) or ['unknown'])[0],
+                'strategy_count': len(_normalize_strategy_tags(position.strategies_triggered)),
+                'strategy_reasons': list(position.reasons or []),
                 'observe_only': normalize_observe_only_view(
                     regime_snapshot=position.regime_snapshot or {},
                     policy_snapshot=position.adaptive_policy_snapshot or {},
@@ -1252,7 +1381,9 @@ class StrategyBacktester:
 
         regime_tags = sorted({t.get('regime_tag') for t in trades if t.get('regime_tag')})
         policy_tags = sorted({t.get('policy_tag') for t in trades if t.get('policy_tag')})
+        strategy_tags = sorted({tag for t in trades for tag in (t.get('strategy_tags') or []) if tag})
         observe_only_tags = sorted({tag for t in trades for tag in ((t.get('observe_only') or {}).get('tags') or []) if tag})
+        strategy_fit = build_strategy_fit_summary(trades, min_sample_size=3)
         return {
             'symbol': symbol,
             'trades': len(trades),
@@ -1267,11 +1398,17 @@ class StrategyBacktester:
             'observe_only_summary_view': summarize_observe_only_collection(trades[-10:]),
             'regime_tags': regime_tags,
             'policy_tags': policy_tags,
+            'strategy_tags': strategy_tags,
             'observe_only_tags': observe_only_tags,
             'regime_policy_calibration': {
                 'by_regime': summarize_trade_buckets(trades, 'regime_tag'),
                 'by_policy_version': summarize_trade_buckets(trades, 'policy_tag'),
                 'by_regime_policy': summarize_trade_buckets(trades, 'regime_tag', 'policy_tag'),
+                'by_strategy': strategy_fit['by_strategy'],
+                'by_regime_strategy': strategy_fit['by_regime_strategy'],
+                'by_policy_strategy': strategy_fit['by_policy_strategy'],
+                'regime_strategy_fit': strategy_fit['regime_strategy_fit'],
+                'strategy_policy_fit': strategy_fit['strategy_policy_fit'],
             },
         }
 
@@ -1283,6 +1420,7 @@ class StrategyBacktester:
         observe_only_tags = sorted({tag for row in symbol_results for tag in (row.get('observe_only_tags') or []) if tag})
         regime_tags = sorted({tag for row in symbol_results for tag in (row.get('regime_tags') or []) if tag})
         policy_tags = sorted({tag for row in symbol_results for tag in (row.get('policy_tags') or []) if tag})
+        strategy_tags = sorted({tag for row in symbol_results for tag in (row.get('strategy_tags') or []) if tag})
         observe_only_summary_view = summarize_observe_only_collection([
             trade
             for row in symbol_results
@@ -1303,6 +1441,7 @@ class StrategyBacktester:
                 'observe_only_summary_view': observe_only_summary_view,
                 'regime_tags': regime_tags,
                 'policy_tags': policy_tags,
+                'strategy_tags': strategy_tags,
                 'calibration_ready': calibration_report['summary']['calibration_ready'],
             },
             'symbols': symbol_results,

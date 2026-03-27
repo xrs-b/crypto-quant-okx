@@ -533,11 +533,12 @@
 
 ### AR-M5-01｜strategy × regime 离线分析报告
 
-- **Status（2026-03-27 / M5 Step 1）**：partial done
+- **Status（2026-03-27 / M5 Step 2）**：partial done
 - **Notes**：
   - 已在 `analytics/backtest.py` 落地首版 `regime × policy` calibration report，先把全链路 adaptive 样本按 `regime_tag / policy_tag` 收口成统一离线分析出口。
   - 当前回测聚合结果已补 `all_trades`、symbol 级 `regime_policy_calibration`，以及聚合级 `calibration_report`，可直接看到 `by_regime / by_policy_version / by_regime_policy` 的 trade_count、win_rate、avg_return_pct、total_return_pct。
-  - 这是 M5 闭环的第一步：先把 policy 校准真正需要的 regime / policy 样本分桶与摘要打通；更细的 `strategy × regime` 维度可在后续基于 signal reasons / strategy breakdown 继续扩展。
+  - 本次继续把 `strategy × regime` 校准入口真正落地：trade 级结果开始保留 `strategy_tags / dominant_strategy / strategy_reasons`，并在 symbol / aggregate calibration report 中新增 `by_strategy / by_regime_strategy / by_policy_strategy / regime_strategy_fit / strategy_policy_fit`，让 adaptive strategy 调整不再只看 policy bucket，而能直接看各 regime 下边个 strategy 真有 fit。
+  - delivery / report-ready payload 亦同步暴露 strategy fit 表格与 `top_strategy` headline，方便后续 dashboard / report / agent 直接消费，而唔需要再自己由原始 trade reasons 横向拼装。
 - **阶段 / 优先级**：M5 / P1
 - **生效范围**：不直接生效
 - **目标**：形成 `strategy × regime` 的二维统计，为后续 policy 调整提供数据依据。

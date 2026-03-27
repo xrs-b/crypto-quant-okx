@@ -9,6 +9,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 import yaml
 
 from analytics.backtest import build_governance_workflow_ready_payload, build_regime_policy_calibration_report
+from analytics.helper import attach_auto_approval_policy, build_workflow_approval_records, execute_rollout_executor, merge_persisted_approval_state
 from core.config import Config, DEFAULT_ADAPTIVE_REGIME_CONFIG
 from core.database import Database
 from core.regime import build_regime_snapshot, normalize_regime_snapshot
@@ -269,13 +270,41 @@ def _replay_workflow_approval_state(case_data: Dict[str, Any], workflow_ready: D
         'summary': {'approval_count': len(states), 'pending_count': sum(1 for row in states if row.get('state') == 'pending'), 'replayed_count': sum(1 for row in states if row.get('replay_source') == replay_source)},
     }
 
-def _build_workflow_diff(workflow_ready: Dict[str, Any], replay_result: Dict[str, Any]) -> Dict[str, Any]:
+def _run_workflow_executor(case_data: Dict[str, Any], workflow_ready: Dict[str, Any], replay_result: Dict[str, Any]) -> Dict[str, Any]:
+    execution_cfg = copy.deepcopy(case_data.get('workflow_execution') or {})
+    if not execution_cfg.get('enabled'):
+        return {'enabled': False, 'mode': 'disabled', 'executed': None}
+    db_path = replay_result.get('db_path')
+    if not db_path:
+        return {'enabled': True, 'mode': execution_cfg.get('mode') or 'dry_run', 'executed': None, 'error': 'workflow replay db not initialized'}
+    db = Database(db_path)
+    payload = attach_auto_approval_policy(copy.deepcopy(workflow_ready))
+    approval_records = build_workflow_approval_records(payload)
+    if approval_records:
+        persisted_rows = [db.get_approval_state(row.get('item_id')) for row in approval_records if row.get('item_id')]
+        payload = attach_auto_approval_policy(merge_persisted_approval_state(payload, [row for row in persisted_rows if row]))
+    executor_payload = execute_rollout_executor(payload, db, settings={
+        'enabled': True,
+        'mode': execution_cfg.get('mode') or 'dry_run',
+        'dry_run': bool(execution_cfg.get('dry_run', (execution_cfg.get('mode') or 'dry_run') == 'dry_run')),
+        'actor': execution_cfg.get('actor') or 'shadow:workflow-executor',
+        'source': execution_cfg.get('source') or 'shadow_workflow_executor',
+        'reason_prefix': execution_cfg.get('reason_prefix') or 'shadow workflow executor',
+        'allowed_action_types': execution_cfg.get('allowed_action_types') or [],
+    }, replay_source=execution_cfg.get('replay_source') or 'shadow_workflow_executor')
+    return {'enabled': True, 'mode': execution_cfg.get('mode') or 'dry_run', 'executed': executor_payload.get('rollout_executor')}
+
+
+def _build_workflow_diff(workflow_ready: Dict[str, Any], replay_result: Dict[str, Any], executor_result: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     actions = workflow_ready.get('actions') or []
     approvals = (workflow_ready.get('approval_state') or {}).get('items') or []
     replay_states = replay_result.get('states') or []
+    executed = (executor_result or {}).get('executed') or {}
+    executor_summary = executed.get('summary') or {}
     return {
         'workflow': {'action_count': len(actions), 'approval_count': len(approvals), 'pending_approval_count': sum(1 for row in approvals if row.get('approval_state') == 'pending'), 'blocked_count': sum(1 for row in (workflow_ready.get('workflow_state') or {}).get('item_states', []) if row.get('workflow_state') == 'blocked'), 'ready_count': sum(1 for row in (workflow_ready.get('workflow_state') or {}).get('item_states', []) if row.get('workflow_state') == 'ready')},
         'replay': {'synced_count': replay_result.get('synced_count', 0), 'timeline_events': len(replay_result.get('timeline') or []), 'replayed_state_count': len(replay_states), 'pending_state_count': sum(1 for row in replay_states if row.get('state') == 'pending')},
+        'executor': {'enabled': bool((executor_result or {}).get('enabled')), 'mode': (executor_result or {}).get('mode') or 'disabled', 'planned_count': executor_summary.get('planned_count', 0), 'queued_count': executor_summary.get('queued_count', 0), 'dry_run_count': executor_summary.get('dry_run_count', 0), 'applied_count': executor_summary.get('applied_count', 0), 'error_count': executor_summary.get('error_count', 0)},
     }
 
 def _evaluate_assertions(case_data: Dict[str, Any], adaptive: Optional[Dict[str, Any]], diff: Dict[str, Any], *, workflow_ready: Optional[Dict[str, Any]] = None, replay_result: Optional[Dict[str, Any]] = None) -> Tuple[bool, list]:
@@ -307,6 +336,12 @@ def _evaluate_assertions(case_data: Dict[str, Any], adaptive: Optional[Dict[str,
         elif key == 'approval_replay_source':
             states = (replay_result or {}).get('states') or []
             actual = states[0].get('replay_source') if states else None
+        elif key == 'executor_planned_count':
+            actual = diff.get('executor', {}).get('planned_count')
+        elif key == 'executor_queued_count':
+            actual = diff.get('executor', {}).get('queued_count')
+        elif key == 'executor_dry_run_count':
+            actual = diff.get('executor', {}).get('dry_run_count')
         else:
             actual = None
         results.append({"field": key, "expected": expected, "actual": actual, "passed": actual == expected})
@@ -326,9 +361,10 @@ def _run_signal_or_execution_case(case: ValidationCase, *, base_config: Optional
 def _run_workflow_case(case: ValidationCase, *, case_path: Optional[str] = None) -> Dict[str, Any]:
     workflow_ready = _build_workflow_ready(case.raw)
     replay_result = _replay_workflow_approval_state(case.raw, workflow_ready)
-    diff = _build_workflow_diff(workflow_ready, replay_result)
+    executor_result = _run_workflow_executor(case.raw, workflow_ready, replay_result)
+    diff = _build_workflow_diff(workflow_ready, replay_result, executor_result)
     passed, assertions = _evaluate_assertions(case.raw, None, diff, workflow_ready=workflow_ready, replay_result=replay_result)
-    return {'case_id': case.case_id, 'case_type': case.case_type, 'mode': case.raw.get('mode') or 'workflow_dry_run', 'status': 'pass' if passed else 'fail', 'baseline': None, 'adaptive': None, 'diff': diff, 'assertions': assertions, 'artifacts': {'workflow_ready': workflow_ready, 'approval_replay': replay_result}, 'audit': {'generated_at': datetime.now().isoformat(), 'real_trade_execution': False, 'dangerous_live_parameter_change': False, 'exchange_mode': 'shadow', 'case_path': str(case_path) if case_path else None, 'replay_source': ((replay_result.get('states') or [{}])[0]).get('replay_source') if replay_result.get('states') else None}}
+    return {'case_id': case.case_id, 'case_type': case.case_type, 'mode': case.raw.get('mode') or 'workflow_dry_run', 'status': 'pass' if passed else 'fail', 'baseline': None, 'adaptive': None, 'diff': diff, 'assertions': assertions, 'artifacts': {'workflow_ready': workflow_ready, 'approval_replay': replay_result, 'rollout_executor': executor_result.get('executed')}, 'audit': {'generated_at': datetime.now().isoformat(), 'real_trade_execution': False, 'dangerous_live_parameter_change': False, 'exchange_mode': 'shadow', 'case_path': str(case_path) if case_path else None, 'replay_source': ((replay_result.get('states') or [{}])[0]).get('replay_source') if replay_result.get('states') else None}}
 
 def run_shadow_validation_case(case_path: str, *, base_config: Config = None) -> Dict[str, Any]:
     case = load_validation_case(case_path)

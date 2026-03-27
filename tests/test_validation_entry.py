@@ -20,6 +20,7 @@ from validation.shadow_runner import (
 
 EXECUTION_FIXTURE = 'tests/fixtures/validation/execution/high-vol-tighten-long-001.yaml'
 WORKFLOW_FIXTURE = 'tests/fixtures/validation/workflow/governance-approval-replay-001.yaml'
+WORKFLOW_EXECUTOR_FIXTURE = 'tests/fixtures/validation/workflow/queue-executor-dry-run-001.yaml'
 FIXTURE_DIR = 'tests/fixtures/validation'
 
 
@@ -72,6 +73,15 @@ class TestShadowValidationEntry(unittest.TestCase):
         self.assertEqual(report['diff']['workflow']['approval_count'], 12)
         self.assertGreaterEqual(report['diff']['replay']['synced_count'], 12)
         self.assertEqual(report['artifacts']['approval_replay']['states'][0]['replay_source'], 'shadow_workflow_fixture')
+
+    def test_shadow_workflow_runner_supports_rollout_executor_dry_run_fixture(self):
+        report = run_shadow_validation_case(WORKFLOW_EXECUTOR_FIXTURE)
+        self.assertEqual(report['case_type'], 'shadow_workflow')
+        self.assertEqual(report['status'], 'pass')
+        self.assertEqual(report['diff']['executor']['planned_count'], 1)
+        self.assertEqual(report['diff']['executor']['dry_run_count'], 1)
+        self.assertEqual(report['artifacts']['rollout_executor']['status'], 'dry_run')
+        self.assertEqual(report['artifacts']['rollout_executor']['items'][0]['plan']['queue_plan']['dispatch_route'], 'manual_review_queue')
 
     def test_collect_validation_case_paths_supports_directory(self):
         paths = collect_validation_case_paths([FIXTURE_DIR])

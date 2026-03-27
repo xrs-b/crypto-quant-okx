@@ -1000,3 +1000,47 @@ workflow safe-apply 则应该同步建设，专门服务 governance / approval /
 虽然目前仍是第一步，但已经把最现实的卡点先打通：
 
 > **而家唔使等自然开单，已经可以主动喂 case，稳定拿到 baseline vs adaptive 的结构化 diff。**
+
+## 21. 2026-03-27 / Shadow Validation Entry Pack step 3（阶段补完）
+
+本轮把 VEP 从“可用 MVP”补到**可持续验证阶段完成**，重点系：
+
+- 补 workflow executor dry-run case，令 queue/workflow 主线都可以在 validation 入口里稳定回归；
+- 统一 shadow workflow report，把 replay + executor 结果放进同一份 artifacts/diff；
+- 保持全程 shadow/dry-run，唔碰真实下单。
+
+### 本轮新增
+
+1. **workflow runner 已可内嵌 rollout executor dry-run**
+   - workflow case 新增可选 `workflow_execution`；
+   - runner 会复用 approval replay 的临时 SQLite，再跑 `execute_rollout_executor()`；
+   - report `artifacts.rollout_executor` 会直接带出 executor plan / dispatch / result；
+   - `diff.executor` 统一暴露 `planned_count / queued_count / dry_run_count / applied_count / error_count`。
+
+2. **新增 queue executor regression fixture**
+   - 新增 `tests/fixtures/validation/workflow/queue-executor-dry-run-001.yaml`；
+   - 用最小 queue-only workflow item 覆盖：
+     - `queue_plan`
+     - `dispatch_route`
+     - dry-run executor plan
+   - 让 workflow / queue / governance 主线唔使靠 dashboard 手点，直接可回放。
+
+3. **VEP 阶段验收口径明确化**
+   - execution：已有 baseline/adaptive diff + enforcement assertions；
+   - workflow：已有 workflow-ready + approval replay；
+   - rollout/queue：已有 executor dry-run regression case；
+   - replay：支持目录批量跑与聚合 summary；
+   - 全部统一 `real_trade_execution=false` / `dangerous_live_parameter_change=false`。
+
+### 阶段结论
+
+而家可以比较清楚话：
+
+> **Shadow Validation Entry Pack 已具备持续验证能力。**
+
+它而家已经唔止系单条 shadow diff，而系一条可重复、可批量、可审计、可扩展到 workflow/queue 主线嘅 validation lane。
+
+### 仍保留到后续阶段
+
+- 更深 execution guard 篮子（例如 direction lock / intent reset / layer gap）可继续追加 fixture；
+- testnet bridge 仍然应保持在后续独立阶段，以免把 validation lane 变成接近真实下单入口。

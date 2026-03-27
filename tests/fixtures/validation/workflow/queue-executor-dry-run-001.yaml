@@ -1,0 +1,49 @@
+case_id: queue-executor-dry-run-001
+case_type: shadow_workflow
+mode: workflow_dry_run
+input:
+  workflow_ready:
+    actions:
+      - item_id: playbook::expand
+        title: Guarded expand item
+        action_type: joint_expand_guarded
+    workflow_state:
+      item_states:
+        - item_id: playbook::expand
+          title: Guarded expand item
+          action_type: joint_expand_guarded
+          decision: expand
+          governance_mode: rollout
+          risk_level: low
+          approval_required: false
+          blocking_reasons: []
+          preconditions: []
+          workflow_state: pending
+          confidence: high
+          queue_name: manual_rollout_review
+      summary: {}
+    approval_state:
+      items:
+        - approval_id: approval::expand
+          playbook_id: playbook::expand
+          title: Guarded expand item
+          action_type: joint_expand_guarded
+          approval_state: pending
+          decision_state: pending
+          risk_level: low
+          approval_required: false
+          blocked_by: []
+      summary: {}
+workflow_execution:
+  enabled: true
+  mode: dry_run
+  allowed_action_types: [joint_expand_guarded]
+  source: shadow_workflow_executor_fixture
+replay:
+  source: shadow_workflow_executor_fixture
+expect:
+  workflow_action_count: 1
+  approval_count: 1
+  approval_replay_synced: true
+  executor_planned_count: 1
+  executor_dry_run_count: 1

@@ -4005,7 +4005,7 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
         self.assertEqual(by_regime['trend_up']['trade_count'], 2)
         self.assertEqual(by_policy['policy_v2']['trade_count'], 3)
         self.assertAlmostEqual(pair[('range', 'policy_v2')]['avg_return_pct'], -0.8333, places=4)
-        self.assertTrue(any(item['type'] == 'tighten_or_reprice' and item['regime'] == 'range' for item in report['recommendations']))
+        self.assertTrue(any(item['regime'] == 'range' and item['policy_version'] == 'policy_v2' for item in report['recommendations']))
 
     def test_calibration_report_marks_sample_gap_when_bucket_is_too_small(self):
         report = build_regime_policy_calibration_report([
@@ -4018,6 +4018,41 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
         ])
         self.assertEqual(report['summary']['trade_count'], 1)
         self.assertTrue(any(item['type'] == 'sample_gap' for item in report['recommendations']))
+        self.assertEqual(report['rollout_gates'][0]['decision'], 'hold')
+        self.assertEqual(report['rollout_gates'][0]['reason'], 'sample_gap')
+
+    def test_calibration_report_builds_policy_ab_diff_and_rollout_gate(self):
+        report = build_regime_policy_calibration_report([
+            {
+                'symbol': 'BTC/USDT',
+                'all_trades': [
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v1', 'return_pct': 0.5},
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v1', 'return_pct': 0.7},
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v1', 'return_pct': 0.4},
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v2', 'return_pct': 1.5},
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v2', 'return_pct': 1.2},
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v2', 'return_pct': 1.0},
+                    {'regime_tag': 'range', 'policy_tag': 'policy_v2', 'return_pct': -2.0},
+                    {'regime_tag': 'range', 'policy_tag': 'policy_v2', 'return_pct': -1.5},
+                    {'regime_tag': 'range', 'policy_tag': 'policy_v2', 'return_pct': -1.0},
+                ],
+            }
+        ])
+        self.assertTrue(report['summary']['policy_ab_ready'])
+        self.assertIn('rollout_gate_summary', report['summary'])
+        self.assertEqual(report['summary']['rollout_gate_summary']['expand'], 2)
+        self.assertEqual(report['summary']['rollout_gate_summary']['rollback'], 1)
+
+        diffs = {row['candidate_policy_version']: row for row in report['policy_ab_diffs']}
+        self.assertIn('policy_v1', diffs)
+        self.assertEqual(diffs['policy_v1']['baseline_policy_version'], 'policy_v2')
+        self.assertAlmostEqual(diffs['policy_v1']['delta_avg_return_pct'], 0.6666, places=4)
+        trend_delta = {item['regime']: item for item in diffs['policy_v1']['regime_deltas']}
+        self.assertAlmostEqual(trend_delta['trend_up']['delta_avg_return_pct'], -0.7, places=4)
+
+        gates = {(row['regime'], row['policy_version']): row for row in report['rollout_gates']}
+        self.assertEqual(gates[('trend_up', 'policy_v2')]['decision'], 'expand')
+        self.assertEqual(gates[('range', 'policy_v2')]['decision'], 'rollback')
 
 
 def run_tests():

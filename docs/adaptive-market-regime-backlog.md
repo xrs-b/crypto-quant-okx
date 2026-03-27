@@ -552,11 +552,12 @@
 
 ### AR-M5-02｜policy version 比较与建议生成
 
-- **Status（2026-03-27 / M5 Step 1）**：partial done
+- **Status（2026-03-27 / M5 Step 2）**：done
 - **Notes**：
-  - 首版 `calibration_report` 已同时输出 `by_policy_version` 与 `by_regime_policy`，并内置最小建议生成：`sample_gap`、`tighten_or_reprice`、`keep_or_expand_rollout`。
-  - 当前目标不是直接自动改 policy，而是让每次回测/复盘先有版本分桶和建议摘要，帮助下一步做更稳的 rollout / calibration / rollback 决策。
-  - 后续可继续补 A/B diff 视图（明确 policy A vs B 在同 regime 下的 delta），但现在已经先把“版本比较必须有统一出口”这件事钉住。
+  - `analytics/backtest.py` 的 `calibration_report` 已补齐 `policy_ab_diffs` 与 `rollout_gates`，不再只给分桶 summary，而是开始输出可直接指导 rollout / tighten / rollback 的结构化判断。
+  - `policy_ab_diffs` 现会以样本最多的 policy 作为 baseline，输出 candidate vs baseline 的总体 delta，以及同 regime 下的 `delta_trade_count / delta_win_rate / delta_avg_return_pct / sample_ready`，方便做 policy A/B compare。
+  - `rollout_gates` 现按 `regime × policy_version` 输出明确 `decision=expand|hold|tighten|rollback`、`reason`、`message` 与关键指标；`summary.rollout_gate_summary` 则提供整体 gate tally，方便后续报告或 dashboard 直接消费。
+  - 建议生成仍保持 fail-safe：样本不足先 hold，负收益且低胜率优先 rollback，负收益但未明显失真时先 tighten，正向稳定 edge 才建议 expand rollout。
 - **阶段 / 优先级**：M5 / P1
 - **生效范围**：不直接生效
 - **目标**：让每次 policy 更新都有版本号、差异说明与基于数据的建议，而不是拍脑袋改 multiplier/threshold。

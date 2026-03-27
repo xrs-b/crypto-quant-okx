@@ -55,6 +55,113 @@ def summarize_trade_buckets(
     return rows
 
 
+def _build_policy_regime_lookup(rows: List[Dict]) -> Dict[Tuple[str, str], Dict]:
+    return {
+        (_normalize_bucket_tag(row.get('bucket')), _normalize_bucket_tag(row.get('secondary_bucket'))): row
+        for row in (rows or [])
+    }
+
+
+def _evaluate_rollout_gate(row: Dict, *, min_sample_size: int) -> Dict:
+    trade_count = int(row.get('trade_count') or 0)
+    avg_return_pct = float(row.get('avg_return_pct') or 0.0)
+    win_rate = float(row.get('win_rate') or 0.0)
+    bucket = _normalize_bucket_tag(row.get('bucket'))
+    policy = _normalize_bucket_tag(row.get('secondary_bucket'))
+    if trade_count < min_sample_size:
+        return {
+            'decision': 'hold',
+            'reason': 'sample_gap',
+            'message': f'{bucket} × {policy} 样本不足，继续观察，不建议放大 rollout',
+            'trade_count': trade_count,
+            'min_sample_size': min_sample_size,
+        }
+    if avg_return_pct < 0 and win_rate < 45:
+        return {
+            'decision': 'rollback',
+            'reason': 'negative_return_and_low_win_rate',
+            'message': f'{bucket} × {policy} 回报转负且胜率偏低，优先考虑回滚或冻结该 rollout',
+            'trade_count': trade_count,
+            'avg_return_pct': avg_return_pct,
+            'win_rate': win_rate,
+        }
+    if avg_return_pct < 0:
+        return {
+            'decision': 'tighten',
+            'reason': 'negative_return',
+            'message': f'{bucket} × {policy} 平均回报为负，优先收紧 decision/risk/execution 侧参数',
+            'trade_count': trade_count,
+            'avg_return_pct': avg_return_pct,
+            'win_rate': win_rate,
+        }
+    if win_rate >= 60 and avg_return_pct > 0:
+        return {
+            'decision': 'expand',
+            'reason': 'stable_positive_edge',
+            'message': f'{bucket} × {policy} 样本达标且边际稳定，可作为扩大 rollout 候选',
+            'trade_count': trade_count,
+            'avg_return_pct': avg_return_pct,
+            'win_rate': win_rate,
+        }
+    return {
+        'decision': 'hold',
+        'reason': 'mixed_edge',
+        'message': f'{bucket} × {policy} 表现中性，先维持当前 rollout 并继续观察',
+        'trade_count': trade_count,
+        'avg_return_pct': avg_return_pct,
+        'win_rate': win_rate,
+    }
+
+
+def _build_policy_ab_diffs(by_policy: List[Dict], by_regime_policy: List[Dict], *, min_sample_size: int) -> List[Dict]:
+    if len(by_policy) < 2:
+        return []
+    lookup = _build_policy_regime_lookup(by_regime_policy)
+    baseline_row = max(by_policy, key=lambda row: (row.get('trade_count', 0), row.get('bucket', '')))
+    baseline_policy = _normalize_bucket_tag(baseline_row.get('bucket'))
+    diffs = []
+    for candidate in by_policy:
+        candidate_policy = _normalize_bucket_tag(candidate.get('bucket'))
+        if candidate_policy == baseline_policy:
+            continue
+        regime_deltas = []
+        candidate_regimes = [
+            row for row in by_regime_policy
+            if _normalize_bucket_tag(row.get('secondary_bucket')) == candidate_policy
+        ]
+        for row in candidate_regimes:
+            regime = _normalize_bucket_tag(row.get('bucket'))
+            baseline_pair = lookup.get((regime, baseline_policy))
+            if not baseline_pair:
+                continue
+            regime_deltas.append({
+                'regime': regime,
+                'candidate_policy_version': candidate_policy,
+                'baseline_policy_version': baseline_policy,
+                'candidate_trade_count': row['trade_count'],
+                'baseline_trade_count': baseline_pair['trade_count'],
+                'delta_trade_count': row['trade_count'] - baseline_pair['trade_count'],
+                'delta_win_rate': round(float(row['win_rate']) - float(baseline_pair['win_rate']), 4),
+                'delta_avg_return_pct': round(float(row['avg_return_pct']) - float(baseline_pair['avg_return_pct']), 4),
+                'sample_ready': row['trade_count'] >= min_sample_size and baseline_pair['trade_count'] >= min_sample_size,
+            })
+        regime_deltas.sort(key=lambda item: (not item['sample_ready'], -item['delta_avg_return_pct'], item['regime']))
+        diffs.append({
+            'baseline_policy_version': baseline_policy,
+            'candidate_policy_version': candidate_policy,
+            'baseline_trade_count': baseline_row['trade_count'],
+            'candidate_trade_count': candidate['trade_count'],
+            'delta_trade_count': candidate['trade_count'] - baseline_row['trade_count'],
+            'delta_win_rate': round(float(candidate['win_rate']) - float(baseline_row['win_rate']), 4),
+            'delta_avg_return_pct': round(float(candidate['avg_return_pct']) - float(baseline_row['avg_return_pct']), 4),
+            'candidate_beats_baseline': float(candidate['avg_return_pct']) > float(baseline_row['avg_return_pct']),
+            'sample_ready': candidate['trade_count'] >= min_sample_size and baseline_row['trade_count'] >= min_sample_size,
+            'regime_deltas': regime_deltas,
+        })
+    diffs.sort(key=lambda item: (not item['sample_ready'], -item['delta_avg_return_pct'], item['candidate_policy_version']))
+    return diffs
+
+
 def build_regime_policy_calibration_report(symbol_results: List[Dict]) -> Dict:
     all_trades = [
         trade
@@ -65,12 +172,19 @@ def build_regime_policy_calibration_report(symbol_results: List[Dict]) -> Dict:
     by_policy = summarize_trade_buckets(all_trades, 'policy_tag')
     by_regime_policy = summarize_trade_buckets(all_trades, 'regime_tag', 'policy_tag')
 
-    recommendations = []
     min_sample_size = 3
+    rollout_gates = []
+    recommendations = []
     for row in by_regime_policy:
         bucket = row['bucket']
         policy = row.get('secondary_bucket') or 'unknown'
-        if row['trade_count'] < min_sample_size:
+        gate = {
+            'regime': bucket,
+            'policy_version': policy,
+            **_evaluate_rollout_gate(row, min_sample_size=min_sample_size),
+        }
+        rollout_gates.append(gate)
+        if gate['reason'] == 'sample_gap':
             recommendations.append({
                 'type': 'sample_gap',
                 'regime': bucket,
@@ -78,30 +192,36 @@ def build_regime_policy_calibration_report(symbol_results: List[Dict]) -> Dict:
                 'message': f'{bucket} × {policy} 样本仍少，先继续收集再调参',
                 'trade_count': row['trade_count'],
             })
-            continue
-        if row['avg_return_pct'] < 0:
+        elif gate['decision'] in {'tighten', 'rollback'}:
             recommendations.append({
-                'type': 'tighten_or_reprice',
+                'type': 'tighten_or_reprice' if gate['decision'] == 'tighten' else 'rollback_or_freeze',
                 'regime': bucket,
                 'policy_version': policy,
-                'message': f'{bucket} × {policy} 平均回报为负，优先检查 decision/risk/execution 收紧是否足够',
+                'message': gate['message'],
                 'trade_count': row['trade_count'],
                 'avg_return_pct': row['avg_return_pct'],
                 'win_rate': row['win_rate'],
             })
-        elif row['win_rate'] >= 60 and row['avg_return_pct'] > 0:
+        elif gate['decision'] == 'expand':
             recommendations.append({
                 'type': 'keep_or_expand_rollout',
                 'regime': bucket,
                 'policy_version': policy,
-                'message': f'{bucket} × {policy} 表现稳定，可作为后续 rollout / calibration 优先候选',
+                'message': gate['message'],
                 'trade_count': row['trade_count'],
                 'avg_return_pct': row['avg_return_pct'],
                 'win_rate': row['win_rate'],
             })
 
+    policy_ab_diffs = _build_policy_ab_diffs(by_policy, by_regime_policy, min_sample_size=min_sample_size)
     top_regime = by_regime[0]['bucket'] if by_regime else 'unknown'
     top_policy = by_policy[0]['bucket'] if by_policy else 'unknown'
+    rollout_gate_summary = {
+        'expand': sum(1 for item in rollout_gates if item['decision'] == 'expand'),
+        'hold': sum(1 for item in rollout_gates if item['decision'] == 'hold'),
+        'tighten': sum(1 for item in rollout_gates if item['decision'] == 'tighten'),
+        'rollback': sum(1 for item in rollout_gates if item['decision'] == 'rollback'),
+    }
     return {
         'summary': {
             'trade_count': len(all_trades),
@@ -110,10 +230,15 @@ def build_regime_policy_calibration_report(symbol_results: List[Dict]) -> Dict:
             'top_regime': top_regime,
             'top_policy_version': top_policy,
             'calibration_ready': bool(all_trades),
+            'min_sample_size': min_sample_size,
+            'policy_ab_ready': len(by_policy) >= 2,
+            'rollout_gate_summary': rollout_gate_summary,
         },
         'by_regime': by_regime,
         'by_policy_version': by_policy,
         'by_regime_policy': by_regime_policy,
+        'policy_ab_diffs': policy_ab_diffs,
+        'rollout_gates': rollout_gates,
         'recommendations': recommendations[:20],
     }
 

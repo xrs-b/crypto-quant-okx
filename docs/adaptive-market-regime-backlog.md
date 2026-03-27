@@ -236,12 +236,14 @@
   1. `shadow_workflow` 的 **testnet bridge** 已从 plan-only skeleton 推到 **controlled execute 第一层**：默认 `allow_execute=false`，显式开启后仅允许 `minimal_smoke`，并固定输出 `plan_only / controlled_execute / skipped / blocked / error` 状态口径；
   2. controlled execute 继续维持硬边界：若 `exchange.mode != testnet`、plan 不 ready、或仍有 pending approvals（默认要求为 0），则直接 `blocked`，不会误落到 real mode；
   3. 审计字段已补齐 `status / blocking_reasons / rollback_expected / cleanup_required / execute_profile / real_trade_execution`，用于后续 reconcile / cleanup / automation 接续；
-  4. workflow payload 已新增 **consumer view**，把 `workflow_state / approval_state / queues / rollout_executor / rollout_stage_progression` 聚成统一 API 消费对象，减少 dashboard/API 侧自行拼装；
-  5. rollout executor 已补 **stage progression summary**，把 `rollout_stage -> target_rollout_stage -> next_transition / dispatch_route / retryable / rollback_hint` 统一暴露，作为更接近自动 rollout 的下一层状态机摘要。
+  4. controlled execute 第二层已补 **最小 reconcile / cleanup trail**：bridge result 现在会稳定输出 `open_status / close_status / cleanup_needed / residual_position_detected / reconcile_summary / failure_compensation_hint`，并在 `cleanup_required=true` 且未确认收口时强制回到 `error`；
+  5. shadow bridge stub / fixture 现可驱动 `open/close confirmation`、`pending-approval blocked`、`cleanup needed`、`residual position detected` 等场景，测试已覆盖成功、blocked、cleanup needed、real-mode blocked 主路径；
+  6. workflow payload 已新增 **consumer view**，把 `workflow_state / approval_state / queues / rollout_executor / rollout_stage_progression` 聚成统一 API 消费对象，减少 dashboard/API 侧自行拼装；
+  7. rollout executor 已补 **stage progression summary**，把 `rollout_stage -> target_rollout_stage -> next_transition / dispatch_route / retryable / rollback_hint` 统一暴露，作为更接近自动 rollout 的下一层状态机摘要。
 - **下一步建议**：
   1. 把 direction lock / intent / layer gap / queue progression 这些高价值 regression case 补齐；
   2. 继续扩 safe-apply / stage handler allowlist，并把 stage progression 真正喂给 queue dispatcher；
-  3. 在真实 testnet 环境补更完整 reconcile/cleanup trail（订单状态确认、失败补偿、残仓探测），之后才考虑更复杂 bridge 动作。
+  3. 若后续接真实 testnet API，再把当前最小 trail 接到真实订单查询 / 持仓快照，而不是只停留在 smoke bridge 的结构化语义层。
 
 ### AR-M5-05｜approval audit / stale cleanup / decision diff layer
 

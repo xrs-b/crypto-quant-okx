@@ -334,7 +334,25 @@ def _run_testnet_bridge(case_data: Dict[str, Any], workflow_ready: Dict[str, Any
         def create_order(self, selected_symbol, order_side, amount, posSide=None):
             return {'id': 'bridge-open', 'symbol': selected_symbol, 'side': order_side, 'amount': amount, 'posSide': posSide}
         def close_order(self, selected_symbol, order_side, amount, posSide=None):
+            if bridge_cfg.get('close_order_error'):
+                raise RuntimeError(bridge_cfg['close_order_error'])
             return {'id': 'bridge-close', 'symbol': selected_symbol, 'side': order_side, 'amount': amount, 'posSide': posSide}
+        def confirm_smoke_open(self, selected_symbol, side, amount, open_order=None):
+            return copy.deepcopy(bridge_cfg.get('open_confirmation') or {'status': bridge_cfg.get('open_status', 'filled')})
+        def confirm_smoke_close(self, selected_symbol, side, amount, close_order=None, open_order=None):
+            return copy.deepcopy(bridge_cfg.get('close_confirmation') or {'status': bridge_cfg.get('close_status', 'filled')})
+        def detect_smoke_residual_position(self, selected_symbol, side, amount, open_order=None, close_order=None):
+            if 'residual_position' in bridge_cfg:
+                return copy.deepcopy(bridge_cfg.get('residual_position'))
+            return {'detected': bool(bridge_cfg.get('residual_position_detected', False)), 'quantity': float(bridge_cfg.get('residual_quantity', 0.0) or 0.0)}
+        def cleanup_smoke_position(self, selected_symbol, side, amount, open_order=None, close_order=None, residual_position=None):
+            if 'cleanup_result' in bridge_cfg:
+                return copy.deepcopy(bridge_cfg.get('cleanup_result'))
+            if bridge_cfg.get('cleanup_succeeded') is True:
+                return {'status': 'flattened'}
+            if bridge_cfg.get('cleanup_succeeded') is False:
+                return {'status': 'manual_required'}
+            return {'status': 'not_attempted'}
 
     exchange = bridge_cfg.get('exchange') or _BridgeExchangeStub()
     plan = build_exchange_smoke_plan(cfg, exchange, symbol=symbol, side=side)
@@ -388,9 +406,18 @@ def _run_testnet_bridge(case_data: Dict[str, Any], workflow_ready: Dict[str, Any
     try:
         result['result'] = bridge_runner(cfg, exchange, symbol=symbol, side=side)
         result['audit']['real_trade_execution'] = bool((result['result'] or {}).get('opened') or (result['result'] or {}).get('closed'))
+        result['cleanup_needed'] = bool((result['result'] or {}).get('cleanup_needed', False))
+        result['residual_position_detected'] = bool((result['result'] or {}).get('residual_position_detected', False))
+        result['open_status'] = (result['result'] or {}).get('open_status')
+        result['close_status'] = (result['result'] or {}).get('close_status')
+        result['reconcile_summary'] = (result['result'] or {}).get('reconcile_summary') or {}
+        result['failure_compensation_hint'] = (result['result'] or {}).get('failure_compensation_hint')
         if (result['result'] or {}).get('error'):
             result['status'] = 'error'
             result['error'] = (result['result'] or {}).get('error')
+        elif cleanup_required and bool((result['result'] or {}).get('cleanup_needed')):
+            result['status'] = 'error'
+            result['error'] = 'cleanup_required_but_cleanup_not_confirmed'
         elif cleanup_required and not bool((result['result'] or {}).get('closed')):
             result['status'] = 'error'
             result['error'] = 'cleanup_required_but_close_not_confirmed'
@@ -414,7 +441,7 @@ def _build_workflow_diff(workflow_ready: Dict[str, Any], replay_result: Dict[str
         'workflow': {'action_count': len(actions), 'approval_count': len(approvals), 'pending_approval_count': sum(1 for row in approvals if row.get('approval_state') == 'pending'), 'blocked_count': sum(1 for row in (workflow_ready.get('workflow_state') or {}).get('item_states', []) if row.get('workflow_state') == 'blocked'), 'ready_count': sum(1 for row in (workflow_ready.get('workflow_state') or {}).get('item_states', []) if row.get('workflow_state') == 'ready')},
         'replay': {'synced_count': replay_result.get('synced_count', 0), 'timeline_events': len(replay_result.get('timeline') or []), 'replayed_state_count': len(replay_states), 'pending_state_count': sum(1 for row in replay_states if row.get('state') == 'pending')},
         'executor': {'enabled': bool((executor_result or {}).get('enabled')), 'mode': (executor_result or {}).get('mode') or 'disabled', 'planned_count': executor_summary.get('planned_count', 0), 'queued_count': executor_summary.get('queued_count', 0), 'dry_run_count': executor_summary.get('dry_run_count', 0), 'applied_count': executor_summary.get('applied_count', 0), 'error_count': executor_summary.get('error_count', 0), 'stage_ready_count': stage_progression.get('ready_stage_count', 0), 'blocked_count': stage_progression.get('blocked_count', 0)},
-        'testnet_bridge': {'enabled': bool(bridge_result.get('enabled')), 'mode': bridge_result.get('mode') or 'disabled', 'status': bridge_result.get('status') or ('disabled' if not bridge_result.get('enabled') else 'plan_only'), 'plan_only': bool(bridge_result.get('plan_only', True)), 'execute_ready': bool((bridge_result.get('plan') or {}).get('execute_ready', False)), 'pending_approval_count': (bridge_result.get('gating') or {}).get('workflow_pending_approvals', 0), 'executor_applied_count': (bridge_result.get('gating') or {}).get('executor_applied_count', 0), 'blocked': bool(bridge_result.get('status') == 'blocked'), 'error': bridge_result.get('error')},
+        'testnet_bridge': {'enabled': bool(bridge_result.get('enabled')), 'mode': bridge_result.get('mode') or 'disabled', 'status': bridge_result.get('status') or ('disabled' if not bridge_result.get('enabled') else 'plan_only'), 'plan_only': bool(bridge_result.get('plan_only', True)), 'execute_ready': bool((bridge_result.get('plan') or {}).get('execute_ready', False)), 'pending_approval_count': (bridge_result.get('gating') or {}).get('workflow_pending_approvals', 0), 'executor_applied_count': (bridge_result.get('gating') or {}).get('executor_applied_count', 0), 'blocked': bool(bridge_result.get('status') == 'blocked'), 'cleanup_needed': bool(bridge_result.get('cleanup_needed', False)), 'residual_position_detected': bool(bridge_result.get('residual_position_detected', False)), 'open_status': bridge_result.get('open_status'), 'close_status': bridge_result.get('close_status'), 'failure_compensation_hint': bridge_result.get('failure_compensation_hint'), 'error': bridge_result.get('error')},
     }
 
 def _evaluate_assertions(case_data: Dict[str, Any], adaptive: Optional[Dict[str, Any]], diff: Dict[str, Any], *, workflow_ready: Optional[Dict[str, Any]] = None, replay_result: Optional[Dict[str, Any]] = None) -> Tuple[bool, list]:
@@ -462,6 +489,16 @@ def _evaluate_assertions(case_data: Dict[str, Any], adaptive: Optional[Dict[str,
             actual = diff.get('testnet_bridge', {}).get('status')
         elif key == 'testnet_bridge_blocked':
             actual = diff.get('testnet_bridge', {}).get('blocked')
+        elif key == 'testnet_bridge_cleanup_needed':
+            actual = diff.get('testnet_bridge', {}).get('cleanup_needed')
+        elif key == 'testnet_bridge_residual_position_detected':
+            actual = diff.get('testnet_bridge', {}).get('residual_position_detected')
+        elif key == 'testnet_bridge_open_status':
+            actual = diff.get('testnet_bridge', {}).get('open_status')
+        elif key == 'testnet_bridge_close_status':
+            actual = diff.get('testnet_bridge', {}).get('close_status')
+        elif key == 'testnet_bridge_failure_compensation_hint':
+            actual = diff.get('testnet_bridge', {}).get('failure_compensation_hint')
         else:
             actual = None
         results.append({"field": key, "expected": expected, "actual": actual, "passed": actual == expected})

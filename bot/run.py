@@ -471,11 +471,57 @@ def reconcile_exchange_positions(exchange: Exchange, db: Database) -> dict:
 def execute_exchange_smoke(cfg: Config, exchange: Exchange, symbol: str = None, side: str = 'long', db: Database = None) -> dict:
     """执行最小 testnet 开平仓验收。只允许 testnet。"""
     plan = build_exchange_smoke_plan(cfg, exchange, symbol=symbol, side=side)
-    result = {'plan': plan, 'opened': False, 'closed': False}
+    result = {
+        'plan': plan,
+        'opened': False,
+        'closed': False,
+        'open_status': 'not_started',
+        'close_status': 'not_started',
+        'cleanup_needed': False,
+        'residual_position_detected': False,
+        'reconcile_summary': {
+            'open_order_confirmed': False,
+            'close_order_confirmed': False,
+            'residual_position_detected': False,
+            'cleanup_attempted': False,
+            'cleanup_succeeded': False,
+            'residual_quantity': 0.0,
+        },
+        'failure_compensation_hint': None,
+    }
+
+    def _call_exchange_method(name, *args, **kwargs):
+        fn = getattr(exchange, name, None)
+        if not callable(fn):
+            return None
+        return fn(*args, **kwargs)
+
+    def _normalize_status(payload, default_status):
+        if isinstance(payload, dict):
+            status = str(payload.get('status') or default_status)
+            return {**payload, 'status': status}
+        if payload is None:
+            return {'status': default_status}
+        return {'status': str(payload)}
+
+    def _normalize_residual(payload):
+        if isinstance(payload, dict):
+            quantity = float(payload.get('quantity') or payload.get('contracts') or payload.get('residual_quantity') or 0.0)
+            detected = bool(payload.get('detected', quantity > 0))
+            return {**payload, 'detected': detected, 'quantity': quantity}
+        quantity = float(payload or 0.0)
+        return {'detected': quantity > 0, 'quantity': quantity}
+
     if plan.get('error'):
         result['error'] = plan['error']
+        result['open_status'] = 'plan_error'
+        result['close_status'] = 'plan_error'
+        result['failure_compensation_hint'] = 'fix_smoke_plan_before_execute'
     elif str(cfg.exchange_mode).lower() != 'testnet':
         result['error'] = '只允许在 testnet 模式执行 smoke 验收'
+        result['open_status'] = 'blocked'
+        result['close_status'] = 'blocked'
+        result['failure_compensation_hint'] = 'real_mode_blocked_no_execution'
     else:
         try:
             open_side = 'buy' if side == 'long' else 'sell'
@@ -484,11 +530,47 @@ def execute_exchange_smoke(cfg: Config, exchange: Exchange, symbol: str = None, 
             open_order = exchange.create_order(plan['symbol'], open_side, amount, posSide=side)
             result['opened'] = True
             result['open_order'] = open_order
+            open_status_payload = _normalize_status(_call_exchange_method('confirm_smoke_open', plan['symbol'], side, amount, open_order=open_order), 'filled')
+            result['open_status'] = open_status_payload.get('status', 'filled')
+            result['open_confirmation'] = open_status_payload
+            result['reconcile_summary']['open_order_confirmed'] = result['open_status'] in {'filled', 'closed', 'confirmed', 'opened'}
+
             close_order = exchange.close_order(plan['symbol'], close_side, amount, posSide=side)
             result['closed'] = True
             result['close_order'] = close_order
+            close_status_payload = _normalize_status(_call_exchange_method('confirm_smoke_close', plan['symbol'], side, amount, close_order=close_order, open_order=open_order), 'filled')
+            result['close_status'] = close_status_payload.get('status', 'filled')
+            result['close_confirmation'] = close_status_payload
+            result['reconcile_summary']['close_order_confirmed'] = result['close_status'] in {'filled', 'closed', 'confirmed'}
+
+            residual_payload = _normalize_residual(_call_exchange_method('detect_smoke_residual_position', plan['symbol'], side, amount, open_order=open_order, close_order=close_order))
+            result['residual_position'] = residual_payload
+            result['residual_position_detected'] = residual_payload.get('detected', False)
+            result['reconcile_summary']['residual_position_detected'] = result['residual_position_detected']
+            result['reconcile_summary']['residual_quantity'] = residual_payload.get('quantity', 0.0)
+
+            cleanup_needed = (not result['reconcile_summary']['close_order_confirmed']) or result['residual_position_detected']
+            result['cleanup_needed'] = cleanup_needed
+            if cleanup_needed:
+                cleanup_payload = _normalize_status(_call_exchange_method('cleanup_smoke_position', plan['symbol'], side, amount, open_order=open_order, close_order=close_order, residual_position=residual_payload), 'not_attempted')
+                result['cleanup_result'] = cleanup_payload
+                result['reconcile_summary']['cleanup_attempted'] = cleanup_payload.get('status') != 'not_attempted'
+                result['reconcile_summary']['cleanup_succeeded'] = cleanup_payload.get('status') in {'flattened', 'clean', 'confirmed', 'success'}
+                if not result['reconcile_summary']['cleanup_succeeded']:
+                    if result['residual_position_detected']:
+                        result['failure_compensation_hint'] = 'manual_testnet_cleanup_required'
+                    else:
+                        result['failure_compensation_hint'] = 'retry_close_confirmation_or_manual_cleanup'
+            if not result['cleanup_needed']:
+                result['failure_compensation_hint'] = None
         except Exception as e:
             result['error'] = str(e)
+            result['cleanup_needed'] = bool(result.get('opened') and not result.get('closed'))
+            result['failure_compensation_hint'] = 'inspect_open_order_and_force_flatten_on_testnet' if result['cleanup_needed'] else 'inspect_bridge_execution_error'
+            if result['opened'] and result['open_status'] == 'not_started':
+                result['open_status'] = 'submitted'
+            if result['close_status'] == 'not_started':
+                result['close_status'] = 'error'
 
     if db is not None:
         details = {
@@ -497,6 +579,12 @@ def execute_exchange_smoke(cfg: Config, exchange: Exchange, symbol: str = None, 
             'closed': result.get('closed', False),
             'open_order': result.get('open_order'),
             'close_order': result.get('close_order'),
+            'open_status': result.get('open_status'),
+            'close_status': result.get('close_status'),
+            'cleanup_needed': result.get('cleanup_needed', False),
+            'residual_position_detected': result.get('residual_position_detected', False),
+            'reconcile_summary': result.get('reconcile_summary') or {},
+            'failure_compensation_hint': result.get('failure_compensation_hint'),
         }
         smoke_run_id = db.record_smoke_run(
             exchange_mode=cfg.exchange_mode,
@@ -504,7 +592,7 @@ def execute_exchange_smoke(cfg: Config, exchange: Exchange, symbol: str = None, 
             symbol=plan.get('symbol') or symbol or '--',
             side=side,
             amount=plan.get('sample_amount'),
-            success=bool(result.get('opened') and result.get('closed') and not result.get('error')),
+            success=bool(result.get('opened') and result.get('closed') and not result.get('error') and not result.get('cleanup_needed')),
             error=result.get('error'),
             details=details,
         )

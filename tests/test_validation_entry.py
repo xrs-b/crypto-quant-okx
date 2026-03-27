@@ -24,6 +24,8 @@ WORKFLOW_EXECUTOR_FIXTURE = 'tests/fixtures/validation/workflow/queue-executor-d
 WORKFLOW_TESTNET_BRIDGE_FIXTURE = 'tests/fixtures/validation/workflow/testnet-bridge-plan-001.yaml'
 WORKFLOW_TESTNET_BRIDGE_EXECUTE_FIXTURE = 'tests/fixtures/validation/workflow/testnet-bridge-execute-001.yaml'
 WORKFLOW_TESTNET_BRIDGE_REAL_MODE_BLOCKED_FIXTURE = 'tests/fixtures/validation/workflow/testnet-bridge-real-mode-blocked-001.yaml'
+WORKFLOW_TESTNET_BRIDGE_CLEANUP_NEEDED_FIXTURE = 'tests/fixtures/validation/workflow/testnet-bridge-cleanup-needed-001.yaml'
+WORKFLOW_TESTNET_BRIDGE_BLOCKED_PENDING_FIXTURE = 'tests/fixtures/validation/workflow/testnet-bridge-pending-approval-blocked-001.yaml'
 FIXTURE_DIR = 'tests/fixtures/validation'
 
 
@@ -104,10 +106,39 @@ class TestShadowValidationEntry(unittest.TestCase):
         self.assertEqual(report['diff']['testnet_bridge']['mode'], 'controlled_execute')
         self.assertEqual(report['diff']['testnet_bridge']['status'], 'controlled_execute')
         self.assertFalse(report['diff']['testnet_bridge']['blocked'])
+        self.assertEqual(report['diff']['testnet_bridge']['open_status'], 'filled')
+        self.assertEqual(report['diff']['testnet_bridge']['close_status'], 'filled')
+        self.assertFalse(report['diff']['testnet_bridge']['cleanup_needed'])
+        self.assertFalse(report['diff']['testnet_bridge']['residual_position_detected'])
         self.assertTrue(report['artifacts']['testnet_bridge']['result']['opened'])
         self.assertTrue(report['artifacts']['testnet_bridge']['result']['closed'])
+        self.assertTrue(report['artifacts']['testnet_bridge']['result']['reconcile_summary']['open_order_confirmed'])
+        self.assertTrue(report['artifacts']['testnet_bridge']['result']['reconcile_summary']['close_order_confirmed'])
         self.assertTrue(report['audit']['real_trade_execution'])
         self.assertTrue(report['artifacts']['testnet_bridge']['audit']['rollback_expected'])
+
+    def test_shadow_workflow_runner_blocks_testnet_bridge_when_pending_approvals_exist(self):
+        report = run_shadow_validation_case(WORKFLOW_TESTNET_BRIDGE_BLOCKED_PENDING_FIXTURE)
+        self.assertEqual(report['case_type'], 'shadow_workflow')
+        self.assertEqual(report['status'], 'pass')
+        self.assertEqual(report['diff']['testnet_bridge']['status'], 'blocked')
+        self.assertTrue(report['diff']['testnet_bridge']['blocked'])
+        self.assertIn('workflow_pending_approvals_present', report['artifacts']['testnet_bridge']['blocking_reasons'])
+        self.assertFalse(report['audit']['real_trade_execution'])
+
+    def test_shadow_workflow_runner_surfaces_cleanup_needed_bridge_trail(self):
+        report = run_shadow_validation_case(WORKFLOW_TESTNET_BRIDGE_CLEANUP_NEEDED_FIXTURE)
+        self.assertEqual(report['case_type'], 'shadow_workflow')
+        self.assertEqual(report['status'], 'pass')
+        self.assertEqual(report['diff']['testnet_bridge']['status'], 'error')
+        self.assertTrue(report['diff']['testnet_bridge']['cleanup_needed'])
+        self.assertTrue(report['diff']['testnet_bridge']['residual_position_detected'])
+        self.assertEqual(report['diff']['testnet_bridge']['open_status'], 'filled')
+        self.assertEqual(report['diff']['testnet_bridge']['close_status'], 'submitted')
+        self.assertEqual(report['diff']['testnet_bridge']['failure_compensation_hint'], 'manual_testnet_cleanup_required')
+        self.assertEqual(report['artifacts']['testnet_bridge']['error'], 'cleanup_required_but_cleanup_not_confirmed')
+        self.assertEqual(report['artifacts']['testnet_bridge']['result']['cleanup_result']['status'], 'manual_required')
+        self.assertTrue(report['audit']['real_trade_execution'])
 
     def test_shadow_workflow_runner_blocks_testnet_bridge_when_real_mode_requested(self):
         report = run_shadow_validation_case(WORKFLOW_TESTNET_BRIDGE_REAL_MODE_BLOCKED_FIXTURE)

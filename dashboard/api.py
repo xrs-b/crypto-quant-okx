@@ -52,7 +52,7 @@ from signals.validator import SignalValidator
 from bot.run import execute_exchange_smoke, reconcile_exchange_positions, load_runtime_state
 from ml.engine import MLEngine
 from core.regime import RegimeDetector, detect_regime, Regime
-from analytics import StrategyBacktester, SignalQualityAnalyzer, ParameterOptimizer, GovernanceEngine, build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, attach_auto_approval_policy, execute_controlled_rollout_layer, execute_controlled_auto_approval_layer, execute_rollout_executor, build_workflow_consumer_view, build_workflow_operator_digest
+from analytics import StrategyBacktester, SignalQualityAnalyzer, ParameterOptimizer, GovernanceEngine, build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, attach_auto_approval_policy, execute_controlled_rollout_layer, execute_controlled_auto_approval_layer, execute_rollout_executor, build_workflow_consumer_view, build_workflow_attention_view, build_workflow_operator_digest
 from analytics.backtest import export_calibration_payload
 from analytics.mfe_mae import MFEAnalyzer, get_mfe_mae_analysis
 from core.regime_policy import summarize_observe_only_collection
@@ -2489,6 +2489,23 @@ def get_backtest_workflow_consumer_view():
         'view': 'workflow_consumer_view',
         'data': consumer_view,
         'summary': consumer_view.get('summary') or {},
+    })
+
+
+@app.route('/api/backtest/workflow-attention-view')
+def get_backtest_workflow_attention_view():
+    """返回聚焦 manual approval / blocked follow-up 的低干预消费视图。"""
+    max_items = max(1, min(int(request.args.get('max_items', 50)), 200))
+    backtest_result = backtester.run_all(config.symbols)
+    calibration_report = backtest_result.get('calibration_report') or {}
+    payload = export_calibration_payload(calibration_report, view='workflow_ready')
+    payload = _persist_workflow_approval_payload(payload, replay_source='workflow_attention_view_api')
+    attention = build_workflow_attention_view(payload, max_items=max_items)
+    return jsonify({
+        'success': True,
+        'view': 'workflow_attention_view',
+        'data': attention,
+        'summary': attention.get('summary') or {},
     })
 
 

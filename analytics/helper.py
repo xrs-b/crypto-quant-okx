@@ -1917,6 +1917,136 @@ def build_workflow_consumer_view(payload: Optional[Dict] = None) -> Dict[str, An
     return view
 
 
+def build_workflow_attention_view(payload: Optional[Dict] = None, *, max_items: int = 50) -> Dict[str, Any]:
+    payload = payload or {}
+    consumer_view = payload.get('consumer_view') or build_workflow_consumer_view(payload)
+    workflow_items = ((consumer_view.get('workflow_state') or {}).get('item_states') or [])
+    approval_items = ((consumer_view.get('approval_state') or {}).get('items') or [])
+    rollout_executor = consumer_view.get('rollout_executor') or {}
+    auto_approval = consumer_view.get('auto_approval_execution') or {}
+    controlled_rollout = consumer_view.get('controlled_rollout_execution') or {}
+
+    approval_by_playbook = {row.get('playbook_id'): row for row in approval_items if row.get('playbook_id')}
+
+    def _sort_key(row: Dict[str, Any]):
+        risk_rank = {'critical': 0, 'high': 1, 'medium': 2, 'low': 3}
+        return (
+            risk_rank.get(str(row.get('risk_level') or '').lower(), 9),
+            0 if row.get('requires_manual') else 1,
+            0 if row.get('approval_required') else 1,
+            str(row.get('title') or row.get('item_id') or ''),
+        )
+
+    item_rows = []
+    for workflow_item in workflow_items:
+        item_id = workflow_item.get('item_id')
+        approval_item = approval_by_playbook.get(item_id) or {}
+        workflow_state = workflow_item.get('workflow_state') or approval_item.get('workflow_state') or 'pending'
+        approval_state = approval_item.get('approval_state') or 'not_required'
+        blocked_by = list(dict.fromkeys((workflow_item.get('blocking_reasons') or []) + (approval_item.get('blocked_by') or [])))
+        requires_manual = bool(workflow_item.get('requires_manual', approval_item.get('requires_manual')))
+        approval_required = bool(workflow_item.get('approval_required', approval_item.get('approval_required')))
+        in_manual_bucket = requires_manual and approval_state == 'pending'
+        in_blocked_bucket = workflow_state in {'blocked_by_approval', 'blocked', 'deferred'} or bool(blocked_by)
+        bucket_tags = []
+        if in_manual_bucket:
+            bucket_tags.append('manual_approval')
+        if in_blocked_bucket:
+            bucket_tags.append('blocked_follow_up')
+        if not bucket_tags:
+            continue
+        item_rows.append({
+            'item_id': item_id,
+            'approval_id': approval_item.get('approval_id'),
+            'title': workflow_item.get('title') or approval_item.get('title') or item_id,
+            'action_type': workflow_item.get('action_type') or approval_item.get('action_type'),
+            'workflow_state': workflow_state,
+            'approval_state': approval_state,
+            'decision_state': approval_item.get('decision_state') or workflow_item.get('decision_state') or workflow_state,
+            'risk_level': workflow_item.get('risk_level') or approval_item.get('risk_level') or 'unknown',
+            'requires_manual': requires_manual,
+            'approval_required': approval_required,
+            'auto_approval_decision': workflow_item.get('auto_approval_decision') or approval_item.get('auto_approval_decision') or 'manual_review',
+            'auto_approval_eligible': bool(workflow_item.get('auto_approval_eligible', approval_item.get('auto_approval_eligible'))),
+            'blocked_by': blocked_by,
+            'blocking_reason_count': len(blocked_by),
+            'queue_progression': workflow_item.get('queue_progression') or {},
+            'stage_model': workflow_item.get('stage_model') or {},
+            'current_rollout_stage': workflow_item.get('current_rollout_stage'),
+            'target_rollout_stage': workflow_item.get('target_rollout_stage'),
+            'scheduled_review': workflow_item.get('scheduled_review') or approval_item.get('scheduled_review') or {},
+            'owner_hint': workflow_item.get('owner_hint') or approval_item.get('owner_hint'),
+            'bucket_tags': bucket_tags,
+            'in_manual_approval_bucket': in_manual_bucket,
+            'in_blocked_follow_up_bucket': in_blocked_bucket,
+        })
+
+    item_rows.sort(key=_sort_key)
+
+    def _bucket_payload(bucket_id: str, title: str, items: List[Dict[str, Any]]) -> Dict[str, Any]:
+        items = sorted(items, key=_sort_key)
+        return {
+            'bucket_id': bucket_id,
+            'title': title,
+            'count': len(items),
+            'items': items[:max_items],
+            'filters': {
+                'workflow_states': sorted({row.get('workflow_state') or 'pending' for row in items}),
+                'approval_states': sorted({row.get('approval_state') or 'not_required' for row in items}),
+                'risk_levels': sorted({row.get('risk_level') or 'unknown' for row in items}),
+                'action_types': sorted({row.get('action_type') or 'unknown' for row in items}),
+            },
+        }
+
+    manual_items = [row for row in item_rows if row.get('in_manual_approval_bucket')]
+    blocked_items = [row for row in item_rows if row.get('in_blocked_follow_up_bucket')]
+    by_bucket = {
+        'manual_approval': _bucket_payload('manual_approval', 'Needs manual approval', manual_items),
+        'blocked_follow_up': _bucket_payload('blocked_follow_up', 'Blocked or deferred follow-up', blocked_items),
+    }
+
+    attention = {
+        'schema_version': 'm5_workflow_attention_view_v1',
+        'headline': {
+            'status': 'attention_required' if item_rows else 'steady',
+            'message': f"{len(manual_items)} manual approval / {len(blocked_items)} blocked follow-up",
+            'rollout_executor_status': rollout_executor.get('status') or 'disabled',
+        },
+        'summary': {
+            'attention_item_count': len(item_rows),
+            'manual_approval_count': len(manual_items),
+            'blocked_follow_up_count': len(blocked_items),
+            'overlap_count': sum(1 for row in item_rows if len(row.get('bucket_tags') or []) > 1),
+            'workflow_item_count': len(workflow_items),
+            'approval_item_count': len(approval_items),
+            'rollout_executor_status': rollout_executor.get('status') or 'disabled',
+            'auto_approval_executed_count': auto_approval.get('executed_count', 0),
+            'controlled_rollout_executed_count': controlled_rollout.get('executed_count', 0),
+        },
+        'filters': {
+            'bucket_ids': ['manual_approval', 'blocked_follow_up'],
+            'workflow_states': sorted({row.get('workflow_state') or 'pending' for row in item_rows}),
+            'approval_states': sorted({row.get('approval_state') or 'not_required' for row in item_rows}),
+            'risk_levels': sorted({row.get('risk_level') or 'unknown' for row in item_rows}),
+            'action_types': sorted({row.get('action_type') or 'unknown' for row in item_rows}),
+            'owner_hints': sorted({row.get('owner_hint') for row in item_rows if row.get('owner_hint')}),
+            'auto_approval_decisions': sorted({row.get('auto_approval_decision') or 'manual_review' for row in item_rows}),
+        },
+        'items': item_rows[:max_items],
+        'by_bucket': by_bucket,
+        'execution': {
+            'rollout_executor': {
+                'status': rollout_executor.get('status') or 'disabled',
+                'summary': rollout_executor.get('summary') or {},
+            },
+            'auto_approval_execution': auto_approval,
+            'controlled_rollout_execution': controlled_rollout,
+        },
+    }
+    payload['attention_view'] = attention
+    return attention
+
+
 def build_workflow_operator_digest(payload: Optional[Dict] = None, *, max_items: int = 5) -> Dict[str, Any]:
     payload = payload or {}
     consumer_view = payload.get('consumer_view') or build_workflow_consumer_view(payload)

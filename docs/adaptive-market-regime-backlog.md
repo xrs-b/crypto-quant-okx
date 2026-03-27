@@ -81,6 +81,7 @@
 | AR-M5-04 | approval decision persistence / replay state layer | M5 | P0 | 否（仅持久化与恢复） | workflow / approval 闭环 |
 | AR-M5-08 | rollout executor skeleton / dispatch-plan-apply-result layer | M5 | P0 | 默认否（仅 skeleton / dry-run / very-safe controlled apply） | rollout execution orchestration |
 | AR-M5-09 | workflow operator digest / low-intervention governance summary API | M5 | P0 | 否（仅聚合已有 workflow/approval/executor 状态） | dashboard / API / low-touch consumption |
+| AR-M5-10 | workflow attention view / manual approval + blocked follow-up API | M5 | P0 | 否（仅聚合已有 workflow/approval/executor 状态） | dashboard / API / agent / low-touch巡检消费 |
 
 ---
 
@@ -102,6 +103,19 @@
   - 若已有 `approved/rejected/deferred/expired` 终态，后续 replay 不会把它冲回 `pending`；
   - dashboard replay 会把已持久化状态重新叠加回 workflow-ready 视图，供恢复/审计使用。
 - **安全边界**：仅落地“审批状态账本”和“回放/恢复视图”；即使审批通过，也不会新增任何危险自动执行链路。
+
+
+### AR-M5-10｜workflow attention view / manual approval + blocked follow-up API
+
+- **阶段 / 优先级**：M5 / P0
+- **生效范围**：仅聚合已有 `workflow_state / approval_state / workflow-consumer-view`，**不触发真实自动执行**
+- **目标**：补一个比 `workflow-consumer-view` / `workflow-operator-digest` 更聚焦的消费入口，让外部可直接拉到：
+  1. `manual_approval`：仍需人工审批的项；
+  2. `blocked_follow_up`：被 blocker / deferred / blocked 卡住、需要后续跟进的项。
+- **输出结构**：稳定 JSON，包含 `headline / summary / filters / items / by_bucket / execution`，方便 dashboard、agent、人工低干预巡检直接消费，而不是再做前端二次拼装。
+- **API**：新增 `GET /api/backtest/workflow-attention-view`，支持 `max_items` 限流。
+- **兼容性**：不替换旧 `workflow-state`、`workflow-consumer-view`、`workflow-operator-digest`；只是在其之上追加更窄、更实用的 attention 视图。
+- **测试**：覆盖 helper 聚合逻辑与 API 返回结构，确保 manual / blocked bucket、summary、filters 稳定存在。
 
 ### AR-M5-06｜controlled rollout state-apply execution layer
 

@@ -76,6 +76,7 @@ M4 Step 4 batch2 status: 已补第二批可直接开工实施稿，明确区分 
 - 用风险预算与仓位限制控制暴露
 - 支持分层开仓（layering）
 - 通过本地数据库、日志、Dashboard 和通知系统提升可观察性
+- 新增 workflow attention API（manual approval / blocked follow-up），便于 dashboard、agent、人工低干预巡检直接拉取待处理项
 - 为回测、信号质量分析、参数优化预留接口
 
 当前项目围绕 **OKX 合约** 场景设计，默认支持：

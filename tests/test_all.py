@@ -5077,3 +5077,133 @@ class TestExecutionObservability(unittest.TestCase):
             self.assertIn('top_tags', snapshot['observe_only_summary'])
             self.assertIn('recent_decisions', snapshot['summary'])
             self.assertTrue(snapshot['summary']['observe_only_banner'])
+
+from analytics.helper import build_workflow_approval_records, merge_persisted_approval_state
+
+
+class TestApprovalPersistence(unittest.TestCase):
+    def test_approval_state_persists_terminal_decision_across_replay(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(str(Path(tmpdir) / 'approval_state.db'))
+            item_id = 'pool_switch::btc-focused'
+            db.upsert_approval_state(
+                item_id=item_id,
+                approval_type='pool_switch',
+                target='btc-focused',
+                title='切换主池',
+                decision='pending',
+                state='pending',
+                workflow_state='pending',
+                replay_source='unit-test',
+                details={'step': 'initial'},
+            )
+            db.record_approval('pool_switch', 'btc-focused', 'approved', {
+                'item_id': item_id,
+                'state': 'approved',
+                'reason': 'looks good',
+                'actor': 'tester',
+                'replay_source': 'unit-test',
+            })
+            replayed = db.sync_approval_items([
+                {
+                    'item_id': item_id,
+                    'approval_type': 'pool_switch',
+                    'target': 'btc-focused',
+                    'title': '切换主池',
+                    'approval_state': 'pending',
+                    'workflow_state': 'pending',
+                }
+            ], replay_source='workflow_replay', preserve_terminal=True)[0]
+            self.assertEqual(replayed['state'], 'approved')
+            self.assertEqual(replayed['decision'], 'approved')
+            self.assertEqual(replayed['reason'], 'looks good')
+            history = db.get_approval_history(limit=5)
+            self.assertEqual(history[0]['decision'], 'approved')
+
+    def test_workflow_helper_merges_persisted_decision_back_into_payload(self):
+        payload = build_governance_workflow_ready_payload(build_regime_policy_calibration_report([
+            {
+                'symbol': 'BTC/USDT',
+                'all_trades': [
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 0.3},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 0.2},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 0.1},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v2', 'strategy_tags': ['Breakout'], 'return_pct': -1.4},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v2', 'strategy_tags': ['Breakout'], 'return_pct': -1.0},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v2', 'strategy_tags': ['Breakout'], 'return_pct': -0.8},
+                ],
+            }
+        ]))
+        approval_record = build_workflow_approval_records(payload)[0]
+        merged = merge_persisted_approval_state(payload, [{
+            'item_id': approval_record['item_id'],
+            'state': 'approved',
+            'decision': 'approved',
+            'reason': 'manual approve',
+            'actor': 'tester',
+            'updated_at': '2026-03-27 13:00:00',
+            'replay_source': 'unit-test',
+        }])
+        approval_item = merged['approval_state']['items'][0]
+        workflow_item = next(row for row in merged['workflow_state']['item_states'] if row['item_id'] == approval_item['playbook_id'])
+        self.assertEqual(approval_item['approval_state'], 'approved')
+        self.assertEqual(workflow_item['workflow_state'], 'ready')
+        self.assertEqual(workflow_item['persisted_decision'], 'approved')
+
+    def test_approval_state_api_and_replay_endpoint_expose_persisted_rows(self):
+        import dashboard.api as dashboard_api
+
+        report = build_regime_policy_calibration_report([
+            {
+                'symbol': 'BTC/USDT',
+                'all_trades': [
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 0.3},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 0.2},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 0.1},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v2', 'strategy_tags': ['Breakout'], 'return_pct': -1.4},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v2', 'strategy_tags': ['Breakout'], 'return_pct': -1.0},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v2', 'strategy_tags': ['Breakout'], 'return_pct': -0.8},
+                ],
+            }
+        ])
+
+        class StubBacktester:
+            def run_all(self, symbols):
+                return {
+                    'summary': {'symbols': len(symbols)},
+                    'symbols': [{'symbol': 'BTC/USDT'}],
+                    'calibration_report': report,
+                }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            test_db = Database(str(Path(tmpdir) / 'api_approval_state.db'))
+            old_db = dashboard_api.db
+            old_backtester = dashboard_api.backtester
+            dashboard_api.db = test_db
+            dashboard_api.backtester = StubBacktester()
+            try:
+                client = app.test_client()
+                replay_resp = client.get('/api/approvals/replay')
+                self.assertEqual(replay_resp.status_code, 200)
+                replay_payload = replay_resp.get_json()
+                self.assertTrue(replay_payload['data']['approval_state']['items'])
+                approval_item = replay_payload['data']['approval_state']['items'][0]
+
+                execute_resp = client.post('/api/approvals/execute', json={
+                    'type': approval_item['action_type'],
+                    'target': approval_item['playbook_id'],
+                    'item_id': approval_item['approval_id'],
+                    'decision': 'deferred',
+                    'reason': 'wait more data',
+                    'actor': 'unit-test',
+                })
+                self.assertEqual(execute_resp.status_code, 200)
+
+                state_resp = client.get('/api/approvals/state?state=deferred')
+                self.assertEqual(state_resp.status_code, 200)
+                state_payload = state_resp.get_json()
+                self.assertEqual(state_payload['summary']['deferred'], 1)
+                self.assertEqual(state_payload['data'][0]['item_id'], approval_item['approval_id'])
+            finally:
+                dashboard_api.db = old_db
+                dashboard_api.backtester = old_backtester

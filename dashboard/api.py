@@ -52,7 +52,7 @@ from signals.validator import SignalValidator
 from bot.run import execute_exchange_smoke, reconcile_exchange_positions, load_runtime_state
 from ml.engine import MLEngine
 from core.regime import RegimeDetector, detect_regime, Regime
-from analytics import StrategyBacktester, SignalQualityAnalyzer, ParameterOptimizer, GovernanceEngine
+from analytics import StrategyBacktester, SignalQualityAnalyzer, ParameterOptimizer, GovernanceEngine, build_workflow_approval_records, merge_persisted_approval_state
 from analytics.backtest import export_calibration_payload
 from analytics.mfe_mae import MFEAnalyzer, get_mfe_mae_analysis
 from core.regime_policy import summarize_observe_only_collection
@@ -81,6 +81,16 @@ smoke_execution_state = {
 # ============================================================================
 # 内部辅助函数
 # ============================================================================
+
+
+def _persist_workflow_approval_payload(payload: Dict[str, Any], replay_source: str = 'workflow_ready') -> Dict[str, Any]:
+    approval_records = build_workflow_approval_records(payload)
+    if not approval_records:
+        return payload
+    db.sync_approval_items(approval_records, replay_source=replay_source, preserve_terminal=True)
+    persisted_rows = [db.get_approval_state(row.get('item_id')) for row in approval_records if row.get('item_id')]
+    persisted_rows = [row for row in persisted_rows if row]
+    return merge_persisted_approval_state(payload, persisted_rows)
 
 
 def _get_exchange_client():
@@ -2400,6 +2410,15 @@ def get_backtest_calibration_report():
         calibration_report,
         view='full' if view == 'full' else view,
     )
+    if view in {'workflow_ready', 'full'}:
+        workflow_payload = payload if view == 'workflow_ready' else (payload.get('workflow_ready') or {})
+        payload_to_persist = dict(workflow_payload)
+        if payload_to_persist:
+            persisted_workflow = _persist_workflow_approval_payload(payload_to_persist, replay_source=f'calibration_report:{view}')
+            if view == 'workflow_ready':
+                payload = persisted_workflow
+            else:
+                payload['workflow_ready'] = persisted_workflow
     summary = calibration_report.get('summary') or {}
     governance_ready = payload if view == 'governance_ready' else (payload.get('governance_ready') or {})
     workflow_ready = payload if view == 'workflow_ready' else (payload.get('workflow_ready') or {})
@@ -2425,6 +2444,7 @@ def get_backtest_workflow_state():
     backtest_result = backtester.run_all(config.symbols)
     calibration_report = backtest_result.get('calibration_report') or {}
     payload = export_calibration_payload(calibration_report, view='workflow_ready')
+    payload = _persist_workflow_approval_payload(payload, replay_source='workflow_state_api')
     return jsonify({
         'success': True,
         'view': 'workflow_state',
@@ -2520,11 +2540,30 @@ def get_pending_approvals():
     pending = []
     for alert in gov.get('alerts', []):
         if alert.get('approval_required') and alert.get('approval_pending', True):
+            approval_type = alert.get('type')
+            target = alert.get('recommended_preset')
+            item_id = db.build_approval_item_id(approval_type, target, {'target': target})
+            state_row = db.upsert_approval_state(
+                item_id=item_id,
+                approval_type=approval_type,
+                target=target,
+                title=alert.get('message'),
+                decision=alert.get('approval_status') or 'pending',
+                state=alert.get('approval_status') or 'pending',
+                workflow_state='pending',
+                replay_source='governance_pending_api',
+                details=alert,
+                preserve_terminal=True,
+            )
             pending.append({
-                'type': alert.get('type'),
-                'target': alert.get('recommended_preset'),
+                'item_id': item_id,
+                'type': approval_type,
+                'target': target,
                 'message': alert.get('message'),
-                'details': alert,
+                'state': state_row.get('state'),
+                'decision': state_row.get('decision'),
+                'updated_at': state_row.get('updated_at'),
+                'details': {**alert, 'persisted_state': state_row.get('state')},
             })
     return jsonify({'success': True, 'data': pending})
 
@@ -2536,11 +2575,15 @@ def execute_approval():
     payload = request.get_json(silent=True) or {}
     approval_type = payload.get('type')
     target = payload.get('target')
-    decision = payload.get('decision', 'approved')
+    decision = str(payload.get('decision', 'approved') or 'approved').lower()
     
     if not approval_type or not target:
         return jsonify({'success': False, 'error': 'missing type or target'}), 400
-    
+
+    item_id = db.build_approval_item_id(approval_type, target, payload)
+    payload['item_id'] = item_id
+    payload['state'] = payload.get('state') or decision
+    payload['replay_source'] = payload.get('replay_source') or 'approval_execute_api'
     db.record_approval(approval_type, target, decision, payload)
     
     if decision == 'approved' and approval_type == 'btc_grid_upgrade':
@@ -2575,6 +2618,32 @@ def get_approval_history():
     """获取审批历史"""
     limit = int(request.args.get('limit', 50))
     return jsonify({'success': True, 'data': db.get_approval_history(limit=limit)})
+
+
+@app.route('/api/approvals/state')
+def get_approval_state_list():
+    """获取审批持久化状态台账"""
+    limit = int(request.args.get('limit', 100))
+    state = request.args.get('state')
+    approval_type = request.args.get('type')
+    rows = db.get_approval_states(state=state, approval_type=approval_type, limit=limit)
+    return jsonify({'success': True, 'data': rows, 'summary': {
+        'count': len(rows),
+        'pending': sum(1 for row in rows if row.get('state') == 'pending'),
+        'approved': sum(1 for row in rows if row.get('state') == 'approved'),
+        'rejected': sum(1 for row in rows if row.get('state') == 'rejected'),
+        'deferred': sum(1 for row in rows if row.get('state') == 'deferred'),
+    }})
+
+
+@app.route('/api/approvals/replay')
+def replay_approval_state():
+    """返回 workflow-ready 视图并叠加已持久化审批状态，用于恢复/审计。"""
+    backtest_result = backtester.run_all(config.symbols)
+    calibration_report = backtest_result.get('calibration_report') or {}
+    payload = export_calibration_payload(calibration_report, view='workflow_ready')
+    payload = _persist_workflow_approval_payload(payload, replay_source='approval_replay_api')
+    return jsonify({'success': True, 'view': 'approval_replay', 'data': payload, 'summary': payload.get('summary') or {}})
 
 
 @app.route('/api/runtime/cleanup', methods=['GET', 'POST'])

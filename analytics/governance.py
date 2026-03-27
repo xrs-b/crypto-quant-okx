@@ -277,9 +277,13 @@ class GovernanceEngine:
         target = enriched.get('recommended_preset')
         latest = self.db.get_latest_approval(approval_type, target)
         if latest:
-            enriched['approval_status'] = latest.get('decision')
-            enriched['approval_last_at'] = latest.get('created_at')
-            enriched['approval_pending'] = False if latest.get('decision') in ('approved', 'rejected') else True
+            latest_state = latest.get('state') or latest.get('decision')
+            enriched['approval_status'] = latest_state
+            enriched['approval_last_at'] = latest.get('updated_at') or latest.get('created_at')
+            enriched['approval_pending'] = False if latest_state in ('approved', 'rejected', 'deferred', 'expired') else True
+            enriched['approval_reason'] = latest.get('reason') or (latest.get('details') or {}).get('reason')
+            enriched['approval_actor'] = latest.get('actor') or (latest.get('details') or {}).get('actor')
+            enriched['approval_item_id'] = latest.get('item_id')
         else:
             enriched['approval_status'] = 'pending' if enriched.get('approval_required') else 'not_required'
             enriched['approval_last_at'] = None

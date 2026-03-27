@@ -78,8 +78,24 @@
 | AR-M5-01 | strategy × regime 离线分析报告 | M5 | P1 | 否 | 校准闭环 |
 | AR-M5-02 | policy version 比较与建议生成 | M5 | P1 | 否 | 版本治理 |
 | AR-M5-03 | regime detector / policy calibration playbook | M5 | P2 | 否 | 运维与迭代 |
+| AR-M5-04 | approval decision persistence / replay state layer | M5 | P0 | 否（仅持久化与恢复） | workflow / approval 闭环 |
 
 ---
+
+## 2.1 近期补充进展（2026-03-27）
+
+### AR-M5-04｜approval decision persistence / replay state layer
+
+- **阶段 / 优先级**：M5 / P0
+- **生效范围**：仅持久化、恢复、审计；**不触发真实自动执行**
+- **目标**：把 dashboard / workflow-ready 输出里的 approval queue 从即时计算结果，推进到 `item_id` 级别的持久化状态台账，支持 `pending -> approved/rejected/deferred` 闭环，以及后续 replay / 恢复 / 审计。
+- **涉及模块**：`core/database.py`、`dashboard/api.py`、`analytics/helper.py`、`analytics/governance.py`、`tests/`
+- **输出**：新增 `approval_state` 持久化结构，核心字段包含 `item_id / approval_type / target / decision / state / workflow_state / updated_at / reason / actor / replay_source / details`。
+- **状态合并语义**：
+  - workflow-ready / pending API 重放时，只会刷新观测字段与 `last_seen_at`；
+  - 若已有 `approved/rejected/deferred/expired` 终态，后续 replay 不会把它冲回 `pending`；
+  - dashboard replay 会把已持久化状态重新叠加回 workflow-ready 视图，供恢复/审计使用。
+- **安全边界**：仅落地“审批状态账本”和“回放/恢复视图”；即使审批通过，也不会新增任何危险自动执行链路。
 
 ## 3. M0：基础定义与观测位（只观察不生效）
 

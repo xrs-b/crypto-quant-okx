@@ -248,6 +248,26 @@ class Database:
             )
         """)
 
+        # 审批状态台账（可恢复 / 可重放 / 可审计）
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS approval_state (
+                item_id TEXT PRIMARY KEY,
+                approval_type TEXT NOT NULL,
+                target TEXT,
+                title TEXT,
+                decision TEXT NOT NULL DEFAULT 'pending',
+                state TEXT NOT NULL DEFAULT 'pending',
+                workflow_state TEXT,
+                reason TEXT,
+                actor TEXT,
+                replay_source TEXT,
+                details TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
         # 治理参数变更历史
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS governance_config_history (
@@ -426,6 +446,23 @@ class Database:
         if 'trough_price' not in position_columns:
             cursor.execute("ALTER TABLE positions ADD COLUMN trough_price REAL")
 
+        cursor.execute("PRAGMA table_info(approval_state)")
+        approval_state_columns = {row[1] for row in cursor.fetchall()}
+        for ddl in [
+            ('title', "ALTER TABLE approval_state ADD COLUMN title TEXT"),
+            ('decision', "ALTER TABLE approval_state ADD COLUMN decision TEXT NOT NULL DEFAULT 'pending'"),
+            ('state', "ALTER TABLE approval_state ADD COLUMN state TEXT NOT NULL DEFAULT 'pending'"),
+            ('workflow_state', "ALTER TABLE approval_state ADD COLUMN workflow_state TEXT"),
+            ('reason', "ALTER TABLE approval_state ADD COLUMN reason TEXT"),
+            ('actor', "ALTER TABLE approval_state ADD COLUMN actor TEXT"),
+            ('replay_source', "ALTER TABLE approval_state ADD COLUMN replay_source TEXT"),
+            ('details', "ALTER TABLE approval_state ADD COLUMN details TEXT"),
+            ('updated_at', "ALTER TABLE approval_state ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP"),
+            ('last_seen_at', "ALTER TABLE approval_state ADD COLUMN last_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP"),
+        ]:
+            if ddl[0] not in approval_state_columns:
+                cursor.execute(ddl[1])
+
         # 创建索引
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_signals_symbol ON signals(symbol)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_signals_created ON signals(created_at)")
@@ -441,6 +478,8 @@ class Database:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_open_intents_symbol_side_status ON open_intents(symbol, side, status)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_open_intents_signal_id ON open_intents(signal_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_layer_plan_states_symbol_side ON layer_plan_states(symbol, side)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_approval_state_type_target ON approval_state(approval_type, target)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_approval_state_state_updated ON approval_state(state, updated_at)")
         
         conn.commit()
         conn.close()
@@ -1190,15 +1229,138 @@ class Database:
         row['summary'] = json.loads(row['summary']) if row.get('summary') else {}
         return row
 
+    def _normalize_approval_state(self, state: Optional[str], decision: Optional[str] = None) -> str:
+        state_value = str(state or '').strip().lower()
+        decision_value = str(decision or '').strip().lower()
+        allowed = {'pending', 'approved', 'rejected', 'deferred', 'expired', 'blocked', 'ready', 'not_required', 'replayed'}
+        if state_value in allowed:
+            return state_value
+        if decision_value in {'approved', 'rejected', 'deferred', 'expired'}:
+            return decision_value
+        return 'pending'
+
+    def build_approval_item_id(self, approval_type: str, target: str = None, details: Dict = None) -> str:
+        details = details or {}
+        if details.get('item_id'):
+            return str(details.get('item_id'))
+        if details.get('approval_id'):
+            return str(details.get('approval_id'))
+        target_part = str(target or details.get('target') or '--')
+        return f"{approval_type}::{target_part}"
+
+    def upsert_approval_state(self, item_id: str, approval_type: str, target: str = None, title: str = None,
+                              decision: str = 'pending', state: str = None, workflow_state: str = None,
+                              reason: str = None, actor: str = None, replay_source: str = None,
+                              details: Dict = None, preserve_terminal: bool = True) -> Dict:
+        normalized_decision = str(decision or 'pending').strip().lower()
+        normalized_state = self._normalize_approval_state(state, normalized_decision)
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM approval_state WHERE item_id = ? LIMIT 1", (item_id,))
+        existing = cursor.fetchone()
+        existing_row = dict(existing) if existing else None
+        if existing_row and existing_row.get('details'):
+            try:
+                existing_row['details'] = json.loads(existing_row['details'])
+            except Exception:
+                existing_row['details'] = {}
+        elif existing_row:
+            existing_row['details'] = {}
+
+        if existing_row and preserve_terminal and existing_row.get('state') in {'approved', 'rejected', 'deferred', 'expired'} and normalized_state in {'pending', 'ready', 'replayed'}:
+            normalized_state = existing_row.get('state')
+            normalized_decision = existing_row.get('decision') or normalized_decision
+            workflow_state = workflow_state or existing_row.get('workflow_state')
+            reason = reason or existing_row.get('reason')
+            actor = actor or existing_row.get('actor')
+
+        merged_details = dict(existing_row.get('details') or {}) if existing_row else {}
+        if details:
+            merged_details.update(details)
+
+        if existing_row:
+            cursor.execute(
+                """
+                UPDATE approval_state
+                SET approval_type = ?,
+                    target = ?,
+                    title = ?,
+                    decision = ?,
+                    state = ?,
+                    workflow_state = ?,
+                    reason = ?,
+                    actor = ?,
+                    replay_source = ?,
+                    details = ?,
+                    updated_at = CURRENT_TIMESTAMP,
+                    last_seen_at = CURRENT_TIMESTAMP
+                WHERE item_id = ?
+                """,
+                (approval_type, target, title, normalized_decision, normalized_state, workflow_state, reason, actor, replay_source, json.dumps(merged_details, ensure_ascii=False), item_id)
+            )
+        else:
+            cursor.execute(
+                """
+                INSERT INTO approval_state (item_id, approval_type, target, title, decision, state, workflow_state, reason, actor, replay_source, details, created_at, updated_at, last_seen_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                """,
+                (item_id, approval_type, target, title, normalized_decision, normalized_state, workflow_state, reason, actor, replay_source, json.dumps(merged_details, ensure_ascii=False))
+            )
+        conn.commit()
+        cursor.execute("SELECT * FROM approval_state WHERE item_id = ? LIMIT 1", (item_id,))
+        row = dict(cursor.fetchone())
+        conn.close()
+        row['details'] = json.loads(row['details']) if row.get('details') else {}
+        return row
+
     def record_approval(self, approval_type: str, target: str, decision: str, details: Dict = None):
+        details = details or {}
+        item_id = self.build_approval_item_id(approval_type, target, details)
+        state = self._normalize_approval_state(details.get('state'), decision)
+        self.upsert_approval_state(
+            item_id=item_id,
+            approval_type=approval_type,
+            target=target,
+            title=details.get('title') or details.get('message'),
+            decision=decision,
+            state=state,
+            workflow_state=details.get('workflow_state'),
+            reason=details.get('reason') or details.get('note'),
+            actor=details.get('actor'),
+            replay_source=details.get('replay_source') or 'manual_decision',
+            details=details,
+            preserve_terminal=False,
+        )
         conn = self._get_connection()
         cursor = conn.cursor()
         cursor.execute("""
             INSERT INTO approval_history (approval_type, target, decision, details)
             VALUES (?, ?, ?, ?)
-        """, (approval_type, target, decision, json.dumps(details) if details else None))
+        """, (approval_type, target, decision, json.dumps(details, ensure_ascii=False) if details else None))
         conn.commit()
         conn.close()
+
+    def sync_approval_items(self, items: List[Dict], replay_source: str = 'workflow_snapshot', preserve_terminal: bool = True) -> List[Dict]:
+        synced = []
+        for item in items or []:
+            approval_type = str(item.get('approval_type') or item.get('action_type') or 'workflow_approval')
+            target = item.get('target') or item.get('recommended_preset') or item.get('playbook_id')
+            row = self.upsert_approval_state(
+                item_id=str(item.get('item_id') or item.get('approval_id') or self.build_approval_item_id(approval_type, target, item)),
+                approval_type=approval_type,
+                target=target,
+                title=item.get('title') or item.get('message'),
+                decision=item.get('decision') or item.get('approval_state') or 'pending',
+                state=item.get('state') or item.get('approval_state') or 'pending',
+                workflow_state=item.get('workflow_state') or item.get('decision_state'),
+                reason=item.get('reason'),
+                actor=item.get('actor'),
+                replay_source=item.get('replay_source') or replay_source,
+                details=item,
+                preserve_terminal=preserve_terminal,
+            )
+            synced.append(row)
+        return synced
 
     def record_override_audit(self, action: str, target_file: str = None, backup_path: str = None,
                               symbols: List[str] = None, parameter_count: int = 0, note: str = None,
@@ -1238,11 +1400,62 @@ class Database:
 
     def get_approval_history(self, limit: int = 50) -> List[Dict]:
         conn = self._get_connection()
-        df = pd.read_sql_query("SELECT * FROM approval_history ORDER BY created_at DESC LIMIT ?", conn, params=(limit,))
+        df = pd.read_sql_query("SELECT * FROM approval_history ORDER BY created_at DESC, id DESC LIMIT ?", conn, params=(limit,))
         conn.close()
         if not df.empty:
             df['details'] = df['details'].apply(lambda x: json.loads(x) if x else {})
         return df.to_dict('records')
+
+    def get_approval_states(self, state: str = None, approval_type: str = None, limit: int = 100) -> List[Dict]:
+        conn = self._get_connection()
+        query = "SELECT * FROM approval_state WHERE 1=1"
+        params = []
+        if state:
+            query += " AND state = ?"
+            params.append(state)
+        if approval_type:
+            query += " AND approval_type = ?"
+            params.append(approval_type)
+        query += " ORDER BY updated_at DESC, item_id ASC LIMIT ?"
+        params.append(limit)
+        df = pd.read_sql_query(query, conn, params=tuple(params))
+        conn.close()
+        if not df.empty:
+            df['details'] = df['details'].apply(lambda x: json.loads(x) if x else {})
+        return df.to_dict('records')
+
+    def get_approval_state(self, item_id: str) -> Optional[Dict]:
+        conn = self._get_connection()
+        df = pd.read_sql_query("SELECT * FROM approval_state WHERE item_id = ? LIMIT 1", conn, params=(item_id,))
+        conn.close()
+        if df.empty:
+            return None
+        row = df.iloc[0].to_dict()
+        row['details'] = json.loads(row['details']) if row.get('details') else {}
+        return row
+
+    def get_latest_approval(self, approval_type: str, target: str = None) -> Optional[Dict]:
+        item_id = self.build_approval_item_id(approval_type, target)
+        state_row = self.get_approval_state(item_id)
+        if state_row:
+            return {
+                **state_row,
+                'created_at': state_row.get('updated_at') or state_row.get('created_at'),
+            }
+        conn = self._get_connection()
+        query = "SELECT * FROM approval_history WHERE approval_type = ?"
+        params = [approval_type]
+        if target is not None:
+            query += " AND target = ?"
+            params.append(target)
+        query += " ORDER BY created_at DESC, id DESC LIMIT 1"
+        df = pd.read_sql_query(query, conn, params=params)
+        conn.close()
+        if df.empty:
+            return None
+        row = df.iloc[0].to_dict()
+        row['details'] = json.loads(row['details']) if row.get('details') else {}
+        return row
 
     def get_risk_guard_state(self, guard_key: str = 'loss_streak') -> Dict:
         conn = self._get_connection()
@@ -1284,22 +1497,6 @@ class Database:
         )
         conn.commit()
         conn.close()
-
-    def get_latest_approval(self, approval_type: str, target: str = None) -> Optional[Dict]:
-        conn = self._get_connection()
-        query = "SELECT * FROM approval_history WHERE approval_type = ?"
-        params = [approval_type]
-        if target is not None:
-            query += " AND target = ?"
-            params.append(target)
-        query += " ORDER BY created_at DESC, id DESC LIMIT 1"
-        df = pd.read_sql_query(query, conn, params=params)
-        conn.close()
-        if df.empty:
-            return None
-        row = df.iloc[0].to_dict()
-        row['details'] = json.loads(row['details']) if row.get('details') else {}
-        return row
 
     def record_smoke_run(self, exchange_mode: str, position_mode: str, symbol: str, side: str,
                          amount: float = None, success: bool = False, error: str = None, details: Dict = None) -> int:

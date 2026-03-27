@@ -189,6 +189,12 @@
   - `queue_plan` 新增 `queue_transition` 与 `queue_progression.status`，把 queue disposition 细化成 `ready_to_queue / blocked_by_approval / deferred`；
   - queue-only dispatcher 不再一律返回 `queued`，而会按审批 gate 返回 `queued / blocked_by_approval / deferred`，方便后续 queue executor / dashboard / audit 直接消费；
   - 仍保持安全边界：只做 queue semantics 与审批钩子，不触发真实交易执行，不做 live 参数 apply。
+- **2026-03-27 skeleton+3 / staged-dispatcher + transition-rules 增量**：
+  - executor plan / dispatch / result / persisted details 统一补充稳定字段：`transition_rule / dispatch_route / next_transition / retryable / rollback_hint`；
+  - 新增 staged dispatcher rule resolver，按 `stage_model / queue_progression / approval_required / requires_manual / auto_approval_decision / blockers / terminal state` 决定 route；
+  - queue-only path 细分为 `manual_review_queue / deferred_review_queue / stage_promotion_queue / operator_followup_queue` 等 dispatch route，表达更接近真实 rollout workflow 的队列语义；
+  - safe-apply path 明确 `stage_metadata_apply / queue_metadata_apply / review_metadata_apply / safe_state_apply` 等 apply route，但依旧只写状态/元数据，不触发真实下单；
+  - 新增 deferred retry / rollback hint 语义，方便后续 dashboard / agent / queue executor 做自动重试、人工回滚与巡检解释。
 
 ### AR-M5-05｜approval audit / stale cleanup / decision diff layer
 

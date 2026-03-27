@@ -7,6 +7,108 @@ from typing import Dict, List, Optional, Any
 
 TERMINAL_APPROVAL_STATES = {'approved', 'rejected', 'deferred', 'expired'}
 AUTO_APPROVAL_DECISIONS = {'auto_approve', 'manual_review', 'freeze', 'defer'}
+SAFE_ROLLOUT_STAGE_HANDLER_REGISTRY = {
+    'observe_ready': {
+        'handler_key': 'apply::observe_ready',
+        'executor_class': 'state_transition',
+        'stage_family': 'observe',
+        'route': 'safe_state_apply',
+        'disposition': 'apply',
+        'safe_boundary': 'state_only',
+        'description': 'Mark low-risk observe items ready without changing live trading behaviour.',
+    },
+    'queue_promote_safe': {
+        'handler_key': 'apply::queue_promote_safe',
+        'executor_class': 'queue_metadata',
+        'stage_family': 'queue',
+        'route': 'queue_metadata_apply',
+        'disposition': 'apply',
+        'safe_boundary': 'metadata_only',
+        'description': 'Apply queue progression metadata only; never triggers real execution.',
+    },
+    'stage_prepare_safe': {
+        'handler_key': 'apply::stage_prepare_safe',
+        'executor_class': 'stage_metadata',
+        'stage_family': 'stage',
+        'route': 'stage_metadata_apply',
+        'disposition': 'apply',
+        'safe_boundary': 'metadata_only',
+        'description': 'Apply rollout stage metadata and transition hints only.',
+    },
+    'review_schedule_safe': {
+        'handler_key': 'apply::review_schedule_safe',
+        'executor_class': 'review_metadata',
+        'stage_family': 'review',
+        'route': 'review_metadata_apply',
+        'disposition': 'apply',
+        'safe_boundary': 'metadata_only',
+        'description': 'Schedule review checkpoints without executing trading changes.',
+    },
+    'metadata_annotate_safe': {
+        'handler_key': 'apply::metadata_annotate_safe',
+        'executor_class': 'annotation_metadata',
+        'stage_family': 'metadata',
+        'route': 'metadata_annotation_apply',
+        'disposition': 'apply',
+        'safe_boundary': 'metadata_only',
+        'description': 'Persist audit annotations/tags only.',
+    },
+    'queue_only_live_trading_change': {
+        'handler_key': 'queue_only::live_trading_change',
+        'executor_class': 'live_trading_change',
+        'stage_family': 'manual_gate',
+        'route': 'manual_review_queue',
+        'disposition': 'queue_only',
+        'safe_boundary': 'queue_only',
+        'description': 'Sensitive live trading changes stay queued for humans.',
+    },
+    'queue_only_governance_control': {
+        'handler_key': 'queue_only::governance_control',
+        'executor_class': 'governance_control',
+        'stage_family': 'manual_gate',
+        'route': 'manual_review_queue',
+        'disposition': 'queue_only',
+        'safe_boundary': 'queue_only',
+        'description': 'Governance control actions are queue-only.',
+    },
+    'queue_only_strategy_weight_change': {
+        'handler_key': 'queue_only::strategy_weight_change',
+        'executor_class': 'strategy_weight_change',
+        'stage_family': 'manual_gate',
+        'route': 'manual_review_queue',
+        'disposition': 'queue_only',
+        'safe_boundary': 'queue_only',
+        'description': 'Strategy weight changes stay queued for review.',
+    },
+    'queue_only_policy_switch': {
+        'handler_key': 'queue_only::policy_switch',
+        'executor_class': 'policy_switch',
+        'stage_family': 'manual_gate',
+        'route': 'manual_review_queue',
+        'disposition': 'queue_only',
+        'safe_boundary': 'queue_only',
+        'description': 'Policy switch actions are intentionally not auto-applied.',
+    },
+    'queue_only_rollout_control': {
+        'handler_key': 'queue_only::rollout_control',
+        'executor_class': 'rollout_control',
+        'stage_family': 'manual_gate',
+        'route': 'manual_review_queue',
+        'disposition': 'queue_only',
+        'safe_boundary': 'queue_only',
+        'description': 'Rollout freeze remains queue-only and fully auditable.',
+    },
+    'unsupported_action': {
+        'handler_key': 'unsupported::unsupported_action',
+        'executor_class': 'unsupported',
+        'stage_family': 'unsupported',
+        'route': 'unsupported_hold',
+        'disposition': 'unsupported',
+        'safe_boundary': 'hold_only',
+        'description': 'Unknown actions are held and surfaced as unsupported.',
+    },
+}
+
 CONTROLLED_ROLLOUT_ACTION_SPECS = {
     'joint_observe': {
         'state': 'ready',
@@ -14,6 +116,7 @@ CONTROLLED_ROLLOUT_ACTION_SPECS = {
         'event_type': 'controlled_rollout_state_apply',
         'result_action': 'state_applied',
         'effect': 'safe_state_transition',
+        'safe_handler': 'observe_ready',
     },
     'joint_queue_promote_safe': {
         'state': 'ready',
@@ -21,6 +124,7 @@ CONTROLLED_ROLLOUT_ACTION_SPECS = {
         'event_type': 'controlled_rollout_queue_promote',
         'result_action': 'queue_promoted',
         'effect': 'safe_queue_promotion',
+        'safe_handler': 'queue_promote_safe',
     },
     'joint_stage_prepare': {
         'state': 'ready',
@@ -28,6 +132,7 @@ CONTROLLED_ROLLOUT_ACTION_SPECS = {
         'event_type': 'controlled_rollout_stage_prepare',
         'result_action': 'stage_prepared',
         'effect': 'safe_rollout_stage_transition',
+        'safe_handler': 'stage_prepare_safe',
     },
     'joint_review_schedule': {
         'state': 'pending',
@@ -35,6 +140,7 @@ CONTROLLED_ROLLOUT_ACTION_SPECS = {
         'event_type': 'controlled_rollout_review_schedule',
         'result_action': 'review_scheduled',
         'effect': 'safe_review_scheduling',
+        'safe_handler': 'review_schedule_safe',
     },
     'joint_metadata_annotate': {
         'state': 'pending',
@@ -42,6 +148,7 @@ CONTROLLED_ROLLOUT_ACTION_SPECS = {
         'event_type': 'controlled_rollout_metadata_annotate',
         'result_action': 'metadata_annotated',
         'effect': 'safe_metadata_annotation',
+        'safe_handler': 'metadata_annotate_safe',
     },
 }
 
@@ -88,6 +195,7 @@ ROLLOUT_EXECUTOR_ACTION_SPECS = {
         'blocked_reason': 'live_rollout_parameter_change_not_supported',
         'requires_approval': True,
         'rollback_capable': False,
+        'safe_handler': 'queue_only_live_trading_change',
     },
     'joint_freeze': {
         'dispatch_mode': 'queue_only',
@@ -96,6 +204,7 @@ ROLLOUT_EXECUTOR_ACTION_SPECS = {
         'blocked_reason': 'freeze_apply_not_automated_in_executor',
         'requires_approval': True,
         'rollback_capable': False,
+        'safe_handler': 'queue_only_governance_control',
     },
     'joint_deweight': {
         'dispatch_mode': 'queue_only',
@@ -104,6 +213,7 @@ ROLLOUT_EXECUTOR_ACTION_SPECS = {
         'blocked_reason': 'strategy_weight_change_not_automated_in_executor',
         'requires_approval': True,
         'rollback_capable': False,
+        'safe_handler': 'queue_only_strategy_weight_change',
     },
     'prefer_strategy_best_policy': {
         'dispatch_mode': 'queue_only',
@@ -112,6 +222,7 @@ ROLLOUT_EXECUTOR_ACTION_SPECS = {
         'blocked_reason': 'policy_switch_not_automated_in_executor',
         'requires_approval': True,
         'rollback_capable': False,
+        'safe_handler': 'queue_only_policy_switch',
     },
     'rollout_freeze': {
         'dispatch_mode': 'queue_only',
@@ -120,6 +231,7 @@ ROLLOUT_EXECUTOR_ACTION_SPECS = {
         'blocked_reason': 'rollout_freeze_not_automated_in_executor',
         'requires_approval': True,
         'rollback_capable': False,
+        'safe_handler': 'queue_only_rollout_control',
     },
 }
 
@@ -419,14 +531,77 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
 
 
+def _resolve_safe_rollout_handler(spec: Optional[Dict[str, Any]] = None, action_type: Optional[str] = None) -> Dict[str, Any]:
+    handler_name = str((spec or {}).get('safe_handler') or '').strip()
+    handler = SAFE_ROLLOUT_STAGE_HANDLER_REGISTRY.get(handler_name)
+    if handler:
+        return dict(handler)
+    fallback = dict(SAFE_ROLLOUT_STAGE_HANDLER_REGISTRY['unsupported_action'])
+    fallback['requested_action_type'] = str(action_type or '').strip().lower()
+    fallback['requested_handler'] = handler_name or None
+    return fallback
+
+
+def _build_safe_rollout_action_registry(allowed_action_types: Optional[List[str]] = None) -> Dict[str, Any]:
+    allow = set(_dedupe_strings(allowed_action_types or []))
+    handlers = {key: dict(value) for key, value in SAFE_ROLLOUT_STAGE_HANDLER_REGISTRY.items()}
+    actions = {}
+    executable = []
+    queue_only = []
+    unsupported = []
+    for action_type, spec in ROLLOUT_EXECUTOR_ACTION_SPECS.items():
+        handler = _resolve_safe_rollout_handler(spec, action_type)
+        entry = {
+            'action_type': action_type,
+            'allowlisted': action_type in allow,
+            'dispatch_mode': spec.get('dispatch_mode') or handler.get('disposition'),
+            'executor_class': spec.get('executor_class') or handler.get('executor_class'),
+            'handler': handler,
+            'handler_key': handler.get('handler_key'),
+            'route': handler.get('route'),
+            'stage_family': handler.get('stage_family'),
+            'rollback_capable': bool(spec.get('rollback_capable', False)),
+            'audit_code': spec.get('audit_code'),
+        }
+        actions[action_type] = entry
+        disposition = entry['dispatch_mode']
+        if disposition == 'apply':
+            executable.append(entry)
+        elif disposition == 'queue_only':
+            queue_only.append(entry)
+        else:
+            unsupported.append(entry)
+    return {
+        'actions': actions,
+        'handlers': handlers,
+        'executable': executable,
+        'queue_only': queue_only,
+        'unsupported': unsupported,
+        'fallback_handler': dict(SAFE_ROLLOUT_STAGE_HANDLER_REGISTRY['unsupported_action']),
+    }
+
+
 def _build_controlled_rollout_action_details(action_type: str, row: Dict, workflow_item: Dict, spec: Dict, settings: Dict) -> Dict[str, Any]:
     now_iso = _utc_now_iso()
+    handler = _resolve_safe_rollout_handler(spec, action_type)
     details: Dict[str, Any] = {
         'effect': spec.get('effect') or 'safe_state_transition',
         'action_type': action_type,
         'safe_apply': True,
         'real_trade_execution': False,
         'dangerous_live_parameter_change': False,
+        'safe_handler': handler,
+        'safe_handler_key': handler.get('handler_key'),
+        'safe_handler_stage_family': handler.get('stage_family'),
+        'safe_handler_route': handler.get('route'),
+        'safe_handler_disposition': handler.get('disposition'),
+        'serialization_ready': True,
+        'observability': {
+            'handler_key': handler.get('handler_key'),
+            'stage_family': handler.get('stage_family'),
+            'route': handler.get('route'),
+            'disposition': handler.get('disposition'),
+        },
     }
 
     if action_type == 'joint_queue_promote_safe':
@@ -435,6 +610,12 @@ def _build_controlled_rollout_action_details(action_type: str, row: Dict, workfl
             'queue_name': queue_name,
             'queue_action': 'promote_safe',
             'queue_priority': row.get('queue_priority') or workflow_item.get('queue_priority') or 'expedite_safe',
+            'queue_handler': {
+                'queue_name': queue_name,
+                'queue_action': 'promote_safe',
+                'disposition': handler.get('disposition'),
+                'route': handler.get('route'),
+            },
         })
     elif action_type == 'joint_stage_prepare':
         target_stage = str(row.get('target_rollout_stage') or workflow_item.get('target_rollout_stage') or 'prepared').strip().lower() or 'prepared'
@@ -445,6 +626,12 @@ def _build_controlled_rollout_action_details(action_type: str, row: Dict, workfl
             'stage_transition': {'from': previous_stage, 'to': target_stage},
             'stage_model': workflow_item.get('stage_model') or row.get('stage_model') or {},
             'queue_progression': workflow_item.get('queue_progression') or row.get('queue_progression') or {},
+            'stage_handler': {
+                'current_stage': previous_stage,
+                'target_stage': target_stage,
+                'disposition': handler.get('disposition'),
+                'route': handler.get('route'),
+            },
         })
     elif action_type == 'joint_review_schedule':
         review_after_hours = int(row.get('review_after_hours') or workflow_item.get('review_after_hours') or settings.get('default_review_after_hours') or 24)
@@ -452,14 +639,21 @@ def _build_controlled_rollout_action_details(action_type: str, row: Dict, workfl
         due_at = row.get('review_due_at') or workflow_item.get('review_due_at')
         if not due_at:
             due_at = (datetime.now(timezone.utc) + timedelta(hours=review_after_hours)).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
+        scheduled_review = workflow_item.get('scheduled_review') or row.get('scheduled_review') or {
+            'type': 'time_window',
+            'target_trade_count': row.get('target_trade_count') or workflow_item.get('target_trade_count'),
+        }
         details.update({
             'review_status': 'scheduled',
             'review_scheduled_at': now_iso,
             'review_due_at': due_at,
             'review_after_hours': review_after_hours,
-            'scheduled_review': workflow_item.get('scheduled_review') or row.get('scheduled_review') or {
-                'type': 'time_window',
-                'target_trade_count': row.get('target_trade_count') or workflow_item.get('target_trade_count'),
+            'scheduled_review': scheduled_review,
+            'review_handler': {
+                'review_status': 'scheduled',
+                'review_due_at': due_at,
+                'review_after_hours': review_after_hours,
+                'route': handler.get('route'),
             },
         })
     elif action_type == 'joint_metadata_annotate':
@@ -471,6 +665,11 @@ def _build_controlled_rollout_action_details(action_type: str, row: Dict, workfl
             'annotation_tags': tags,
             'annotation_note': note,
             'annotated_at': now_iso,
+            'metadata_handler': {
+                'annotation_count': len(annotations) if isinstance(annotations, dict) else 1,
+                'annotation_tags': tags,
+                'route': handler.get('route'),
+            },
         })
 
     return details
@@ -809,35 +1008,32 @@ def _get_rollout_executor_settings(config: Any = None, overrides: Optional[Dict[
 
 
 def _build_rollout_executor_catalog(allowed_action_types: Optional[List[str]] = None) -> Dict[str, Any]:
-    allow = set(_dedupe_strings(allowed_action_types or []))
-    executable = []
-    queue_only = []
-    unsupported = []
+    registry = _build_safe_rollout_action_registry(allowed_action_types)
     handlers = {}
-    for action_type, spec in ROLLOUT_EXECUTOR_ACTION_SPECS.items():
+    for action_type, entry in (registry.get('actions') or {}).items():
         row = {
             'action_type': action_type,
-            'dispatch_mode': spec.get('dispatch_mode'),
-            'executor_class': spec.get('executor_class'),
-            'handler_key': f"{spec.get('dispatch_mode') or 'unsupported'}::{spec.get('executor_class') or 'unknown'}",
-            'allowlisted': action_type in allow,
-            'audit_code': spec.get('audit_code'),
-            'rollback_capable': bool(spec.get('rollback_capable', False)),
+            'dispatch_mode': entry.get('dispatch_mode'),
+            'executor_class': entry.get('executor_class'),
+            'handler_key': entry.get('handler_key'),
+            'allowlisted': bool(entry.get('allowlisted')),
+            'audit_code': entry.get('audit_code'),
+            'rollback_capable': bool(entry.get('rollback_capable', False)),
+            'handler': entry.get('handler'),
+            'route': entry.get('route'),
+            'stage_family': entry.get('stage_family'),
         }
+        spec = ROLLOUT_EXECUTOR_ACTION_SPECS.get(action_type) or {}
         if spec.get('blocked_reason'):
             row['blocked_reason'] = spec.get('blocked_reason')
         handlers[action_type] = dict(row)
-        if spec.get('dispatch_mode') == 'apply':
-            executable.append(row)
-        elif spec.get('dispatch_mode') == 'queue_only':
-            queue_only.append(row)
-        else:
-            unsupported.append(row)
     return {
-        'executable': executable,
-        'queue_only': queue_only,
-        'unsupported': unsupported,
+        'executable': registry.get('executable') or [],
+        'queue_only': registry.get('queue_only') or [],
+        'unsupported': registry.get('unsupported') or [],
         'handlers': handlers,
+        'stage_handlers': registry.get('handlers') or {},
+        'fallback_handler': registry.get('fallback_handler') or {},
     }
 
 
@@ -1136,6 +1332,7 @@ def execute_rollout_executor(payload: Dict, db: Any, *, config: Any = None, sett
     workflow_lookup = {row.get('item_id'): row for row in (workflow_state.get('item_states') or []) if row.get('item_id')}
     allowlisted = set(execution_settings.get('allowed_action_types') or [])
     catalog = _build_rollout_executor_catalog(execution_settings.get('allowed_action_types'))
+    action_registry = _build_safe_rollout_action_registry(execution_settings.get('allowed_action_types'))
 
     result = {
         'schema_version': 'm5_rollout_executor_skeleton_v2',
@@ -1158,6 +1355,7 @@ def execute_rollout_executor(payload: Dict, db: Any, *, config: Any = None, sett
             'by_status': {},
         },
         'supported_action_map': catalog,
+        'action_registry': action_registry,
         'items': [],
     }
     payload['rollout_executor'] = result
@@ -1202,9 +1400,10 @@ def execute_rollout_executor(payload: Dict, db: Any, *, config: Any = None, sett
         requires_manual = bool(row.get('requires_manual'))
         approval_required = bool(row.get('approval_required') if row.get('approval_required') is not None else workflow_item.get('approval_required'))
         eligible = bool(row.get('auto_approval_eligible'))
-        dispatch_mode = (spec or {}).get('dispatch_mode') or 'unsupported'
-        executor_class = (spec or {}).get('executor_class') or 'unsupported'
-        handler_key = f'{dispatch_mode}::{executor_class}'
+        handler = _resolve_safe_rollout_handler(spec, action_type)
+        dispatch_mode = (spec or {}).get('dispatch_mode') or handler.get('disposition') or 'unsupported'
+        executor_class = (spec or {}).get('executor_class') or handler.get('executor_class') or 'unsupported'
+        handler_key = handler.get('handler_key') or f'{dispatch_mode}::{executor_class}'
         idempotency_key = f'rollout_executor::{approval_id}::{action_type}::{(spec or {}).get("state") or current_state}::{(spec or {}).get("workflow_state") or current_workflow_state}'
 
         transition_rule = _resolve_rollout_transition_rule(
@@ -1242,6 +1441,7 @@ def execute_rollout_executor(payload: Dict, db: Any, *, config: Any = None, sett
             'handler_key': handler_key,
             'rollback_capable': bool((spec or {}).get('rollback_capable', False)),
             'idempotency_key': idempotency_key,
+            'safe_handler': handler,
             'transition_rule': transition_rule.get('transition_rule'),
             'dispatch_route': transition_rule.get('dispatch_route'),
             'next_transition': transition_rule.get('next_transition'),
@@ -1264,6 +1464,9 @@ def execute_rollout_executor(payload: Dict, db: Any, *, config: Any = None, sett
                 'allowlisted_apply_only': True,
             },
             'audit_code': (spec or {}).get('audit_code') or 'UNSUPPORTED_ACTION',
+            'handler_key': handler_key,
+            'handler_route': handler.get('route'),
+            'handler_disposition': handler.get('disposition'),
             'auto_approval_decision': auto_decision,
             'auto_approval_reason': row.get('reason'),
             'auto_approval_confidence': row.get('confidence'),
@@ -1396,6 +1599,9 @@ def execute_rollout_executor(payload: Dict, db: Any, *, config: Any = None, sett
             'execution_mode': execution_settings['mode'],
             'dispatch_mode': dispatch_mode,
             'handler_key': handler_key,
+            'safe_handler_route': handler.get('route'),
+            'safe_handler_disposition': handler.get('disposition'),
+            'safe_handler_stage_family': handler.get('stage_family'),
             'rollback_capable': bool(spec.get('rollback_capable', False)),
             'idempotency_key': idempotency_key,
             'transition_rule': transition_rule.get('transition_rule'),

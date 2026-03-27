@@ -200,6 +200,13 @@
   - safe-apply path 明确 `stage_metadata_apply / queue_metadata_apply / review_metadata_apply / safe_state_apply` 等 apply route，但依旧只写状态/元数据，不触发真实下单；
   - 新增 deferred retry / rollback hint 语义，方便后续 dashboard / agent / queue executor 做自动重试、人工回滚与巡检解释。
 
+- **2026-03-27 skeleton+4 / safe-action-registry + richer-stage-handlers 增量**：
+  - 在 `analytics/helper.py` 把 very-safe apply / queue-only 动作正式收敛为 `SAFE_ROLLOUT_STAGE_HANDLER_REGISTRY` + `action_registry`，不再只靠 scattered if/else 推断；
+  - `supported_action_map` 继续保留，同时新增 `stage_handlers / fallback_handler`，executor 结果里新增 `action_registry`，方便 dashboard / agent / audit 稳定读取；
+  - `joint_stage_prepare / joint_queue_promote_safe / joint_review_schedule / joint_metadata_annotate` 各自补 richer handler payload（`stage_handler / queue_handler / review_handler / metadata_handler`），并统一保留 `safe_handler_key / route / disposition / stage_family / observability / serialization_ready`；
+  - unsupported action 明确走 fallback handler：`unsupported::unsupported_action` + `unsupported_hold`，避免未来扩 action type 时 silently 混进默认 apply；
+  - 继续保持安全边界：所有 handler 都只落状态/元数据/审计，不触发真实交易执行，不做危险 live parameter apply。
+
 ### AR-M5-05｜approval audit / stale cleanup / decision diff layer
 
 - **阶段 / 优先级**：M5 / P0

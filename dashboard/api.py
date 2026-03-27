@@ -2835,6 +2835,44 @@ def get_approval_history():
     return jsonify({'success': True, 'data': db.get_approval_history(limit=limit)})
 
 
+@app.route('/api/approvals/state-machine')
+def get_approval_state_machine_list():
+    """返回审批/rollout 的统一状态机摘要，方便 dashboard/agent 直接消费。"""
+    limit = int(request.args.get('limit', 100))
+    state = request.args.get('state')
+    approval_type = request.args.get('type')
+    rows = db.get_approval_states(state=state, approval_type=approval_type, limit=limit)
+    items = []
+    phase_counts = {}
+    workflow_counts = {}
+    for row in rows:
+        semantics = ((row.get('details') or {}).get('state_machine') or {})
+        phase = semantics.get('phase') or 'unknown'
+        workflow_state = semantics.get('workflow_state') or row.get('workflow_state') or 'pending'
+        phase_counts[phase] = phase_counts.get(phase, 0) + 1
+        workflow_counts[workflow_state] = workflow_counts.get(workflow_state, 0) + 1
+        items.append({
+            'item_id': row.get('item_id'),
+            'approval_type': row.get('approval_type'),
+            'target': row.get('target'),
+            'title': row.get('title'),
+            'decision': row.get('decision'),
+            'state': row.get('state'),
+            'workflow_state': row.get('workflow_state'),
+            'updated_at': row.get('updated_at'),
+            'reason': row.get('reason'),
+            'actor': row.get('actor'),
+            'state_machine': semantics,
+        })
+    return jsonify({'success': True, 'data': items, 'summary': {
+        'count': len(items),
+        'phase_counts': phase_counts,
+        'workflow_state_counts': workflow_counts,
+        'rollback_candidate_count': sum(1 for row in items if (row.get('state_machine') or {}).get('rollback_candidate')),
+        'retryable_count': sum(1 for row in items if (row.get('state_machine') or {}).get('retryable')),
+        'terminal_count': sum(1 for row in items if (row.get('state_machine') or {}).get('terminal')),
+    }})
+
 @app.route('/api/approvals/state')
 def get_approval_state_list():
     """获取审批持久化状态台账"""

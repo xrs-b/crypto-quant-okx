@@ -68,6 +68,64 @@ class Database:
         data['pnl_percent'] = (pnl / margin * 100) if pnl is not None and margin > 0 else None
         return data
 
+    def _normalize_workflow_state(self, workflow_state: Optional[str], approval_state: Optional[str] = None) -> str:
+        normalized = str(workflow_state or '').strip().lower()
+        allowed = {'pending', 'ready', 'queued', 'blocked', 'blocked_by_approval', 'review_pending', 'executing', 'execution_failed', 'retry_pending', 'rollback_pending', 'rolled_back', 'approved', 'rejected', 'deferred', 'expired'}
+        if normalized in allowed:
+            return normalized
+        approval_value = str(approval_state or '').strip().lower()
+        if approval_value in {'approved', 'rejected', 'deferred', 'expired'}:
+            return approval_value
+        return 'pending'
+
+    def _build_state_machine_details(self, *, item_id: Optional[str], decision: Optional[str], state: Optional[str], workflow_state: Optional[str], details: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        payload = dict(details or {})
+        queue_progression = self._safe_json_dict(payload.get('queue_progression'))
+        queue_transition = self._safe_json_dict(payload.get('queue_transition'))
+        stage_transition = self._safe_json_dict(payload.get('stage_transition'))
+        dispatch_route = payload.get('dispatch_route') or queue_progression.get('dispatch_route') or queue_transition.get('dispatch_route')
+        next_transition = payload.get('next_transition') or queue_progression.get('next_transition') or queue_transition.get('next_transition')
+        rollout_stage = payload.get('rollout_stage') or payload.get('current_rollout_stage') or stage_transition.get('to') or stage_transition.get('from')
+        target_rollout_stage = payload.get('target_rollout_stage') or stage_transition.get('to') or rollout_stage
+        blocked_by = payload.get('blocked_by') or payload.get('blocking_reasons') or []
+        if not isinstance(blocked_by, list):
+            blocked_by = [str(blocked_by)] if blocked_by else []
+        normalized_state = self._normalize_approval_state(state, decision)
+        normalized_workflow = self._normalize_workflow_state(workflow_state, normalized_state)
+        phase = 'proposal'
+        if normalized_state in {'approved', 'rejected', 'deferred', 'expired'} or normalized_workflow in {'approved', 'rejected', 'deferred', 'expired'}:
+            phase = 'terminal'
+        elif normalized_workflow in {'queued', 'ready'}:
+            phase = 'queue'
+        elif normalized_workflow in {'executing', 'execution_failed', 'retry_pending', 'rollback_pending', 'rolled_back'}:
+            phase = 'execution'
+        elif normalized_workflow in {'blocked', 'blocked_by_approval', 'review_pending'} or normalized_state in {'pending', 'ready', 'replayed'}:
+            phase = 'approval'
+        payload['state_machine'] = {
+            'schema_version': 'm5_unified_state_machine_v1',
+            'item_id': item_id,
+            'decision': str(decision or 'pending').strip().lower() or 'pending',
+            'approval_state': normalized_state,
+            'workflow_state': normalized_workflow,
+            'queue_status': queue_progression.get('status'),
+            'dispatch_route': dispatch_route,
+            'next_transition': next_transition,
+            'rollout_stage': rollout_stage,
+            'target_rollout_stage': target_rollout_stage,
+            'phase': phase,
+            'blocked_by': blocked_by,
+            'terminal': normalized_state in {'approved', 'rejected', 'deferred', 'expired'} or normalized_workflow in {'approved', 'rejected', 'deferred', 'expired'},
+            'retryable': bool(payload.get('retryable', queue_progression.get('retryable'))),
+            'rollback_candidate': bool(payload.get('rollback_hint') or queue_transition.get('rollback_hint') or payload.get('rollback_capable')),
+            'rollback_hint': payload.get('rollback_hint') or queue_transition.get('rollback_hint'),
+            'executor_result': {
+                'status': payload.get('execution_mode') or payload.get('queue_result_action') or payload.get('result_action'),
+                'layer': payload.get('execution_layer'),
+                'route': dispatch_route,
+            },
+        }
+        return payload
+
     def _normalize_event_type(self, event_type: Optional[str], category: str = 'approval') -> str:
         normalized = str(event_type or '').strip().lower()
         if normalized:
@@ -1340,6 +1398,7 @@ class Database:
                               conn: sqlite3.Connection = None) -> Dict:
         normalized_decision = str(decision or 'pending').strip().lower()
         normalized_state = self._normalize_approval_state(state, normalized_decision)
+        workflow_state = self._normalize_workflow_state(workflow_state, normalized_state) if workflow_state is not None else workflow_state
         owns_conn = conn is None
         conn = conn or self._get_connection()
         cursor = conn.cursor()
@@ -1358,7 +1417,7 @@ class Database:
         row = dict(cursor.fetchone())
         if owns_conn:
             conn.close()
-        row['details'] = self._safe_json_dict(row.get('details'))
+        row['details'] = self._build_state_machine_details(item_id=row.get('item_id'), decision=row.get('decision'), state=row.get('state'), workflow_state=row.get('workflow_state'), details=self._safe_json_dict(row.get('details')))
         return row
 
     def rebuild_approval_snapshot(self, item_id: str) -> Optional[Dict[str, Any]]:
@@ -1393,7 +1452,7 @@ class Database:
             if not terminal_locked:
                 snapshot['decision'] = event.get('decision') or snapshot.get('decision')
                 snapshot['state'] = self._normalize_approval_state(event.get('state'), event.get('decision'))
-                snapshot['workflow_state'] = event.get('workflow_state') or snapshot.get('workflow_state')
+                snapshot['workflow_state'] = self._normalize_workflow_state(event.get('workflow_state') or snapshot.get('workflow_state'), snapshot.get('state'))
                 snapshot['reason'] = event.get('reason') or snapshot.get('reason')
                 snapshot['actor'] = event.get('actor') or snapshot.get('actor')
                 snapshot['replay_source'] = event.get('source') or snapshot.get('replay_source')
@@ -1459,6 +1518,7 @@ class Database:
                               event_type: str = 'snapshot_sync', append_event: bool = True) -> Dict:
         normalized_decision = str(decision or 'pending').strip().lower()
         normalized_state = self._normalize_approval_state(state, normalized_decision)
+        workflow_state = self._normalize_workflow_state(workflow_state, normalized_state) if workflow_state is not None else workflow_state
         conn = self._get_connection()
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM approval_state WHERE item_id = ? LIMIT 1", (item_id,))
@@ -1479,6 +1539,7 @@ class Database:
         merged_details = dict(existing_row.get('details') or {}) if existing_row else {}
         if details:
             merged_details.update(details)
+        merged_details = self._build_state_machine_details(item_id=item_id, decision=normalized_decision, state=normalized_state, workflow_state=workflow_state, details=merged_details)
         if terminal_preserved:
             merged_details.setdefault('terminal_preserved', True)
 
@@ -1913,7 +1974,7 @@ class Database:
         if df.empty:
             return None
         row = df.iloc[0].to_dict()
-        row['details'] = json.loads(row['details']) if row.get('details') else {}
+        row['details'] = self._build_state_machine_details(item_id=row.get('item_id'), decision=row.get('decision'), state=row.get('state'), workflow_state=row.get('workflow_state'), details=(json.loads(row['details']) if row.get('details') else {}))
         return row
 
     def get_latest_approval(self, approval_type: str, target: str = None) -> Optional[Dict]:

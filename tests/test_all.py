@@ -7655,3 +7655,110 @@ class TestApprovalPersistence(unittest.TestCase):
             finally:
                 dashboard_api.db = old_db
                 dashboard_api.backtester = old_backtester
+
+class TestUnifiedWorkflowStateMachine(unittest.TestCase):
+    def test_merge_persisted_approval_state_builds_state_machine_semantics(self):
+        payload = {
+            'workflow_state': {
+                'item_states': [{
+                    'item_id': 'playbook::queue',
+                    'title': 'Queue item',
+                    'action_type': 'joint_expand_guarded',
+                    'workflow_state': 'pending',
+                    'queue_progression': {'status': 'ready_to_queue', 'dispatch_route': 'manual_review_queue', 'next_transition': 'await_manual_approval'},
+                    'current_rollout_stage': 'observe',
+                    'target_rollout_stage': 'guarded',
+                    'blocking_reasons': [],
+                }],
+                'summary': {},
+            },
+            'approval_state': {
+                'items': [{
+                    'approval_id': 'approval::queue',
+                    'playbook_id': 'playbook::queue',
+                    'title': 'Queue item',
+                    'action_type': 'joint_expand_guarded',
+                    'approval_state': 'pending',
+                    'decision_state': 'pending',
+                    'queue_progression': {'status': 'ready_to_queue', 'dispatch_route': 'manual_review_queue', 'next_transition': 'await_manual_approval'},
+                    'rollout_stage': 'observe',
+                    'target_rollout_stage': 'guarded',
+                    'blocked_by': [],
+                }],
+                'summary': {},
+            },
+        }
+        merged = merge_persisted_approval_state(payload, [{
+            'item_id': 'approval::queue',
+            'state': 'pending',
+            'decision': 'pending',
+            'workflow_state': 'queued',
+            'updated_at': '2026-03-27 10:00:00',
+            'details': {
+                'queue_progression': {'status': 'ready_to_queue', 'dispatch_route': 'manual_review_queue', 'next_transition': 'await_manual_approval'},
+                'dispatch_route': 'manual_review_queue',
+                'next_transition': 'await_manual_approval',
+            },
+        }])
+        approval_item = merged['approval_state']['items'][0]
+        workflow_item = merged['workflow_state']['item_states'][0]
+        self.assertEqual(approval_item['state_machine']['workflow_state'], 'queued')
+        self.assertEqual(approval_item['state_machine']['phase'], 'queue')
+        self.assertTrue(approval_item['state_machine']['retryable'])
+        self.assertEqual(workflow_item['state_machine']['dispatch_route'], 'manual_review_queue')
+        self.assertEqual(merged['workflow_state']['summary']['queued_count'], 1)
+        self.assertEqual(merged['workflow_state']['summary']['state_machine']['rollback_candidate_count'], 1)
+
+    def test_database_get_approval_state_includes_state_machine_details(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(str(Path(tmpdir) / 'state_machine.db'))
+            row = db.upsert_approval_state(
+                item_id='approval::stage',
+                approval_type='joint_stage_prepare',
+                target='playbook::stage',
+                title='Stage item',
+                decision='pending',
+                state='ready',
+                workflow_state='ready',
+                details={
+                    'dispatch_route': 'stage_metadata_apply',
+                    'next_transition': 'promote_to_target_stage',
+                    'rollout_stage': 'observe',
+                    'target_rollout_stage': 'guarded_prepare',
+                    'rollback_hint': 'revert_stage_metadata_to_previous_stage',
+                },
+                replay_source='unit-test',
+            )
+            self.assertEqual(row['details']['state_machine']['phase'], 'queue')
+            fetched = db.get_approval_state('approval::stage')
+            self.assertEqual(fetched['details']['state_machine']['dispatch_route'], 'stage_metadata_apply')
+            self.assertTrue(fetched['details']['state_machine']['rollback_candidate'])
+
+    def test_approval_state_machine_api_returns_phase_summary(self):
+        import dashboard.api as dashboard_api
+        with tempfile.TemporaryDirectory() as tmpdir:
+            test_db = Database(str(Path(tmpdir) / 'api_state_machine.db'))
+            old_db = dashboard_api.db
+            dashboard_api.db = test_db
+            try:
+                test_db.upsert_approval_state(
+                    item_id='approval::queue',
+                    approval_type='joint_expand_guarded',
+                    target='playbook::queue',
+                    title='Queue item',
+                    decision='pending',
+                    state='pending',
+                    workflow_state='queued',
+                    details={'queue_progression': {'status': 'ready_to_queue', 'dispatch_route': 'manual_review_queue'}},
+                    replay_source='unit-test',
+                )
+                client = app.test_client()
+                resp = client.get('/api/approvals/state-machine?limit=10')
+                self.assertEqual(resp.status_code, 200)
+                payload = resp.get_json()
+                self.assertTrue(payload['success'])
+                self.assertEqual(payload['summary']['phase_counts']['queue'], 1)
+                self.assertEqual(payload['summary']['workflow_state_counts']['queued'], 1)
+                self.assertEqual(payload['data'][0]['state_machine']['workflow_state'], 'queued')
+            finally:
+                dashboard_api.db = old_db

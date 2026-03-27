@@ -7,6 +7,28 @@ from typing import Dict, List, Optional, Any
 
 TERMINAL_APPROVAL_STATES = {'approved', 'rejected', 'deferred', 'expired'}
 AUTO_APPROVAL_DECISIONS = {'auto_approve', 'manual_review', 'freeze', 'defer'}
+
+WORKFLOW_TERMINAL_STATES = {'approved', 'rejected', 'deferred', 'expired'}
+WORKFLOW_ACTIVE_STATES = {'pending', 'ready', 'queued', 'blocked', 'blocked_by_approval', 'review_pending', 'executing', 'execution_failed', 'retry_pending', 'rollback_pending', 'rolled_back'}
+WORKFLOW_ALLOWED_STATES = WORKFLOW_TERMINAL_STATES | WORKFLOW_ACTIVE_STATES
+WORKFLOW_QUEUE_STATE_TO_WORKFLOW_STATE = {
+    'ready_to_queue': 'queued',
+    'blocked_by_approval': 'blocked_by_approval',
+    'deferred': 'deferred',
+    'terminal': 'approved',
+}
+EXECUTOR_RESULT_STATUS_TO_WORKFLOW_STATE = {
+    'planned': 'pending',
+    'dispatch_ready': 'ready',
+    'applied': 'ready',
+    'queued': 'queued',
+    'blocked_by_approval': 'blocked_by_approval',
+    'deferred': 'deferred',
+    'error': 'execution_failed',
+    'dry_run': 'pending',
+    'disabled': 'pending',
+    'skipped': 'pending',
+}
 SAFE_ROLLOUT_STAGE_HANDLER_REGISTRY = {
     'observe_ready': {
         'handler_key': 'apply::observe_ready',
@@ -234,6 +256,67 @@ ROLLOUT_EXECUTOR_ACTION_SPECS = {
         'safe_handler': 'queue_only_rollout_control',
     },
 }
+
+
+def _normalize_workflow_state(value: Optional[str], *, approval_state: Optional[str] = None, queue_status: Optional[str] = None, executor_status: Optional[str] = None) -> str:
+    normalized = str(value or '').strip().lower()
+    if normalized in WORKFLOW_ALLOWED_STATES:
+        return normalized
+    normalized_approval = str(approval_state or '').strip().lower()
+    if normalized_approval in WORKFLOW_TERMINAL_STATES:
+        return normalized_approval
+    normalized_queue = str(queue_status or '').strip().lower()
+    if normalized_queue in WORKFLOW_QUEUE_STATE_TO_WORKFLOW_STATE:
+        return WORKFLOW_QUEUE_STATE_TO_WORKFLOW_STATE[normalized_queue]
+    normalized_executor = str(executor_status or '').strip().lower()
+    if normalized_executor in EXECUTOR_RESULT_STATUS_TO_WORKFLOW_STATE:
+        return EXECUTOR_RESULT_STATUS_TO_WORKFLOW_STATE[normalized_executor]
+    return 'pending'
+
+
+def _build_state_machine_semantics(*, item_id: Optional[str] = None, approval_state: Optional[str] = None, workflow_state: Optional[str] = None, decision_state: Optional[str] = None, queue_status: Optional[str] = None, dispatch_route: Optional[str] = None, next_transition: Optional[str] = None, executor_status: Optional[str] = None, rollout_stage: Optional[str] = None, target_rollout_stage: Optional[str] = None, blocked_by: Optional[List[str]] = None, retryable: Optional[bool] = None, rollback_hint: Optional[str] = None) -> Dict[str, Any]:
+    normalized_approval = str(approval_state or decision_state or 'pending').strip().lower() or 'pending'
+    normalized_workflow = _normalize_workflow_state(workflow_state, approval_state=normalized_approval, queue_status=queue_status, executor_status=executor_status)
+    normalized_queue = str(queue_status or '').strip().lower() or None
+    blocked = _dedupe_strings(blocked_by or [])
+    terminal = normalized_approval in TERMINAL_APPROVAL_STATES or normalized_workflow in WORKFLOW_TERMINAL_STATES
+    phase = 'proposal'
+    if normalized_approval in {'pending', 'ready', 'replayed'} and normalized_workflow in {'pending', 'blocked', 'blocked_by_approval', 'review_pending'}:
+        phase = 'approval'
+    elif normalized_workflow in {'queued', 'ready'}:
+        phase = 'queue'
+    elif normalized_workflow in {'executing', 'execution_failed', 'retry_pending', 'rollback_pending', 'rolled_back'}:
+        phase = 'execution'
+    elif terminal:
+        phase = 'terminal'
+    lifecycle_path = [phase]
+    if normalized_queue:
+        lifecycle_path.append(f'queue:{normalized_queue}')
+    if dispatch_route:
+        lifecycle_path.append(f'route:{dispatch_route}')
+    if normalized_workflow not in {phase, normalized_queue}:
+        lifecycle_path.append(f'workflow:{normalized_workflow}')
+    return {
+        'schema_version': 'm5_unified_state_machine_v1',
+        'item_id': item_id,
+        'approval_state': normalized_approval,
+        'workflow_state': normalized_workflow,
+        'decision_state': normalized_approval,
+        'queue_status': normalized_queue,
+        'dispatch_route': dispatch_route,
+        'next_transition': next_transition,
+        'executor_status': str(executor_status or '').strip().lower() or None,
+        'rollout_stage': str(rollout_stage or '').strip().lower() or None,
+        'target_rollout_stage': str(target_rollout_stage or '').strip().lower() or (str(rollout_stage or '').strip().lower() or None),
+        'phase': phase,
+        'blocked': bool(blocked or normalized_workflow in {'blocked', 'blocked_by_approval', 'deferred', 'execution_failed'}),
+        'blocked_by': blocked,
+        'terminal': terminal,
+        'retryable': bool(retryable) if retryable is not None else normalized_workflow in {'queued', 'deferred', 'execution_failed', 'retry_pending'},
+        'rollback_candidate': bool(rollback_hint or normalized_workflow in {'ready', 'queued', 'execution_failed', 'rollback_pending'}),
+        'rollback_hint': rollback_hint,
+        'lifecycle_path': lifecycle_path,
+    }
 
 
 def _normalize_auto_approval_decision(value: Optional[str]) -> str:
@@ -476,7 +559,7 @@ def build_workflow_approval_records(payload: Dict) -> List[Dict]:
             'title': row.get('title') or workflow_item.get('title'),
             'decision': row.get('approval_state') or 'pending',
             'state': row.get('approval_state') or 'pending',
-            'workflow_state': workflow_item.get('workflow_state') or row.get('decision_state'),
+            'workflow_state': _normalize_workflow_state(workflow_item.get('workflow_state') or row.get('decision_state'), approval_state=row.get('approval_state') or 'pending'),
             'replay_source': 'workflow_ready',
             'bucket_id': row.get('bucket_id'),
             'playbook_id': playbook_id,
@@ -549,7 +632,7 @@ def merge_persisted_approval_state(payload: Dict, persisted_rows: Optional[List[
         row['persisted_decision'] = approval_row.get('persisted_decision')
         row['persisted_workflow_state'] = approval_row.get('persisted_workflow_state')
         if approval_row.get('persisted_workflow_state'):
-            row['workflow_state'] = approval_row.get('persisted_workflow_state')
+            row['workflow_state'] = _normalize_workflow_state(approval_row.get('persisted_workflow_state'), approval_state=approval_row.get('approval_state'))
         elif row.get('approval_required') and approval_row.get('approval_state') == 'approved' and row.get('workflow_state') == 'pending':
             row['workflow_state'] = 'ready'
         elif approval_row.get('approval_state') in {'rejected', 'deferred', 'expired'}:
@@ -563,6 +646,37 @@ def merge_persisted_approval_state(payload: Dict, persisted_rows: Optional[List[
     summary['deferred_count'] = sum(1 for row in items if row.get('approval_state') == 'deferred')
     approval_state['summary'] = summary
 
+    for row in approval_state.get('items') or []:
+        semantics = _build_state_machine_semantics(
+            item_id=row.get('approval_id') or row.get('item_id') or row.get('playbook_id'),
+            approval_state=row.get('approval_state') or row.get('persisted_state') or row.get('state'),
+            workflow_state=row.get('persisted_workflow_state') or row.get('workflow_state') or row.get('decision_state'),
+            decision_state=row.get('decision_state') or row.get('approval_state'),
+            queue_status=((row.get('queue_progression') or {}).get('status') if isinstance(row.get('queue_progression'), dict) else None),
+            dispatch_route=((row.get('queue_progression') or {}).get('dispatch_route') if isinstance(row.get('queue_progression'), dict) else None),
+            next_transition=((row.get('queue_progression') or {}).get('next_transition') if isinstance(row.get('queue_progression'), dict) else None),
+            rollout_stage=row.get('rollout_stage') or row.get('current_rollout_stage'),
+            target_rollout_stage=row.get('target_rollout_stage'),
+            blocked_by=row.get('blocked_by') or [],
+        )
+        row['state_machine'] = semantics
+        row['workflow_state'] = semantics['workflow_state']
+    for row in workflow_state.get('item_states') or []:
+        semantics = _build_state_machine_semantics(
+            item_id=row.get('item_id'),
+            approval_state=row.get('approval_state') or row.get('persisted_approval_state') or 'pending',
+            workflow_state=row.get('workflow_state'),
+            decision_state=row.get('decision_state') or row.get('approval_state'),
+            queue_status=((row.get('queue_progression') or {}).get('status') if isinstance(row.get('queue_progression'), dict) else None),
+            dispatch_route=((row.get('queue_progression') or {}).get('dispatch_route') if isinstance(row.get('queue_progression'), dict) else None),
+            next_transition=((row.get('queue_progression') or {}).get('next_transition') if isinstance(row.get('queue_progression'), dict) else None),
+            rollout_stage=row.get('current_rollout_stage') or row.get('rollout_stage'),
+            target_rollout_stage=row.get('target_rollout_stage'),
+            blocked_by=(row.get('blocking_reasons') or []) + (row.get('blocked_by') or []),
+        )
+        row['state_machine'] = semantics
+        row['workflow_state'] = semantics['workflow_state']
+
     workflow_summary = workflow_state.get('summary') or {}
     workflow_items = workflow_state.get('item_states') or []
     workflow_summary['ready_count'] = sum(1 for row in workflow_items if row.get('workflow_state') == 'ready')
@@ -571,6 +685,17 @@ def merge_persisted_approval_state(payload: Dict, persisted_rows: Optional[List[
     workflow_summary['approved_count'] = sum(1 for row in workflow_items if row.get('workflow_state') == 'approved')
     workflow_summary['rejected_count'] = sum(1 for row in workflow_items if row.get('workflow_state') == 'rejected')
     workflow_summary['deferred_count'] = sum(1 for row in workflow_items if row.get('workflow_state') == 'deferred')
+    workflow_summary['queued_count'] = sum(1 for row in workflow_items if row.get('workflow_state') == 'queued')
+    workflow_summary['retry_pending_count'] = sum(1 for row in workflow_items if row.get('workflow_state') == 'retry_pending')
+    workflow_summary['execution_failed_count'] = sum(1 for row in workflow_items if row.get('workflow_state') == 'execution_failed')
+    workflow_summary['state_machine'] = {
+        'schema_version': 'm5_unified_state_machine_v1',
+        'terminal_count': sum(1 for row in workflow_items if (row.get('state_machine') or {}).get('terminal')),
+        'blocked_count': sum(1 for row in workflow_items if (row.get('state_machine') or {}).get('blocked')),
+        'rollback_candidate_count': sum(1 for row in workflow_items if (row.get('state_machine') or {}).get('rollback_candidate')),
+        'retryable_count': sum(1 for row in workflow_items if (row.get('state_machine') or {}).get('retryable')),
+        'phases': sorted({(row.get('state_machine') or {}).get('phase') or 'unknown' for row in workflow_items}),
+    }
     workflow_state['summary'] = workflow_summary
     return payload
 

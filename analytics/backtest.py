@@ -179,6 +179,186 @@ def _build_policy_ab_regime_lookup(policy_ab_diffs: List[Dict]) -> Dict[Tuple[st
     return lookup
 
 
+def _delivery_bucket_id(regime: str, policy_version: str) -> str:
+    return f'{_normalize_bucket_tag(regime)}::{_normalize_bucket_tag(policy_version)}'
+
+
+def _build_calibration_delivery_payload(
+    *,
+    summary: Dict,
+    by_regime: List[Dict],
+    by_policy: List[Dict],
+    by_regime_policy: List[Dict],
+    policy_ab_diffs: List[Dict],
+    rollout_gates: List[Dict],
+    recommendations: List[Dict],
+) -> Dict:
+    gate_lookup = {
+        (_normalize_bucket_tag(row.get('regime')), _normalize_bucket_tag(row.get('policy_version'))): row
+        for row in (rollout_gates or [])
+    }
+    recommendation_lookup = {
+        (_normalize_bucket_tag(row.get('regime')), _normalize_bucket_tag(row.get('policy_version'))): row
+        for row in (recommendations or [])
+    }
+    ab_lookup = _build_policy_ab_regime_lookup(policy_ab_diffs)
+
+    items = []
+    for row in by_regime_policy or []:
+        regime = _normalize_bucket_tag(row.get('bucket'))
+        policy = _normalize_bucket_tag(row.get('secondary_bucket'))
+        gate = gate_lookup.get((regime, policy), {})
+        recommendation = recommendation_lookup.get((regime, policy), {})
+        ab_row = ab_lookup.get((regime, policy))
+        priority = recommendation.get('priority', 'low')
+        confidence = recommendation.get('confidence', 'low')
+        items.append({
+            'bucket_id': _delivery_bucket_id(regime, policy),
+            'regime': regime,
+            'policy_version': policy,
+            'metrics': {
+                'trade_count': int(row.get('trade_count') or 0),
+                'wins': int(row.get('wins') or 0),
+                'losses': int(row.get('losses') or 0),
+                'win_rate': float(row.get('win_rate') or 0.0),
+                'avg_return_pct': float(row.get('avg_return_pct') or 0.0),
+                'total_return_pct': float(row.get('total_return_pct') or 0.0),
+                'avg_abs_return_pct': float(row.get('avg_abs_return_pct') or 0.0),
+            },
+            'gate': {
+                'decision': gate.get('decision'),
+                'reason': gate.get('reason'),
+                'message': gate.get('message'),
+            },
+            'recommendation': {
+                'type': recommendation.get('type'),
+                'category': recommendation.get('category'),
+                'priority': priority,
+                'confidence': confidence,
+                'governance_mode': recommendation.get('governance_mode'),
+                'blocking_issue': recommendation.get('blocking_issue'),
+                'suggested_action': recommendation.get('suggested_action'),
+                'summary_line': recommendation.get('summary_line'),
+                'actions': recommendation.get('actions') or [],
+                'rollout_plan': recommendation.get('rollout_plan') or {},
+                'guardrails': recommendation.get('guardrails') or [],
+                'thresholds': recommendation.get('thresholds') or {},
+                'next_review_after_trade_count': recommendation.get('next_review_after_trade_count'),
+            },
+            'baseline_comparison': {
+                'baseline_policy_version': (ab_row or {}).get('baseline_policy_version'),
+                'sample_ready': bool((ab_row or {}).get('sample_ready')),
+                'candidate_beats_baseline': bool((ab_row or {}).get('candidate_beats_baseline')),
+                'delta_trade_count': (ab_row or {}).get('delta_trade_count'),
+                'delta_win_rate': (ab_row or {}).get('delta_win_rate'),
+                'delta_avg_return_pct': (ab_row or {}).get('delta_avg_return_pct'),
+                'overall_sample_ready': bool((ab_row or {}).get('overall_sample_ready')),
+                'overall_candidate_beats_baseline': bool((ab_row or {}).get('overall_candidate_beats_baseline')),
+            },
+            'status': {
+                'blocking': bool(recommendation.get('blocking_issue')),
+                'ready_for_dashboard': True,
+                'ready_for_rollout_orchestration': bool(gate.get('decision') and recommendation.get('type')),
+                'priority_rank': {'critical': 0, 'high': 1, 'medium': 2, 'low': 3}.get(priority, 9),
+                'confidence_rank': {'high': 0, 'medium': 1, 'low': 2}.get(confidence, 9),
+            },
+        })
+
+    items.sort(key=lambda item: (
+        item['status']['priority_rank'],
+        item['status']['confidence_rank'],
+        -item['metrics']['trade_count'],
+        item['regime'],
+        item['policy_version'],
+    ))
+
+    queue = [
+        {
+            'bucket_id': item['bucket_id'],
+            'regime': item['regime'],
+            'policy_version': item['policy_version'],
+            'decision': item['gate']['decision'],
+            'recommendation_type': item['recommendation']['type'],
+            'governance_mode': item['recommendation']['governance_mode'],
+            'priority': item['recommendation']['priority'],
+            'confidence': item['recommendation']['confidence'],
+            'blocking': item['status']['blocking'],
+            'primary_action': (item['recommendation']['actions'] or [{}])[0].get('type'),
+            'summary_line': item['recommendation']['summary_line'],
+        }
+        for item in items
+    ]
+
+    def _queue_filter(*, decision: Optional[str] = None, recommendation_type: Optional[str] = None, blocking: Optional[bool] = None) -> List[Dict]:
+        rows = queue
+        if decision is not None:
+            rows = [row for row in rows if row.get('decision') == decision]
+        if recommendation_type is not None:
+            rows = [row for row in rows if row.get('recommendation_type') == recommendation_type]
+        if blocking is not None:
+            rows = [row for row in rows if row.get('blocking') is blocking]
+        return rows
+
+    return {
+        'schema_version': 'm5_delivery_v1',
+        'summary': {
+            'trade_count': summary.get('trade_count', 0),
+            'min_sample_size': summary.get('min_sample_size', 0),
+            'calibration_ready': bool(summary.get('calibration_ready')),
+            'policy_ab_ready': bool(summary.get('policy_ab_ready')),
+            'bucket_count': len(items),
+            'regime_count': len(by_regime or []),
+            'policy_count': len(by_policy or []),
+        },
+        'views': {
+            'items': items,
+            'tables': {
+                'by_regime': by_regime,
+                'by_policy_version': by_policy,
+                'by_regime_policy': by_regime_policy,
+                'policy_ab_diffs': policy_ab_diffs,
+                'rollout_gates': rollout_gates,
+                'recommendations': recommendations[:50],
+            },
+        },
+        'render_ready': {
+            'headline': {
+                'top_regime': summary.get('top_regime'),
+                'top_policy_version': summary.get('top_policy_version'),
+                'trade_count': summary.get('trade_count', 0),
+                'bucket_count': len(items),
+            },
+            'sections': {
+                'priority_queue': queue[:10],
+                'blocking_items': _queue_filter(blocking=True),
+                'rollout_candidates': _queue_filter(decision='expand'),
+                'tighten_watchlist': _queue_filter(decision='tighten'),
+                'rollback_queue': _queue_filter(decision='rollback'),
+                'sample_gap_queue': _queue_filter(recommendation_type='collect_more_samples'),
+            },
+        },
+        'orchestration_ready': {
+            'queue': queue,
+            'queues': {
+                'blocking': _queue_filter(blocking=True),
+                'expand': _queue_filter(decision='expand'),
+                'tighten': _queue_filter(decision='tighten'),
+                'rollback': _queue_filter(decision='rollback'),
+                'observe': [row for row in queue if row.get('governance_mode') == 'observe'],
+                'review': [row for row in queue if row.get('governance_mode') == 'review'],
+            },
+            'action_catalog': dict(sorted({
+                action_type: sum(1 for rec in recommendations for action in (rec.get('actions') or []) if action['type'] == action_type)
+                for action_type in {
+                    action['type']
+                    for rec in recommendations
+                    for action in (rec.get('actions') or [])
+                }
+            }.items())),
+        },
+    }
+
+
 def _recommendation_priority(decision: str, reason: str, ab_row: Optional[Dict]) -> str:
     if decision == 'rollback':
         return 'critical'
@@ -577,25 +757,42 @@ def build_regime_policy_calibration_report(symbol_results: List[Dict]) -> Dict:
             for item in recommendations[:5]
         ],
     }
+    summary = {
+        'trade_count': len(all_trades),
+        'regimes': len(by_regime),
+        'policy_versions': len(by_policy),
+        'top_regime': top_regime,
+        'top_policy_version': top_policy,
+        'calibration_ready': bool(all_trades),
+        'min_sample_size': min_sample_size,
+        'policy_ab_ready': len(by_policy) >= 2,
+        'rollout_gate_summary': rollout_gate_summary,
+        'recommendation_summary': recommendation_summary,
+    }
+    delivery = _build_calibration_delivery_payload(
+        summary=summary,
+        by_regime=by_regime,
+        by_policy=by_policy,
+        by_regime_policy=by_regime_policy,
+        policy_ab_diffs=policy_ab_diffs,
+        rollout_gates=rollout_gates,
+        recommendations=recommendations[:50],
+    )
+    summary['delivery_ready'] = {
+        'schema_version': delivery['schema_version'],
+        'bucket_count': delivery['summary']['bucket_count'],
+        'blocking_items': len(delivery['orchestration_ready']['queues']['blocking']),
+        'priority_queue_size': len(delivery['orchestration_ready']['queue']),
+    }
     return {
-        'summary': {
-            'trade_count': len(all_trades),
-            'regimes': len(by_regime),
-            'policy_versions': len(by_policy),
-            'top_regime': top_regime,
-            'top_policy_version': top_policy,
-            'calibration_ready': bool(all_trades),
-            'min_sample_size': min_sample_size,
-            'policy_ab_ready': len(by_policy) >= 2,
-            'rollout_gate_summary': rollout_gate_summary,
-            'recommendation_summary': recommendation_summary,
-        },
+        'summary': summary,
         'by_regime': by_regime,
         'by_policy_version': by_policy,
         'by_regime_policy': by_regime_policy,
         'policy_ab_diffs': policy_ab_diffs,
         'rollout_gates': rollout_gates,
         'recommendations': recommendations[:50],
+        'delivery': delivery,
     }
 
 

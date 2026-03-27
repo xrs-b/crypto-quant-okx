@@ -552,12 +552,14 @@
 
 ### AR-M5-02｜policy version 比较与建议生成
 
-- **Status（2026-03-27 / M5 Step 3）**：done
+- **Status（2026-03-27 / M5 Step 4）**：done
 - **Notes**：
   - `analytics/backtest.py` 的 `calibration_report` 已补齐 `policy_ab_diffs` 与 `rollout_gates`，不再只给分桶 summary，而是开始输出可直接指导 rollout / tighten / rollback 的结构化判断。
   - `policy_ab_diffs` 现会以样本最多的 policy 作为 baseline，输出 candidate vs baseline 的总体 delta，以及同 regime 下的 `delta_trade_count / delta_win_rate / delta_avg_return_pct / sample_ready`，方便做 policy A/B compare。
   - `rollout_gates` 现按 `regime × policy_version` 输出明确 `decision=expand|hold|tighten|rollback`、`reason`、`message` 与关键指标；`summary.rollout_gate_summary` 则提供整体 gate tally，方便后续报告或 dashboard 直接消费。
   - 新增自动 calibration 建议层：每个 `regime × policy_version` 都会产出结构化 `recommendation object`，除 `type / category / priority / confidence / reason / suggested_action / blocking_issue / gate_decision / evidence` 外，现进一步补 `governance_mode / actions / rollout_plan / thresholds / guardrails / next_review_after_trade_count / summary_line`，让 dashboard / report / rollout playbook 可直接消费治理动作而非再做二次猜测。
+  - 在此基础上又补一层统一 `delivery` payload：把 `by_regime_policy + rollout_gates + recommendations + baseline comparison` 收口成稳定的 `views.items`，并给出 `render_ready.sections` 与 `orchestration_ready.queue/queues/action_catalog`，让后续 dashboard/report/人工治理或自动 rollout orchestration 不必再自己横向 join 四份输出。
+  - `summary.delivery_ready` 会暴露 schema version、bucket 数、blocking 数与 priority queue size，方便聚合层快速判断这批 calibration 结果是否已经具备“可渲染 / 可编排”消费条件。
   - 建议对象继续优先从既有 `rollout_gates + policy_ab_diffs` 推导，而不是拍脑袋：样本不足升级为更可执行的 `collect_more_samples` + `rollout_freeze`；负收益类拆成 `tighten_thresholds`、`rollout_freeze`、`repricing_review`；正向桶统一落到带 guardrail 的 `expand_guarded`；正收益但稳定性不足则归到 `repricing_review` / instability review 流程。
   - `summary.recommendation_summary` 现除 critical/high/medium/low tally 外，也补 `by_type / by_governance_mode / blocked / aligned_with_rollout_gate / top_actions / top_priority_items`，方便后续 dashboard/report 直接做治理面板与 rollout 队列。
 - **阶段 / 优先级**：M5 / P1

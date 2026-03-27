@@ -4187,6 +4187,45 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
         self.assertTrue(summary['top_priority_items'])
         self.assertIn('summary_line', summary['top_priority_items'][0])
 
+    def test_calibration_report_exposes_delivery_payload_for_render_and_orchestration(self):
+        report = build_regime_policy_calibration_report([
+            {
+                'symbol': 'BTC/USDT',
+                'all_trades': [
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v1', 'return_pct': 0.4},
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v1', 'return_pct': 0.3},
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v1', 'return_pct': 0.2},
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v2', 'return_pct': 1.2},
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v2', 'return_pct': 1.1},
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v2', 'return_pct': 1.0},
+                    {'regime_tag': 'range', 'policy_tag': 'policy_v2', 'return_pct': -1.0},
+                    {'regime_tag': 'range', 'policy_tag': 'policy_v2', 'return_pct': -0.8},
+                    {'regime_tag': 'range', 'policy_tag': 'policy_v2', 'return_pct': 0.3},
+                ],
+            }
+        ])
+        delivery = report['delivery']
+        self.assertEqual(delivery['schema_version'], 'm5_delivery_v1')
+        self.assertEqual(delivery['summary']['bucket_count'], len(report['by_regime_policy']))
+        self.assertEqual(delivery['views']['tables']['rollout_gates'], report['rollout_gates'])
+        self.assertEqual(delivery['views']['tables']['recommendations'], report['recommendations'])
+        self.assertTrue(delivery['render_ready']['sections']['priority_queue'])
+        self.assertTrue(delivery['orchestration_ready']['queue'])
+        first_item = delivery['views']['items'][0]
+        self.assertIn('bucket_id', first_item)
+        self.assertIn('metrics', first_item)
+        self.assertIn('gate', first_item)
+        self.assertIn('recommendation', first_item)
+        self.assertTrue(first_item['status']['ready_for_rollout_orchestration'])
+        first_queue = delivery['orchestration_ready']['queue'][0]
+        self.assertIn('primary_action', first_queue)
+        self.assertIn(first_queue['decision'], {'expand', 'tighten', 'rollback', 'hold'})
+        self.assertIn('expand', delivery['orchestration_ready']['queues'])
+        self.assertIn('rollback', delivery['orchestration_ready']['queues'])
+        self.assertIn('repricing_review', delivery['orchestration_ready']['action_catalog'])
+        self.assertEqual(report['summary']['delivery_ready']['schema_version'], 'm5_delivery_v1')
+        self.assertGreaterEqual(report['summary']['delivery_ready']['priority_queue_size'], 1)
+
 
 def run_tests():
     """运行所有测试"""

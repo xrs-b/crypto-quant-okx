@@ -951,10 +951,49 @@ workflow safe-apply 则应该同步建设，专门服务 governance / approval /
 
 ### 仍未完成（留待下一步）
 
-- `shadow_workflow` / `workflow_dry_run`
-- `--validation-replay <dir>` 批量回归入口
 - direction lock / intent / layer gap / queue progression 等更深 execution/workflow case basket
 - testnet controlled execute bridge
+
+## 20. 2026-03-27 / Shadow Validation Entry Pack step 2 实现状态
+
+本轮继续把 MVP 推到可持续 regression 可用版本，重点不做 UI，而是把 **workflow + replay + aggregated summary** 打通。
+
+### 本轮新增
+
+1. **`shadow_workflow` 已可跑通核心链路**
+   - case schema 新增 `shadow_workflow`；
+   - 支持通过 `input.symbol_results` 直接生成 calibration report，再落到 `build_governance_workflow_ready_payload()`；
+   - 可直接验证 governance / workflow / approval queue 核心结构；
+   - 默认只做 dry-run / shadow，`real_trade_execution=false`、`dangerous_live_parameter_change=false`。
+
+2. **approval replay 已接入 validation runner**
+   - workflow case 会把 `approval_state.items` 同步到临时 SQLite；
+   - 复用现有 `Database.sync_approval_items()` / timeline / state snapshot；
+   - report artifacts 会带出 replay state / timeline / replay_source，方便后续回归和排障。
+
+3. **批量 validation replay 已支持目录 / 多 case**
+   - CLI 新增：
+   ```bash
+   python bot/run.py --validation-replay --case tests/fixtures/validation
+   python bot/run.py --validation-replay --case case-a.yaml case-b.yaml some-dir/
+   ```
+   - 自动收集 YAML/JSON case；
+   - 输出聚合 summary：`case_count / pass_count / fail_count / case_types / failed_cases`；
+   - 继续保持 shadow-only 边界，不触发真实交易。
+
+4. **测试覆盖已补到 workflow + replay + CLI**
+   - 新增 workflow fixture；
+   - 覆盖单 case workflow runner；
+   - 覆盖目录收集、多 case replay summary；
+   - 覆盖 CLI 的 `--validation-entry` 与 `--validation-replay` 输出/落盘。
+
+### 当前结论
+
+而家 validation 入口已经由“单 case shadow diff”扩到：
+
+> **单 case shadow execution + shadow workflow + 批量 replay regression**
+
+即系后续继续推进 adaptive strategy / governance / approval / rollout 时，已经有一条比较稳定、可持续、fail-closed 嘅 regression 入口可复用。
 
 ### 结论
 

@@ -28,7 +28,7 @@ from signals import SignalDetector, SignalValidator, SignalRecorder, EntryDecide
 from trading import TradingExecutor, RiskManager
 from ml.engine import MLEngine, ModelTrainer, DataCollector
 from analytics import StrategyBacktester, SignalQualityAnalyzer, ParameterOptimizer, GovernanceEngine
-from validation import run_shadow_validation_case
+from validation import run_shadow_validation_case, run_shadow_validation_replay
 
 
 def run_notification_relay(interval: int = 30, once: bool = False, limit: int = 20):
@@ -882,9 +882,10 @@ def main():
     parser.add_argument('--relay-limit', type=int, default=20, help='配合 relay-outbox，单轮最多处理几条 pending outbox')
     parser.add_argument('--reconcile-positions', action='store_true', help='只读/同步交易所持仓到本地 DB')
     parser.add_argument('--exchange-smoke', action='store_true', help='生成最小 testnet 验收计划；默认只预演')
-    parser.add_argument('--validation-entry', type=str, choices=['run'], help='运行 shadow validation 入口（首批 MVP）')
-    parser.add_argument('--case', type=str, help='validation case 文件路径（json/yaml）')
-    parser.add_argument('--validation-output', type=str, help='可选：将 validation report 写入指定 json 文件')
+    parser.add_argument('--validation-entry', type=str, choices=['run'], help='运行单个 shadow validation case')
+    parser.add_argument('--validation-replay', action='store_true', help='运行 validation replay，支持目录/多 case 并输出聚合 summary')
+    parser.add_argument('--case', type=str, nargs='+', help='validation case 文件或目录路径（json/yaml，可传多个）')
+    parser.add_argument('--validation-output', type=str, help='可选：将 validation report / replay report 写入指定 json 文件')
     parser.add_argument('--execute', action='store_true', help='配合 smoke 验收命令，显式允许执行 testnet 开平仓')
     parser.add_argument('--symbol', type=str, help='指定 smoke/diagnose 目标币种')
     parser.add_argument('--side', type=str, default='long', choices=['long', 'short'], help='smoke 验收方向')
@@ -1167,15 +1168,26 @@ def main():
                 print(f"smoke_run_id: {result['smoke_run_id']}")
 
     elif args.validation_entry:
-        if not args.case:
-            raise SystemExit('--validation-entry 需要配合 --case')
-        report = run_shadow_validation_case(args.case, base_config=Config())
+        if not args.case or len(args.case) != 1:
+            raise SystemExit('--validation-entry 需要配合单个 --case <file>')
+        report = run_shadow_validation_case(args.case[0], base_config=Config())
         if args.validation_output:
             output_path = Path(args.validation_output)
             output_path.parent.mkdir(parents=True, exist_ok=True)
             output_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')
         print("\n🕶️ Shadow Validation Report:\n")
         print(json.dumps(report, ensure_ascii=False, indent=2))
+
+    elif args.validation_replay:
+        if not args.case:
+            raise SystemExit('--validation-replay 需要配合一个或多个 --case <file|dir>')
+        report = run_shadow_validation_replay(args.case, base_config=Config())
+        if args.validation_output:
+            output_path = Path(args.validation_output)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')
+        print("\n🧪 Shadow Validation Replay Summary:\n")
+        print(json.dumps(report['summary'], ensure_ascii=False, indent=2))
 
     else:
         # 运行交易

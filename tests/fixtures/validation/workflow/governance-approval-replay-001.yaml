@@ -1,0 +1,40 @@
+case_id: governance-approval-replay-001
+case_type: shadow_workflow
+mode: workflow_dry_run
+input:
+  symbol_results:
+    - symbol: BTC/USDT
+      all_trades:
+        - regime_tag: panic
+          policy_tag: policy_v1
+          strategy_tags: [Breakout]
+          return_pct: 0.3
+        - regime_tag: panic
+          policy_tag: policy_v1
+          strategy_tags: [Breakout]
+          return_pct: 0.2
+        - regime_tag: panic
+          policy_tag: policy_v1
+          strategy_tags: [Breakout]
+          return_pct: 0.1
+        - regime_tag: panic
+          policy_tag: policy_v2
+          strategy_tags: [Breakout]
+          return_pct: -1.4
+        - regime_tag: panic
+          policy_tag: policy_v2
+          strategy_tags: [Breakout]
+          return_pct: -1.0
+        - regime_tag: panic
+          policy_tag: policy_v2
+          strategy_tags: [Breakout]
+          return_pct: -0.8
+replay:
+  source: shadow_workflow_fixture
+expect:
+  workflow_action_count: 12
+  approval_count: 12
+  pending_approval_count: 12
+  workflow_has_pending: true
+  approval_replay_synced: true
+  approval_replay_source: shadow_workflow_fixture

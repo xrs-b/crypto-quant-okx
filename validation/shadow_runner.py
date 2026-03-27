@@ -1,21 +1,22 @@
 import copy
 import json
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import yaml
 
+from analytics.backtest import build_governance_workflow_ready_payload, build_regime_policy_calibration_report
 from core.config import Config, DEFAULT_ADAPTIVE_REGIME_CONFIG
+from core.database import Database
 from core.regime import build_regime_snapshot, normalize_regime_snapshot
 from core.regime_policy import resolve_regime_policy, build_risk_effective_snapshot, build_execution_effective_snapshot
 from signals import Signal, EntryDecider, SignalValidator
 
-
-SUPPORTED_CASE_TYPES = {"shadow_signal", "shadow_execution"}
-SUPPORTED_MODES = {"baseline", "adaptive", "guarded_execute", "decision_only", "observe_only", "full"}
-
+SUPPORTED_CASE_TYPES = {"shadow_signal", "shadow_execution", "shadow_workflow"}
+SUPPORTED_MODES = {"baseline", "adaptive", "guarded_execute", "decision_only", "observe_only", "full", "workflow", "workflow_dry_run", "validation_replay"}
 
 @dataclass
 class ValidationCase:
@@ -29,10 +30,8 @@ class ValidationCase:
     def case_type(self) -> str:
         return str(self.raw.get("case_type") or "shadow_execution")
 
-
 class ValidationCaseError(ValueError):
     pass
-
 
 class ShadowConfig:
     def __init__(self, base: Config = None, overrides: Dict[str, Any] = None):
@@ -111,7 +110,6 @@ class ShadowConfig:
                 self._deep_merge_inplace(merged, symbol_adaptive)
         return merged
 
-
 def _load_case_raw(path: str) -> Dict[str, Any]:
     content = Path(path).read_text(encoding="utf-8")
     suffix = Path(path).suffix.lower()
@@ -123,13 +121,33 @@ def _load_case_raw(path: str) -> Dict[str, Any]:
         raise ValidationCaseError("validation case must be an object")
     return data
 
-
 def load_validation_case(path: str) -> ValidationCase:
     data = _load_case_raw(path)
     case = ValidationCase(raw=data)
     _validate_case(case.raw)
     return case
 
+def collect_validation_case_paths(paths: Iterable[str]) -> List[str]:
+    collected: List[str] = []
+    for raw_path in paths or []:
+        path = Path(raw_path)
+        if path.is_dir():
+            for child in sorted(path.rglob('*')):
+                if child.is_file() and child.suffix.lower() in {'.yaml', '.yml', '.json'}:
+                    collected.append(str(child))
+        elif path.is_file():
+            collected.append(str(path))
+        else:
+            raise ValidationCaseError(f"validation path not found: {raw_path}")
+    deduped = []
+    seen = set()
+    for item in collected:
+        if item not in seen:
+            seen.add(item)
+            deduped.append(item)
+    if not deduped:
+        raise ValidationCaseError("no validation cases found")
+    return deduped
 
 def _validate_case(data: Dict[str, Any]):
     if not data.get("case_id"):
@@ -140,12 +158,16 @@ def _validate_case(data: Dict[str, Any]):
     mode = str(data.get("mode") or "guarded_execute")
     if mode not in SUPPORTED_MODES:
         raise ValidationCaseError(f"unsupported mode: {mode}")
-    signal = data.get("input", {}).get("signal") or {}
-    if not signal.get("symbol"):
-        raise ValidationCaseError("input.signal.symbol is required")
-    if signal.get("signal_type") not in {"buy", "sell", "hold"}:
-        raise ValidationCaseError("input.signal.signal_type must be buy/sell/hold")
-
+    if case_type in {"shadow_signal", "shadow_execution"}:
+        signal = data.get("input", {}).get("signal") or {}
+        if not signal.get("symbol"):
+            raise ValidationCaseError("input.signal.symbol is required")
+        if signal.get("signal_type") not in {"buy", "sell", "hold"}:
+            raise ValidationCaseError("input.signal.signal_type must be buy/sell/hold")
+    elif case_type == 'shadow_workflow':
+        workflow_input = data.get('input') or {}
+        if not (workflow_input.get('symbol_results') or workflow_input.get('report') or workflow_input.get('workflow_ready')):
+            raise ValidationCaseError("shadow_workflow requires input.symbol_results, input.report, or input.workflow_ready")
 
 def _build_signal(case_data: Dict[str, Any]) -> Signal:
     signal_input = copy.deepcopy(case_data.get("input", {}).get("signal") or {})
@@ -169,14 +191,10 @@ def _build_signal(case_data: Dict[str, Any]) -> Signal:
     signal_input.setdefault("strategies_triggered", [])
     signal_input.setdefault("reasons", [])
     signal_input.setdefault("market_context", market_context)
-    signal_input.setdefault("regime_info", {
-        "regime": normalized.get("regime", "unknown"),
-        "confidence": normalized.get("confidence", 0.0),
-    })
+    signal_input.setdefault("regime_info", {"regime": normalized.get("regime", "unknown"), "confidence": normalized.get("confidence", 0.0)})
     signal_input["regime_snapshot"] = normalized
     signal_input.setdefault("adaptive_policy_snapshot", {})
     return Signal(**signal_input)
-
 
 def _evaluate_with_config(cfg: ShadowConfig, signal: Signal) -> Dict[str, Any]:
     signal = copy.deepcopy(signal)
@@ -184,148 +202,148 @@ def _evaluate_with_config(cfg: ShadowConfig, signal: Signal) -> Dict[str, Any]:
     policy_snapshot = resolve_regime_policy(cfg, signal.symbol, regime_snapshot)
     signal.regime_snapshot = regime_snapshot
     signal.adaptive_policy_snapshot = policy_snapshot
-    signal.regime_info = signal.regime_info or {
-        "regime": regime_snapshot.get("regime", "unknown"),
-        "confidence": regime_snapshot.get("confidence", 0.0),
-    }
-
+    signal.regime_info = signal.regime_info or {"regime": regime_snapshot.get("regime", "unknown"), "confidence": regime_snapshot.get("confidence", 0.0)}
     decision = EntryDecider(cfg.all).decide(signal)
     validator_passed, validator_reason, validator_details = SignalValidator(cfg, None).validate(signal)
     risk_snapshot = build_risk_effective_snapshot(cfg, signal.symbol, signal=signal, regime_snapshot=regime_snapshot, policy_snapshot=policy_snapshot)
     execution_snapshot = build_execution_effective_snapshot(cfg, signal.symbol, signal=signal, regime_snapshot=regime_snapshot, policy_snapshot=policy_snapshot)
-
     return {
-        "signal": {
-            "symbol": signal.symbol,
-            "signal_type": signal.signal_type,
-            "strength": signal.strength,
-            "strategies_triggered": list(signal.strategies_triggered or []),
-        },
+        "signal": {"symbol": signal.symbol, "signal_type": signal.signal_type, "strength": signal.strength, "strategies_triggered": list(signal.strategies_triggered or [])},
         "regime_snapshot": regime_snapshot,
         "adaptive_policy_snapshot": policy_snapshot,
         "decision": decision.to_dict(),
-        "validator": {
-            "passed": validator_passed,
-            "reason": validator_reason,
-            "details": validator_details,
-        },
+        "validator": {"passed": validator_passed, "reason": validator_reason, "details": validator_details},
         "risk": {
-            "effective_state": risk_snapshot.get("effective_state"),
-            "observe_only": risk_snapshot.get("observe_only"),
-            "baseline": risk_snapshot.get("baseline"),
-            "effective": risk_snapshot.get("effective"),
-            "enforced_budget": risk_snapshot.get("enforced_budget"),
-            "would_tighten": risk_snapshot.get("would_tighten"),
-            "would_tighten_fields": risk_snapshot.get("would_tighten_fields"),
-            "enforced_fields": risk_snapshot.get("enforced_fields"),
+            "effective_state": risk_snapshot.get("effective_state"), "observe_only": risk_snapshot.get("observe_only"),
+            "baseline": risk_snapshot.get("baseline"), "effective": risk_snapshot.get("effective"),
+            "enforced_budget": risk_snapshot.get("enforced_budget"), "would_tighten": risk_snapshot.get("would_tighten"),
+            "would_tighten_fields": risk_snapshot.get("would_tighten_fields"), "enforced_fields": risk_snapshot.get("enforced_fields"),
             "hint_codes": risk_snapshot.get("hint_codes"),
         },
         "execution": {
-            "effective_state": execution_snapshot.get("effective_state"),
-            "observe_only": execution_snapshot.get("observe_only"),
-            "baseline": execution_snapshot.get("baseline"),
-            "effective": execution_snapshot.get("effective"),
-            "live": execution_snapshot.get("live"),
-            "enforced_profile": execution_snapshot.get("enforced_profile"),
-            "would_tighten": execution_snapshot.get("would_tighten"),
-            "would_tighten_fields": execution_snapshot.get("would_tighten_fields"),
-            "enforced_fields": execution_snapshot.get("enforced_fields"),
+            "effective_state": execution_snapshot.get("effective_state"), "observe_only": execution_snapshot.get("observe_only"),
+            "baseline": execution_snapshot.get("baseline"), "effective": execution_snapshot.get("effective"), "live": execution_snapshot.get("live"),
+            "enforced_profile": execution_snapshot.get("enforced_profile"), "would_tighten": execution_snapshot.get("would_tighten"),
+            "would_tighten_fields": execution_snapshot.get("would_tighten_fields"), "enforced_fields": execution_snapshot.get("enforced_fields"),
             "execution_profile_really_enforced": execution_snapshot.get("execution_profile_really_enforced"),
             "layering_profile_really_enforced": execution_snapshot.get("layering_profile_really_enforced"),
-            "plan_shape_really_enforced": execution_snapshot.get("plan_shape_really_enforced"),
-            "hint_codes": execution_snapshot.get("hint_codes"),
+            "plan_shape_really_enforced": execution_snapshot.get("plan_shape_really_enforced"), "hint_codes": execution_snapshot.get("hint_codes"),
         },
     }
-
 
 def _build_diff(baseline: Dict[str, Any], adaptive: Dict[str, Any]) -> Dict[str, Any]:
     return {
-        "decision": {
-            "baseline": baseline["decision"]["decision"],
-            "adaptive": adaptive["decision"]["decision"],
-            "changed": baseline["decision"]["decision"] != adaptive["decision"]["decision"],
-            "score_delta": adaptive["decision"]["score"] - baseline["decision"]["score"],
-        },
-        "validator": {
-            "baseline": baseline["validator"]["passed"],
-            "adaptive": adaptive["validator"]["passed"],
-            "changed": baseline["validator"]["passed"] != adaptive["validator"]["passed"],
-            "baseline_reason": baseline["validator"]["reason"],
-            "adaptive_reason": adaptive["validator"]["reason"],
-        },
-        "risk": {
-            "would_tighten": adaptive["risk"]["would_tighten"],
-            "tightened_fields": adaptive["risk"]["would_tighten_fields"],
-            "enforced_fields": adaptive["risk"]["enforced_fields"],
-            "baseline_entry_margin_ratio": (baseline["risk"]["baseline"] or {}).get("base_entry_margin_ratio"),
-            "adaptive_entry_margin_ratio": (adaptive["risk"]["effective"] or {}).get("base_entry_margin_ratio"),
-        },
-        "execution": {
-            "would_tighten": adaptive["execution"]["would_tighten"],
-            "tightened_fields": adaptive["execution"]["would_tighten_fields"],
-            "enforced_fields": adaptive["execution"]["enforced_fields"],
-            "execution_profile_really_enforced": adaptive["execution"]["execution_profile_really_enforced"],
-            "layering_profile_really_enforced": adaptive["execution"]["layering_profile_really_enforced"],
-            "plan_shape_really_enforced": adaptive["execution"]["plan_shape_really_enforced"],
-            "baseline_layer_ratios": (baseline["execution"]["baseline"] or {}).get("layer_ratios"),
-            "adaptive_live_layer_ratios": (adaptive["execution"]["live"] or {}).get("layer_ratios"),
-        },
+        "decision": {"baseline": baseline["decision"]["decision"], "adaptive": adaptive["decision"]["decision"], "changed": baseline["decision"]["decision"] != adaptive["decision"]["decision"], "score_delta": adaptive["decision"]["score"] - baseline["decision"]["score"]},
+        "validator": {"baseline": baseline["validator"]["passed"], "adaptive": adaptive["validator"]["passed"], "changed": baseline["validator"]["passed"] != adaptive["validator"]["passed"], "baseline_reason": baseline["validator"]["reason"], "adaptive_reason": adaptive["validator"]["reason"]},
+        "risk": {"would_tighten": adaptive["risk"]["would_tighten"], "tightened_fields": adaptive["risk"]["would_tighten_fields"], "enforced_fields": adaptive["risk"]["enforced_fields"], "baseline_entry_margin_ratio": (baseline["risk"]["baseline"] or {}).get("base_entry_margin_ratio"), "adaptive_entry_margin_ratio": (adaptive["risk"]["effective"] or {}).get("base_entry_margin_ratio")},
+        "execution": {"would_tighten": adaptive["execution"]["would_tighten"], "tightened_fields": adaptive["execution"]["would_tighten_fields"], "enforced_fields": adaptive["execution"]["enforced_fields"], "execution_profile_really_enforced": adaptive["execution"]["execution_profile_really_enforced"], "layering_profile_really_enforced": adaptive["execution"]["layering_profile_really_enforced"], "plan_shape_really_enforced": adaptive["execution"]["plan_shape_really_enforced"], "baseline_layer_ratios": (baseline["execution"]["baseline"] or {}).get("layer_ratios"), "adaptive_live_layer_ratios": (adaptive["execution"]["live"] or {}).get("layer_ratios")},
     }
 
+def _build_workflow_ready(case_data: Dict[str, Any]) -> Dict[str, Any]:
+    workflow_input = copy.deepcopy(case_data.get('input') or {})
+    if workflow_input.get('workflow_ready'):
+        return workflow_input['workflow_ready']
+    if workflow_input.get('report'):
+        return build_governance_workflow_ready_payload(workflow_input['report'])
+    return build_governance_workflow_ready_payload(build_regime_policy_calibration_report(workflow_input.get('symbol_results') or []))
 
-def _evaluate_assertions(case_data: Dict[str, Any], adaptive: Dict[str, Any], diff: Dict[str, Any]) -> Tuple[bool, list]:
+def _replay_workflow_approval_state(case_data: Dict[str, Any], workflow_ready: Dict[str, Any]) -> Dict[str, Any]:
+    replay_cfg = copy.deepcopy(case_data.get('replay') or {})
+    approval_items = copy.deepcopy((workflow_ready.get('approval_state') or {}).get('items') or [])
+    if not approval_items:
+        return {'enabled': bool(replay_cfg.get('enabled', True)), 'db_path': None, 'synced_count': 0, 'states': [], 'timeline': [], 'summary': {'approval_count': 0, 'pending_count': 0}}
+    if replay_cfg.get('db_path'):
+        db_path = replay_cfg['db_path']
+    else:
+        tmp = tempfile.NamedTemporaryFile(prefix='shadow-workflow-', suffix='.db', delete=False)
+        db_path = tmp.name
+        tmp.close()
+    replay_source = replay_cfg.get('source') or 'shadow_workflow_replay'
+    db = Database(db_path)
+    synced = db.sync_approval_items(approval_items, replay_source=replay_source, preserve_terminal=bool(replay_cfg.get('preserve_terminal', True)))
+    item_id = synced[0].get('item_id') if synced else None
+    timeline = db.get_approval_timeline(item_id=item_id, limit=50) if item_id else []
+    states = db.get_approval_states(limit=max(len(synced), 1))
+    return {
+        'enabled': bool(replay_cfg.get('enabled', True)), 'db_path': db_path, 'synced_count': len(synced), 'states': states, 'timeline': timeline,
+        'summary': {'approval_count': len(states), 'pending_count': sum(1 for row in states if row.get('state') == 'pending'), 'replayed_count': sum(1 for row in states if row.get('replay_source') == replay_source)},
+    }
+
+def _build_workflow_diff(workflow_ready: Dict[str, Any], replay_result: Dict[str, Any]) -> Dict[str, Any]:
+    actions = workflow_ready.get('actions') or []
+    approvals = (workflow_ready.get('approval_state') or {}).get('items') or []
+    replay_states = replay_result.get('states') or []
+    return {
+        'workflow': {'action_count': len(actions), 'approval_count': len(approvals), 'pending_approval_count': sum(1 for row in approvals if row.get('approval_state') == 'pending'), 'blocked_count': sum(1 for row in (workflow_ready.get('workflow_state') or {}).get('item_states', []) if row.get('workflow_state') == 'blocked'), 'ready_count': sum(1 for row in (workflow_ready.get('workflow_state') or {}).get('item_states', []) if row.get('workflow_state') == 'ready')},
+        'replay': {'synced_count': replay_result.get('synced_count', 0), 'timeline_events': len(replay_result.get('timeline') or []), 'replayed_state_count': len(replay_states), 'pending_state_count': sum(1 for row in replay_states if row.get('state') == 'pending')},
+    }
+
+def _evaluate_assertions(case_data: Dict[str, Any], adaptive: Optional[Dict[str, Any]], diff: Dict[str, Any], *, workflow_ready: Optional[Dict[str, Any]] = None, replay_result: Optional[Dict[str, Any]] = None) -> Tuple[bool, list]:
     expectations = case_data.get("expect") or {}
     results = []
     for key, expected in expectations.items():
         if key == "decision":
-            actual = adaptive["decision"]["decision"]
+            actual = adaptive["decision"]["decision"] if adaptive else None
         elif key == "validator_pass":
-            actual = adaptive["validator"]["passed"]
+            actual = adaptive["validator"]["passed"] if adaptive else None
         elif key == "risk_would_tighten":
-            actual = diff["risk"]["would_tighten"]
+            actual = diff.get("risk", {}).get("would_tighten")
         elif key == "execution_profile_really_enforced":
-            actual = diff["execution"]["execution_profile_really_enforced"]
+            actual = diff.get("execution", {}).get("execution_profile_really_enforced")
         elif key == "layering_profile_really_enforced":
-            actual = diff["execution"]["layering_profile_really_enforced"]
+            actual = diff.get("execution", {}).get("layering_profile_really_enforced")
         elif key == "plan_shape_really_enforced":
-            actual = diff["execution"]["plan_shape_really_enforced"]
+            actual = diff.get("execution", {}).get("plan_shape_really_enforced")
+        elif key == 'workflow_action_count':
+            actual = diff.get('workflow', {}).get('action_count')
+        elif key == 'approval_count':
+            actual = diff.get('workflow', {}).get('approval_count')
+        elif key == 'pending_approval_count':
+            actual = diff.get('workflow', {}).get('pending_approval_count')
+        elif key == 'workflow_has_pending':
+            actual = any(row.get('workflow_state') == 'pending' for row in (workflow_ready or {}).get('workflow_state', {}).get('item_states', []))
+        elif key == 'approval_replay_synced':
+            actual = (replay_result or {}).get('synced_count', 0) > 0
+        elif key == 'approval_replay_source':
+            states = (replay_result or {}).get('states') or []
+            actual = states[0].get('replay_source') if states else None
         else:
             actual = None
         results.append({"field": key, "expected": expected, "actual": actual, "passed": actual == expected})
     return all(item["passed"] for item in results) if results else True, results
 
-
-def run_shadow_validation_case(case_path: str, *, base_config: Config = None) -> Dict[str, Any]:
-    case = load_validation_case(case_path)
+def _run_signal_or_execution_case(case: ValidationCase, *, base_config: Optional[Config] = None, case_path: Optional[str] = None) -> Dict[str, Any]:
     base_config = base_config or Config()
     signal = _build_signal(case.raw)
-
     baseline_cfg = ShadowConfig(base=base_config, overrides=case.raw.get("baseline_config_overrides") or {})
     adaptive_cfg = ShadowConfig(base=base_config, overrides=case.raw.get("config_overrides") or {})
-
     baseline = _evaluate_with_config(baseline_cfg, signal)
     adaptive = _evaluate_with_config(adaptive_cfg, signal)
     diff = _build_diff(baseline, adaptive)
     passed, assertions = _evaluate_assertions(case.raw, adaptive, diff)
+    return {"case_id": case.case_id, "case_type": case.case_type, "mode": case.raw.get("mode") or "guarded_execute", "status": "pass" if passed else "fail", "baseline": baseline, "adaptive": adaptive, "diff": diff, "assertions": assertions, "artifacts": {"baseline_policy_snapshot": baseline.get("adaptive_policy_snapshot"), "adaptive_policy_snapshot": adaptive.get("adaptive_policy_snapshot"), "adaptive_regime_snapshot": adaptive.get("regime_snapshot")}, "audit": {"generated_at": datetime.now().isoformat(), "real_trade_execution": False, "dangerous_live_parameter_change": False, "exchange_mode": "shadow", "case_path": str(case_path) if case_path else None}}
 
-    return {
-        "case_id": case.case_id,
-        "case_type": case.case_type,
-        "mode": case.raw.get("mode") or "guarded_execute",
-        "status": "pass" if passed else "fail",
-        "baseline": baseline,
-        "adaptive": adaptive,
-        "diff": diff,
-        "assertions": assertions,
-        "artifacts": {
-            "baseline_policy_snapshot": baseline.get("adaptive_policy_snapshot"),
-            "adaptive_policy_snapshot": adaptive.get("adaptive_policy_snapshot"),
-            "adaptive_regime_snapshot": adaptive.get("regime_snapshot"),
-        },
-        "audit": {
-            "generated_at": datetime.now().isoformat(),
-            "real_trade_execution": False,
-            "exchange_mode": "shadow",
-            "case_path": str(case_path),
-        },
-    }
+def _run_workflow_case(case: ValidationCase, *, case_path: Optional[str] = None) -> Dict[str, Any]:
+    workflow_ready = _build_workflow_ready(case.raw)
+    replay_result = _replay_workflow_approval_state(case.raw, workflow_ready)
+    diff = _build_workflow_diff(workflow_ready, replay_result)
+    passed, assertions = _evaluate_assertions(case.raw, None, diff, workflow_ready=workflow_ready, replay_result=replay_result)
+    return {'case_id': case.case_id, 'case_type': case.case_type, 'mode': case.raw.get('mode') or 'workflow_dry_run', 'status': 'pass' if passed else 'fail', 'baseline': None, 'adaptive': None, 'diff': diff, 'assertions': assertions, 'artifacts': {'workflow_ready': workflow_ready, 'approval_replay': replay_result}, 'audit': {'generated_at': datetime.now().isoformat(), 'real_trade_execution': False, 'dangerous_live_parameter_change': False, 'exchange_mode': 'shadow', 'case_path': str(case_path) if case_path else None, 'replay_source': ((replay_result.get('states') or [{}])[0]).get('replay_source') if replay_result.get('states') else None}}
+
+def run_shadow_validation_case(case_path: str, *, base_config: Config = None) -> Dict[str, Any]:
+    case = load_validation_case(case_path)
+    if case.case_type == 'shadow_workflow':
+        return _run_workflow_case(case, case_path=case_path)
+    return _run_signal_or_execution_case(case, base_config=base_config, case_path=case_path)
+
+def build_validation_summary(results: List[Dict[str, Any]]) -> Dict[str, Any]:
+    case_types, statuses = {}, {}
+    for row in results:
+        case_types[row.get('case_type') or 'unknown'] = case_types.get(row.get('case_type') or 'unknown', 0) + 1
+        statuses[row.get('status') or 'unknown'] = statuses.get(row.get('status') or 'unknown', 0) + 1
+    return {'case_count': len(results), 'pass_count': statuses.get('pass', 0), 'fail_count': statuses.get('fail', 0), 'case_types': case_types, 'statuses': statuses, 'failed_cases': [{'case_id': row.get('case_id'), 'case_type': row.get('case_type'), 'case_path': (row.get('audit') or {}).get('case_path'), 'failed_assertions': [item for item in (row.get('assertions') or []) if not item.get('passed')]} for row in results if row.get('status') != 'pass'], 'generated_at': datetime.now().isoformat(), 'real_trade_execution': False, 'exchange_mode': 'shadow'}
+
+def run_shadow_validation_replay(paths: Iterable[str], *, base_config: Optional[Config] = None) -> Dict[str, Any]:
+    case_paths = collect_validation_case_paths(paths)
+    results = [run_shadow_validation_case(path, base_config=base_config) for path in case_paths]
+    return {'mode': 'validation_replay', 'paths': case_paths, 'results': results, 'summary': build_validation_summary(results), 'audit': {'generated_at': datetime.now().isoformat(), 'real_trade_execution': False, 'dangerous_live_parameter_change': False, 'exchange_mode': 'shadow'}}

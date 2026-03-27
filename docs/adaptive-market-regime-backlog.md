@@ -207,24 +207,30 @@
   - unsupported action 明确走 fallback handler：`unsupported::unsupported_action` + `unsupported_hold`，避免未来扩 action type 时 silently 混进默认 apply；
   - 继续保持安全边界：所有 handler 都只落状态/元数据/审计，不触发真实交易执行，不做危险 live parameter apply。
 
-### VEP-01 / VEP-02｜Shadow Validation Entry Pack（step 1 已落地）
+### VEP-01 / VEP-04｜Shadow Validation Entry Pack（step 2 已落地）
 
 - **阶段 / 优先级**：Validation Entry Pack / P0
-- **生效范围**：仅 shadow / dry-run；**不做真实下单**
+- **生效范围**：仅 shadow / dry-run / replay；**不做真实下单、不做危险 live 参数修改**
 - **本次已落地内容**：
-  - 新增 `validation/shadow_runner.py`，提供统一 case loader + shadow runner；
-  - 新增统一 case schema 最小骨架，首批支持 `shadow_signal / shadow_execution`；
-  - 新增 CLI 入口：`python bot/run.py --validation-entry run --case <file>`；
-  - runner 现阶段复用真实链路中的 `EntryDecider / SignalValidator / build_risk_effective_snapshot / build_execution_effective_snapshot`，输出 baseline vs adaptive diff；
-  - 输出 envelope 固定包含：`case_id / case_type / mode / status / baseline / adaptive / diff / assertions / artifacts / audit`；
-  - `audit.real_trade_execution=false`、`audit.exchange_mode=shadow` 明确安全边界；
-  - 首个 fixture：`tests/fixtures/validation/execution/high-vol-tighten-long-001.yaml`；
-  - 首批测试覆盖 case schema / helper / CLI。
-- **当前未覆盖**：workflow_dry_run、批量 replay basket、testnet bridge。
+  - `validation/shadow_runner.py` 已扩成统一 case loader + single run + batch replay；
+  - case schema 现支持 `shadow_signal / shadow_execution / shadow_workflow`；
+  - workflow case 可用 `input.symbol_results` 直接生成 `workflow_ready`，覆盖 governance / workflow / approval queue 核心链路；
+  - workflow runner 会复用现有 `Database.sync_approval_items()` / timeline / state snapshot，在临时 SQLite 上做 approval replay；
+  - CLI 现支持：
+    - `python bot/run.py --validation-entry run --case <file>`
+    - `python bot/run.py --validation-replay --case <file|dir> [more paths...]`
+  - replay summary 会聚合 `case_count / pass_count / fail_count / case_types / failed_cases`；
+  - 输出 envelope 继续固定包含：`case_id / case_type / mode / status / baseline / adaptive / diff / assertions / artifacts / audit`；
+  - `audit.real_trade_execution=false`、`audit.exchange_mode=shadow`、`dangerous_live_parameter_change=false` 明确安全边界；
+  - fixture basket 已扩到 execution + workflow：
+    - `tests/fixtures/validation/execution/high-vol-tighten-long-001.yaml`
+    - `tests/fixtures/validation/workflow/governance-approval-replay-001.yaml`
+  - 测试已覆盖 case schema / workflow runner / replay summary / CLI 落盘。
+- **当前未覆盖**：更深 execution guard basket、workflow safe-apply allowlist、testnet bridge。
 - **下一步建议**：
-  1. 补 `shadow_workflow` case type；
-  2. 补 `--validation-replay <dir>` 批量回归；
-  3. 把 direction lock / intent / layer gap 这些 execution-time guard case 也纳入 fixture basket。
+  1. 把 direction lock / intent / layer gap / queue progression 这些高价值 regression case 补齐；
+  2. 补 `workflow safe-apply` 白名单动作；
+  3. 最后再把 case-based testnet smoke bridge 接上。
 
 ### AR-M5-05｜approval audit / stale cleanup / decision diff layer
 

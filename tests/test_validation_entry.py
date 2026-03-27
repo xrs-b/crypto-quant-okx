@@ -21,6 +21,7 @@ from validation.shadow_runner import (
 EXECUTION_FIXTURE = 'tests/fixtures/validation/execution/high-vol-tighten-long-001.yaml'
 WORKFLOW_FIXTURE = 'tests/fixtures/validation/workflow/governance-approval-replay-001.yaml'
 WORKFLOW_EXECUTOR_FIXTURE = 'tests/fixtures/validation/workflow/queue-executor-dry-run-001.yaml'
+WORKFLOW_TESTNET_BRIDGE_FIXTURE = 'tests/fixtures/validation/workflow/testnet-bridge-plan-001.yaml'
 FIXTURE_DIR = 'tests/fixtures/validation'
 
 
@@ -82,6 +83,17 @@ class TestShadowValidationEntry(unittest.TestCase):
         self.assertEqual(report['diff']['executor']['dry_run_count'], 1)
         self.assertEqual(report['artifacts']['rollout_executor']['status'], 'dry_run')
         self.assertEqual(report['artifacts']['rollout_executor']['items'][0]['plan']['queue_plan']['dispatch_route'], 'manual_review_queue')
+
+    def test_shadow_workflow_runner_supports_testnet_bridge_plan_fixture(self):
+        report = run_shadow_validation_case(WORKFLOW_TESTNET_BRIDGE_FIXTURE)
+        self.assertEqual(report['case_type'], 'shadow_workflow')
+        self.assertEqual(report['status'], 'pass')
+        self.assertTrue(report['diff']['testnet_bridge']['enabled'])
+        self.assertTrue(report['diff']['testnet_bridge']['plan_only'])
+        self.assertTrue(report['diff']['testnet_bridge']['execute_ready'])
+        self.assertEqual(report['artifacts']['testnet_bridge']['mode'], 'plan_only')
+        self.assertFalse(report['audit']['real_trade_execution'])
+        self.assertEqual(report['artifacts']['workflow_consumer_view']['schema_version'], 'm5_workflow_consumer_view_v1')
 
     def test_collect_validation_case_paths_supports_directory(self):
         paths = collect_validation_case_paths([FIXTURE_DIR])

@@ -9,7 +9,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 import yaml
 
 from analytics.backtest import build_governance_workflow_ready_payload, build_regime_policy_calibration_report
-from analytics.helper import attach_auto_approval_policy, build_workflow_approval_records, execute_rollout_executor, merge_persisted_approval_state
+from analytics.helper import attach_auto_approval_policy, build_workflow_approval_records, execute_rollout_executor, merge_persisted_approval_state, build_workflow_consumer_view
 from core.config import Config, DEFAULT_ADAPTIVE_REGIME_CONFIG
 from core.database import Database
 from core.regime import build_regime_snapshot, normalize_regime_snapshot
@@ -42,6 +42,9 @@ class ShadowConfig:
             self._deep_merge_inplace(self._config, overrides)
         self.all = self._config
         self.db_path = getattr(self._base, "db_path", "data/trading.db")
+        self.exchange_mode = str(self.get('exchange.mode', 'testnet') or 'testnet')
+        self.position_mode = str(self.get('trading.position_mode', 'hedge') or 'hedge')
+        self.symbols = list(self.get('trading.watch_list', []) or [])
 
     def _deep_merge_inplace(self, base: Dict[str, Any], override: Dict[str, Any]):
         for key, value in (override or {}).items():
@@ -295,16 +298,69 @@ def _run_workflow_executor(case_data: Dict[str, Any], workflow_ready: Dict[str, 
     return {'enabled': True, 'mode': execution_cfg.get('mode') or 'dry_run', 'executed': executor_payload.get('rollout_executor')}
 
 
-def _build_workflow_diff(workflow_ready: Dict[str, Any], replay_result: Dict[str, Any], executor_result: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def _run_testnet_bridge(case_data: Dict[str, Any], workflow_ready: Dict[str, Any], executor_result: Optional[Dict[str, Any]] = None, *, base_config: Optional[Config] = None, bridge_runner=None) -> Dict[str, Any]:
+    from bot.run import build_exchange_smoke_plan, execute_exchange_smoke
+
+    bridge_cfg = copy.deepcopy(case_data.get('testnet_bridge') or {})
+    enabled = bool(bridge_cfg.get('enabled', False))
+    if not enabled:
+        return {'enabled': False, 'mode': 'disabled', 'plan_only': True, 'result': None, 'audit': {'real_trade_execution': False, 'dangerous_live_parameter_change': False}}
+
+    cfg = ShadowConfig(base=base_config or Config(), overrides=bridge_cfg.get('config_overrides') or {})
+    symbol = bridge_cfg.get('symbol')
+    side = bridge_cfg.get('side') or 'long'
+    allow_execute = bool(bridge_cfg.get('allow_execute', False))
+    plan_only = not allow_execute
+
+    class _BridgeExchangeStub:
+        def fetch_balance(self):
+            return bridge_cfg.get('balance') or {'free': {'USDT': bridge_cfg.get('available_usdt', 1000)}}
+        def is_futures_symbol(self, selected_symbol):
+            unsupported = set(bridge_cfg.get('unsupported_symbols') or [])
+            return selected_symbol not in unsupported
+        def fetch_ticker(self, selected_symbol):
+            prices = bridge_cfg.get('prices') or {}
+            return {'last': prices.get(selected_symbol, bridge_cfg.get('last_price', 50000))}
+        def normalize_contract_amount(self, selected_symbol, smoke_notional, last_price):
+            if bridge_cfg.get('sample_amount') is not None:
+                return bridge_cfg['sample_amount']
+            last_price = float(last_price or 0)
+            return round(float(smoke_notional or 0) / last_price, 6) if last_price > 0 else 0.0
+        def get_order_symbol(self, selected_symbol):
+            return selected_symbol
+        def create_order(self, selected_symbol, order_side, amount, posSide=None):
+            return {'id': 'bridge-open', 'symbol': selected_symbol, 'side': order_side, 'amount': amount, 'posSide': posSide}
+        def close_order(self, selected_symbol, order_side, amount, posSide=None):
+            return {'id': 'bridge-close', 'symbol': selected_symbol, 'side': order_side, 'amount': amount, 'posSide': posSide}
+
+    exchange = bridge_cfg.get('exchange') or _BridgeExchangeStub()
+    plan = build_exchange_smoke_plan(cfg, exchange, symbol=symbol, side=side)
+    gating = {
+        'workflow_pending_approvals': sum(1 for row in ((workflow_ready.get('approval_state') or {}).get('items') or []) if row.get('approval_state') == 'pending'),
+        'executor_applied_count': (((executor_result or {}).get('executed') or {}).get('summary') or {}).get('applied_count', 0),
+        'executor_queued_count': (((executor_result or {}).get('executed') or {}).get('summary') or {}).get('queued_count', 0),
+    }
+    result = {'enabled': True, 'mode': 'plan_only' if plan_only else 'controlled_execute', 'plan_only': plan_only, 'plan': plan, 'gating': gating, 'result': None, 'audit': {'real_trade_execution': False, 'dangerous_live_parameter_change': False, 'exchange_mode': cfg.get('exchange.mode', 'testnet'), 'allow_execute': allow_execute}}
+    if plan_only or bridge_runner is None:
+        return result
+    result['result'] = bridge_runner(cfg, exchange, symbol=symbol, side=side)
+    result['audit']['real_trade_execution'] = bool((result['result'] or {}).get('opened') or (result['result'] or {}).get('closed'))
+    return result
+
+
+def _build_workflow_diff(workflow_ready: Dict[str, Any], replay_result: Dict[str, Any], executor_result: Optional[Dict[str, Any]] = None, bridge_result: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     actions = workflow_ready.get('actions') or []
     approvals = (workflow_ready.get('approval_state') or {}).get('items') or []
     replay_states = replay_result.get('states') or []
     executed = (executor_result or {}).get('executed') or {}
     executor_summary = executed.get('summary') or {}
+    stage_progression = (executed.get('stage_progression') or {}).get('summary') or {}
+    bridge_result = bridge_result or {}
     return {
         'workflow': {'action_count': len(actions), 'approval_count': len(approvals), 'pending_approval_count': sum(1 for row in approvals if row.get('approval_state') == 'pending'), 'blocked_count': sum(1 for row in (workflow_ready.get('workflow_state') or {}).get('item_states', []) if row.get('workflow_state') == 'blocked'), 'ready_count': sum(1 for row in (workflow_ready.get('workflow_state') or {}).get('item_states', []) if row.get('workflow_state') == 'ready')},
         'replay': {'synced_count': replay_result.get('synced_count', 0), 'timeline_events': len(replay_result.get('timeline') or []), 'replayed_state_count': len(replay_states), 'pending_state_count': sum(1 for row in replay_states if row.get('state') == 'pending')},
-        'executor': {'enabled': bool((executor_result or {}).get('enabled')), 'mode': (executor_result or {}).get('mode') or 'disabled', 'planned_count': executor_summary.get('planned_count', 0), 'queued_count': executor_summary.get('queued_count', 0), 'dry_run_count': executor_summary.get('dry_run_count', 0), 'applied_count': executor_summary.get('applied_count', 0), 'error_count': executor_summary.get('error_count', 0)},
+        'executor': {'enabled': bool((executor_result or {}).get('enabled')), 'mode': (executor_result or {}).get('mode') or 'disabled', 'planned_count': executor_summary.get('planned_count', 0), 'queued_count': executor_summary.get('queued_count', 0), 'dry_run_count': executor_summary.get('dry_run_count', 0), 'applied_count': executor_summary.get('applied_count', 0), 'error_count': executor_summary.get('error_count', 0), 'stage_ready_count': stage_progression.get('ready_stage_count', 0), 'blocked_count': stage_progression.get('blocked_count', 0)},
+        'testnet_bridge': {'enabled': bool(bridge_result.get('enabled')), 'mode': bridge_result.get('mode') or 'disabled', 'plan_only': bool(bridge_result.get('plan_only', True)), 'execute_ready': bool((bridge_result.get('plan') or {}).get('execute_ready', False)), 'pending_approval_count': (bridge_result.get('gating') or {}).get('workflow_pending_approvals', 0), 'executor_applied_count': (bridge_result.get('gating') or {}).get('executor_applied_count', 0)},
     }
 
 def _evaluate_assertions(case_data: Dict[str, Any], adaptive: Optional[Dict[str, Any]], diff: Dict[str, Any], *, workflow_ready: Optional[Dict[str, Any]] = None, replay_result: Optional[Dict[str, Any]] = None) -> Tuple[bool, list]:
@@ -342,6 +398,12 @@ def _evaluate_assertions(case_data: Dict[str, Any], adaptive: Optional[Dict[str,
             actual = diff.get('executor', {}).get('queued_count')
         elif key == 'executor_dry_run_count':
             actual = diff.get('executor', {}).get('dry_run_count')
+        elif key == 'testnet_bridge_enabled':
+            actual = diff.get('testnet_bridge', {}).get('enabled')
+        elif key == 'testnet_bridge_execute_ready':
+            actual = diff.get('testnet_bridge', {}).get('execute_ready')
+        elif key == 'testnet_bridge_mode':
+            actual = diff.get('testnet_bridge', {}).get('mode')
         else:
             actual = None
         results.append({"field": key, "expected": expected, "actual": actual, "passed": actual == expected})
@@ -358,18 +420,25 @@ def _run_signal_or_execution_case(case: ValidationCase, *, base_config: Optional
     passed, assertions = _evaluate_assertions(case.raw, adaptive, diff)
     return {"case_id": case.case_id, "case_type": case.case_type, "mode": case.raw.get("mode") or "guarded_execute", "status": "pass" if passed else "fail", "baseline": baseline, "adaptive": adaptive, "diff": diff, "assertions": assertions, "artifacts": {"baseline_policy_snapshot": baseline.get("adaptive_policy_snapshot"), "adaptive_policy_snapshot": adaptive.get("adaptive_policy_snapshot"), "adaptive_regime_snapshot": adaptive.get("regime_snapshot")}, "audit": {"generated_at": datetime.now().isoformat(), "real_trade_execution": False, "dangerous_live_parameter_change": False, "exchange_mode": "shadow", "case_path": str(case_path) if case_path else None}}
 
-def _run_workflow_case(case: ValidationCase, *, case_path: Optional[str] = None) -> Dict[str, Any]:
+def _run_workflow_case(case: ValidationCase, *, case_path: Optional[str] = None, base_config: Optional[Config] = None) -> Dict[str, Any]:
     workflow_ready = _build_workflow_ready(case.raw)
     replay_result = _replay_workflow_approval_state(case.raw, workflow_ready)
     executor_result = _run_workflow_executor(case.raw, workflow_ready, replay_result)
-    diff = _build_workflow_diff(workflow_ready, replay_result, executor_result)
+    bridge_result = _run_testnet_bridge(case.raw, workflow_ready, executor_result, base_config=base_config)
+    consumer_view = build_workflow_consumer_view({
+        **copy.deepcopy(workflow_ready),
+        'rollout_executor': (executor_result or {}).get('executed') or {},
+        'controlled_rollout_execution': {},
+        'auto_approval_execution': {},
+    })
+    diff = _build_workflow_diff(workflow_ready, replay_result, executor_result, bridge_result)
     passed, assertions = _evaluate_assertions(case.raw, None, diff, workflow_ready=workflow_ready, replay_result=replay_result)
-    return {'case_id': case.case_id, 'case_type': case.case_type, 'mode': case.raw.get('mode') or 'workflow_dry_run', 'status': 'pass' if passed else 'fail', 'baseline': None, 'adaptive': None, 'diff': diff, 'assertions': assertions, 'artifacts': {'workflow_ready': workflow_ready, 'approval_replay': replay_result, 'rollout_executor': executor_result.get('executed')}, 'audit': {'generated_at': datetime.now().isoformat(), 'real_trade_execution': False, 'dangerous_live_parameter_change': False, 'exchange_mode': 'shadow', 'case_path': str(case_path) if case_path else None, 'replay_source': ((replay_result.get('states') or [{}])[0]).get('replay_source') if replay_result.get('states') else None}}
+    return {'case_id': case.case_id, 'case_type': case.case_type, 'mode': case.raw.get('mode') or 'workflow_dry_run', 'status': 'pass' if passed else 'fail', 'baseline': None, 'adaptive': None, 'diff': diff, 'assertions': assertions, 'artifacts': {'workflow_ready': workflow_ready, 'approval_replay': replay_result, 'rollout_executor': executor_result.get('executed'), 'workflow_consumer_view': consumer_view, 'testnet_bridge': bridge_result}, 'audit': {'generated_at': datetime.now().isoformat(), 'real_trade_execution': bool((bridge_result.get('audit') or {}).get('real_trade_execution', False)), 'dangerous_live_parameter_change': False, 'exchange_mode': (bridge_result.get('audit') or {}).get('exchange_mode', 'shadow'), 'case_path': str(case_path) if case_path else None, 'replay_source': ((replay_result.get('states') or [{}])[0]).get('replay_source') if replay_result.get('states') else None}}
 
 def run_shadow_validation_case(case_path: str, *, base_config: Config = None) -> Dict[str, Any]:
     case = load_validation_case(case_path)
     if case.case_type == 'shadow_workflow':
-        return _run_workflow_case(case, case_path=case_path)
+        return _run_workflow_case(case, case_path=case_path, base_config=base_config)
     return _run_signal_or_execution_case(case, base_config=base_config, case_path=case_path)
 
 def build_validation_summary(results: List[Dict[str, Any]]) -> Dict[str, Any]:

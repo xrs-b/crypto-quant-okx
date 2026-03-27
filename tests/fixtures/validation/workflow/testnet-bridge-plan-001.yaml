@@ -1,0 +1,72 @@
+case_id: testnet-bridge-plan-001
+case_type: shadow_workflow
+mode: workflow_dry_run
+input:
+  workflow_ready:
+    schema_version: m5_governance_workflow_ready_v2
+    summary: {}
+    actions:
+      - item_id: playbook::observe
+        title: Safe observe item
+        action_type: joint_observe
+        decision: expand
+        governance_mode: rollout
+        risk_level: low
+        approval_required: false
+        workflow_state: pending
+        confidence: high
+    approval_state:
+      schema_version: m5_approval_state_layer_v1
+      items:
+        - approval_id: approval::observe
+          playbook_id: playbook::observe
+          title: Safe observe item
+          action_type: joint_observe
+          approval_state: pending
+          decision_state: pending
+          risk_level: low
+          approval_required: false
+          blocked_by: []
+      summary: {}
+    workflow_state:
+      schema_version: m5_workflow_state_layer_v1
+      item_states:
+        - item_id: playbook::observe
+          title: Safe observe item
+          action_type: joint_observe
+          workflow_state: pending
+          decision: expand
+          governance_mode: rollout
+          risk_level: low
+          approval_required: false
+          blocking_reasons: []
+          preconditions: []
+          confidence: high
+      summary: {}
+    queues:
+      priority: []
+      next_actions: []
+      blocking: []
+      approvals: []
+replay:
+  source: shadow_workflow_fixture_testnet_bridge
+workflow_execution:
+  enabled: true
+  mode: dry_run
+  allowed_action_types:
+    - joint_observe
+testnet_bridge:
+  enabled: true
+  allow_execute: false
+  symbol: BTC/USDT
+  side: long
+  available_usdt: 250
+  last_price: 50000
+  sample_amount: 0.001
+expect:
+  approval_replay_synced: true
+  executor_planned_count: 1
+  executor_dry_run_count: 1
+  testnet_bridge_enabled: true
+  testnet_bridge_execute_ready: true
+  testnet_bridge_mode: plan_only

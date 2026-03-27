@@ -575,6 +575,8 @@
   - 再向前推进一层可执行准备：`joint_governance` 现补 `action_playbook`，把 `combined_actions` 展开成稳定、可序列化的逐项动作卡片，统一附带 `risk_level / owner_hint / execution_window / preconditions / rollback_plan / approval_required / approval_roles`，方便 dashboard / agent / 人工审批流直接回答“下一步具体做咩、边个批、失败点样退”。
   - `build_joint_governance_ready_payload()` / `delivery.orchestration_ready` 同步新增 `approval_ready`、`joint_action_playbook`、`joint_approval_queue`，令治理输出唔止系 queue/summary，而系接近审批工作台可直接消费的 prepared action set；仍保持 no-op，不触发真实自动执行。
   - 今轮再补更明确的 workflow 入口：`build_governance_workflow_ready_payload()` 与 `/api/backtest/calibration-report?view=workflow_ready` 直接暴露 `actions / approval_queue / queues / filters / by_bucket / summary`，dashboard / report / agent / 人工治理可唔经手 `governance_ready` 原始结构就直接消费准备好的审批工作流数据。
+  - 2026-03-27 implementation update（workflow state layer / done）：在 `workflow_ready` 之上再补一层稳定、可序列化的 `workflow_state + approval_state`，把 `item state / approval state / transition / execution readiness / rollback readiness / by_bucket indexes` 统一收口；旧 `actions / approval_queue` 继续保留兼容，方便 dashboard / agent / 人工低干预逐步迁移，而唔需要一次过重写所有消费端。
+  - 同步在 `dashboard/api.py` 新增 `/api/backtest/workflow-state` 自然入口，默认直接返回 workflow state layer，方便后续审批工作台、auto-approval agent、rollout orchestrator 直接对接。
   - `summary.recommendation_summary` 现除 critical/high/medium/low tally 外，也补 `by_type / by_governance_mode / blocked / aligned_with_rollout_gate / top_actions / top_priority_items`，方便后续 dashboard/report 直接做治理面板与 rollout 队列。
 - **阶段 / 优先级**：M5 / P1
 - **生效范围**：不直接生效

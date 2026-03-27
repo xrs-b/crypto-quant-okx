@@ -2419,6 +2419,20 @@ def get_backtest_calibration_report():
     })
 
 
+@app.route('/api/backtest/workflow-state')
+def get_backtest_workflow_state():
+    """获取治理 workflow/approval state 层，供 dashboard/agent/低干预审批流直接消费。"""
+    backtest_result = backtester.run_all(config.symbols)
+    calibration_report = backtest_result.get('calibration_report') or {}
+    payload = export_calibration_payload(calibration_report, view='workflow_ready')
+    return jsonify({
+        'success': True,
+        'view': 'workflow_state',
+        'data': payload,
+        'summary': payload.get('summary') or {},
+    })
+
+
 @app.route('/api/signal-quality')
 def get_signal_quality():
     """获取信号质量分析"""

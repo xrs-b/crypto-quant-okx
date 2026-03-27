@@ -1872,6 +1872,260 @@ def build_joint_governance_ready_payload(source: Dict) -> Dict:
     }
 
 
+def _classify_execution_readiness(action: Dict) -> Dict:
+    preconditions = action.get('preconditions') or []
+    blocking_issues = action.get('blocking_issues') or []
+    if action.get('approval_required'):
+        return {
+            'state': 'pending_approval',
+            'ready': False,
+            'blocking_reasons': ['approval_required'],
+        }
+    open_preconditions = [
+        row.get('value') or row.get('type')
+        for row in preconditions
+        if row.get('status') in {'open', 'pending', 'required'}
+    ]
+    if blocking_issues or open_preconditions:
+        return {
+            'state': 'blocked',
+            'ready': False,
+            'blocking_reasons': _dedupe_strings(list(blocking_issues) + open_preconditions),
+        }
+    return {
+        'state': 'ready',
+        'ready': True,
+        'blocking_reasons': [],
+    }
+
+
+def _classify_rollback_readiness(action: Dict) -> Dict:
+    rollback_plan = action.get('rollback_plan') or {}
+    target_state = rollback_plan.get('target_state')
+    steps = rollback_plan.get('steps') or []
+    if target_state and steps:
+        return {
+            'state': 'ready',
+            'ready': True,
+            'target_state': target_state,
+            'trigger': rollback_plan.get('trigger'),
+        }
+    return {
+        'state': 'pending',
+        'ready': False,
+        'target_state': target_state,
+        'trigger': rollback_plan.get('trigger'),
+    }
+
+
+def _build_workflow_state_layer(
+    *,
+    actions: List[Dict],
+    approvals: List[Dict],
+    bucket_index: Dict,
+    action_playbook: Dict,
+    approval_ready: Dict,
+    priority_queue: List[Dict],
+    next_actions: List[Dict],
+    blocking_items: List[Dict],
+) -> Dict:
+    approval_lookup = {
+        row.get('playbook_id'): row
+        for row in approvals
+        if row.get('playbook_id')
+    }
+    item_states = []
+    action_states = []
+    approval_states = []
+    item_state_by_bucket = {}
+    action_state_by_playbook = {}
+    approval_state_by_id = {}
+
+    for action in actions:
+        execution_readiness = _classify_execution_readiness(action)
+        rollback_readiness = _classify_rollback_readiness(action)
+        approval_row = approval_lookup.get(action.get('playbook_id'))
+        if approval_row:
+            approval_state = 'pending'
+        elif execution_readiness['state'] == 'blocked':
+            approval_state = 'blocked'
+        elif not action.get('approval_required'):
+            approval_state = 'not_required'
+        else:
+            approval_state = 'ready'
+        if execution_readiness['state'] == 'blocked':
+            workflow_state = 'blocked'
+        elif execution_readiness['state'] == 'pending_approval':
+            workflow_state = 'pending'
+        elif execution_readiness['state'] == 'ready':
+            workflow_state = 'ready'
+        else:
+            workflow_state = execution_readiness['state']
+        item_state = {
+            'item_id': action.get('playbook_id'),
+            'bucket_id': action.get('bucket_id'),
+            'scope': action.get('scope'),
+            'type': 'workflow_item',
+            'title': action.get('title'),
+            'action_type': action.get('action_type'),
+            'decision': action.get('decision'),
+            'governance_mode': action.get('governance_mode'),
+            'risk_level': action.get('risk_level'),
+            'owner_hint': action.get('owner_hint'),
+            'priority': action.get('priority'),
+            'confidence': action.get('confidence'),
+            'workflow_state': workflow_state,
+            'approval_state': approval_state,
+            'execution_readiness': execution_readiness,
+            'rollback_readiness': rollback_readiness,
+            'transition': {
+                'current': workflow_state,
+                'next_on_approval': 'ready_for_execution' if action.get('approval_required') else None,
+                'next_on_reject': 'rejected' if action.get('approval_required') else None,
+                'next_on_defer': 'deferred' if action.get('approval_required') else None,
+                'next_on_execute': 'executed' if execution_readiness.get('ready') else None,
+                'next_on_block': 'blocked',
+            },
+            'approval_required': bool(action.get('approval_required')),
+            'approval_roles': action.get('approval_roles') or [],
+            'blocking_reasons': execution_readiness.get('blocking_reasons') or [],
+            'status': action.get('status'),
+            'execution_window': action.get('execution_window') or {},
+            'preconditions': action.get('preconditions') or [],
+            'rollback_plan': action.get('rollback_plan') or {},
+        }
+        item_states.append(item_state)
+        action_states.append(item_state)
+        action_state_by_playbook[item_state['item_id']] = item_state
+
+    for approval in approvals:
+        approval_state = {
+            'approval_id': approval.get('approval_id'),
+            'playbook_id': approval.get('playbook_id'),
+            'bucket_id': approval.get('bucket_id'),
+            'title': approval.get('title'),
+            'action_type': approval.get('action_type'),
+            'risk_level': approval.get('risk_level'),
+            'owner_hint': approval.get('owner_hint'),
+            'approval_state': 'pending',
+            'decision_state': 'awaiting_manual_approval',
+            'execution_readiness': {
+                'state': 'pending_approval',
+                'ready': False,
+                'blocking_reasons': ['approval_required'],
+            },
+            'rollback_readiness': _classify_rollback_readiness(approval),
+            'transition': {
+                'current': 'pending',
+                'next_on_approve': 'approved',
+                'next_on_reject': 'rejected',
+                'next_on_defer': 'deferred',
+                'next_on_expire': 'expired',
+            },
+            'approval_roles': approval.get('approval_roles') or [],
+            'execution_window': approval.get('execution_window') or {},
+            'preconditions': approval.get('preconditions') or [],
+            'rollback_plan': approval.get('rollback_plan') or {},
+            'status': approval.get('status'),
+        }
+        approval_states.append(approval_state)
+        approval_state_by_id[approval_state['approval_id']] = approval_state
+
+    for bucket_id in bucket_index:
+        bucket_actions = [row for row in item_states if row.get('bucket_id') == bucket_id]
+        bucket_approvals = [row for row in approval_states if row.get('bucket_id') == bucket_id]
+        if any(row.get('workflow_state') == 'blocked' for row in bucket_actions):
+            bucket_state = 'blocked'
+        elif bucket_approvals:
+            bucket_state = 'pending_approval'
+        elif any(row.get('workflow_state') == 'ready' for row in bucket_actions):
+            bucket_state = 'ready'
+        else:
+            bucket_state = 'pending'
+        item_state_by_bucket[bucket_id] = {
+            'bucket_id': bucket_id,
+            'item_state': bucket_state,
+            'approval_state': 'pending' if bucket_approvals else 'not_required',
+            'execution_readiness': {
+                'state': 'ready' if bucket_state == 'ready' else bucket_state,
+                'ready': bucket_state == 'ready',
+                'blocking_reasons': _dedupe_strings([
+                    reason
+                    for row in bucket_actions
+                    for reason in (row.get('blocking_reasons') or [])
+                ]),
+            },
+            'rollback_readiness': {
+                'state': 'ready' if all((row.get('rollback_readiness') or {}).get('ready') for row in bucket_actions) else 'partial',
+                'ready': bool(bucket_actions) and all((row.get('rollback_readiness') or {}).get('ready') for row in bucket_actions),
+            },
+            'playbook_ids': [row.get('item_id') for row in bucket_actions],
+            'approval_ids': [row.get('approval_id') for row in bucket_approvals],
+        }
+
+    workflow_state = {
+        'schema_version': 'm5_workflow_state_layer_v1',
+        'state_model': {
+            'item_states': ['ready', 'pending', 'blocked', 'approved', 'rejected', 'deferred', 'executed'],
+            'approval_states': ['not_required', 'ready', 'pending', 'approved', 'rejected', 'deferred', 'expired', 'blocked'],
+            'execution_readiness_states': ['ready', 'pending_approval', 'blocked'],
+            'rollback_readiness_states': ['ready', 'pending', 'partial'],
+        },
+        'item_states': item_states,
+        'action_states': action_states,
+        'approval_states': approval_states,
+        'item_state_by_bucket': item_state_by_bucket,
+        'action_state_by_playbook': action_state_by_playbook,
+        'approval_state_by_id': approval_state_by_id,
+        'summary': {
+            'item_count': len(item_states),
+            'approval_count': len(approval_states),
+            'ready_count': sum(1 for row in item_states if row.get('workflow_state') == 'ready'),
+            'pending_count': sum(1 for row in item_states if row.get('workflow_state') == 'pending'),
+            'blocked_count': sum(1 for row in item_states if row.get('workflow_state') == 'blocked'),
+            'pending_approval_count': sum(1 for row in approval_states if row.get('approval_state') == 'pending'),
+            'execution_ready_count': sum(1 for row in item_states if (row.get('execution_readiness') or {}).get('ready')),
+            'rollback_ready_count': sum(1 for row in item_states if (row.get('rollback_readiness') or {}).get('ready')),
+        },
+        'queues': {
+            'priority': priority_queue,
+            'next_actions': next_actions,
+            'blocking': blocking_items,
+            'approvals': approvals,
+        },
+        'indexes': {
+            'bucket_ids': sorted(bucket_index.keys()),
+            'playbook_ids': sorted(action_state_by_playbook.keys()),
+            'approval_ids': sorted(approval_state_by_id.keys()),
+        },
+        'tables': {
+            'item_states': item_states,
+            'approval_states': approval_states,
+        },
+    }
+    return {
+        'workflow_state': workflow_state,
+        'approval_state': {
+            'schema_version': 'm5_approval_state_layer_v1',
+            'items': approval_states,
+            'by_bucket': {
+                bucket_id: {
+                    'bucket_id': bucket_id,
+                    'approval_state': row.get('approval_state'),
+                    'approval_ids': row.get('approval_ids') or [],
+                    'playbook_ids': row.get('playbook_ids') or [],
+                }
+                for bucket_id, row in item_state_by_bucket.items()
+            },
+            'summary': {
+                'approval_count': len(approval_states),
+                'pending_count': sum(1 for row in approval_states if row.get('approval_state') == 'pending'),
+                'roles': approval_ready.get('summary', {}).get('approver_roles') or [],
+            },
+        },
+    }
+
+
 def build_governance_workflow_ready_payload(source: Dict) -> Dict:
     report = _coerce_calibration_report_source(source)
     governance_ready = build_joint_governance_ready_payload(report)
@@ -1885,6 +2139,16 @@ def build_governance_workflow_ready_payload(source: Dict) -> Dict:
     bucket_index = governance_ready.get('bucket_index') or {}
     actions = action_playbook.get('items') or []
     approvals = approval_ready.get('items') or []
+    state_layer = _build_workflow_state_layer(
+        actions=actions,
+        approvals=approvals,
+        bucket_index=bucket_index,
+        action_playbook=action_playbook,
+        approval_ready=approval_ready,
+        priority_queue=priority_queue,
+        next_actions=next_actions,
+        blocking_items=blocking_items,
+    )
 
     filters = {
         'risk_levels': sorted({row.get('risk_level') for row in actions if row.get('risk_level')}),
@@ -1892,6 +2156,8 @@ def build_governance_workflow_ready_payload(source: Dict) -> Dict:
         'approval_roles': approval_ready.get('summary', {}).get('approver_roles') or [],
         'statuses': sorted({row.get('status') for row in actions if row.get('status')}),
         'decision_types': sorted({row.get('decision') for row in actions if row.get('decision')}),
+        'workflow_states': sorted({row.get('workflow_state') for row in (state_layer.get('workflow_state', {}).get('item_states') or []) if row.get('workflow_state')}),
+        'approval_states': sorted({row.get('approval_state') for row in (state_layer.get('approval_state', {}).get('items') or []) if row.get('approval_state')}),
         'execution_windows': sorted({json.dumps(row.get('execution_window'), sort_keys=True, ensure_ascii=False) for row in actions if row.get('execution_window')}),
         'bucket_ids': sorted(bucket_index.keys()),
     }
@@ -1909,10 +2175,12 @@ def build_governance_workflow_ready_payload(source: Dict) -> Dict:
         'priority_queue_size': len(priority_queue),
         'next_action_bucket_count': len(next_actions),
         'blocking_item_count': len(blocking_items),
+        'workflow_state_summary': (state_layer.get('workflow_state') or {}).get('summary') or {},
+        'approval_state_summary': (state_layer.get('approval_state') or {}).get('summary') or {},
         'filters': {key: len(value) for key, value in filters.items()},
     }
     return {
-        'schema_version': 'm5_governance_workflow_ready_v1',
+        'schema_version': 'm5_governance_workflow_ready_v2',
         'governance_schema_version': governance_ready.get('schema_version'),
         'delivery_schema_version': governance_ready.get('delivery_schema_version'),
         'summary': workflow_summary,
@@ -1920,6 +2188,8 @@ def build_governance_workflow_ready_payload(source: Dict) -> Dict:
         'approval_queue': approvals,
         'action_playbook': action_playbook,
         'approval_ready': approval_ready,
+        'workflow_state': state_layer.get('workflow_state') or {},
+        'approval_state': state_layer.get('approval_state') or {},
         'queues': queues,
         'filters': filters,
         'bucket_index': bucket_index,
@@ -1929,6 +2199,7 @@ def build_governance_workflow_ready_payload(source: Dict) -> Dict:
                 'governance': bucket_index.get(bucket_id) or {},
                 'playbook': (action_playbook.get('by_bucket') or {}).get(bucket_id) or {},
                 'approvals': (approval_ready.get('by_bucket') or {}).get(bucket_id) or {},
+                'state': ((state_layer.get('workflow_state') or {}).get('item_state_by_bucket') or {}).get(bucket_id) or {},
             }
             for bucket_id in bucket_index
         },
@@ -1938,6 +2209,8 @@ def build_governance_workflow_ready_payload(source: Dict) -> Dict:
             'priority_queue': priority_queue,
             'next_actions': next_actions,
             'blocking_items': blocking_items,
+            'workflow_state': state_layer.get('workflow_state') or {},
+            'approval_state': state_layer.get('approval_state') or {},
         },
     }
 

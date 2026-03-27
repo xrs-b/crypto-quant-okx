@@ -5964,7 +5964,8 @@ class TestApprovalPersistence(unittest.TestCase):
             self.assertEqual(observe_item['result']['disposition'], 'applied')
             self.assertEqual(expand['state'], 'pending')
             self.assertEqual(expand_item['result']['disposition'], 'queued')
-            self.assertEqual(expand_item['dispatch']['reason'], 'queue_only')
+            self.assertEqual(expand_item['dispatch']['reason'], 'live_rollout_parameter_change_not_supported')
+            self.assertEqual(expand_item['plan']['queue_plan']['blocked_reason'], 'live_rollout_parameter_change_not_supported')
             self.assertEqual(executor['summary']['applied_count'], 1)
             self.assertEqual(executor['summary']['queued_count'], 1)
 

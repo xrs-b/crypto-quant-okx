@@ -207,6 +207,16 @@ def _recommendation_confidence(gate: Dict, ab_row: Optional[Dict], *, min_sample
     return 'low'
 
 
+def _governance_action(action_type: str, title: str, description: str, **extra) -> Dict:
+    action = {
+        'type': action_type,
+        'title': title,
+        'description': description,
+    }
+    action.update(extra)
+    return action
+
+
 def _build_calibration_recommendation(gate: Dict, bucket_row: Dict, ab_row: Optional[Dict], *, min_sample_size: int) -> Dict:
     regime = gate['regime']
     policy = gate['policy_version']
@@ -217,62 +227,236 @@ def _build_calibration_recommendation(gate: Dict, bucket_row: Dict, ab_row: Opti
     win_rate = float(bucket_row.get('win_rate') or 0.0)
     priority = _recommendation_priority(decision, reason, ab_row)
     confidence = _recommendation_confidence(gate, ab_row, min_sample_size=min_sample_size)
+    baseline_ready = bool(ab_row and ab_row.get('sample_ready'))
+    beats_baseline = bool(ab_row and ab_row.get('candidate_beats_baseline'))
+    baseline_delta = float((ab_row or {}).get('delta_avg_return_pct') or 0.0)
 
     recommendation_type = 'maintain_hold'
     category = 'mixed_signal'
     suggested_action = '维持当前 rollout，不急于放大，继续观察更多样本。'
     blocking_issue = None
     reason_text = gate['message']
+    governance_mode = 'observe'
+    actions = [
+        _governance_action(
+            'maintain_guardrails',
+            '维持现有 guardrails',
+            '保持当前 rollout gate 与风险阈值不变，持续跟踪后续 bucket 漂移。',
+            owner='research',
+            urgency='normal',
+        )
+    ]
+    next_review_after = max(min_sample_size, trade_count + 2)
+    rollout_plan = {'mode': 'hold', 'max_rollout_pct': 0, 'requires_fast_rollback': False}
+    thresholds = {'target_min_trade_count': min_sample_size}
+    guardrails = []
 
     if reason == 'sample_gap':
-        recommendation_type = 'sample_collection'
+        recommendation_type = 'collect_more_samples'
         category = 'sample_sufficiency'
         blocking_issue = 'insufficient_sample'
+        governance_mode = 'observe'
+        next_review_after = min_sample_size
         suggested_action = (
             f'优先补齐 {regime} × {policy} 的样本；在达到至少 {min_sample_size} 笔可比交易前，避免 rollout / repricing。'
         )
         reason_text = f'{reason_text} 当前仅 {trade_count} 笔，未达到最小样本门槛。'
+        actions = [
+            _governance_action(
+                'collect_more_samples',
+                '补齐 bucket 样本',
+                f'继续收集 {regime} × {policy} 交易样本，至少补到 {min_sample_size} 笔再重新评估。',
+                owner='research',
+                target_sample_size=min_sample_size,
+                missing_samples=max(min_sample_size - trade_count, 0),
+                urgency='normal',
+            ),
+            _governance_action(
+                'rollout_freeze',
+                '冻结新增 rollout',
+                '样本不足期间不扩大该 bucket 的 rollout，也不做 repricing。',
+                owner='ops',
+                urgency='normal',
+            ),
+        ]
+        rollout_plan = {'mode': 'freeze', 'max_rollout_pct': 0, 'requires_fast_rollback': False}
+        thresholds = {'target_min_trade_count': min_sample_size, 'current_trade_count': trade_count}
+        guardrails = ['until_sample_ready']
     elif decision == 'rollback':
-        recommendation_type = 'rollback'
+        recommendation_type = 'rollout_freeze'
         category = 'underperform'
         blocking_issue = 'negative_return_and_low_win_rate'
+        governance_mode = 'rollback'
+        next_review_after = trade_count + 2
         suggested_action = '冻结或回滚该 policy 在对应 regime 的 rollout，恢复 baseline，并复核 entry/filter/risk 定价。'
+        actions = [
+            _governance_action(
+                'rollout_freeze',
+                '立即冻结 rollout',
+                '暂停该 regime × policy 的新增放量，防止继续放大负边际。',
+                owner='ops',
+                urgency='immediate',
+            ),
+            _governance_action(
+                'rollback_to_baseline',
+                '回退到 baseline policy',
+                '把该 bucket 恢复到基线 policy 或默认风控参数，再观察恢复情况。',
+                owner='ops',
+                baseline_policy_version=(ab_row or {}).get('baseline_policy_version'),
+                urgency='immediate',
+            ),
+            _governance_action(
+                'repricing_review',
+                '复核 entry/filter/risk 定价',
+                '检查 entry 门槛、过滤器、仓位/止损/执行参数是否过宽或定价错误。',
+                owner='research',
+                urgency='high',
+            ),
+        ]
+        rollout_plan = {'mode': 'rollback', 'max_rollout_pct': 0, 'requires_fast_rollback': True}
+        thresholds = {'max_negative_avg_return_pct': 0.0, 'min_win_rate_pct': 45.0}
+        guardrails = ['rollback_enabled', 'baseline_only_until_review']
     elif decision == 'tighten':
-        recommendation_type = 'tighten'
+        recommendation_type = 'tighten_thresholds'
         category = 'underperform'
         blocking_issue = 'negative_return'
+        governance_mode = 'tighten'
+        next_review_after = trade_count + 2
         suggested_action = '先收紧放行阈值与风险/执行参数；若后续补样后仍为负，再进入 rollback 或 repricing。'
+        actions = [
+            _governance_action(
+                'tighten_thresholds',
+                '收紧 decision / risk 阈值',
+                '优先收紧 entry、validator、risk/execution 阈值，降低继续放大亏损的概率。',
+                owner='research',
+                urgency='high',
+            ),
+            _governance_action(
+                'repricing_review',
+                '检查定价是否偏宽',
+                '若 tightening 后仍持续为负，进入 repricing review，重新校准止损、仓位与执行容忍度。',
+                owner='research',
+                urgency='normal',
+            ),
+        ]
+        rollout_plan = {'mode': 'tighten', 'max_rollout_pct': 25, 'requires_fast_rollback': True}
+        thresholds = {'max_negative_avg_return_pct': 0.0}
+        guardrails = ['reduced_rollout_cap']
     elif decision == 'expand':
-        recommendation_type = 'expand_rollout'
+        recommendation_type = 'expand_guarded'
         category = 'validated_edge'
+        governance_mode = 'rollout'
+        next_review_after = trade_count + 2
         suggested_action = '可小步扩大该 regime 下 rollout，继续监控胜率、均值回报与回撤漂移。'
+        actions = [
+            _governance_action(
+                'expand_guarded',
+                '小步灰度扩量',
+                '在保留快速回退开关的前提下，小步提升该 bucket 的 rollout 占比。',
+                owner='ops',
+                urgency='normal',
+            ),
+            _governance_action(
+                'monitor_drift',
+                '持续观察 edge 漂移',
+                '扩量后继续监控 win_rate、avg_return_pct 与 regime 漂移，防止 edge 失真。',
+                owner='ops',
+                urgency='normal',
+            ),
+        ]
+        rollout_plan = {'mode': 'guarded_expand', 'max_rollout_pct': 25, 'requires_fast_rollback': True}
+        thresholds = {'min_win_rate_pct': 60.0, 'min_avg_return_pct': 0.0}
+        guardrails = ['fast_rollback_ready', 'post_expand_monitoring']
     elif decision == 'hold':
         recommendation_type = 'mixed_signal_review'
         category = 'mixed_signal'
         blocking_issue = 'mixed_signal'
+        governance_mode = 'observe'
+        next_review_after = trade_count + 2
         suggested_action = '先保持当前配置，继续收集样本，并重点检查是否存在 regime 内部不稳定或符号分化。'
+        actions = [
+            _governance_action(
+                'mixed_signal_review',
+                '复核混合信号来源',
+                '重点检查 regime 内部不稳定、symbol 分化或交易分布偏移。',
+                owner='research',
+                urgency='normal',
+            )
+        ]
+        rollout_plan = {'mode': 'hold', 'max_rollout_pct': 0, 'requires_fast_rollback': False}
+        guardrails = ['no_auto_expand']
 
     if ab_row:
-        if ab_row.get('sample_ready') and not ab_row.get('candidate_beats_baseline'):
+        if baseline_ready and not beats_baseline:
             if decision == 'expand':
-                recommendation_type = 'expand_with_caution'
+                recommendation_type = 'expand_guarded'
                 category = 'mixed_signal'
                 blocking_issue = 'ab_conflict_with_baseline'
+                governance_mode = 'rollout'
                 suggested_action = '虽然单桶 gate 偏正向，但相对 baseline 未形成优势；先小流量灰度，不建议全量 expand。'
+                actions.insert(0, _governance_action(
+                    'repricing_review',
+                    '先确认 A/B 优势是否真实',
+                    'expand 前先复核该 bucket 相对 baseline 的优势是否稳定，避免误把噪音当 edge。',
+                    owner='research',
+                    urgency='high',
+                ))
+                rollout_plan = {'mode': 'guarded_expand', 'max_rollout_pct': 10, 'requires_fast_rollback': True}
+                guardrails.append('ab_advantage_required_for_full_expand')
             elif decision in {'hold', 'tighten'}:
                 blocking_issue = blocking_issue or 'underperform_vs_baseline'
                 suggested_action = '相对 baseline 未见优势，建议继续收紧/维持 hold，并把 repricing 或 rollback 纳入候选。'
-        elif ab_row.get('sample_ready') and ab_row.get('candidate_beats_baseline') and decision == 'expand':
+                actions.insert(0, _governance_action(
+                    'repricing_review',
+                    '复核相对 baseline 的退化来源',
+                    '重点分析为什么该 policy 在当前 regime 下跑输 baseline，再决定继续 tighten 还是 rollback。',
+                    owner='research',
+                    urgency='high',
+                ))
+                guardrails.append('baseline_advantage_missing')
+        elif baseline_ready and beats_baseline and decision == 'expand':
             suggested_action = '该 regime 下已优于 baseline，可按小步灰度扩大 rollout，并保留快速回退开关。'
-        elif not ab_row.get('sample_ready') and decision == 'expand':
+            rollout_plan = {'mode': 'guarded_expand', 'max_rollout_pct': 35, 'requires_fast_rollback': True}
+            guardrails.append('baseline_advantage_confirmed')
+        elif not baseline_ready and decision == 'expand':
+            recommendation_type = 'expand_guarded'
             suggested_action = '单桶表现偏正向，但 baseline 对照样本未充分，建议仅做有限 rollout，继续补充 A/B 样本。'
+            actions.append(_governance_action(
+                'collect_more_samples',
+                '补齐 A/B 对照样本',
+                '由于 baseline 对照未达样本门槛，扩量期间必须继续补样验证。',
+                owner='research',
+                target_sample_size=min_sample_size,
+                urgency='normal',
+            ))
+            rollout_plan = {'mode': 'guarded_expand', 'max_rollout_pct': 10, 'requires_fast_rollback': True}
+            guardrails.append('ab_sample_gap')
 
     instability_flag = win_rate < 55 and avg_return_pct > 0 and decision == 'hold'
     if instability_flag:
         category = 'instability'
-        recommendation_type = 'instability_review'
+        recommendation_type = 'repricing_review'
         blocking_issue = blocking_issue or 'unstable_edge'
+        governance_mode = 'review'
         suggested_action = '收益为正但稳定性不足，先不要扩量；继续观察并检查是否需要 tightening/repricing 降低波动。'
+        actions = [
+            _governance_action(
+                'repricing_review',
+                '复核收益来源与波动',
+                '虽然平均回报为正，但胜率偏低，需检查是否靠少量极端收益支撑。',
+                owner='research',
+                urgency='high',
+            ),
+            _governance_action(
+                'tighten_thresholds',
+                '必要时收紧阈值',
+                '若复核后确认 edge 不稳定，应先收紧阈值，避免误扩量。',
+                owner='research',
+                urgency='normal',
+            ),
+        ]
+        rollout_plan = {'mode': 'hold', 'max_rollout_pct': 0, 'requires_fast_rollback': True}
+        guardrails = ['no_expand_until_stable']
 
     return {
         'regime': regime,
@@ -288,12 +472,22 @@ def _build_calibration_recommendation(gate: Dict, bucket_row: Dict, ab_row: Opti
         'gate_reason': reason,
         'aligned_with_rollout_gate': True,
         'message': gate['message'],
+        'governance_mode': governance_mode,
+        'next_review_after_trade_count': next_review_after,
+        'actions': actions,
+        'rollout_plan': rollout_plan,
+        'thresholds': thresholds,
+        'guardrails': guardrails,
+        'summary_line': f'{regime} × {policy}: {recommendation_type} ({decision}/{priority}/{confidence})',
         'evidence': {
             'trade_count': trade_count,
             'min_sample_size': min_sample_size,
             'avg_return_pct': avg_return_pct,
             'win_rate': win_rate,
             'baseline_comparison': ab_row,
+            'baseline_ready': baseline_ready,
+            'candidate_beats_baseline': beats_baseline,
+            'delta_vs_baseline_avg_return_pct': round(baseline_delta, 4) if ab_row else None,
         },
     }
 
@@ -349,6 +543,40 @@ def build_regime_policy_calibration_report(symbol_results: List[Dict]) -> Dict:
         'tighten': sum(1 for item in rollout_gates if item['decision'] == 'tighten'),
         'rollback': sum(1 for item in rollout_gates if item['decision'] == 'rollback'),
     }
+    recommendation_summary = {
+        'critical': sum(1 for item in recommendations if item['priority'] == 'critical'),
+        'high': sum(1 for item in recommendations if item['priority'] == 'high'),
+        'medium': sum(1 for item in recommendations if item['priority'] == 'medium'),
+        'low': sum(1 for item in recommendations if item['priority'] == 'low'),
+        'by_type': dict(sorted({
+            item['type']: sum(1 for row in recommendations if row['type'] == item['type'])
+            for item in recommendations
+        }.items())),
+        'by_governance_mode': dict(sorted({
+            item['governance_mode']: sum(1 for row in recommendations if row['governance_mode'] == item['governance_mode'])
+            for item in recommendations
+        }.items())),
+        'blocked': sum(1 for item in recommendations if item.get('blocking_issue')),
+        'aligned_with_rollout_gate': sum(1 for item in recommendations if item.get('aligned_with_rollout_gate')),
+        'top_actions': dict(sorted({
+            action_type: sum(1 for row in recommendations for action in (row.get('actions') or []) if action['type'] == action_type)
+            for action_type in {
+                action['type']
+                for recommendation in recommendations
+                for action in (recommendation.get('actions') or [])
+            }
+        }.items())), 
+        'top_priority_items': [
+            {
+                'regime': item['regime'],
+                'policy_version': item['policy_version'],
+                'type': item['type'],
+                'priority': item['priority'],
+                'summary_line': item['summary_line'],
+            }
+            for item in recommendations[:5]
+        ],
+    }
     return {
         'summary': {
             'trade_count': len(all_trades),
@@ -360,12 +588,7 @@ def build_regime_policy_calibration_report(symbol_results: List[Dict]) -> Dict:
             'min_sample_size': min_sample_size,
             'policy_ab_ready': len(by_policy) >= 2,
             'rollout_gate_summary': rollout_gate_summary,
-            'recommendation_summary': {
-                'critical': sum(1 for item in recommendations if item['priority'] == 'critical'),
-                'high': sum(1 for item in recommendations if item['priority'] == 'high'),
-                'medium': sum(1 for item in recommendations if item['priority'] == 'medium'),
-                'low': sum(1 for item in recommendations if item['priority'] == 'low'),
-            },
+            'recommendation_summary': recommendation_summary,
         },
         'by_regime': by_regime,
         'by_policy_version': by_policy,

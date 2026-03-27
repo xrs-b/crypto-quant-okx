@@ -4010,6 +4010,9 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
         self.assertIn('confidence', recommendation)
         self.assertIn('suggested_action', recommendation)
         self.assertIn('aligned_with_rollout_gate', recommendation)
+        self.assertIn('actions', recommendation)
+        self.assertIn('rollout_plan', recommendation)
+        self.assertIn('summary_line', recommendation)
 
     def test_calibration_report_marks_sample_gap_when_bucket_is_too_small(self):
         report = build_regime_policy_calibration_report([
@@ -4022,9 +4025,12 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
         ])
         self.assertEqual(report['summary']['trade_count'], 1)
         rec = next(item for item in report['recommendations'] if item['regime'] == 'high_vol' and item['policy_version'] == 'policy_v3')
-        self.assertEqual(rec['type'], 'sample_collection')
+        self.assertEqual(rec['type'], 'collect_more_samples')
         self.assertEqual(rec['blocking_issue'], 'insufficient_sample')
         self.assertEqual(rec['gate_decision'], 'hold')
+        self.assertEqual(rec['governance_mode'], 'observe')
+        self.assertEqual(rec['rollout_plan']['mode'], 'freeze')
+        self.assertEqual(rec['actions'][0]['type'], 'collect_more_samples')
         self.assertEqual(report['rollout_gates'][0]['decision'], 'hold')
         self.assertEqual(report['rollout_gates'][0]['reason'], 'sample_gap')
 
@@ -4077,10 +4083,12 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
             }
         ])
         rec = next(item for item in report['recommendations'] if item['regime'] == 'trend_up' and item['policy_version'] == 'policy_v2')
-        self.assertEqual(rec['type'], 'expand_rollout')
+        self.assertEqual(rec['type'], 'expand_guarded')
         self.assertEqual(rec['gate_decision'], 'expand')
         self.assertEqual(rec['category'], 'validated_edge')
         self.assertIsNone(rec['blocking_issue'])
+        self.assertEqual(rec['governance_mode'], 'rollout')
+        self.assertEqual(rec['rollout_plan']['max_rollout_pct'], 35)
         self.assertTrue(rec['aligned_with_rollout_gate'])
         self.assertTrue(rec['evidence']['baseline_comparison']['candidate_beats_baseline'])
 
@@ -4100,10 +4108,12 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
             }
         ])
         rec = next(item for item in report['recommendations'] if item['regime'] == 'trend_up' and item['policy_version'] == 'policy_v2')
-        self.assertEqual(rec['type'], 'tighten')
+        self.assertEqual(rec['type'], 'tighten_thresholds')
         self.assertEqual(rec['priority'], 'high')
         self.assertEqual(rec['gate_decision'], 'tighten')
         self.assertEqual(rec['blocking_issue'], 'negative_return')
+        self.assertEqual(rec['governance_mode'], 'tighten')
+        self.assertEqual(rec['actions'][0]['type'], 'repricing_review')
         self.assertLess(rec['evidence']['baseline_comparison']['delta_avg_return_pct'], 0)
 
     def test_calibration_report_marks_instability_for_positive_but_low_win_rate_hold(self):
@@ -4122,9 +4132,60 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
         ])
         rec = next(item for item in report['recommendations'] if item['regime'] == 'range' and item['policy_version'] == 'policy_v2')
         self.assertEqual(rec['gate_decision'], 'hold')
-        self.assertEqual(rec['type'], 'instability_review')
+        self.assertEqual(rec['type'], 'repricing_review')
         self.assertEqual(rec['category'], 'instability')
         self.assertEqual(rec['blocking_issue'], 'mixed_signal')
+        self.assertEqual(rec['governance_mode'], 'review')
+        self.assertEqual(rec['actions'][0]['type'], 'repricing_review')
+
+    def test_calibration_report_uses_freeze_recommendation_for_rollback_gate(self):
+        report = build_regime_policy_calibration_report([
+            {
+                'symbol': 'BTC/USDT',
+                'all_trades': [
+                    {'regime_tag': 'trend_down', 'policy_tag': 'policy_v1', 'return_pct': 0.3},
+                    {'regime_tag': 'trend_down', 'policy_tag': 'policy_v1', 'return_pct': 0.2},
+                    {'regime_tag': 'trend_down', 'policy_tag': 'policy_v1', 'return_pct': 0.4},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v2', 'return_pct': -2.0},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v2', 'return_pct': -1.8},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v2', 'return_pct': -1.1},
+                ],
+            }
+        ])
+        rec = next(item for item in report['recommendations'] if item['regime'] == 'panic' and item['policy_version'] == 'policy_v2')
+        self.assertEqual(rec['gate_decision'], 'rollback')
+        self.assertEqual(rec['type'], 'rollout_freeze')
+        self.assertEqual(rec['priority'], 'critical')
+        self.assertEqual(rec['governance_mode'], 'rollback')
+        self.assertEqual(rec['actions'][0]['type'], 'rollout_freeze')
+        self.assertEqual(rec['rollout_plan']['mode'], 'rollback')
+
+    def test_calibration_report_summary_exposes_governance_breakdown(self):
+        report = build_regime_policy_calibration_report([
+            {
+                'symbol': 'BTC/USDT',
+                'all_trades': [
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v1', 'return_pct': 0.3},
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v1', 'return_pct': 0.2},
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v1', 'return_pct': 0.1},
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v2', 'return_pct': 1.1},
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v2', 'return_pct': 1.0},
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v2', 'return_pct': 0.9},
+                    {'regime_tag': 'range', 'policy_tag': 'policy_v2', 'return_pct': -1.2},
+                    {'regime_tag': 'range', 'policy_tag': 'policy_v2', 'return_pct': -0.8},
+                    {'regime_tag': 'range', 'policy_tag': 'policy_v2', 'return_pct': 0.2},
+                ],
+            }
+        ])
+        summary = report['summary']['recommendation_summary']
+        self.assertIn('by_type', summary)
+        self.assertIn('by_governance_mode', summary)
+        self.assertIn('top_actions', summary)
+        self.assertGreaterEqual(summary['by_type']['expand_guarded'], 1)
+        self.assertGreaterEqual(summary['by_governance_mode']['rollout'], 1)
+        self.assertGreaterEqual(summary['top_actions']['repricing_review'], 1)
+        self.assertTrue(summary['top_priority_items'])
+        self.assertIn('summary_line', summary['top_priority_items'][0])
 
 
 def run_tests():

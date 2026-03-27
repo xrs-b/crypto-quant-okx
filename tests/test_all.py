@@ -24,7 +24,7 @@ from core.notifier import NotificationManager
 from signals import Signal, SignalDetector, SignalValidator, SignalRecorder, EntryDecider
 from trading import TradingExecutor, RiskManager
 from trading.executor import build_observability_context
-from analytics.backtest import StrategyBacktester, build_regime_policy_calibration_report
+from analytics.backtest import StrategyBacktester, build_regime_policy_calibration_report, build_calibration_report_ready_payload, export_calibration_payload
 from strategies.strategy_library import StrategyManager
 from bot.run import build_exchange_diagnostics, build_exchange_smoke_plan, build_runtime_health_summary, maybe_send_daily_health_summary, execute_exchange_smoke, reconcile_exchange_positions
 from dashboard.api import app
@@ -4225,6 +4225,118 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
         self.assertIn('repricing_review', delivery['orchestration_ready']['action_catalog'])
         self.assertEqual(report['summary']['delivery_ready']['schema_version'], 'm5_delivery_v1')
         self.assertGreaterEqual(report['summary']['delivery_ready']['priority_queue_size'], 1)
+
+    def test_calibration_report_ready_payload_flattens_delivery_for_consumers(self):
+        report = build_regime_policy_calibration_report([
+            {
+                'symbol': 'BTC/USDT',
+                'all_trades': [
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v1', 'return_pct': 0.4},
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v1', 'return_pct': 0.3},
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v1', 'return_pct': 0.2},
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v2', 'return_pct': 1.2},
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v2', 'return_pct': 1.1},
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v2', 'return_pct': 1.0},
+                ],
+            }
+        ])
+        payload = build_calibration_report_ready_payload(report)
+        self.assertEqual(payload['schema_version'], 'm5_report_ready_v1')
+        self.assertEqual(payload['delivery_schema_version'], 'm5_delivery_v1')
+        self.assertEqual(payload['delivery_ready'], report['summary']['delivery_ready'])
+        self.assertEqual(payload['views']['items'], report['delivery']['views']['items'])
+        self.assertEqual(payload['render_ready'], report['delivery']['render_ready'])
+        self.assertEqual(payload['orchestration_ready'], report['delivery']['orchestration_ready'])
+        self.assertEqual(payload['tables'], report['delivery']['views']['tables'])
+
+    def test_export_calibration_payload_supports_delivery_and_full_views(self):
+        report = build_regime_policy_calibration_report([
+            {
+                'symbol': 'BTC/USDT',
+                'all_trades': [
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v1', 'return_pct': 0.4},
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v1', 'return_pct': 0.3},
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v1', 'return_pct': 0.2},
+                ],
+            }
+        ])
+        self.assertEqual(export_calibration_payload(report, view='delivery'), report['delivery'])
+        self.assertEqual(export_calibration_payload(report, view='full'), report)
+
+    def test_backtest_calibration_report_api_returns_report_ready_view(self):
+        import dashboard.api as dashboard_api
+
+        report = build_regime_policy_calibration_report([
+            {
+                'symbol': 'BTC/USDT',
+                'all_trades': [
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v1', 'return_pct': 0.4},
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v1', 'return_pct': 0.3},
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v1', 'return_pct': 0.2},
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v2', 'return_pct': 1.2},
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v2', 'return_pct': 1.1},
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v2', 'return_pct': 1.0},
+                ],
+            }
+        ])
+
+        class StubBacktester:
+            def run_all(self, symbols):
+                return {
+                    'summary': {'symbols': len(symbols)},
+                    'symbols': [{'symbol': 'BTC/USDT'}],
+                    'calibration_report': report,
+                }
+
+        old_backtester = dashboard_api.backtester
+        dashboard_api.backtester = StubBacktester()
+        try:
+            client = app.test_client()
+            response = client.get('/api/backtest/calibration-report')
+            self.assertEqual(response.status_code, 200)
+            payload = response.get_json()
+            self.assertTrue(payload['success'])
+            self.assertEqual(payload['view'], 'report_ready')
+            self.assertEqual(payload['data']['schema_version'], 'm5_report_ready_v1')
+            self.assertEqual(payload['data']['delivery_ready'], report['summary']['delivery_ready'])
+            self.assertEqual(payload['summary']['delivery_ready'], report['summary']['delivery_ready'])
+        finally:
+            dashboard_api.backtester = old_backtester
+
+    def test_backtest_calibration_report_api_supports_delivery_view(self):
+        import dashboard.api as dashboard_api
+
+        report = build_regime_policy_calibration_report([
+            {
+                'symbol': 'BTC/USDT',
+                'all_trades': [
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v1', 'return_pct': 0.4},
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v1', 'return_pct': 0.3},
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v1', 'return_pct': 0.2},
+                ],
+            }
+        ])
+
+        class StubBacktester:
+            def run_all(self, symbols):
+                return {
+                    'summary': {'symbols': len(symbols)},
+                    'symbols': [{'symbol': 'BTC/USDT'}],
+                    'calibration_report': report,
+                }
+
+        old_backtester = dashboard_api.backtester
+        dashboard_api.backtester = StubBacktester()
+        try:
+            client = app.test_client()
+            response = client.get('/api/backtest/calibration-report?view=delivery')
+            self.assertEqual(response.status_code, 200)
+            payload = response.get_json()
+            self.assertEqual(payload['view'], 'delivery')
+            self.assertEqual(payload['data']['schema_version'], 'm5_delivery_v1')
+            self.assertEqual(payload['data']['views']['items'], report['delivery']['views']['items'])
+        finally:
+            dashboard_api.backtester = old_backtester
 
 
 def run_tests():

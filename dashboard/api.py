@@ -53,6 +53,7 @@ from bot.run import execute_exchange_smoke, reconcile_exchange_positions, load_r
 from ml.engine import MLEngine
 from core.regime import RegimeDetector, detect_regime, Regime
 from analytics import StrategyBacktester, SignalQualityAnalyzer, ParameterOptimizer, GovernanceEngine
+from analytics.backtest import export_calibration_payload
 from analytics.mfe_mae import MFEAnalyzer, get_mfe_mae_analysis
 from core.regime_policy import summarize_observe_only_collection
 
@@ -2384,6 +2385,33 @@ def get_ml_metrics():
 def get_backtest_summary():
     """获取回测结果"""
     return jsonify({'success': True, 'data': backtester.run_all(config.symbols)})
+
+
+@app.route('/api/backtest/calibration-report')
+def get_backtest_calibration_report():
+    """获取 M5 calibration 聚合输出，默认返回 report-ready payload。"""
+    view = (request.args.get('view') or 'report_ready').strip().lower()
+    if view not in {'report_ready', 'delivery', 'full'}:
+        return jsonify({'success': False, 'error': 'view must be one of report_ready|delivery|full'}), 400
+
+    backtest_result = backtester.run_all(config.symbols)
+    calibration_report = backtest_result.get('calibration_report') or {}
+    payload = export_calibration_payload(
+        calibration_report,
+        view='full' if view == 'full' else view,
+    )
+    summary = calibration_report.get('summary') or {}
+    return jsonify({
+        'success': True,
+        'view': view,
+        'data': payload,
+        'summary': {
+            'symbols': len(backtest_result.get('symbols') or []),
+            'trade_count': summary.get('trade_count', 0),
+            'calibration_ready': bool(summary.get('calibration_ready')),
+            'delivery_ready': summary.get('delivery_ready') or {},
+        }
+    })
 
 
 @app.route('/api/signal-quality')

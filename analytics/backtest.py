@@ -672,6 +672,42 @@ def _build_calibration_recommendation(gate: Dict, bucket_row: Dict, ab_row: Opti
     }
 
 
+def _coerce_calibration_report_source(source: Dict) -> Dict:
+    if not isinstance(source, dict):
+        return {}
+    if isinstance(source.get('calibration_report'), dict):
+        return source['calibration_report']
+    return source
+
+
+def build_calibration_report_ready_payload(source: Dict) -> Dict:
+    report = _coerce_calibration_report_source(source)
+    delivery = report.get('delivery') or {}
+    summary = report.get('summary') or {}
+    views = delivery.get('views') or {}
+    return {
+        'schema_version': 'm5_report_ready_v1',
+        'delivery_schema_version': delivery.get('schema_version'),
+        'summary': summary,
+        'delivery_ready': summary.get('delivery_ready') or {},
+        'views': {
+            'items': views.get('items') or [],
+        },
+        'render_ready': delivery.get('render_ready') or {},
+        'orchestration_ready': delivery.get('orchestration_ready') or {},
+        'tables': views.get('tables') or {},
+    }
+
+
+def export_calibration_payload(source: Dict, *, view: str = 'report_ready') -> Dict:
+    report = _coerce_calibration_report_source(source)
+    if view == 'delivery':
+        return report.get('delivery') or {}
+    if view == 'report_ready':
+        return build_calibration_report_ready_payload(report)
+    return report
+
+
 def build_regime_policy_calibration_report(symbol_results: List[Dict]) -> Dict:
     all_trades = [
         trade

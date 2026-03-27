@@ -4005,7 +4005,11 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
         self.assertEqual(by_regime['trend_up']['trade_count'], 2)
         self.assertEqual(by_policy['policy_v2']['trade_count'], 3)
         self.assertAlmostEqual(pair[('range', 'policy_v2')]['avg_return_pct'], -0.8333, places=4)
-        self.assertTrue(any(item['regime'] == 'range' and item['policy_version'] == 'policy_v2' for item in report['recommendations']))
+        recommendation = next(item for item in report['recommendations'] if item['regime'] == 'range' and item['policy_version'] == 'policy_v2')
+        self.assertIn('priority', recommendation)
+        self.assertIn('confidence', recommendation)
+        self.assertIn('suggested_action', recommendation)
+        self.assertIn('aligned_with_rollout_gate', recommendation)
 
     def test_calibration_report_marks_sample_gap_when_bucket_is_too_small(self):
         report = build_regime_policy_calibration_report([
@@ -4017,7 +4021,10 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
             }
         ])
         self.assertEqual(report['summary']['trade_count'], 1)
-        self.assertTrue(any(item['type'] == 'sample_gap' for item in report['recommendations']))
+        rec = next(item for item in report['recommendations'] if item['regime'] == 'high_vol' and item['policy_version'] == 'policy_v3')
+        self.assertEqual(rec['type'], 'sample_collection')
+        self.assertEqual(rec['blocking_issue'], 'insufficient_sample')
+        self.assertEqual(rec['gate_decision'], 'hold')
         self.assertEqual(report['rollout_gates'][0]['decision'], 'hold')
         self.assertEqual(report['rollout_gates'][0]['reason'], 'sample_gap')
 
@@ -4053,6 +4060,71 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
         gates = {(row['regime'], row['policy_version']): row for row in report['rollout_gates']}
         self.assertEqual(gates[('trend_up', 'policy_v2')]['decision'], 'expand')
         self.assertEqual(gates[('range', 'policy_v2')]['decision'], 'rollback')
+
+    def test_calibration_report_builds_expand_recommendation_aligned_with_ab_advantage(self):
+        report = build_regime_policy_calibration_report([
+            {
+                'symbol': 'BTC/USDT',
+                'all_trades': [
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v1', 'return_pct': 0.4},
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v1', 'return_pct': 0.3},
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v1', 'return_pct': 0.2},
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v1', 'return_pct': 0.1},
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v2', 'return_pct': 1.2},
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v2', 'return_pct': 1.1},
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v2', 'return_pct': 1.0},
+                ],
+            }
+        ])
+        rec = next(item for item in report['recommendations'] if item['regime'] == 'trend_up' and item['policy_version'] == 'policy_v2')
+        self.assertEqual(rec['type'], 'expand_rollout')
+        self.assertEqual(rec['gate_decision'], 'expand')
+        self.assertEqual(rec['category'], 'validated_edge')
+        self.assertIsNone(rec['blocking_issue'])
+        self.assertTrue(rec['aligned_with_rollout_gate'])
+        self.assertTrue(rec['evidence']['baseline_comparison']['candidate_beats_baseline'])
+
+    def test_calibration_report_builds_tighten_recommendation_when_underperforming_vs_baseline(self):
+        report = build_regime_policy_calibration_report([
+            {
+                'symbol': 'BTC/USDT',
+                'all_trades': [
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v1', 'return_pct': 1.1},
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v1', 'return_pct': 0.9},
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v1', 'return_pct': 0.7},
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v1', 'return_pct': 0.8},
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v2', 'return_pct': -0.5},
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v2', 'return_pct': 0.1},
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v2', 'return_pct': 0.2},
+                ],
+            }
+        ])
+        rec = next(item for item in report['recommendations'] if item['regime'] == 'trend_up' and item['policy_version'] == 'policy_v2')
+        self.assertEqual(rec['type'], 'tighten')
+        self.assertEqual(rec['priority'], 'high')
+        self.assertEqual(rec['gate_decision'], 'tighten')
+        self.assertEqual(rec['blocking_issue'], 'negative_return')
+        self.assertLess(rec['evidence']['baseline_comparison']['delta_avg_return_pct'], 0)
+
+    def test_calibration_report_marks_instability_for_positive_but_low_win_rate_hold(self):
+        report = build_regime_policy_calibration_report([
+            {
+                'symbol': 'BTC/USDT',
+                'all_trades': [
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v1', 'return_pct': 0.2},
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v1', 'return_pct': 0.1},
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v1', 'return_pct': 0.3},
+                    {'regime_tag': 'range', 'policy_tag': 'policy_v2', 'return_pct': 2.0},
+                    {'regime_tag': 'range', 'policy_tag': 'policy_v2', 'return_pct': -0.8},
+                    {'regime_tag': 'range', 'policy_tag': 'policy_v2', 'return_pct': -0.4},
+                ],
+            }
+        ])
+        rec = next(item for item in report['recommendations'] if item['regime'] == 'range' and item['policy_version'] == 'policy_v2')
+        self.assertEqual(rec['gate_decision'], 'hold')
+        self.assertEqual(rec['type'], 'instability_review')
+        self.assertEqual(rec['category'], 'instability')
+        self.assertEqual(rec['blocking_issue'], 'mixed_signal')
 
 
 def run_tests():

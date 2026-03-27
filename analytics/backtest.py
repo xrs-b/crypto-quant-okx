@@ -144,6 +144,7 @@ def _build_policy_ab_diffs(by_policy: List[Dict], by_regime_policy: List[Dict], 
                 'delta_win_rate': round(float(row['win_rate']) - float(baseline_pair['win_rate']), 4),
                 'delta_avg_return_pct': round(float(row['avg_return_pct']) - float(baseline_pair['avg_return_pct']), 4),
                 'sample_ready': row['trade_count'] >= min_sample_size and baseline_pair['trade_count'] >= min_sample_size,
+                'candidate_beats_baseline': float(row['avg_return_pct']) > float(baseline_pair['avg_return_pct']),
             })
         regime_deltas.sort(key=lambda item: (not item['sample_ready'], -item['delta_avg_return_pct'], item['regime']))
         diffs.append({
@@ -162,6 +163,141 @@ def _build_policy_ab_diffs(by_policy: List[Dict], by_regime_policy: List[Dict], 
     return diffs
 
 
+def _build_policy_ab_regime_lookup(policy_ab_diffs: List[Dict]) -> Dict[Tuple[str, str], Dict]:
+    lookup: Dict[Tuple[str, str], Dict] = {}
+    for diff in policy_ab_diffs or []:
+        candidate_policy = _normalize_bucket_tag(diff.get('candidate_policy_version'))
+        for row in diff.get('regime_deltas') or []:
+            lookup[(_normalize_bucket_tag(row.get('regime')), candidate_policy)] = {
+                **row,
+                'baseline_policy_version': diff.get('baseline_policy_version'),
+                'overall_sample_ready': diff.get('sample_ready', False),
+                'overall_candidate_beats_baseline': diff.get('candidate_beats_baseline', False),
+                'overall_delta_avg_return_pct': diff.get('delta_avg_return_pct', 0.0),
+                'overall_delta_win_rate': diff.get('delta_win_rate', 0.0),
+            }
+    return lookup
+
+
+def _recommendation_priority(decision: str, reason: str, ab_row: Optional[Dict]) -> str:
+    if decision == 'rollback':
+        return 'critical'
+    if decision == 'tighten':
+        return 'high'
+    if reason == 'sample_gap':
+        return 'medium'
+    if ab_row and ab_row.get('sample_ready') and not ab_row.get('candidate_beats_baseline'):
+        return 'high'
+    if decision == 'expand':
+        return 'medium'
+    return 'low'
+
+
+def _recommendation_confidence(gate: Dict, ab_row: Optional[Dict], *, min_sample_size: int) -> str:
+    trade_count = int(gate.get('trade_count') or 0)
+    decision = gate.get('decision')
+    if decision == 'rollback' and trade_count >= min_sample_size + 2:
+        return 'high'
+    if decision in {'tighten', 'expand'} and trade_count >= min_sample_size + 1:
+        return 'high'
+    if ab_row and ab_row.get('sample_ready'):
+        return 'medium'
+    if trade_count >= min_sample_size:
+        return 'medium'
+    return 'low'
+
+
+def _build_calibration_recommendation(gate: Dict, bucket_row: Dict, ab_row: Optional[Dict], *, min_sample_size: int) -> Dict:
+    regime = gate['regime']
+    policy = gate['policy_version']
+    decision = gate['decision']
+    reason = gate['reason']
+    trade_count = int(bucket_row.get('trade_count') or 0)
+    avg_return_pct = float(bucket_row.get('avg_return_pct') or 0.0)
+    win_rate = float(bucket_row.get('win_rate') or 0.0)
+    priority = _recommendation_priority(decision, reason, ab_row)
+    confidence = _recommendation_confidence(gate, ab_row, min_sample_size=min_sample_size)
+
+    recommendation_type = 'maintain_hold'
+    category = 'mixed_signal'
+    suggested_action = '维持当前 rollout，不急于放大，继续观察更多样本。'
+    blocking_issue = None
+    reason_text = gate['message']
+
+    if reason == 'sample_gap':
+        recommendation_type = 'sample_collection'
+        category = 'sample_sufficiency'
+        blocking_issue = 'insufficient_sample'
+        suggested_action = (
+            f'优先补齐 {regime} × {policy} 的样本；在达到至少 {min_sample_size} 笔可比交易前，避免 rollout / repricing。'
+        )
+        reason_text = f'{reason_text} 当前仅 {trade_count} 笔，未达到最小样本门槛。'
+    elif decision == 'rollback':
+        recommendation_type = 'rollback'
+        category = 'underperform'
+        blocking_issue = 'negative_return_and_low_win_rate'
+        suggested_action = '冻结或回滚该 policy 在对应 regime 的 rollout，恢复 baseline，并复核 entry/filter/risk 定价。'
+    elif decision == 'tighten':
+        recommendation_type = 'tighten'
+        category = 'underperform'
+        blocking_issue = 'negative_return'
+        suggested_action = '先收紧放行阈值与风险/执行参数；若后续补样后仍为负，再进入 rollback 或 repricing。'
+    elif decision == 'expand':
+        recommendation_type = 'expand_rollout'
+        category = 'validated_edge'
+        suggested_action = '可小步扩大该 regime 下 rollout，继续监控胜率、均值回报与回撤漂移。'
+    elif decision == 'hold':
+        recommendation_type = 'mixed_signal_review'
+        category = 'mixed_signal'
+        blocking_issue = 'mixed_signal'
+        suggested_action = '先保持当前配置，继续收集样本，并重点检查是否存在 regime 内部不稳定或符号分化。'
+
+    if ab_row:
+        if ab_row.get('sample_ready') and not ab_row.get('candidate_beats_baseline'):
+            if decision == 'expand':
+                recommendation_type = 'expand_with_caution'
+                category = 'mixed_signal'
+                blocking_issue = 'ab_conflict_with_baseline'
+                suggested_action = '虽然单桶 gate 偏正向，但相对 baseline 未形成优势；先小流量灰度，不建议全量 expand。'
+            elif decision in {'hold', 'tighten'}:
+                blocking_issue = blocking_issue or 'underperform_vs_baseline'
+                suggested_action = '相对 baseline 未见优势，建议继续收紧/维持 hold，并把 repricing 或 rollback 纳入候选。'
+        elif ab_row.get('sample_ready') and ab_row.get('candidate_beats_baseline') and decision == 'expand':
+            suggested_action = '该 regime 下已优于 baseline，可按小步灰度扩大 rollout，并保留快速回退开关。'
+        elif not ab_row.get('sample_ready') and decision == 'expand':
+            suggested_action = '单桶表现偏正向，但 baseline 对照样本未充分，建议仅做有限 rollout，继续补充 A/B 样本。'
+
+    instability_flag = win_rate < 55 and avg_return_pct > 0 and decision == 'hold'
+    if instability_flag:
+        category = 'instability'
+        recommendation_type = 'instability_review'
+        blocking_issue = blocking_issue or 'unstable_edge'
+        suggested_action = '收益为正但稳定性不足，先不要扩量；继续观察并检查是否需要 tightening/repricing 降低波动。'
+
+    return {
+        'regime': regime,
+        'policy_version': policy,
+        'type': recommendation_type,
+        'category': category,
+        'priority': priority,
+        'confidence': confidence,
+        'reason': reason_text,
+        'suggested_action': suggested_action,
+        'blocking_issue': blocking_issue,
+        'gate_decision': decision,
+        'gate_reason': reason,
+        'aligned_with_rollout_gate': True,
+        'message': gate['message'],
+        'evidence': {
+            'trade_count': trade_count,
+            'min_sample_size': min_sample_size,
+            'avg_return_pct': avg_return_pct,
+            'win_rate': win_rate,
+            'baseline_comparison': ab_row,
+        },
+    }
+
+
 def build_regime_policy_calibration_report(symbol_results: List[Dict]) -> Dict:
     all_trades = [
         trade
@@ -174,7 +310,7 @@ def build_regime_policy_calibration_report(symbol_results: List[Dict]) -> Dict:
 
     min_sample_size = 3
     rollout_gates = []
-    recommendations = []
+    bucket_lookup = {}
     for row in by_regime_policy:
         bucket = row['bucket']
         policy = row.get('secondary_bucket') or 'unknown'
@@ -184,36 +320,27 @@ def build_regime_policy_calibration_report(symbol_results: List[Dict]) -> Dict:
             **_evaluate_rollout_gate(row, min_sample_size=min_sample_size),
         }
         rollout_gates.append(gate)
-        if gate['reason'] == 'sample_gap':
-            recommendations.append({
-                'type': 'sample_gap',
-                'regime': bucket,
-                'policy_version': policy,
-                'message': f'{bucket} × {policy} 样本仍少，先继续收集再调参',
-                'trade_count': row['trade_count'],
-            })
-        elif gate['decision'] in {'tighten', 'rollback'}:
-            recommendations.append({
-                'type': 'tighten_or_reprice' if gate['decision'] == 'tighten' else 'rollback_or_freeze',
-                'regime': bucket,
-                'policy_version': policy,
-                'message': gate['message'],
-                'trade_count': row['trade_count'],
-                'avg_return_pct': row['avg_return_pct'],
-                'win_rate': row['win_rate'],
-            })
-        elif gate['decision'] == 'expand':
-            recommendations.append({
-                'type': 'keep_or_expand_rollout',
-                'regime': bucket,
-                'policy_version': policy,
-                'message': gate['message'],
-                'trade_count': row['trade_count'],
-                'avg_return_pct': row['avg_return_pct'],
-                'win_rate': row['win_rate'],
-            })
+        bucket_lookup[(bucket, policy)] = row
 
     policy_ab_diffs = _build_policy_ab_diffs(by_policy, by_regime_policy, min_sample_size=min_sample_size)
+    ab_lookup = _build_policy_ab_regime_lookup(policy_ab_diffs)
+    recommendations = []
+    for gate in rollout_gates:
+        bucket_row = bucket_lookup[(gate['regime'], gate['policy_version'])]
+        ab_row = ab_lookup.get((gate['regime'], gate['policy_version']))
+        recommendations.append(
+            _build_calibration_recommendation(gate, bucket_row, ab_row, min_sample_size=min_sample_size)
+        )
+
+    recommendations.sort(
+        key=lambda item: (
+            {'critical': 0, 'high': 1, 'medium': 2, 'low': 3}.get(item['priority'], 9),
+            {'high': 0, 'medium': 1, 'low': 2}.get(item['confidence'], 9),
+            -(item.get('evidence') or {}).get('trade_count', 0),
+            item['regime'],
+            item['policy_version'],
+        )
+    )
     top_regime = by_regime[0]['bucket'] if by_regime else 'unknown'
     top_policy = by_policy[0]['bucket'] if by_policy else 'unknown'
     rollout_gate_summary = {
@@ -233,13 +360,19 @@ def build_regime_policy_calibration_report(symbol_results: List[Dict]) -> Dict:
             'min_sample_size': min_sample_size,
             'policy_ab_ready': len(by_policy) >= 2,
             'rollout_gate_summary': rollout_gate_summary,
+            'recommendation_summary': {
+                'critical': sum(1 for item in recommendations if item['priority'] == 'critical'),
+                'high': sum(1 for item in recommendations if item['priority'] == 'high'),
+                'medium': sum(1 for item in recommendations if item['priority'] == 'medium'),
+                'low': sum(1 for item in recommendations if item['priority'] == 'low'),
+            },
         },
         'by_regime': by_regime,
         'by_policy_version': by_policy,
         'by_regime_policy': by_regime_policy,
         'policy_ab_diffs': policy_ab_diffs,
         'rollout_gates': rollout_gates,
-        'recommendations': recommendations[:20],
+        'recommendations': recommendations[:50],
     }
 
 

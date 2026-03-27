@@ -4217,14 +4217,66 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
         self.assertIn('gate', first_item)
         self.assertIn('recommendation', first_item)
         self.assertTrue(first_item['status']['ready_for_rollout_orchestration'])
+        self.assertIn('orchestration', first_item)
+        self.assertTrue(first_item['orchestration']['action_queue'])
+        self.assertIn('review_checkpoints', first_item['orchestration'])
         first_queue = delivery['orchestration_ready']['queue'][0]
         self.assertIn('primary_action', first_queue)
+        self.assertIn('next_actions', first_queue)
+        self.assertIn('blocking_chain', first_queue)
+        self.assertIn('rollback_candidate', first_queue)
         self.assertIn(first_queue['decision'], {'expand', 'tighten', 'rollback', 'hold'})
         self.assertIn('expand', delivery['orchestration_ready']['queues'])
         self.assertIn('rollback', delivery['orchestration_ready']['queues'])
+        self.assertTrue(delivery['orchestration_ready']['prioritized_queue'])
+        self.assertTrue(delivery['orchestration_ready']['next_actions'])
+        self.assertTrue(delivery['orchestration_ready']['review_checkpoints'])
         self.assertIn('repricing_review', delivery['orchestration_ready']['action_catalog'])
         self.assertEqual(report['summary']['delivery_ready']['schema_version'], 'm5_delivery_v1')
         self.assertGreaterEqual(report['summary']['delivery_ready']['priority_queue_size'], 1)
+        self.assertGreaterEqual(report['summary']['delivery_ready']['next_action_bucket_count'], 1)
+
+    def test_calibration_report_orchestration_ready_exposes_ordered_actions_and_dependencies(self):
+        report = build_regime_policy_calibration_report([
+            {
+                'symbol': 'BTC/USDT',
+                'all_trades': [
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v1', 'return_pct': 0.2},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v1', 'return_pct': 0.1},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v1', 'return_pct': 0.05},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v2', 'return_pct': -1.5},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v2', 'return_pct': -1.0},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v2', 'return_pct': -0.8},
+                    {'regime_tag': 'range', 'policy_tag': 'policy_v3', 'return_pct': 0.4},
+                    {'regime_tag': 'range', 'policy_tag': 'policy_v3', 'return_pct': 0.3},
+                ],
+            }
+        ])
+        delivery = report['delivery']
+        rollback_item = next(item for item in delivery['views']['items'] if item['regime'] == 'panic' and item['policy_version'] == 'policy_v2')
+        action_queue = rollback_item['orchestration']['action_queue']
+        self.assertEqual(action_queue[0]['type'], 'rollout_freeze')
+        self.assertEqual(action_queue[1]['type'], 'rollback_to_baseline')
+        self.assertEqual(action_queue[1]['depends_on'], [action_queue[0]['id']])
+        self.assertEqual(action_queue[2]['type'], 'repricing_review')
+        self.assertEqual(action_queue[2]['depends_on'], [action_queue[1]['id']])
+        self.assertTrue(rollback_item['orchestration']['rollback_candidate']['eligible'])
+
+        sample_gap_item = next(item for item in delivery['views']['items'] if item['regime'] == 'range' and item['policy_version'] == 'policy_v3')
+        sample_gap_actions = sample_gap_item['orchestration']['action_queue']
+        self.assertEqual(sample_gap_actions[0]['type'], 'collect_more_samples')
+        self.assertIn('missing_1_samples', [row['value'] for row in sample_gap_item['orchestration']['blocking_chain']])
+
+        next_actions = delivery['orchestration_ready']['next_actions']
+        rollback_next = next(row for row in next_actions if row['bucket_id'] == rollback_item['bucket_id'])
+        self.assertEqual(rollback_next['next_actions'][0]['type'], 'rollout_freeze')
+        blocking_chain = delivery['orchestration_ready']['blocking_chain']
+        self.assertTrue(any(row['bucket_id'] == sample_gap_item['bucket_id'] for row in blocking_chain))
+        review_row = next(row for row in delivery['orchestration_ready']['review_checkpoints'] if row['bucket_id'] == rollback_item['bucket_id'])
+        self.assertTrue(any(checkpoint['type'] == 'trade_count' for checkpoint in review_row['checkpoints']))
+        self.assertTrue(any(checkpoint['type'] == 'thresholds' for checkpoint in review_row['checkpoints']))
+        rollback_candidates = delivery['orchestration_ready']['rollback_candidates']
+        self.assertTrue(any(row['bucket_id'] == rollback_item['bucket_id'] for row in rollback_candidates))
 
     def test_calibration_report_ready_payload_flattens_delivery_for_consumers(self):
         report = build_regime_policy_calibration_report([

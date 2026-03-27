@@ -183,6 +183,133 @@ def _delivery_bucket_id(regime: str, policy_version: str) -> str:
     return f'{_normalize_bucket_tag(regime)}::{_normalize_bucket_tag(policy_version)}'
 
 
+
+
+def _priority_rank(value: Optional[str]) -> int:
+    return {'critical': 0, 'high': 1, 'medium': 2, 'low': 3}.get(_normalize_bucket_tag(value), 9)
+
+
+def _confidence_rank(value: Optional[str]) -> int:
+    return {'high': 0, 'medium': 1, 'low': 2}.get(_normalize_bucket_tag(value), 9)
+
+
+def _build_orchestration_plan(item: Dict) -> Dict:
+    recommendation = item.get('recommendation') or {}
+    metrics = item.get('metrics') or {}
+    baseline = item.get('baseline_comparison') or {}
+    actions = recommendation.get('actions') or []
+    bucket_id = item.get('bucket_id')
+    trade_count = int(metrics.get('trade_count') or 0)
+    next_review_after = recommendation.get('next_review_after_trade_count')
+
+    blockers = []
+    blocking_issue = recommendation.get('blocking_issue')
+    if blocking_issue:
+        blockers.append({
+            'type': 'blocking_issue',
+            'value': blocking_issue,
+            'source': 'recommendation',
+            'resolved': False,
+        })
+    for guardrail in recommendation.get('guardrails') or []:
+        blockers.append({
+            'type': 'guardrail',
+            'value': guardrail,
+            'source': 'guardrails',
+            'resolved': False,
+        })
+    if recommendation.get('type') == 'collect_more_samples':
+        target = int((recommendation.get('thresholds') or {}).get('target_min_trade_count') or 0)
+        blockers.append({
+            'type': 'sample_gap',
+            'value': f'missing_{max(target - trade_count, 0)}_samples',
+            'source': 'thresholds',
+            'resolved': trade_count >= target if target else False,
+        })
+    if baseline.get('sample_ready') and not baseline.get('candidate_beats_baseline'):
+        blockers.append({
+            'type': 'ab_conflict',
+            'value': 'candidate_not_beating_baseline',
+            'source': 'policy_ab_diffs',
+            'resolved': False,
+        })
+
+    action_queue = []
+    previous_action_id = None
+    for index, action in enumerate(actions, start=1):
+        action_type = action.get('type')
+        action_id = f'{bucket_id}::{action_type}::{index}'
+        if previous_action_id:
+            depends_on = [previous_action_id]
+        elif action_type in {'expand_guarded', 'rollback_to_baseline'} and blockers:
+            depends_on = []
+        else:
+            depends_on = []
+        action_queue.append({
+            'id': action_id,
+            'order': index,
+            'type': action_type,
+            'title': action.get('title'),
+            'owner': action.get('owner'),
+            'urgency': action.get('urgency'),
+            'description': action.get('description'),
+            'depends_on': depends_on,
+            'blocking_prerequisites': [blocker['value'] for blocker in blockers] if index == 1 and blockers else [],
+            'evidence': {
+                'trade_count': trade_count,
+                'avg_return_pct': metrics.get('avg_return_pct'),
+                'win_rate': metrics.get('win_rate'),
+                'baseline_policy_version': baseline.get('baseline_policy_version'),
+                'candidate_beats_baseline': baseline.get('candidate_beats_baseline'),
+            },
+        })
+        previous_action_id = action_id
+
+    next_actions = action_queue[:2]
+    review_checkpoints = []
+    if next_review_after is not None:
+        review_checkpoints.append({
+            'type': 'trade_count',
+            'target_trade_count': next_review_after,
+            'current_trade_count': trade_count,
+            'remaining_samples': max(int(next_review_after) - trade_count, 0),
+            'reason': recommendation.get('reason') or recommendation.get('suggested_action'),
+        })
+    thresholds = recommendation.get('thresholds') or {}
+    if thresholds:
+        review_checkpoints.append({
+            'type': 'thresholds',
+            'values': thresholds,
+            'guardrails': recommendation.get('guardrails') or [],
+        })
+    if baseline.get('baseline_policy_version'):
+        review_checkpoints.append({
+            'type': 'baseline_comparison',
+            'baseline_policy_version': baseline.get('baseline_policy_version'),
+            'sample_ready': baseline.get('sample_ready'),
+            'candidate_beats_baseline': baseline.get('candidate_beats_baseline'),
+            'delta_avg_return_pct': baseline.get('delta_avg_return_pct'),
+            'delta_win_rate': baseline.get('delta_win_rate'),
+        })
+
+    rollback_candidate = {
+        'eligible': bool(recommendation.get('rollout_plan', {}).get('requires_fast_rollback')),
+        'reason': recommendation.get('blocking_issue') or item.get('gate', {}).get('reason'),
+        'recommended_target': baseline.get('baseline_policy_version') or 'baseline_or_previous_safe_config',
+        'mode': recommendation.get('rollout_plan', {}).get('mode'),
+    }
+
+    return {
+        'priority_rank': _priority_rank(recommendation.get('priority')),
+        'confidence_rank': _confidence_rank(recommendation.get('confidence')),
+        'blockers': blockers,
+        'blocking_chain': blockers,
+        'action_queue': action_queue,
+        'next_actions': next_actions,
+        'review_checkpoints': review_checkpoints,
+        'rollback_candidate': rollback_candidate,
+    }
+
 def _build_calibration_delivery_payload(
     *,
     summary: Dict,
@@ -212,7 +339,7 @@ def _build_calibration_delivery_payload(
         ab_row = ab_lookup.get((regime, policy))
         priority = recommendation.get('priority', 'low')
         confidence = recommendation.get('confidence', 'low')
-        items.append({
+        item = {
             'bucket_id': _delivery_bucket_id(regime, policy),
             'regime': regime,
             'policy_version': policy,
@@ -239,6 +366,7 @@ def _build_calibration_delivery_payload(
                 'blocking_issue': recommendation.get('blocking_issue'),
                 'suggested_action': recommendation.get('suggested_action'),
                 'summary_line': recommendation.get('summary_line'),
+                'reason': recommendation.get('reason'),
                 'actions': recommendation.get('actions') or [],
                 'rollout_plan': recommendation.get('rollout_plan') or {},
                 'guardrails': recommendation.get('guardrails') or [],
@@ -259,10 +387,13 @@ def _build_calibration_delivery_payload(
                 'blocking': bool(recommendation.get('blocking_issue')),
                 'ready_for_dashboard': True,
                 'ready_for_rollout_orchestration': bool(gate.get('decision') and recommendation.get('type')),
-                'priority_rank': {'critical': 0, 'high': 1, 'medium': 2, 'low': 3}.get(priority, 9),
-                'confidence_rank': {'high': 0, 'medium': 1, 'low': 2}.get(confidence, 9),
+                'priority_rank': _priority_rank(priority),
+                'confidence_rank': _confidence_rank(confidence),
             },
-        })
+        }
+        item['orchestration'] = _build_orchestration_plan(item)
+        item['status']['blocking'] = bool(item['orchestration']['blockers'])
+        items.append(item)
 
     items.sort(key=lambda item: (
         item['status']['priority_rank'],
@@ -285,6 +416,10 @@ def _build_calibration_delivery_payload(
             'blocking': item['status']['blocking'],
             'primary_action': (item['recommendation']['actions'] or [{}])[0].get('type'),
             'summary_line': item['recommendation']['summary_line'],
+            'next_actions': item['orchestration']['next_actions'],
+            'blocking_chain': item['orchestration']['blocking_chain'],
+            'review_checkpoints': item['orchestration']['review_checkpoints'],
+            'rollback_candidate': item['orchestration']['rollback_candidate'],
         }
         for item in items
     ]
@@ -299,6 +434,53 @@ def _build_calibration_delivery_payload(
             rows = [row for row in rows if row.get('blocking') is blocking]
         return rows
 
+    prioritized_queue = queue[:]
+    next_actions = [
+        {
+            'bucket_id': item['bucket_id'],
+            'regime': item['regime'],
+            'policy_version': item['policy_version'],
+            'decision': item['gate']['decision'],
+            'recommendation_type': item['recommendation']['type'],
+            'action_queue': item['orchestration']['action_queue'],
+            'next_actions': item['orchestration']['next_actions'],
+            'blocking_chain': item['orchestration']['blocking_chain'],
+        }
+        for item in items
+        if item['orchestration']['next_actions']
+    ]
+    blocking_chain = [
+        {
+            'bucket_id': item['bucket_id'],
+            'regime': item['regime'],
+            'policy_version': item['policy_version'],
+            'decision': item['gate']['decision'],
+            'blocking_chain': item['orchestration']['blocking_chain'],
+        }
+        for item in items
+        if item['orchestration']['blocking_chain']
+    ]
+    review_checkpoints = [
+        {
+            'bucket_id': item['bucket_id'],
+            'regime': item['regime'],
+            'policy_version': item['policy_version'],
+            'decision': item['gate']['decision'],
+            'checkpoints': item['orchestration']['review_checkpoints'],
+        }
+        for item in items
+        if item['orchestration']['review_checkpoints']
+    ]
+    rollback_candidates = [
+        {
+            'bucket_id': item['bucket_id'],
+            'regime': item['regime'],
+            'policy_version': item['policy_version'],
+            **item['orchestration']['rollback_candidate'],
+        }
+        for item in items
+        if item['orchestration']['rollback_candidate'].get('eligible')
+    ]
     return {
         'schema_version': 'm5_delivery_v1',
         'summary': {
@@ -309,6 +491,9 @@ def _build_calibration_delivery_payload(
             'bucket_count': len(items),
             'regime_count': len(by_regime or []),
             'policy_count': len(by_policy or []),
+            'blocking_chain_count': len(blocking_chain),
+            'next_action_bucket_count': len(next_actions),
+            'rollback_candidate_count': len(rollback_candidates),
         },
         'views': {
             'items': items,
@@ -329,23 +514,30 @@ def _build_calibration_delivery_payload(
                 'bucket_count': len(items),
             },
             'sections': {
-                'priority_queue': queue[:10],
+                'priority_queue': prioritized_queue[:10],
                 'blocking_items': _queue_filter(blocking=True),
                 'rollout_candidates': _queue_filter(decision='expand'),
                 'tighten_watchlist': _queue_filter(decision='tighten'),
                 'rollback_queue': _queue_filter(decision='rollback'),
                 'sample_gap_queue': _queue_filter(recommendation_type='collect_more_samples'),
+                'next_actions': next_actions[:10],
+                'review_checkpoints': review_checkpoints[:10],
             },
         },
         'orchestration_ready': {
-            'queue': queue,
+            'queue': prioritized_queue,
+            'prioritized_queue': prioritized_queue,
+            'next_actions': next_actions,
+            'blocking_chain': blocking_chain,
+            'review_checkpoints': review_checkpoints,
+            'rollback_candidates': rollback_candidates,
             'queues': {
                 'blocking': _queue_filter(blocking=True),
                 'expand': _queue_filter(decision='expand'),
                 'tighten': _queue_filter(decision='tighten'),
                 'rollback': _queue_filter(decision='rollback'),
-                'observe': [row for row in queue if row.get('governance_mode') == 'observe'],
-                'review': [row for row in queue if row.get('governance_mode') == 'review'],
+                'observe': [row for row in prioritized_queue if row.get('governance_mode') == 'observe'],
+                'review': [row for row in prioritized_queue if row.get('governance_mode') == 'review'],
             },
             'action_catalog': dict(sorted({
                 action_type: sum(1 for rec in recommendations for action in (rec.get('actions') or []) if action['type'] == action_type)
@@ -819,6 +1011,9 @@ def build_regime_policy_calibration_report(symbol_results: List[Dict]) -> Dict:
         'bucket_count': delivery['summary']['bucket_count'],
         'blocking_items': len(delivery['orchestration_ready']['queues']['blocking']),
         'priority_queue_size': len(delivery['orchestration_ready']['queue']),
+        'next_action_bucket_count': len(delivery['orchestration_ready']['next_actions']),
+        'blocking_chain_count': len(delivery['orchestration_ready']['blocking_chain']),
+        'rollback_candidate_count': len(delivery['orchestration_ready']['rollback_candidates']),
     }
     return {
         'summary': summary,

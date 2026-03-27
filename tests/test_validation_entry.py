@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from validation.shadow_runner import (
     ValidationCaseError,
     collect_validation_case_paths,
+    format_validation_report_markdown,
     load_validation_case,
     run_shadow_validation_case,
     run_shadow_validation_replay,
@@ -116,6 +117,8 @@ class TestShadowValidationEntry(unittest.TestCase):
         self.assertTrue(report['artifacts']['testnet_bridge']['result']['reconcile_summary']['close_order_confirmed'])
         self.assertTrue(report['audit']['real_trade_execution'])
         self.assertTrue(report['artifacts']['testnet_bridge']['audit']['rollback_expected'])
+        self.assertEqual(report['artifacts']['testnet_bridge_summary']['status'], 'controlled_execute')
+        self.assertTrue(report['artifacts']['testnet_bridge_summary']['close_confirmed'])
 
     def test_shadow_workflow_runner_blocks_testnet_bridge_when_pending_approvals_exist(self):
         report = run_shadow_validation_case(WORKFLOW_TESTNET_BRIDGE_BLOCKED_PENDING_FIXTURE)
@@ -163,6 +166,12 @@ class TestShadowValidationEntry(unittest.TestCase):
         self.assertEqual(replay['summary']['pass_count'], replay['summary']['case_count'])
         self.assertIn('shadow_execution', replay['summary']['case_types'])
         self.assertIn('shadow_workflow', replay['summary']['case_types'])
+        self.assertEqual(replay['summary']['testnet_bridge']['case_count'], 5)
+        self.assertEqual(replay['summary']['testnet_bridge']['status_counts']['plan_only'], 1)
+        self.assertEqual(replay['summary']['testnet_bridge']['status_counts']['controlled_execute'], 1)
+        self.assertEqual(replay['summary']['testnet_bridge']['status_counts']['blocked'], 2)
+        self.assertEqual(replay['summary']['testnet_bridge']['status_counts']['error'], 1)
+        self.assertIn('testnet-bridge-cleanup-needed-001', replay['summary']['testnet_bridge']['case_ids_requiring_cleanup'])
 
     def test_cli_validation_entry_prints_report_and_writes_output(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -195,6 +204,29 @@ class TestShadowValidationEntry(unittest.TestCase):
             self.assertEqual(payload['mode'], 'validation_replay')
             self.assertGreaterEqual(payload['summary']['case_count'], 2)
             self.assertEqual(payload['summary']['fail_count'], 0)
+            self.assertIn('testnet_bridge', payload['summary'])
+
+    def test_validation_markdown_formatter_surfaces_bridge_summary(self):
+        report = run_shadow_validation_replay([FIXTURE_DIR])
+        markdown = format_validation_report_markdown(report)
+        self.assertIn('# Shadow Validation Replay Report', markdown)
+        self.assertIn('## Testnet Bridge', markdown)
+        self.assertIn('testnet-bridge-cleanup-needed-001', markdown)
+
+    def test_cli_validation_replay_writes_markdown_report(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / 'replay.md'
+            subprocess.run(
+                [sys.executable, 'bot/run.py', '--validation-replay', '--case', FIXTURE_DIR, '--validation-output', str(output_path)],
+                cwd='/Volumes/MacHD/Projects/crypto-quant-okx',
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            markdown = output_path.read_text(encoding='utf-8')
+            self.assertIn('# Shadow Validation Replay Report', markdown)
+            self.assertIn('### Blocking Reasons', markdown)
+            self.assertIn('workflow_pending_approvals_present', markdown)
 
 
 if __name__ == '__main__':

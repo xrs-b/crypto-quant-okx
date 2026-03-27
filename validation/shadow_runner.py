@@ -429,6 +429,170 @@ def _run_testnet_bridge(case_data: Dict[str, Any], workflow_ready: Dict[str, Any
     return result
 
 
+
+
+def _build_testnet_bridge_summary(bridge_result: Optional[Dict[str, Any]], *, case_id: Optional[str] = None, case_path: Optional[str] = None) -> Dict[str, Any]:
+    bridge_result = bridge_result or {}
+    plan = bridge_result.get('plan') or {}
+    gating = bridge_result.get('gating') or {}
+    audit = bridge_result.get('audit') or {}
+    result = bridge_result.get('result') or {}
+    blocking_reasons = list(bridge_result.get('blocking_reasons') or [])
+    cleanup_needed = bool(bridge_result.get('cleanup_needed', False))
+    residual_position_detected = bool(bridge_result.get('residual_position_detected', False))
+    close_confirmed = bool((result.get('reconcile_summary') or {}).get('close_order_confirmed'))
+    cleanup_confirmed = (result.get('cleanup_result') or {}).get('status') in {'flattened', 'confirmed_flat'}
+    return {
+        'case_id': case_id,
+        'case_path': case_path,
+        'enabled': bool(bridge_result.get('enabled', False)),
+        'mode': bridge_result.get('mode') or 'disabled',
+        'status': bridge_result.get('status') or ('disabled' if not bridge_result.get('enabled') else 'plan_only'),
+        'plan_only': bool(bridge_result.get('plan_only', True)),
+        'execute_ready': bool(plan.get('execute_ready', False)),
+        'exchange_mode': audit.get('exchange_mode'),
+        'symbol': plan.get('symbol'),
+        'side': plan.get('side'),
+        'execute_profile': audit.get('execute_profile'),
+        'allow_execute': bool(audit.get('allow_execute', False)),
+        'real_trade_execution': bool(audit.get('real_trade_execution', False)),
+        'rollback_expected': bool(audit.get('rollback_expected', False)),
+        'cleanup_required': bool(audit.get('cleanup_required', False)),
+        'cleanup_needed': cleanup_needed,
+        'cleanup_confirmed': cleanup_confirmed,
+        'residual_position_detected': residual_position_detected,
+        'open_status': bridge_result.get('open_status'),
+        'close_status': bridge_result.get('close_status'),
+        'close_confirmed': close_confirmed,
+        'failure_compensation_hint': bridge_result.get('failure_compensation_hint'),
+        'error': bridge_result.get('error'),
+        'blocking_reasons': blocking_reasons,
+        'blocking_reason_count': len(blocking_reasons),
+        'workflow_pending_approvals': int(gating.get('workflow_pending_approvals', 0) or 0),
+        'executor_applied_count': int(gating.get('executor_applied_count', 0) or 0),
+        'executor_queued_count': int(gating.get('executor_queued_count', 0) or 0),
+        'reconcile_summary': copy.deepcopy(bridge_result.get('reconcile_summary') or {}),
+        'cleanup_result': copy.deepcopy(result.get('cleanup_result') or {}),
+    }
+
+
+def _aggregate_testnet_bridge_batch(results: List[Dict[str, Any]]) -> Dict[str, Any]:
+    bridge_cases = []
+    status_counts: Dict[str, int] = {}
+    blocking_reason_counts: Dict[str, int] = {}
+    mode_counts: Dict[str, int] = {}
+    for row in results or []:
+        bridge_summary = copy.deepcopy((((row.get('artifacts') or {}).get('testnet_bridge_summary')) or {}))
+        if not bridge_summary:
+            bridge_summary = _build_testnet_bridge_summary(
+                ((row.get('artifacts') or {}).get('testnet_bridge') or {}),
+                case_id=row.get('case_id'),
+                case_path=((row.get('audit') or {}).get('case_path')),
+            )
+        if not bridge_summary.get('enabled'):
+            continue
+        bridge_cases.append(bridge_summary)
+        status = bridge_summary.get('status') or 'unknown'
+        mode = bridge_summary.get('mode') or 'unknown'
+        status_counts[status] = status_counts.get(status, 0) + 1
+        mode_counts[mode] = mode_counts.get(mode, 0) + 1
+        for reason in bridge_summary.get('blocking_reasons') or []:
+            blocking_reason_counts[reason] = blocking_reason_counts.get(reason, 0) + 1
+    cleanup_case_ids = [row.get('case_id') for row in bridge_cases if row.get('cleanup_needed')]
+    blocked_case_ids = [row.get('case_id') for row in bridge_cases if row.get('status') == 'blocked']
+    error_case_ids = [row.get('case_id') for row in bridge_cases if row.get('status') == 'error']
+    return {
+        'case_count': len(bridge_cases),
+        'enabled_case_count': len(bridge_cases),
+        'status_counts': status_counts,
+        'mode_counts': mode_counts,
+        'blocking_reason_counts': blocking_reason_counts,
+        'real_trade_execution_count': sum(1 for row in bridge_cases if row.get('real_trade_execution')),
+        'controlled_execute_success_count': sum(1 for row in bridge_cases if row.get('status') == 'controlled_execute' and not row.get('cleanup_needed') and not row.get('error')),
+        'plan_only_count': sum(1 for row in bridge_cases if row.get('plan_only')),
+        'blocked_count': len(blocked_case_ids),
+        'error_count': len(error_case_ids),
+        'cleanup_needed_count': len(cleanup_case_ids),
+        'cleanup_confirmed_count': sum(1 for row in bridge_cases if row.get('cleanup_confirmed')),
+        'residual_position_detected_count': sum(1 for row in bridge_cases if row.get('residual_position_detected')),
+        'close_confirmed_count': sum(1 for row in bridge_cases if row.get('close_confirmed')),
+        'case_ids_requiring_cleanup': cleanup_case_ids,
+        'blocked_case_ids': blocked_case_ids,
+        'error_case_ids': error_case_ids,
+        'cases': bridge_cases,
+    }
+
+
+def format_validation_report_markdown(report: Dict[str, Any]) -> str:
+    if report.get('mode') == 'validation_replay':
+        summary = report.get('summary') or {}
+        bridge = summary.get('testnet_bridge') or {}
+        lines = [
+            '# Shadow Validation Replay Report',
+            '',
+            '## Summary',
+            f"- cases: {summary.get('case_count', 0)}",
+            f"- pass: {summary.get('pass_count', 0)}",
+            f"- fail: {summary.get('fail_count', 0)}",
+            '',
+            '## Testnet Bridge',
+            f"- enabled cases: {bridge.get('case_count', 0)}",
+            f"- real trade execution count: {bridge.get('real_trade_execution_count', 0)}",
+            f"- controlled execute success count: {bridge.get('controlled_execute_success_count', 0)}",
+            f"- blocked count: {bridge.get('blocked_count', 0)}",
+            f"- error count: {bridge.get('error_count', 0)}",
+            f"- cleanup needed count: {bridge.get('cleanup_needed_count', 0)}",
+            '',
+            '### Status Counts',
+        ]
+        for key, value in sorted((bridge.get('status_counts') or {}).items()):
+            lines.append(f'- {key}: {value}')
+        if bridge.get('blocking_reason_counts'):
+            lines.extend(['', '### Blocking Reasons'])
+            for key, value in sorted((bridge.get('blocking_reason_counts') or {}).items()):
+                lines.append(f'- {key}: {value}')
+        if bridge.get('case_ids_requiring_cleanup'):
+            lines.extend(['', '### Cases Requiring Cleanup'])
+            for case_id in bridge.get('case_ids_requiring_cleanup') or []:
+                lines.append(f'- {case_id}')
+        if summary.get('failed_cases'):
+            lines.extend(['', '## Failed Cases'])
+            for failed in summary.get('failed_cases') or []:
+                lines.append(f"- {failed.get('case_id')} ({failed.get('case_type')})")
+        return '\n'.join(lines) + '\n'
+
+    bridge = ((report.get('artifacts') or {}).get('testnet_bridge_summary')) or {}
+    lines = [
+        '# Shadow Validation Report',
+        '',
+        '## Case',
+        f"- case_id: {report.get('case_id')}",
+        f"- case_type: {report.get('case_type')}",
+        f"- mode: {report.get('mode')}",
+        f"- status: {report.get('status')}",
+    ]
+    if bridge.get('enabled'):
+        lines.extend([
+            '',
+            '## Testnet Bridge',
+            f"- status: {bridge.get('status')}",
+            f"- mode: {bridge.get('mode')}",
+            f"- execute_ready: {bridge.get('execute_ready')}",
+            f"- exchange_mode: {bridge.get('exchange_mode')}",
+            f"- symbol: {bridge.get('symbol')}",
+            f"- side: {bridge.get('side')}",
+            f"- real_trade_execution: {bridge.get('real_trade_execution')}",
+            f"- cleanup_needed: {bridge.get('cleanup_needed')}",
+            f"- residual_position_detected: {bridge.get('residual_position_detected')}",
+            f"- open_status: {bridge.get('open_status')}",
+            f"- close_status: {bridge.get('close_status')}",
+        ])
+        if bridge.get('blocking_reasons'):
+            lines.append(f"- blocking_reasons: {', '.join(bridge.get('blocking_reasons') or [])}")
+        if bridge.get('error'):
+            lines.append(f"- error: {bridge.get('error')}")
+    return '\n'.join(lines) + '\n'
+
 def _build_workflow_diff(workflow_ready: Dict[str, Any], replay_result: Dict[str, Any], executor_result: Optional[Dict[str, Any]] = None, bridge_result: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     actions = workflow_ready.get('actions') or []
     approvals = (workflow_ready.get('approval_state') or {}).get('items') or []
@@ -528,7 +692,8 @@ def _run_workflow_case(case: ValidationCase, *, case_path: Optional[str] = None,
     })
     diff = _build_workflow_diff(workflow_ready, replay_result, executor_result, bridge_result)
     passed, assertions = _evaluate_assertions(case.raw, None, diff, workflow_ready=workflow_ready, replay_result=replay_result)
-    return {'case_id': case.case_id, 'case_type': case.case_type, 'mode': case.raw.get('mode') or 'workflow_dry_run', 'status': 'pass' if passed else 'fail', 'baseline': None, 'adaptive': None, 'diff': diff, 'assertions': assertions, 'artifacts': {'workflow_ready': workflow_ready, 'approval_replay': replay_result, 'rollout_executor': executor_result.get('executed'), 'workflow_consumer_view': consumer_view, 'testnet_bridge': bridge_result}, 'audit': {'generated_at': datetime.now().isoformat(), 'real_trade_execution': bool((bridge_result.get('audit') or {}).get('real_trade_execution', False)), 'dangerous_live_parameter_change': False, 'exchange_mode': (bridge_result.get('audit') or {}).get('exchange_mode', 'shadow'), 'case_path': str(case_path) if case_path else None, 'replay_source': ((replay_result.get('states') or [{}])[0]).get('replay_source') if replay_result.get('states') else None}}
+    bridge_summary = _build_testnet_bridge_summary(bridge_result, case_id=case.case_id, case_path=str(case_path) if case_path else None)
+    return {'case_id': case.case_id, 'case_type': case.case_type, 'mode': case.raw.get('mode') or 'workflow_dry_run', 'status': 'pass' if passed else 'fail', 'baseline': None, 'adaptive': None, 'diff': diff, 'assertions': assertions, 'artifacts': {'workflow_ready': workflow_ready, 'approval_replay': replay_result, 'rollout_executor': executor_result.get('executed'), 'workflow_consumer_view': consumer_view, 'testnet_bridge': bridge_result, 'testnet_bridge_summary': bridge_summary}, 'audit': {'generated_at': datetime.now().isoformat(), 'real_trade_execution': bool((bridge_result.get('audit') or {}).get('real_trade_execution', False)), 'dangerous_live_parameter_change': False, 'exchange_mode': (bridge_result.get('audit') or {}).get('exchange_mode', 'shadow'), 'case_path': str(case_path) if case_path else None, 'replay_source': ((replay_result.get('states') or [{}])[0]).get('replay_source') if replay_result.get('states') else None}}
 
 def run_shadow_validation_case(case_path: str, *, base_config: Config = None) -> Dict[str, Any]:
     case = load_validation_case(case_path)
@@ -541,7 +706,7 @@ def build_validation_summary(results: List[Dict[str, Any]]) -> Dict[str, Any]:
     for row in results:
         case_types[row.get('case_type') or 'unknown'] = case_types.get(row.get('case_type') or 'unknown', 0) + 1
         statuses[row.get('status') or 'unknown'] = statuses.get(row.get('status') or 'unknown', 0) + 1
-    return {'case_count': len(results), 'pass_count': statuses.get('pass', 0), 'fail_count': statuses.get('fail', 0), 'case_types': case_types, 'statuses': statuses, 'failed_cases': [{'case_id': row.get('case_id'), 'case_type': row.get('case_type'), 'case_path': (row.get('audit') or {}).get('case_path'), 'failed_assertions': [item for item in (row.get('assertions') or []) if not item.get('passed')]} for row in results if row.get('status') != 'pass'], 'generated_at': datetime.now().isoformat(), 'real_trade_execution': False, 'exchange_mode': 'shadow'}
+    return {'case_count': len(results), 'pass_count': statuses.get('pass', 0), 'fail_count': statuses.get('fail', 0), 'case_types': case_types, 'statuses': statuses, 'failed_cases': [{'case_id': row.get('case_id'), 'case_type': row.get('case_type'), 'case_path': (row.get('audit') or {}).get('case_path'), 'failed_assertions': [item for item in (row.get('assertions') or []) if not item.get('passed')]} for row in results if row.get('status') != 'pass'], 'generated_at': datetime.now().isoformat(), 'real_trade_execution': False, 'exchange_mode': 'shadow', 'testnet_bridge': _aggregate_testnet_bridge_batch(results)}
 
 def run_shadow_validation_replay(paths: Iterable[str], *, base_config: Optional[Config] = None) -> Dict[str, Any]:
     case_paths = collect_validation_case_paths(paths)

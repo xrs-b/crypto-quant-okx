@@ -28,7 +28,7 @@ from signals import SignalDetector, SignalValidator, SignalRecorder, EntryDecide
 from trading import TradingExecutor, RiskManager
 from ml.engine import MLEngine, ModelTrainer, DataCollector
 from analytics import StrategyBacktester, SignalQualityAnalyzer, ParameterOptimizer, GovernanceEngine
-from validation import run_shadow_validation_case, run_shadow_validation_replay
+from validation import format_validation_report_markdown, run_shadow_validation_case, run_shadow_validation_replay
 
 
 def run_notification_relay(interval: int = 30, once: bool = False, limit: int = 20):
@@ -973,7 +973,7 @@ def main():
     parser.add_argument('--validation-entry', type=str, choices=['run'], help='运行单个 shadow validation case')
     parser.add_argument('--validation-replay', action='store_true', help='运行 validation replay，支持目录/多 case 并输出聚合 summary')
     parser.add_argument('--case', type=str, nargs='+', help='validation case 文件或目录路径（json/yaml，可传多个）')
-    parser.add_argument('--validation-output', type=str, help='可选：将 validation report / replay report 写入指定 json 文件')
+    parser.add_argument('--validation-output', type=str, help='可选：将 validation report / replay report 写入指定 json/md 文件（.md 导出人类可读摘要）')
     parser.add_argument('--execute', action='store_true', help='配合 smoke 验收命令，显式允许执行 testnet 开平仓')
     parser.add_argument('--symbol', type=str, help='指定 smoke/diagnose 目标币种')
     parser.add_argument('--side', type=str, default='long', choices=['long', 'short'], help='smoke 验收方向')
@@ -1262,7 +1262,10 @@ def main():
         if args.validation_output:
             output_path = Path(args.validation_output)
             output_path.parent.mkdir(parents=True, exist_ok=True)
-            output_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')
+            if output_path.suffix.lower() == '.md':
+                output_path.write_text(format_validation_report_markdown(report), encoding='utf-8')
+            else:
+                output_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')
         print("\n🕶️ Shadow Validation Report:\n")
         print(json.dumps(report, ensure_ascii=False, indent=2))
 
@@ -1273,7 +1276,10 @@ def main():
         if args.validation_output:
             output_path = Path(args.validation_output)
             output_path.parent.mkdir(parents=True, exist_ok=True)
-            output_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')
+            if output_path.suffix.lower() == '.md':
+                output_path.write_text(format_validation_report_markdown(report), encoding='utf-8')
+            else:
+                output_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')
         print("\n🧪 Shadow Validation Replay Summary:\n")
         print(json.dumps(report['summary'], ensure_ascii=False, indent=2))
 

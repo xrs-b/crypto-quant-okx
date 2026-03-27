@@ -239,7 +239,11 @@
   4. controlled execute 第二层已补 **最小 reconcile / cleanup trail**：bridge result 现在会稳定输出 `open_status / close_status / cleanup_needed / residual_position_detected / reconcile_summary / failure_compensation_hint`，并在 `cleanup_required=true` 且未确认收口时强制回到 `error`；
   5. shadow bridge stub / fixture 现可驱动 `open/close confirmation`、`pending-approval blocked`、`cleanup needed`、`residual position detected` 等场景，测试已覆盖成功、blocked、cleanup needed、real-mode blocked 主路径；
   6. workflow payload 已新增 **consumer view**，把 `workflow_state / approval_state / queues / rollout_executor / rollout_stage_progression` 聚成统一 API 消费对象，减少 dashboard/API 侧自行拼装；
-  7. rollout executor 已补 **stage progression summary**，把 `rollout_stage -> target_rollout_stage -> next_transition / dispatch_route / retryable / rollback_hint` 统一暴露，作为更接近自动 rollout 的下一层状态机摘要。
+  7. rollout executor 已补 **stage progression summary**，把 `rollout_stage -> target_rollout_stage -> next_transition / dispatch_route / retryable / rollback_hint` 统一暴露，作为更接近自动 rollout 的下一层状态机摘要；
+  8. 再补 **testnet bridge summary / report export**：单 case 现固定附带 `testnet_bridge_summary`，batch replay summary 会聚合 `status_counts / blocking_reason_counts / cleanup_needed_count / controlled_execute_success_count / case_ids_requiring_cleanup`，CLI `--validation-output` 同时支持 `.md` 导出人类可读 bridge 报告，方便阶段性验收、审计和回放归档。
+- **阶段判断**：
+  - 以“默认关闭、真实盘硬拦截、可审计、可回滚、可批量 replay、可导出阶段报告”的标准看，**testnet bridge 已可视为阶段性完成**；
+  - 后续重点不再是补 bridge skeleton，而是接真实 testnet API 查询/持仓快照、继续扩 regression basket，以及 safe-apply / queue dispatcher 的自动化闭环。
 - **下一步建议**：
   1. 把 direction lock / intent / layer gap / queue progression 这些高价值 regression case 补齐；
   2. 继续扩 safe-apply / stage handler allowlist，并把 stage progression 真正喂给 queue dispatcher；

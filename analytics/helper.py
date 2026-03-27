@@ -610,6 +610,77 @@ def _summarize_operator_action_policies(rows: Optional[List[Dict[str, Any]]]) ->
     }
 
 
+def _build_low_intervention_group_summary(rows: Optional[List[Dict[str, Any]]], *, label: Optional[str] = None) -> Dict[str, Any]:
+    rows = rows or []
+    operator_policy_summary = _summarize_operator_action_policies(rows)
+
+    def _count(values: List[Any], default: str) -> Dict[str, int]:
+        counts: Dict[str, int] = {}
+        for value in values:
+            key = str(value or default).strip() or default
+            counts[key] = counts.get(key, 0) + 1
+        return dict(sorted(counts.items(), key=lambda item: (-item[1], item[0])))
+
+    def _top_key(counts: Dict[str, int]) -> Optional[str]:
+        return max(sorted(counts.items()), key=lambda item: (item[1], item[0]))[0] if counts else None
+
+    lane_counts = _count([row.get('lane_id') for row in rows], 'unknown')
+    workflow_state_counts = _count([row.get('workflow_state') for row in rows], 'pending')
+    approval_state_counts = _count([row.get('approval_state') for row in rows], 'not_required')
+    risk_level_counts = _count([row.get('risk_level') for row in rows], 'unknown')
+    action_type_counts = _count([row.get('action_type') for row in rows], 'unknown')
+    priority_mix = _count([(row.get('operator_action_policy') or {}).get('priority') for row in rows], 'normal')
+    bucket_counts = _count([tag for row in rows for tag in (row.get('bucket_tags') or [])], 'unbucketed')
+    owner_counts = _count([row.get('owner_hint') for row in rows if row.get('owner_hint')], 'unassigned')
+
+    manual_count = sum(1 for row in rows if bool(row.get('requires_manual')) and str(row.get('approval_state') or '').strip().lower() == 'pending')
+    blocked_count = sum(1 for row in rows if str(row.get('workflow_state') or '').strip().lower() in {'blocked', 'blocked_by_approval', 'deferred'} or bool(row.get('blocked_by')))
+    ready_count = sum(1 for row in rows if str(row.get('workflow_state') or '').strip().lower() == 'ready')
+    queued_count = sum(1 for row in rows if str(row.get('workflow_state') or '').strip().lower() == 'queued')
+    deferred_count = sum(1 for row in rows if str(row.get('workflow_state') or '').strip().lower() == 'deferred')
+    auto_batch_count = sum(1 for row in rows if str(row.get('auto_approval_decision') or '').strip().lower() == 'auto_approve' and not bool(row.get('requires_manual')) and not bool(row.get('blocked_by')) and str(row.get('workflow_state') or '').strip().lower() in {'ready', 'queued'})
+
+    dominant_action = operator_policy_summary.get('dominant_action')
+    dominant_route = operator_policy_summary.get('dominant_route')
+    dominant_follow_up = operator_policy_summary.get('dominant_follow_up')
+    dominant_priority = operator_policy_summary.get('dominant_priority')
+    headline_bits = [f"{len(rows)} item(s)"]
+    if dominant_action:
+        headline_bits.append(f"action={dominant_action}")
+    if dominant_route:
+        headline_bits.append(f"route={dominant_route}")
+    if dominant_follow_up:
+        headline_bits.append(f"follow_up={dominant_follow_up}")
+    headline_bits.append(f"blocked={blocked_count}/manual={manual_count}/ready={ready_count}")
+
+    return {
+        'label': label,
+        'item_count': len(rows),
+        'headline': ' | '.join(headline_bits),
+        'dominant_action': dominant_action,
+        'dominant_route': dominant_route,
+        'dominant_follow_up': dominant_follow_up,
+        'dominant_priority': dominant_priority,
+        'priority_mix': priority_mix,
+        'status_overview': {
+            'manual': manual_count,
+            'blocked': blocked_count,
+            'ready': ready_count,
+            'queued': queued_count,
+            'deferred': deferred_count,
+            'auto_batch': auto_batch_count,
+        },
+        'lane_mix': lane_counts,
+        'workflow_state_mix': workflow_state_counts,
+        'approval_state_mix': approval_state_counts,
+        'risk_level_mix': risk_level_counts,
+        'action_type_mix': action_type_counts,
+        'bucket_mix': bucket_counts,
+        'owner_mix': owner_counts,
+        'reason_codes': operator_policy_summary.get('reason_codes') or [],
+    }
+
+
 def _evaluate_auto_approval_policy(row: Dict, *, workflow_item: Optional[Dict] = None) -> Dict[str, Any]:
     workflow_item = workflow_item or {}
     risk_level = str(row.get('risk_level') or workflow_item.get('risk_level') or 'low').strip().lower()
@@ -2604,8 +2675,32 @@ def build_workflow_operator_digest(payload: Optional[Dict] = None, *, max_items:
             'message': f"{len(sorted_items)} {action_messages.get(kind, 'item(s) need follow-up')}",
             'route': top_policy.get('route'),
             'follow_up': top_policy.get('follow_up'),
+            'summary': _build_low_intervention_group_summary(sorted_items, label=kind),
             'items': sorted_items[:max_items],
         })
+
+    group_summaries = {
+        'by_lane': [
+            {
+                'group_id': group_id,
+                'summary': _build_low_intervention_group_summary(items, label=group_id),
+            }
+            for group_id, items in [
+                ('manual_approval', manual_approval_items),
+                ('blocked', blocked_items),
+                ('queued', queued_items),
+                ('ready', ready_items),
+                ('auto_batch', auto_advance_items),
+            ] if items
+        ],
+        'by_operator_action': [
+            {
+                'group_id': row.get('kind'),
+                'summary': row.get('summary') or {},
+            }
+            for row in next_actions
+        ],
+    }
 
     headline_status = 'attention_required' if manual_approval_items or blocked_items else 'steady'
     if ready_items and not manual_approval_items and not blocked_items:
@@ -2636,6 +2731,7 @@ def build_workflow_operator_digest(payload: Optional[Dict] = None, *, max_items:
             'operator_action_counts': {row.get('kind'): row.get('count', 0) for row in next_actions},
             'operator_routes': sorted({row.get('route') for row in next_actions if row.get('route')}),
             'operator_follow_ups': sorted({row.get('follow_up') for row in next_actions if row.get('follow_up')}),
+            'group_summaries': group_summaries,
         },
         'attention': {
             'manual_approval': manual_approval_items[:max_items],
@@ -2645,6 +2741,7 @@ def build_workflow_operator_digest(payload: Optional[Dict] = None, *, max_items:
             'auto_advance_candidates': auto_advance_items[:max_items],
         },
         'next_actions': next_actions,
+        'group_summaries': group_summaries,
         'operator_action_policies': policy_rows[:max_items],
         'execution': {
             'rollout_executor': {
@@ -3741,6 +3838,9 @@ def build_workbench_timeline_summary_aggregation(payload: Optional[Dict] = None,
             'workflow_state': row.get('workflow_state') or 'pending',
             'approval_state': row.get('approval_state') or 'not_required',
             'risk_level': row.get('risk_level') or 'unknown',
+            'requires_manual': bool(row.get('requires_manual')),
+            'approval_required': bool(row.get('approval_required')),
+            'auto_approval_decision': row.get('auto_approval_decision') or 'manual_review',
             'current_rollout_stage': row.get('current_rollout_stage') or 'pending',
             'target_rollout_stage': row.get('target_rollout_stage') or row.get('current_rollout_stage') or 'pending',
             'bucket_tags': row.get('bucket_tags') or [],
@@ -3810,10 +3910,13 @@ def build_workbench_timeline_summary_aggregation(payload: Optional[Dict] = None,
         ts_first = [row.get('merged_timeline', {}).get('timestamp_range', {}).get('first') for row in rows if row.get('merged_timeline', {}).get('timestamp_range', {}).get('first')]
         ts_last = [row.get('merged_timeline', {}).get('timestamp_range', {}).get('last') for row in rows if row.get('merged_timeline', {}).get('timestamp_range', {}).get('last')]
         operator_policy_summary = _summarize_operator_action_policies(rows)
+        low_intervention_summary = _build_low_intervention_group_summary(rows, label=group_id)
         return {
             'group_type': group_type,
             'group_id': group_id,
             'item_count': len(rows),
+            'headline': low_intervention_summary.get('headline'),
+            'low_intervention_summary': low_intervention_summary,
             'items': rows[:max_items_per_group],
             'filters': {
                 'lane_ids': _dedupe_strings([row.get('lane_id') for row in rows]),
@@ -3967,7 +4070,35 @@ def build_workbench_governance_view(payload: Optional[Dict] = None, *, max_items
     lanes = {}
     for lane_id, title in lane_titles.items():
         lane_items = sorted([row for row in active_items if row.get('lane_id') == lane_id], key=_workbench_item_sort_key)
-        lanes[lane_id] = _bucket(lane_id, title, lane_items)
+        lane_bucket = _bucket(lane_id, title, lane_items)
+        lane_bucket['low_intervention_summary'] = _build_low_intervention_group_summary(lane_items, label=lane_id)
+        lane_bucket['headline'] = lane_bucket['low_intervention_summary'].get('headline')
+        lanes[lane_id] = lane_bucket
+
+    def _build_group_summary_rows(group_type: str, values: List[tuple]) -> List[Dict[str, Any]]:
+        summaries = []
+        for group_id, items in values:
+            sorted_items = sorted(items, key=_workbench_item_sort_key)
+            if not sorted_items:
+                continue
+            summary = _build_low_intervention_group_summary(sorted_items, label=group_id)
+            summaries.append({
+                'group_type': group_type,
+                'group_id': group_id,
+                'item_count': len(sorted_items),
+                'headline': summary.get('headline'),
+                'summary': summary,
+                'items': sorted_items[:max_items],
+            })
+        return summaries
+
+    group_summaries = {
+        'by_lane': _build_group_summary_rows('lane', [(lane_id, [row for row in active_items if row.get('lane_id') == lane_id]) for lane_id in lane_titles.keys()]),
+        'by_bucket': _build_group_summary_rows('bucket', sorted(({tag: [row for row in active_items if tag in (row.get('bucket_tags') or [])] for tag in sorted({tag for row in active_items for tag in (row.get('bucket_tags') or [])})}).items(), key=lambda item: (-len(item[1]), item[0]))),
+        'by_operator_action': _build_group_summary_rows('operator_action', sorted(({key: [row for row in active_items if (row.get('operator_action') or 'observe_only_followup') == key] for key in sorted({row.get('operator_action') or 'observe_only_followup' for row in active_items})}).items(), key=lambda item: (-len(item[1]), item[0]))),
+        'by_operator_route': _build_group_summary_rows('operator_route', sorted(({key: [row for row in active_items if (row.get('operator_route') or 'observe_only_followup') == key] for key in sorted({row.get('operator_route') or 'observe_only_followup' for row in active_items})}).items(), key=lambda item: (-len(item[1]), item[0]))),
+        'by_follow_up': _build_group_summary_rows('follow_up', sorted(({key: [row for row in active_items if (row.get('operator_follow_up') or 'observe_only') == key] for key in sorted({row.get('operator_follow_up') or 'observe_only' for row in active_items})}).items(), key=lambda item: (-len(item[1]), item[0]))),
+    }
 
     stage_frontier = []
     for key, count in sorted((stage_summary.get('by_stage') or {}).items(), key=lambda item: (-item[1], item[0]))[:max_items]:
@@ -4024,10 +4155,12 @@ def build_workbench_governance_view(payload: Optional[Dict] = None, *, max_items
             'recent_adjustment_count': len(recent_adjustments),
             'rollout_executor_status': rollout_executor.get('status') or 'disabled',
             'stage_progression': stage_summary,
+            'group_summaries': {key: len(value) for key, value in group_summaries.items()},
         },
         'filters': catalog.get('filters') or {},
         'applied_filters': (filtered_view or {}).get('applied_filters') or {},
         'lanes': lanes,
+        'group_summaries': group_summaries,
         'rollout': {
             'summary': stage_summary,
             'frontier': stage_frontier,

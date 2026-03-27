@@ -5825,6 +5825,9 @@ class TestApprovalPersistence(unittest.TestCase):
         self.assertEqual(payload['attention']['ready'][0]['item_id'], 'playbook::ready')
         self.assertEqual(payload['next_actions'][0]['kind'], 'review_schedule')
         self.assertEqual(payload['operator_action_policies'][0]['operator_action_policy']['action'], 'review_schedule')
+        self.assertEqual(payload['group_summaries']['by_lane'][0]['group_id'], 'manual_approval')
+        self.assertEqual(payload['group_summaries']['by_lane'][0]['summary']['status_overview']['manual'], 1)
+        self.assertEqual(payload['next_actions'][0]['summary']['dominant_route'], 'manual_approval_queue')
         self.assertTrue(payload['next_actions'])
 
     def test_build_dashboard_summary_cards_aggregates_digest_attention_and_execution(self):
@@ -6030,6 +6033,8 @@ class TestApprovalPersistence(unittest.TestCase):
         self.assertTrue(payload['rollout']['frontier'])
         self.assertEqual(payload['recent_adjustments'][0]['source'], 'auto_approval_execution')
         self.assertGreaterEqual(payload['summary']['recent_adjustment_count'], 2)
+        self.assertEqual(payload['lanes']['manual_approval']['low_intervention_summary']['dominant_follow_up'], 'await_manual_approval')
+        self.assertEqual(next(row for row in payload['group_summaries']['by_operator_route'] if row['group_id'] == 'manual_approval_queue')['summary']['dominant_follow_up'], 'await_manual_approval')
 
     def test_build_workbench_governance_detail_view_adds_queue_approval_rollout_drilldown(self):
         payload = {
@@ -6277,6 +6282,8 @@ class TestApprovalPersistence(unittest.TestCase):
         manual_bucket = next(group for group in aggregation['groups']['by_bucket'] if group['group_id'] == 'manual_approval')
         self.assertEqual(manual_bucket['item_count'], 1)
         self.assertIn('manual_review_queue', manual_bucket['timeline_summary']['dispatch_routes'])
+        self.assertEqual(manual_bucket['headline'], manual_bucket['low_intervention_summary']['headline'])
+        self.assertEqual(manual_bucket['low_intervention_summary']['status_overview']['manual'], 1)
         self.assertEqual(manual_bucket['operator_action_policy_summary']['action_counts']['review_schedule'], 1)
         self.assertEqual(manual_bucket['operator_action_policy_summary']['route_counts']['manual_approval_queue'], 1)
         self.assertEqual(manual_bucket['operator_action_policy_summary']['follow_up_counts']['await_manual_approval'], 1)

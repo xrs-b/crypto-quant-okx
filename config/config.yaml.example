@@ -48,6 +48,15 @@ governance:
   pool_switch:
     min_hold_hours: 6
     score_margin: 1.0
+  rollout_executor:
+    enabled: false
+    mode: disabled   # disabled|dry_run|controlled；默认安全关闭，仅 skeleton：先做 plan/dispatch/apply/result 骨架，真实 live trading 参数改写仍不自动执行
+    dry_run: false
+    actor: system:rollout-executor
+    source: rollout_executor
+    reason_prefix: rollout executor skeleton apply
+    allowed_action_types: [joint_observe]   # 当前可 apply 的 very-safe 动作：joint_observe/joint_queue_promote_safe/joint_stage_prepare/joint_review_schedule/joint_metadata_annotate；其余如 joint_expand_guarded/rollout_freeze 等暂只 queue/plan
+    default_review_after_hours: 24
   controlled_rollout_execution:
     enabled: false
     mode: disabled   # disabled|state_apply；默认安全关闭，只允许低风险白名单动作做受控持久化，不做真实交易执行

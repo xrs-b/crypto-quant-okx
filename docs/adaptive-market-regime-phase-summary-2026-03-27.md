@@ -56,6 +56,7 @@
 - orchestration semantics（action queue / next actions / blocking chain / rollback candidates）
 - controlled rollout state-apply execution layer（默认关闭；除 `joint_observe` 外，已扩到 `joint_queue_promote_safe` / `joint_stage_prepare` / `joint_review_schedule` / `joint_metadata_annotate` 等 very-safe 动作；全部只写持久化 state / workflow / metadata / audit，不触发真实交易执行）
 - rollout stage orchestration 首版（新增 `stage_model` / `queue_progression` / `scheduled_review` / `orchestration_summary`，并把 stage/queue/review semantics 透传到 delivery、workflow-ready、approval persistence，继续保持默认安全关闭）
+- rollout executor skeleton 首版（新增 `supported_action_map`、`dispatch -> plan -> apply -> result` envelope、`disabled/dry_run/controlled` 模式、executor audit/status 摘要；当前只对白名单 very-safe action 做 controlled apply，敏感 action 仍只 queue/plan）
 
 ---
 

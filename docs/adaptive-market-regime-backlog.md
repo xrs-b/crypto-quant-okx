@@ -79,6 +79,7 @@
 | AR-M5-02 | policy version 比较与建议生成 | M5 | P1 | 否 | 版本治理 |
 | AR-M5-03 | regime detector / policy calibration playbook | M5 | P2 | 否 | 运维与迭代 |
 | AR-M5-04 | approval decision persistence / replay state layer | M5 | P0 | 否（仅持久化与恢复） | workflow / approval 闭环 |
+| AR-M5-08 | rollout executor skeleton / dispatch-plan-apply-result layer | M5 | P0 | 默认否（仅 skeleton / dry-run / very-safe controlled apply） | rollout execution orchestration |
 
 ---
 
@@ -141,6 +142,41 @@
   - 默认只增强 orchestrator 语义，不新增真实 rollout 执行；
   - 即使受控 state-apply 开启，也只允许 `joint_stage_prepare / joint_review_schedule / joint_queue_promote_safe` 这类 very-safe 元数据/状态动作；
   - 保持 terminal state preserve 语义，不允许后续 replay 覆盖终态。
+
+### AR-M5-08｜rollout executor skeleton / dispatch-plan-apply-result layer
+
+- **阶段 / 优先级**：M5 / P0
+- **生效范围**：默认关闭；支持 `disabled / dry_run / controlled`，其中 controlled 当前只对白名单 very-safe action 做状态/元数据 apply；**不做真实交易执行、不自动改 live trading 参数**
+- **目标**：在已有 `workflow_state / approval_state / auto_approval / controlled rollout / orchestration` 基础上，补一层真正可扩展的 rollout executor skeleton，先统一：
+  1. `supported_action_map`：明确哪些 action 当前可执行、哪些只 queue/plan；
+  2. `dispatch -> plan -> apply -> result` 执行骨架；
+  3. `status / summary / audit` 执行台账；
+  4. dry-run 与 controlled apply 分离；
+  5. 后续 safe action types 能直接挂到 executor dispatcher。
+- **当前 apply 白名单**：
+  - `joint_observe`
+  - `joint_queue_promote_safe`
+  - `joint_stage_prepare`
+  - `joint_review_schedule`
+  - `joint_metadata_annotate`
+- **当前 queue/plan only**：
+  - `joint_expand_guarded`
+  - `joint_freeze`
+  - `joint_deweight`
+  - `prefer_strategy_best_policy`
+  - `rollout_freeze`
+- **涉及模块**：`analytics/helper.py`、`analytics/__init__.py`、`dashboard/api.py`、`config/config.yaml.example`、`tests/`
+- **安全边界**：
+  - 默认 `enabled=false`；
+  - `dry_run` 不落库，只产出执行计划与审计包；
+  - `controlled` 也只允许 allowlist + low-risk + auto-approval-eligible + no blocker + no manual required 的 safe action；
+  - 所有 apply 结果都保留 `execution_layer / execution_mode / rollback_capable / real_trade_execution=false / dangerous_live_parameter_change=false` 审计字段；
+  - terminal state 继续不可被 skeleton apply 覆盖。
+- **验收重点**：
+  - disabled/dry-run/controlled 三种模式行为清晰；
+  - 可执行 action 会生成 plan+audit 并按 controlled 模式安全落库；
+  - 敏感 action 即使 allowlist 命中，也只会 queue，不会自动 apply；
+  - 测试覆盖 supported action map、dispatch/result envelope、审计字段、dry-run no-op 语义。
 
 ### AR-M5-05｜approval audit / stale cleanup / decision diff layer
 

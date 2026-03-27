@@ -45,6 +45,84 @@ CONTROLLED_ROLLOUT_ACTION_SPECS = {
     },
 }
 
+ROLLOUT_EXECUTOR_ACTION_SPECS = {
+    'joint_observe': {
+        **CONTROLLED_ROLLOUT_ACTION_SPECS['joint_observe'],
+        'dispatch_mode': 'apply',
+        'executor_class': 'state_transition',
+        'audit_code': 'SAFE_STATE_APPLY',
+        'rollback_capable': True,
+    },
+    'joint_queue_promote_safe': {
+        **CONTROLLED_ROLLOUT_ACTION_SPECS['joint_queue_promote_safe'],
+        'dispatch_mode': 'apply',
+        'executor_class': 'queue_metadata',
+        'audit_code': 'SAFE_QUEUE_PROMOTE',
+        'rollback_capable': True,
+    },
+    'joint_stage_prepare': {
+        **CONTROLLED_ROLLOUT_ACTION_SPECS['joint_stage_prepare'],
+        'dispatch_mode': 'apply',
+        'executor_class': 'stage_metadata',
+        'audit_code': 'SAFE_STAGE_PREPARE',
+        'rollback_capable': True,
+    },
+    'joint_review_schedule': {
+        **CONTROLLED_ROLLOUT_ACTION_SPECS['joint_review_schedule'],
+        'dispatch_mode': 'apply',
+        'executor_class': 'review_metadata',
+        'audit_code': 'SAFE_REVIEW_SCHEDULE',
+        'rollback_capable': True,
+    },
+    'joint_metadata_annotate': {
+        **CONTROLLED_ROLLOUT_ACTION_SPECS['joint_metadata_annotate'],
+        'dispatch_mode': 'apply',
+        'executor_class': 'annotation_metadata',
+        'audit_code': 'SAFE_METADATA_ANNOTATE',
+        'rollback_capable': True,
+    },
+    'joint_expand_guarded': {
+        'dispatch_mode': 'queue_only',
+        'executor_class': 'live_trading_change',
+        'audit_code': 'QUEUE_ONLY_GUARDED_EXPAND',
+        'blocked_reason': 'live_rollout_parameter_change_not_supported',
+        'requires_approval': True,
+        'rollback_capable': False,
+    },
+    'joint_freeze': {
+        'dispatch_mode': 'queue_only',
+        'executor_class': 'governance_control',
+        'audit_code': 'QUEUE_ONLY_FREEZE',
+        'blocked_reason': 'freeze_apply_not_automated_in_executor',
+        'requires_approval': True,
+        'rollback_capable': False,
+    },
+    'joint_deweight': {
+        'dispatch_mode': 'queue_only',
+        'executor_class': 'strategy_weight_change',
+        'audit_code': 'QUEUE_ONLY_DEWEIGHT',
+        'blocked_reason': 'strategy_weight_change_not_automated_in_executor',
+        'requires_approval': True,
+        'rollback_capable': False,
+    },
+    'prefer_strategy_best_policy': {
+        'dispatch_mode': 'queue_only',
+        'executor_class': 'policy_switch',
+        'audit_code': 'QUEUE_ONLY_POLICY_SWITCH',
+        'blocked_reason': 'policy_switch_not_automated_in_executor',
+        'requires_approval': True,
+        'rollback_capable': False,
+    },
+    'rollout_freeze': {
+        'dispatch_mode': 'queue_only',
+        'executor_class': 'rollout_control',
+        'audit_code': 'QUEUE_ONLY_ROLLOUT_FREEZE',
+        'blocked_reason': 'rollout_freeze_not_automated_in_executor',
+        'requires_approval': True,
+        'rollback_capable': False,
+    },
+}
+
 
 def _normalize_auto_approval_decision(value: Optional[str]) -> str:
     normalized = str(value or '').strip().lower()
@@ -698,6 +776,291 @@ def execute_controlled_auto_approval_layer(payload: Dict, db: Any, *, config: An
         merge_persisted_approval_state(payload, executed_rows)
     return payload
 
+
+
+def _normalize_rollout_executor_mode(value: Optional[str]) -> str:
+    normalized = str(value or '').strip().lower()
+    return normalized if normalized in {'disabled', 'dry_run', 'controlled'} else 'disabled'
+
+
+def _get_rollout_executor_settings(config: Any = None, overrides: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    overrides = dict(overrides or {})
+    getter = getattr(config, 'get', None)
+    raw = getter('governance.rollout_executor', {}) if callable(getter) else {}
+    raw = dict(raw or {}) if isinstance(raw, dict) else {}
+    allowed_action_types = _dedupe_strings(raw.get('allowed_action_types') or ['joint_observe'])
+    settings = {
+        'enabled': bool(raw.get('enabled', False)),
+        'mode': _normalize_rollout_executor_mode(raw.get('mode')),
+        'actor': str(raw.get('actor') or 'system:rollout-executor'),
+        'source': str(raw.get('source') or 'rollout_executor'),
+        'reason_prefix': str(raw.get('reason_prefix') or 'rollout executor skeleton apply'),
+        'allowed_action_types': allowed_action_types,
+        'default_review_after_hours': int(raw.get('default_review_after_hours') or 24),
+        'dry_run': bool(raw.get('dry_run', False)),
+    }
+    settings.update({k: v for k, v in overrides.items() if v is not None})
+    settings['enabled'] = bool(settings.get('enabled', False))
+    settings['mode'] = _normalize_rollout_executor_mode(settings.get('mode'))
+    settings['allowed_action_types'] = _dedupe_strings(settings.get('allowed_action_types') or ['joint_observe'])
+    settings['default_review_after_hours'] = max(1, min(int(settings.get('default_review_after_hours') or 24), 24 * 14))
+    settings['dry_run'] = bool(settings.get('dry_run', False) or settings['mode'] == 'dry_run')
+    return settings
+
+
+def _build_rollout_executor_catalog(allowed_action_types: Optional[List[str]] = None) -> Dict[str, Any]:
+    allow = set(_dedupe_strings(allowed_action_types or []))
+    executable = []
+    queue_only = []
+    unsupported = []
+    for action_type, spec in ROLLOUT_EXECUTOR_ACTION_SPECS.items():
+        row = {
+            'action_type': action_type,
+            'dispatch_mode': spec.get('dispatch_mode'),
+            'executor_class': spec.get('executor_class'),
+            'allowlisted': action_type in allow,
+            'audit_code': spec.get('audit_code'),
+            'rollback_capable': bool(spec.get('rollback_capable', False)),
+        }
+        if spec.get('blocked_reason'):
+            row['blocked_reason'] = spec.get('blocked_reason')
+        if spec.get('dispatch_mode') == 'apply':
+            executable.append(row)
+        elif spec.get('dispatch_mode') == 'queue_only':
+            queue_only.append(row)
+        else:
+            unsupported.append(row)
+    return {
+        'executable': executable,
+        'queue_only': queue_only,
+        'unsupported': unsupported,
+    }
+
+
+def execute_rollout_executor(payload: Dict, db: Any, *, config: Any = None, settings: Optional[Dict[str, Any]] = None,
+                             replay_source: str = 'workflow_ready') -> Dict:
+    payload = payload or {}
+    execution_settings = _get_rollout_executor_settings(config=config, overrides=settings)
+    approval_state = payload.get('approval_state') or {}
+    workflow_state = payload.get('workflow_state') or {}
+    approval_items = approval_state.get('items') or []
+    workflow_lookup = {row.get('item_id'): row for row in (workflow_state.get('item_states') or []) if row.get('item_id')}
+    allowlisted = set(execution_settings.get('allowed_action_types') or [])
+    catalog = _build_rollout_executor_catalog(execution_settings.get('allowed_action_types'))
+
+    result = {
+        'schema_version': 'm5_rollout_executor_skeleton_v1',
+        'enabled': execution_settings.get('enabled', False),
+        'mode': execution_settings.get('mode'),
+        'dry_run': execution_settings.get('dry_run', False),
+        'actor': execution_settings.get('actor'),
+        'source': execution_settings.get('source'),
+        'replay_source': replay_source,
+        'status': 'disabled',
+        'summary': {
+            'item_count': len(approval_items),
+            'planned_count': 0,
+            'applied_count': 0,
+            'queued_count': 0,
+            'skipped_count': 0,
+        },
+        'supported_action_map': catalog,
+        'items': [],
+    }
+    payload['rollout_executor'] = result
+
+    if not approval_items:
+        result['status'] = 'idle'
+        return payload
+    if not result['enabled'] or result['mode'] == 'disabled':
+        result['summary']['skipped_count'] = len(approval_items)
+        result['items'] = [{
+            'item_id': row.get('approval_id') or row.get('item_id') or row.get('playbook_id'),
+            'playbook_id': row.get('playbook_id'),
+            'action_type': str(row.get('action_type') or '').strip().lower(),
+            'status': 'disabled',
+            'result': {'disposition': 'disabled', 'reason': 'rollout_executor_disabled'},
+        } for row in approval_items]
+        return payload
+
+    result['status'] = 'dry_run' if result['dry_run'] else 'ready'
+    executed_rows = []
+    for row in approval_items:
+        approval_id = row.get('approval_id') or row.get('item_id') or row.get('playbook_id')
+        workflow_item = workflow_lookup.get(row.get('playbook_id')) or {}
+        persisted_row = db.get_approval_state(approval_id) if approval_id else None
+        persisted_details = (persisted_row or {}).get('details') or {}
+        action_type = str(row.get('action_type') or workflow_item.get('action_type') or (persisted_row or {}).get('approval_type') or '').strip().lower()
+        spec = ROLLOUT_EXECUTOR_ACTION_SPECS.get(action_type)
+        current_state = str((persisted_row or {}).get('state') or row.get('approval_state') or row.get('persisted_state') or 'pending').strip().lower()
+        current_workflow_state = str((persisted_row or {}).get('workflow_state') or row.get('persisted_workflow_state') or workflow_item.get('workflow_state') or row.get('decision_state') or 'pending').strip().lower()
+        auto_decision = _normalize_auto_approval_decision(row.get('auto_approval_decision'))
+        blocked_by = _dedupe_strings(row.get('blocked_by') or workflow_item.get('blocked_by') or workflow_item.get('blocking_reasons') or [])
+        risk_level = str(row.get('risk_level') or workflow_item.get('risk_level') or '').strip().lower()
+        requires_manual = bool(row.get('requires_manual'))
+        approval_required = bool(row.get('approval_required') if row.get('approval_required') is not None else workflow_item.get('approval_required'))
+        eligible = bool(row.get('auto_approval_eligible'))
+
+        plan = {
+            'item_id': approval_id,
+            'playbook_id': row.get('playbook_id'),
+            'title': row.get('title') or workflow_item.get('title'),
+            'action_type': action_type,
+            'dispatch_mode': (spec or {}).get('dispatch_mode') or 'unsupported',
+            'current_state': current_state,
+            'current_workflow_state': current_workflow_state,
+            'target_state': (spec or {}).get('state'),
+            'target_workflow_state': (spec or {}).get('workflow_state'),
+            'risk_level': risk_level or 'unknown',
+            'eligible': eligible,
+            'requires_manual': requires_manual,
+            'approval_required': approval_required,
+            'blocked_by': blocked_by,
+            'dry_run': result['dry_run'],
+            'allowlisted': action_type in allowlisted,
+            'executor_class': (spec or {}).get('executor_class') or 'unsupported',
+            'rollback_capable': bool((spec or {}).get('rollback_capable', False)),
+        }
+
+        audit = {
+            'executor': 'rollout_executor_skeleton',
+            'schema_version': result['schema_version'],
+            'actor': execution_settings['actor'],
+            'source': execution_settings['source'],
+            'replay_source': replay_source,
+            'safe_boundary': {
+                'real_trade_execution': False,
+                'dangerous_live_parameter_change': False,
+                'allowlisted_apply_only': True,
+            },
+            'audit_code': (spec or {}).get('audit_code') or 'UNSUPPORTED_ACTION',
+            'auto_approval_decision': auto_decision,
+            'auto_approval_reason': row.get('reason'),
+            'auto_approval_confidence': row.get('confidence'),
+        }
+
+        result_row = {
+            'item_id': approval_id,
+            'playbook_id': row.get('playbook_id'),
+            'action_type': action_type,
+            'plan': plan,
+            'dispatch': {'mode': plan['dispatch_mode'], 'allowed': False, 'reason': None},
+            'apply': {'attempted': False, 'persisted': False},
+            'result': {'disposition': 'skipped', 'reason': None},
+            'audit': audit,
+        }
+        result['summary']['planned_count'] += 1
+
+        skip_reason = None
+        if current_state in TERMINAL_APPROVAL_STATES:
+            skip_reason = f'terminal_state:{current_state}'
+        elif not spec:
+            skip_reason = f'action_type_not_supported:{action_type or "unknown"}'
+        elif action_type not in allowlisted:
+            skip_reason = f'action_type_not_allowlisted:{action_type or "unknown"}'
+        elif spec.get('dispatch_mode') == 'queue_only':
+            skip_reason = spec.get('blocked_reason') or 'queue_only_action'
+            result_row['dispatch']['allowed'] = True
+            result_row['dispatch']['reason'] = 'queue_only'
+            result_row['result'] = {'disposition': 'queued', 'reason': skip_reason}
+            result['summary']['queued_count'] += 1
+            result['items'].append(result_row)
+            continue
+        elif approval_required:
+            skip_reason = 'approval_required'
+        elif requires_manual:
+            skip_reason = 'requires_manual'
+        elif not eligible:
+            skip_reason = 'not_eligible'
+        elif auto_decision != 'auto_approve':
+            skip_reason = f'judgement:{auto_decision}'
+        elif risk_level != 'low':
+            skip_reason = f'risk_level:{risk_level or "unknown"}'
+        elif blocked_by:
+            skip_reason = 'blocked_by:' + ','.join(blocked_by)
+        elif persisted_details.get('execution_layer') == 'rollout_executor_skeleton' and current_state == str(spec.get('state') or current_state):
+            skip_reason = 'already_applied'
+
+        if skip_reason:
+            result_row['result'] = {'disposition': 'skipped', 'reason': skip_reason}
+            result['summary']['skipped_count'] += 1
+            result['items'].append(result_row)
+            continue
+
+        result_row['dispatch'] = {'mode': plan['dispatch_mode'], 'allowed': True, 'reason': 'safe_apply_candidate'}
+        reason = f"{execution_settings['reason_prefix']}: {row.get('reason') or 'safe rollout executor action'}"
+        details = {
+            'item_id': approval_id,
+            'approval_id': approval_id,
+            'playbook_id': row.get('playbook_id'),
+            'title': row.get('title') or workflow_item.get('title'),
+            'bucket_id': row.get('bucket_id') or workflow_item.get('bucket_id'),
+            'state': spec.get('state'),
+            'workflow_state': spec.get('workflow_state'),
+            'reason': reason,
+            'actor': execution_settings['actor'],
+            'source': execution_settings['source'],
+            'replay_source': replay_source,
+            'auto_approval_decision': auto_decision,
+            'auto_approval_reason': row.get('reason'),
+            'auto_approval_confidence': row.get('confidence'),
+            'auto_approval_eligible': True,
+            'requires_manual': False,
+            'blocked_by': blocked_by,
+            'rule_hits': row.get('rule_hits') or [],
+            'risk_level': row.get('risk_level') or workflow_item.get('risk_level'),
+            'action_type': action_type,
+            'execution_layer': 'rollout_executor_skeleton',
+            'execution_mode': execution_settings['mode'],
+            'dispatch_mode': spec.get('dispatch_mode'),
+            'rollback_capable': bool(spec.get('rollback_capable', False)),
+            'real_trade_execution': False,
+            'dangerous_live_parameter_change': False,
+        }
+        details.update(_build_controlled_rollout_action_details(action_type, row, workflow_item, spec, execution_settings))
+        result_row['apply']['attempted'] = True
+        if result['dry_run']:
+            result_row['result'] = {
+                'disposition': 'dry_run',
+                'reason': reason,
+                'state': spec.get('state'),
+                'workflow_state': spec.get('workflow_state'),
+            }
+            result['summary']['applied_count'] += 1
+            result['items'].append(result_row)
+            continue
+
+        db.upsert_approval_state(
+            item_id=approval_id,
+            approval_type=row.get('action_type') or workflow_item.get('action_type') or 'workflow_approval',
+            target=row.get('playbook_id'),
+            title=row.get('title') or workflow_item.get('title'),
+            decision=row.get('persisted_decision') or row.get('approval_state') or 'pending',
+            state=spec.get('state'),
+            workflow_state=spec.get('workflow_state'),
+            reason=reason,
+            actor=execution_settings['actor'],
+            replay_source=replay_source,
+            details=details,
+            preserve_terminal=True,
+            event_type=str(spec.get('event_type') or 'rollout_executor_apply'),
+            append_event=True,
+        )
+        executed_rows.append(db.get_approval_state(approval_id))
+        result_row['apply']['persisted'] = True
+        result_row['result'] = {
+            'disposition': 'applied',
+            'reason': reason,
+            'state': spec.get('state'),
+            'workflow_state': spec.get('workflow_state'),
+        }
+        result['summary']['applied_count'] += 1
+        result['items'].append(result_row)
+
+    if executed_rows:
+        merge_persisted_approval_state(payload, executed_rows)
+    result['status'] = 'executed' if result['summary']['applied_count'] and not result['dry_run'] else result['status']
+    return payload
 
 def build_approval_audit_overview(*, stale_rows: Optional[List[Dict]] = None,
                                   decision_diffs: Optional[List[Dict]] = None,

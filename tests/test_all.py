@@ -5289,6 +5289,44 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
         finally:
             dashboard_api.backtester = old_backtester
 
+    def test_backtest_workbench_governance_timeline_summary_api_returns_bucket_and_action_aggregation(self):
+        import dashboard.api as dashboard_api
+
+        report = build_regime_policy_calibration_report([{
+            'symbol': 'BTC/USDT',
+            'all_trades': [
+                {'regime_tag': 'panic', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 0.3},
+                {'regime_tag': 'panic', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 0.2},
+                {'regime_tag': 'panic', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 0.1},
+                {'regime_tag': 'panic', 'policy_tag': 'policy_v2', 'strategy_tags': ['Breakout'], 'return_pct': -1.4},
+                {'regime_tag': 'panic', 'policy_tag': 'policy_v2', 'strategy_tags': ['Breakout'], 'return_pct': -1.0},
+                {'regime_tag': 'panic', 'policy_tag': 'policy_v2', 'strategy_tags': ['Breakout'], 'return_pct': -0.8},
+            ],
+        }])
+
+        class StubBacktester:
+            def run_all(self, symbols):
+                return {'summary': {'symbols': len(symbols)}, 'symbols': [{'symbol': 'BTC/USDT'}], 'calibration_report': report}
+
+        old_backtester = dashboard_api.backtester
+        dashboard_api.backtester = StubBacktester()
+        try:
+            client = app.test_client()
+            response = client.get('/api/backtest/workbench-governance-timeline-summary?bucket=manual_approval&max_items_per_group=5')
+            self.assertEqual(response.status_code, 200)
+            payload = response.get_json()
+            self.assertEqual(payload['view'], 'workbench_timeline_summary_aggregation')
+            self.assertEqual(payload['data']['schema_version'], 'm5_workbench_timeline_summary_aggregation_v1')
+            self.assertGreaterEqual(payload['summary']['item_count'], 1)
+            self.assertTrue(payload['data']['groups']['by_bucket'])
+            self.assertEqual(payload['data']['applied_filters']['bucket_tags'], ['manual_approval'])
+            manual_bucket = next(group for group in payload['data']['groups']['by_bucket'] if group['group_id'] == 'manual_approval')
+            self.assertGreaterEqual(manual_bucket['merged_timeline_summary']['event_count_total'], manual_bucket['merged_timeline_summary']['executor_event_count_total'])
+            self.assertTrue(manual_bucket['items'])
+            self.assertIn('timeline', manual_bucket['items'][0])
+        finally:
+            dashboard_api.backtester = old_backtester
+
     def test_backtest_calibration_report_api_supports_governance_ready_view(self):
         import dashboard.api as dashboard_api
 
@@ -5597,7 +5635,7 @@ class TestExecutionObservability(unittest.TestCase):
             self.assertIn('recent_decisions', snapshot['summary'])
             self.assertTrue(snapshot['summary']['observe_only_banner'])
 
-from analytics.helper import build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, attach_auto_approval_policy, execute_controlled_rollout_layer, execute_controlled_auto_approval_layer, execute_rollout_executor, build_workflow_attention_view, build_workflow_operator_digest, build_dashboard_summary_cards, build_workbench_governance_view, build_workbench_governance_detail_view, build_workbench_merged_timeline
+from analytics.helper import build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, attach_auto_approval_policy, execute_controlled_rollout_layer, execute_controlled_auto_approval_layer, execute_rollout_executor, build_workflow_attention_view, build_workflow_operator_digest, build_dashboard_summary_cards, build_workbench_governance_view, build_workbench_governance_detail_view, build_workbench_merged_timeline, build_workbench_timeline_summary_aggregation
 
 
 class TestApprovalPersistence(unittest.TestCase):
@@ -6025,6 +6063,90 @@ class TestApprovalPersistence(unittest.TestCase):
         self.assertEqual(merged['events'][-1]['source'], 'executor_timeline')
         self.assertIn('approval_db', merged['summary']['phases'])
         self.assertIn('dispatch', merged['summary']['phases'])
+
+    def test_build_workbench_timeline_summary_aggregation_groups_bucket_and_action_views(self):
+        payload = {
+            'workflow_state': {
+                'item_states': [
+                    {
+                        'item_id': 'playbook::manual', 'title': 'Manual gate item', 'action_type': 'joint_expand_guarded',
+                        'risk_level': 'medium', 'approval_required': True, 'requires_manual': True,
+                        'workflow_state': 'blocked_by_approval', 'blocking_reasons': ['missing_operator_ack'],
+                        'queue_progression': {'status': 'awaiting_approval', 'dispatch_route': 'manual_review_queue', 'next_action': 'queue_for_manual_review'},
+                        'current_rollout_stage': 'guarded', 'target_rollout_stage': 'expanded',
+                    },
+                    {
+                        'item_id': 'playbook::ready', 'title': 'Ready item', 'action_type': 'joint_observe',
+                        'risk_level': 'low', 'approval_required': False, 'requires_manual': False,
+                        'workflow_state': 'ready', 'blocking_reasons': [],
+                        'queue_progression': {'status': 'ready', 'dispatch_route': 'safe_state_apply', 'next_action': 'ready_for_rollout_or_execution'},
+                        'current_rollout_stage': 'observe', 'target_rollout_stage': 'ready',
+                    },
+                ],
+                'summary': {},
+            },
+            'approval_state': {
+                'items': [
+                    {
+                        'approval_id': 'approval::manual', 'playbook_id': 'playbook::manual', 'title': 'Manual gate item',
+                        'action_type': 'joint_expand_guarded', 'approval_state': 'pending', 'decision_state': 'pending',
+                        'risk_level': 'medium', 'approval_required': True, 'requires_manual': True, 'blocked_by': ['missing_operator_ack'],
+                    },
+                ],
+                'summary': {},
+            },
+            'workflow_operator_digest': {
+                'headline': {'status': 'attention', 'message': 'need review'},
+                'attention': {
+                    'manual_approval': [{'item_id': 'playbook::manual'}],
+                    'blocked': [{'item_id': 'playbook::manual'}],
+                    'ready': [{'item_id': 'playbook::ready'}],
+                    'queued': [],
+                    'auto_advance_candidates': [{'item_id': 'playbook::ready'}],
+                },
+            },
+            'rollout_executor': {
+                'status': 'active',
+                'items': [
+                    {
+                        'playbook_id': 'playbook::manual',
+                        'status': 'blocked_by_approval',
+                        'plan': {'handler_key': 'queue_only::live_trading_change', 'executor_class': 'live_trading_change', 'dispatch_mode': 'queue_only', 'dispatch_route': 'manual_review_queue'},
+                        'dispatch': {'status': 'blocked_by_approval', 'handler_key': 'queue_only::live_trading_change', 'executor_class': 'live_trading_change', 'mode': 'queue_only', 'dispatch_route': 'manual_review_queue', 'reason': 'manual_review_required', 'code': 'APPROVAL_GATED_QUEUE'},
+                        'result': {'status': 'blocked_by_approval', 'disposition': 'blocked_by_approval', 'dispatch_route': 'manual_review_queue', 'reason': 'manual_review_required', 'code': 'APPROVAL_GATED_QUEUE'},
+                    },
+                    {
+                        'playbook_id': 'playbook::ready',
+                        'status': 'applied',
+                        'plan': {'handler_key': 'apply::observe_ready', 'executor_class': 'state_transition', 'dispatch_mode': 'apply', 'dispatch_route': 'safe_state_apply'},
+                        'dispatch': {'status': 'applied', 'handler_key': 'apply::observe_ready', 'executor_class': 'state_transition', 'mode': 'apply', 'dispatch_route': 'safe_state_apply', 'reason': 'safe_apply_ready', 'code': 'SAFE_APPLY_READY'},
+                        'result': {'status': 'applied', 'disposition': 'applied', 'dispatch_route': 'safe_state_apply', 'reason': 'safe_apply_ready', 'code': 'SAFE_APPLY_READY'},
+                    },
+                ],
+            },
+            'controlled_rollout_execution': {'mode': 'disabled', 'items': []},
+            'auto_approval_execution': {'mode': 'disabled', 'items': []},
+        }
+        aggregation = build_workbench_timeline_summary_aggregation(
+            payload,
+            approval_timeline_fetcher=lambda approval_id, limit: [
+                {'id': 1, 'item_id': approval_id, 'event_type': 'snapshot_sync', 'state': 'pending', 'workflow_state': 'pending', 'decision': 'pending', 'reason': 'initial sync', 'created_at': '2026-03-27T10:00:00Z'},
+                {'id': 2, 'item_id': approval_id, 'event_type': 'rollout_executor_queue_blocked', 'state': 'pending', 'workflow_state': 'blocked_by_approval', 'decision': 'pending', 'reason': 'manual_review_required', 'created_at': '2026-03-27T10:01:00Z'},
+            ] if approval_id == 'approval::manual' else [],
+        )
+        self.assertEqual(aggregation['schema_version'], 'm5_workbench_timeline_summary_aggregation_v1')
+        self.assertEqual(aggregation['summary']['item_count'], 2)
+        manual_bucket = next(group for group in aggregation['groups']['by_bucket'] if group['group_id'] == 'manual_approval')
+        self.assertEqual(manual_bucket['item_count'], 1)
+        self.assertIn('manual_review_queue', manual_bucket['timeline_summary']['dispatch_routes'])
+        self.assertEqual(manual_bucket['merged_timeline_summary']['approval_event_count_total'], 2)
+        action_group = next(group for group in aggregation['groups']['by_action_type'] if group['group_id'] == 'joint_expand_guarded')
+        self.assertEqual(action_group['item_count'], 1)
+        self.assertIn('approval_db', action_group['merged_timeline_summary']['phases'])
+        self.assertIn('executor_dispatch_decided', action_group['merged_timeline_summary']['event_types'])
+        ready_item = next(row for row in aggregation['items'] if row['item_id'] == 'playbook::ready')
+        self.assertEqual(ready_item['timeline']['dispatch_route'], 'safe_state_apply')
+        self.assertEqual(ready_item['merged_timeline']['approval_event_count'], 0)
 
     def test_build_workflow_attention_view_groups_manual_and_blocked_items(self):
         payload = build_workflow_attention_view({

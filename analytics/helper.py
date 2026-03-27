@@ -3091,6 +3091,200 @@ def build_workbench_governance_detail_view(payload: Optional[Dict] = None, *, it
     }
 
 
+def build_workbench_timeline_summary_aggregation(payload: Optional[Dict] = None, *, lane_ids: Any = None, action_types: Any = None,
+                                                 risk_levels: Any = None, workflow_states: Any = None, approval_states: Any = None,
+                                                 current_rollout_stages: Any = None, target_rollout_stages: Any = None, bucket_tags: Any = None,
+                                                 auto_approval_decisions: Any = None, owner_hints: Any = None, q: Optional[str] = None,
+                                                 approval_timeline_fetcher: Optional[Any] = None, approval_timeline_limit: int = 200,
+                                                 max_groups: int = 50, max_items_per_group: int = 20) -> Dict[str, Any]:
+    payload = payload or {}
+    catalog = payload.get('workbench_governance_catalog') or _build_workbench_item_catalog(payload)
+    filtered_items = sorted(_filter_workbench_catalog_items(
+        catalog.get('items') or [],
+        lane_ids=lane_ids,
+        action_types=action_types,
+        risk_levels=risk_levels,
+        workflow_states=workflow_states,
+        approval_states=approval_states,
+        current_rollout_stages=current_rollout_stages,
+        target_rollout_stages=target_rollout_stages,
+        bucket_tags=bucket_tags,
+        auto_approval_decisions=auto_approval_decisions,
+        owner_hints=owner_hints,
+        q=q,
+    ), key=_workbench_item_sort_key)
+    deduped_items: List[Dict[str, Any]] = []
+    seen_items = set()
+    for row in filtered_items:
+        dedupe_key = (row.get('item_id'), row.get('approval_id'))
+        if dedupe_key in seen_items:
+            continue
+        seen_items.add(dedupe_key)
+        deduped_items.append(row)
+
+    approval_timeline_cache: Dict[str, List[Dict[str, Any]]] = {}
+
+    def _approval_timeline_for(approval_id: Optional[str]) -> List[Dict[str, Any]]:
+        if not approval_id or not approval_timeline_fetcher:
+            return []
+        if approval_id not in approval_timeline_cache:
+            approval_timeline_cache[approval_id] = list(approval_timeline_fetcher(approval_id, approval_timeline_limit) or [])
+        return approval_timeline_cache[approval_id]
+
+    def _item_summary(row: Dict[str, Any]) -> Dict[str, Any]:
+        detail = build_workbench_governance_detail_view(
+            payload,
+            item_id=row.get('item_id'),
+            approval_id=row.get('approval_id'),
+            lane_id=row.get('lane_id'),
+            approval_timeline=_approval_timeline_for(row.get('approval_id')),
+        )
+        timeline = ((detail.get('drilldown') or {}).get('timeline') or {}).get('summary') or {}
+        merged_timeline = ((detail.get('drilldown') or {}).get('merged_timeline') or {}).get('summary') or {}
+        return {
+            'item_id': row.get('item_id'),
+            'approval_id': row.get('approval_id'),
+            'title': row.get('title'),
+            'lane_id': row.get('lane_id'),
+            'action_type': row.get('action_type') or 'unknown',
+            'workflow_state': row.get('workflow_state') or 'pending',
+            'approval_state': row.get('approval_state') or 'not_required',
+            'risk_level': row.get('risk_level') or 'unknown',
+            'current_rollout_stage': row.get('current_rollout_stage') or 'pending',
+            'target_rollout_stage': row.get('target_rollout_stage') or row.get('current_rollout_stage') or 'pending',
+            'bucket_tags': row.get('bucket_tags') or [],
+            'blocked_by': row.get('blocked_by') or [],
+            'why_summary': row.get('why_summary'),
+            'next_step': row.get('next_step'),
+            'timeline': {
+                'current_status': timeline.get('current_status'),
+                'workflow_state': timeline.get('workflow_state'),
+                'approval_state': timeline.get('approval_state'),
+                'current_stage': timeline.get('current_stage'),
+                'target_stage': timeline.get('target_stage'),
+                'dispatch_route': timeline.get('dispatch_route'),
+                'audit_event_types': timeline.get('audit_event_types') or [],
+                'decision_path': timeline.get('decision_path') or {},
+                'result_summary': timeline.get('result_summary') or {},
+                'event_count': timeline.get('event_count', 0),
+            },
+            'merged_timeline': {
+                'event_count': merged_timeline.get('event_count', 0),
+                'approval_event_count': merged_timeline.get('approval_event_count', 0),
+                'executor_event_count': merged_timeline.get('executor_event_count', 0),
+                'event_types': merged_timeline.get('event_types') or [],
+                'phases': merged_timeline.get('phases') or [],
+                'timestamp_range': merged_timeline.get('timestamp_range') or {},
+            },
+        }
+
+    item_summaries = [_item_summary(row) for row in deduped_items]
+
+    def _aggregate_group(group_type: str, group_id: str, rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+        timeline_routes = _dedupe_strings([row.get('timeline', {}).get('dispatch_route') for row in rows])
+        statuses = _dedupe_strings([row.get('timeline', {}).get('current_status') for row in rows])
+        workflow_state_set = _dedupe_strings([row.get('workflow_state') for row in rows])
+        approval_state_set = _dedupe_strings([row.get('approval_state') for row in rows])
+        action_type_set = _dedupe_strings([row.get('action_type') for row in rows])
+        risk_level_set = _dedupe_strings([row.get('risk_level') for row in rows])
+        current_stage_set = _dedupe_strings([row.get('current_rollout_stage') for row in rows])
+        target_stage_set = _dedupe_strings([row.get('target_rollout_stage') for row in rows])
+        next_steps = _dedupe_strings([row.get('next_step') for row in rows])
+        event_types = _dedupe_strings([event_type for row in rows for event_type in (row.get('merged_timeline', {}).get('event_types') or [])])
+        phases = _dedupe_strings([phase for row in rows for phase in (row.get('merged_timeline', {}).get('phases') or [])])
+        audit_event_types = _dedupe_strings([event_type for row in rows for event_type in (row.get('timeline', {}).get('audit_event_types') or [])])
+        timeline_event_total = sum(int(row.get('timeline', {}).get('event_count') or 0) for row in rows)
+        merged_event_total = sum(int(row.get('merged_timeline', {}).get('event_count') or 0) for row in rows)
+        approval_event_total = sum(int(row.get('merged_timeline', {}).get('approval_event_count') or 0) for row in rows)
+        executor_event_total = sum(int(row.get('merged_timeline', {}).get('executor_event_count') or 0) for row in rows)
+        ts_first = [row.get('merged_timeline', {}).get('timestamp_range', {}).get('first') for row in rows if row.get('merged_timeline', {}).get('timestamp_range', {}).get('first')]
+        ts_last = [row.get('merged_timeline', {}).get('timestamp_range', {}).get('last') for row in rows if row.get('merged_timeline', {}).get('timestamp_range', {}).get('last')]
+        return {
+            'group_type': group_type,
+            'group_id': group_id,
+            'item_count': len(rows),
+            'items': rows[:max_items_per_group],
+            'filters': {
+                'lane_ids': _dedupe_strings([row.get('lane_id') for row in rows]),
+                'action_types': action_type_set,
+                'workflow_states': workflow_state_set,
+                'approval_states': approval_state_set,
+                'risk_levels': risk_level_set,
+                'current_rollout_stages': current_stage_set,
+                'target_rollout_stages': target_stage_set,
+                'bucket_tags': _dedupe_strings([tag for row in rows for tag in (row.get('bucket_tags') or [])]),
+            },
+            'timeline_summary': {
+                'current_statuses': statuses,
+                'dispatch_routes': timeline_routes,
+                'next_steps': next_steps,
+                'audit_event_types': audit_event_types,
+                'event_count_total': timeline_event_total,
+                'event_count_avg': round((timeline_event_total / len(rows)), 4) if rows else 0,
+            },
+            'merged_timeline_summary': {
+                'event_count_total': merged_event_total,
+                'approval_event_count_total': approval_event_total,
+                'executor_event_count_total': executor_event_total,
+                'event_types': event_types,
+                'phases': phases,
+                'timestamp_range': {
+                    'first': min(ts_first) if ts_first else None,
+                    'last': max(ts_last) if ts_last else None,
+                },
+            },
+        }
+
+    bucket_map: Dict[str, List[Dict[str, Any]]] = {}
+    action_map: Dict[str, List[Dict[str, Any]]] = {}
+    lane_map: Dict[str, List[Dict[str, Any]]] = {}
+    for row in item_summaries:
+        for bucket in row.get('bucket_tags') or [row.get('lane_id') or 'unbucketed']:
+            bucket_map.setdefault(bucket, []).append(row)
+        action_map.setdefault(row.get('action_type') or 'unknown', []).append(row)
+        lane_map.setdefault(row.get('lane_id') or 'unknown', []).append(row)
+
+    bucket_groups = [_aggregate_group('bucket', group_id, rows) for group_id, rows in sorted(bucket_map.items(), key=lambda item: (-len(item[1]), item[0]))[:max_groups]]
+    action_groups = [_aggregate_group('action_type', group_id, rows) for group_id, rows in sorted(action_map.items(), key=lambda item: (-len(item[1]), item[0]))[:max_groups]]
+    lane_groups = [_aggregate_group('lane', group_id, rows) for group_id, rows in sorted(lane_map.items(), key=lambda item: (-len(item[1]), item[0]))[:max_groups]]
+
+    aggregation = {
+        'schema_version': 'm5_workbench_timeline_summary_aggregation_v1',
+        'summary': {
+            'item_count': len(item_summaries),
+            'bucket_group_count': len(bucket_groups),
+            'action_group_count': len(action_groups),
+            'lane_group_count': len(lane_groups),
+            'approval_timeline_item_count': len(approval_timeline_cache),
+            'timeline_event_count_total': sum(int(row.get('timeline', {}).get('event_count') or 0) for row in item_summaries),
+            'merged_event_count_total': sum(int(row.get('merged_timeline', {}).get('event_count') or 0) for row in item_summaries),
+            'approval_event_count_total': sum(int(row.get('merged_timeline', {}).get('approval_event_count') or 0) for row in item_summaries),
+            'executor_event_count_total': sum(int(row.get('merged_timeline', {}).get('executor_event_count') or 0) for row in item_summaries),
+        },
+        'applied_filters': {
+            'lane_ids': _normalize_filter_values(lane_ids),
+            'action_types': _normalize_filter_values(action_types),
+            'risk_levels': _normalize_filter_values(risk_levels),
+            'workflow_states': _normalize_filter_values(workflow_states),
+            'approval_states': _normalize_filter_values(approval_states),
+            'current_rollout_stages': _normalize_filter_values(current_rollout_stages),
+            'target_rollout_stages': _normalize_filter_values(target_rollout_stages),
+            'bucket_tags': _normalize_filter_values(bucket_tags),
+            'auto_approval_decisions': _normalize_filter_values(auto_approval_decisions),
+            'owner_hints': _normalize_filter_values(owner_hints),
+            'q': str(q or '').strip(),
+        },
+        'groups': {
+            'by_bucket': bucket_groups,
+            'by_action_type': action_groups,
+            'by_lane': lane_groups,
+        },
+        'items': item_summaries,
+    }
+    payload['workbench_timeline_summary_aggregation'] = aggregation
+    return aggregation
+
+
 def build_workbench_governance_view(payload: Optional[Dict] = None, *, max_items: int = 5,
                                     max_adjustments: int = 10, filters: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     payload = payload or {}

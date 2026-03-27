@@ -52,7 +52,7 @@ from signals.validator import SignalValidator
 from bot.run import execute_exchange_smoke, reconcile_exchange_positions, load_runtime_state
 from ml.engine import MLEngine
 from core.regime import RegimeDetector, detect_regime, Regime
-from analytics import StrategyBacktester, SignalQualityAnalyzer, ParameterOptimizer, GovernanceEngine, build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, attach_auto_approval_policy, execute_controlled_rollout_layer, execute_controlled_auto_approval_layer, execute_rollout_executor, build_workflow_consumer_view, build_workflow_attention_view, build_workflow_operator_digest, build_dashboard_summary_cards, build_workbench_governance_view, build_workbench_governance_filter_view, build_workbench_governance_detail_view, build_workbench_merged_timeline
+from analytics import StrategyBacktester, SignalQualityAnalyzer, ParameterOptimizer, GovernanceEngine, build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, attach_auto_approval_policy, execute_controlled_rollout_layer, execute_controlled_auto_approval_layer, execute_rollout_executor, build_workflow_consumer_view, build_workflow_attention_view, build_workflow_operator_digest, build_dashboard_summary_cards, build_workbench_governance_view, build_workbench_governance_filter_view, build_workbench_governance_detail_view, build_workbench_merged_timeline, build_workbench_timeline_summary_aggregation
 from analytics.backtest import export_calibration_payload
 from analytics.mfe_mae import MFEAnalyzer, get_mfe_mae_analysis
 from core.regime_policy import summarize_observe_only_collection
@@ -2637,6 +2637,35 @@ def get_backtest_workbench_governance_merged_timeline():
         return jsonify({'success': False, 'error': 'workbench item not found', 'data': detail}), 404
     merged_timeline = ((detail.get('drilldown') or {}).get('merged_timeline') or {})
     return jsonify({'success': True, 'view': 'workbench_merged_timeline', 'data': merged_timeline, 'summary': merged_timeline.get('summary') or {}})
+
+
+@app.route('/api/backtest/workbench-governance-timeline-summary')
+def get_backtest_workbench_governance_timeline_summary():
+    """按 bucket / action_type / lane 聚合 workbench timeline 摘要，避免逐个点开 detail。"""
+    max_groups = max(1, min(int(request.args.get('max_groups', 50)), 100))
+    max_items_per_group = max(1, min(int(request.args.get('max_items_per_group', 20)), 100))
+    backtest_result = backtester.run_all(config.symbols)
+    calibration_report = backtest_result.get('calibration_report') or {}
+    payload = export_calibration_payload(calibration_report, view='workflow_ready')
+    payload = _persist_workflow_approval_payload(payload, replay_source='workbench_governance_timeline_summary_api')
+    aggregation = build_workbench_timeline_summary_aggregation(
+        payload,
+        lane_ids=request.args.get('lane') or request.args.get('lane_ids'),
+        action_types=request.args.get('action') or request.args.get('action_types'),
+        risk_levels=request.args.get('risk') or request.args.get('risk_levels'),
+        workflow_states=request.args.get('workflow_state') or request.args.get('workflow_states'),
+        approval_states=request.args.get('approval_state') or request.args.get('approval_states'),
+        current_rollout_stages=request.args.get('stage') or request.args.get('current_rollout_stages'),
+        target_rollout_stages=request.args.get('target_stage') or request.args.get('target_rollout_stages'),
+        bucket_tags=request.args.get('bucket') or request.args.get('bucket_tags'),
+        auto_approval_decisions=request.args.get('auto_decision') or request.args.get('auto_approval_decisions'),
+        owner_hints=request.args.get('owner') or request.args.get('owner_hints'),
+        q=request.args.get('q'),
+        approval_timeline_fetcher=lambda approval_id, limit: db.get_approval_timeline(item_id=approval_id, limit=limit, ascending=True) if approval_id else [],
+        max_groups=max_groups,
+        max_items_per_group=max_items_per_group,
+    )
+    return jsonify({'success': True, 'view': 'workbench_timeline_summary_aggregation', 'data': aggregation, 'summary': aggregation.get('summary') or {}})
 
 
 @app.route('/api/signal-quality')

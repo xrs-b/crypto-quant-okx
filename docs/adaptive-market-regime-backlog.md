@@ -132,6 +132,11 @@
   - `events`：按 `workflow -> approval -> executor_plan -> dispatch -> result` 固定 phase 串出动作执行轨迹，回答“做过哪些 action、每一步状态、走了哪条审批/调度/执行路径”；
   - `raw`：保留 `workflow_item / approval_item / executor_item` 原始快照，方便 dashboard / agent / 人工巡检做二次展开而不需要重新拼装。
   - 该视图优先服务后端/helper/API 消费层，不做前端要求；结构保持稳定、可序列化、适合后续接入 approval timeline / rollout executor timeline 汇总。
+- **2026-03-27 timeline summary aggregation 增量**：继续在上述 `detail + merged_timeline` 基础上补 item / bucket / action-type 级 timeline 摘要聚合：
+  - helper 新增统一 `build_workbench_timeline_summary_aggregation(...)`，复用现有 `workbench item catalog + detail + merged timeline`，直接输出 `items + groups.by_bucket + groups.by_action_type + groups.by_lane`；
+  - 每个 item 会固定回挂 `timeline` 与 `merged_timeline` 的稳定摘要；每个 group 会给出 `item_count / filters / timeline_summary / merged_timeline_summary`，方便 dashboard / agent / 人工巡检快速看某 bucket 或某类 item 的整体 timeline 状态，而不用逐个点 detail；
+  - dashboard/API 新增 `GET /api/backtest/workbench-governance-timeline-summary`，支持沿用 lane/action/risk/stage/bucket/owner/q 过滤条件，并补 `max_groups / max_items_per_group` 控制输出体积；
+  - 输出保持稳定、可序列化，不做前端绑定，优先服务后端消费与低干预巡检。
 
 ### AR-M5-10｜workflow attention view / manual approval + blocked follow-up API
 

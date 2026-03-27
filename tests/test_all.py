@@ -5073,6 +5073,89 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
         finally:
             dashboard_api.backtester = old_backtester
 
+    def test_backtest_workbench_governance_view_api_returns_low_intervention_snapshot(self):
+        import dashboard.api as dashboard_api
+
+        report = build_regime_policy_calibration_report([
+            {
+                'symbol': 'BTC/USDT',
+                'all_trades': [
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 0.3},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 0.2},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 0.1},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v2', 'strategy_tags': ['Breakout'], 'return_pct': -1.4},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v2', 'strategy_tags': ['Breakout'], 'return_pct': -1.0},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v2', 'strategy_tags': ['Breakout'], 'return_pct': -0.8},
+                ],
+            }
+        ])
+
+        class StubBacktester:
+            def run_all(self, symbols):
+                return {
+                    'summary': {'symbols': len(symbols)},
+                    'symbols': [{'symbol': 'BTC/USDT'}],
+                    'calibration_report': report,
+                }
+
+        old_backtester = dashboard_api.backtester
+        dashboard_api.backtester = StubBacktester()
+        try:
+            client = app.test_client()
+            response = client.get('/api/backtest/workbench-governance-view?max_items=2&max_adjustments=3')
+            self.assertEqual(response.status_code, 200)
+            payload = response.get_json()
+            self.assertTrue(payload['success'])
+            self.assertEqual(payload['view'], 'workbench_governance_view')
+            self.assertEqual(payload['data']['schema_version'], 'm5_workbench_governance_view_v1')
+            self.assertIn('lanes', payload['data'])
+            self.assertIn('rollout', payload['data'])
+            self.assertIn('recent_adjustments', payload['data'])
+            self.assertEqual(payload['summary'], payload['data']['summary'])
+            self.assertLessEqual(len(payload['data']['rollout']['items']), 2)
+            self.assertLessEqual(len(payload['data']['recent_adjustments']), 3)
+        finally:
+            dashboard_api.backtester = old_backtester
+
+    def test_backtest_calibration_report_api_supports_workbench_governance_view(self):
+        import dashboard.api as dashboard_api
+
+        report = build_regime_policy_calibration_report([
+            {
+                'symbol': 'BTC/USDT',
+                'all_trades': [
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 0.3},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 0.2},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 0.1},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v2', 'strategy_tags': ['Breakout'], 'return_pct': -1.4},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v2', 'strategy_tags': ['Breakout'], 'return_pct': -1.0},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v2', 'strategy_tags': ['Breakout'], 'return_pct': -0.8},
+                ],
+            }
+        ])
+
+        class StubBacktester:
+            def run_all(self, symbols):
+                return {
+                    'summary': {'symbols': len(symbols)},
+                    'symbols': [{'symbol': 'BTC/USDT'}],
+                    'calibration_report': report,
+                }
+
+        old_backtester = dashboard_api.backtester
+        dashboard_api.backtester = StubBacktester()
+        try:
+            client = app.test_client()
+            response = client.get('/api/backtest/calibration-report?view=workbench_governance_view')
+            self.assertEqual(response.status_code, 200)
+            payload = response.get_json()
+            self.assertEqual(payload['view'], 'workbench_governance_view')
+            self.assertEqual(payload['data']['schema_version'], 'm5_workbench_governance_view_v1')
+            self.assertEqual(payload['summary']['workbench_governance_view'], payload['data']['summary'])
+            self.assertIn('lanes', payload['data'])
+        finally:
+            dashboard_api.backtester = old_backtester
+
     def test_backtest_calibration_report_api_supports_governance_ready_view(self):
         import dashboard.api as dashboard_api
 
@@ -5381,7 +5464,7 @@ class TestExecutionObservability(unittest.TestCase):
             self.assertIn('recent_decisions', snapshot['summary'])
             self.assertTrue(snapshot['summary']['observe_only_banner'])
 
-from analytics.helper import build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, attach_auto_approval_policy, execute_controlled_rollout_layer, execute_controlled_auto_approval_layer, execute_rollout_executor, build_workflow_attention_view, build_workflow_operator_digest, build_dashboard_summary_cards
+from analytics.helper import build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, attach_auto_approval_policy, execute_controlled_rollout_layer, execute_controlled_auto_approval_layer, execute_rollout_executor, build_workflow_attention_view, build_workflow_operator_digest, build_dashboard_summary_cards, build_workbench_governance_view
 
 
 class TestApprovalPersistence(unittest.TestCase):
@@ -5520,6 +5603,140 @@ class TestApprovalPersistence(unittest.TestCase):
         self.assertEqual(payload['card_index']['execution_status']['metrics']['bridge_executed'], 1)
         self.assertLessEqual(len(payload['card_index']['key_alerts']['items']), 2)
         self.assertLessEqual(len(payload['card_index']['stage_progression']['items']), 2)
+
+    def test_build_workbench_governance_view_aggregates_lanes_rollout_and_recent_adjustments(self):
+        payload = build_workbench_governance_view({
+            'workflow_state': {
+                'item_states': [
+                    {
+                        'item_id': 'playbook::manual',
+                        'title': 'Manual gate item',
+                        'action_type': 'joint_expand_guarded',
+                        'risk_level': 'high',
+                        'approval_required': True,
+                        'requires_manual': True,
+                        'workflow_state': 'blocked_by_approval',
+                        'blocking_reasons': [],
+                        'current_rollout_stage': 'guarded',
+                        'target_rollout_stage': 'expanded',
+                    },
+                    {
+                        'item_id': 'playbook::queued',
+                        'title': 'Queued stage item',
+                        'action_type': 'joint_stage_prepare',
+                        'risk_level': 'medium',
+                        'approval_required': False,
+                        'requires_manual': False,
+                        'workflow_state': 'queued',
+                        'blocking_reasons': [],
+                        'auto_approval_decision': 'auto_approve',
+                        'auto_approval_eligible': True,
+                        'current_rollout_stage': 'observe',
+                        'target_rollout_stage': 'guarded',
+                    },
+                    {
+                        'item_id': 'playbook::ready',
+                        'title': 'Ready auto item',
+                        'action_type': 'joint_observe',
+                        'risk_level': 'low',
+                        'approval_required': False,
+                        'requires_manual': False,
+                        'workflow_state': 'ready',
+                        'blocking_reasons': [],
+                        'auto_approval_decision': 'auto_approve',
+                        'auto_approval_eligible': True,
+                        'current_rollout_stage': 'observe',
+                        'target_rollout_stage': 'observe',
+                    },
+                ],
+                'summary': {},
+            },
+            'approval_state': {
+                'items': [
+                    {
+                        'approval_id': 'approval::manual',
+                        'playbook_id': 'playbook::manual',
+                        'title': 'Manual gate item',
+                        'action_type': 'joint_expand_guarded',
+                        'approval_state': 'pending',
+                        'decision_state': 'pending',
+                        'risk_level': 'high',
+                        'approval_required': True,
+                        'requires_manual': True,
+                        'blocked_by': [],
+                    },
+                    {
+                        'approval_id': 'approval::queued',
+                        'playbook_id': 'playbook::queued',
+                        'title': 'Queued stage item',
+                        'action_type': 'joint_stage_prepare',
+                        'approval_state': 'pending',
+                        'decision_state': 'queued',
+                        'risk_level': 'medium',
+                        'approval_required': False,
+                        'requires_manual': False,
+                        'blocked_by': [],
+                    },
+                ],
+                'summary': {},
+            },
+            'rollout_executor': {
+                'status': 'controlled',
+                'summary': {'by_status': {'applied': 1, 'queued': 1}},
+                'items': [
+                    {
+                        'item_id': 'approval::queued',
+                        'playbook_id': 'playbook::queued',
+                        'action_type': 'joint_stage_prepare',
+                        'status': 'queued',
+                        'plan': {'rollout_stage': 'observe', 'target_rollout_stage': 'guarded'},
+                        'result': {'reason': 'queued for guarded rollout'},
+                    }
+                ],
+            },
+            'controlled_rollout_execution': {
+                'mode': 'state_apply',
+                'executed_count': 1,
+                'skipped_count': 0,
+                'items': [
+                    {
+                        'item_id': 'approval::ready',
+                        'playbook_id': 'playbook::ready',
+                        'action_type': 'joint_observe',
+                        'action': 'state_applied',
+                        'state': 'ready',
+                        'workflow_state': 'ready',
+                        'reason': 'controlled rollout applied',
+                    }
+                ],
+            },
+            'auto_approval_execution': {
+                'mode': 'controlled',
+                'executed_count': 1,
+                'skipped_count': 0,
+                'items': [
+                    {
+                        'item_id': 'approval::ready',
+                        'playbook_id': 'playbook::ready',
+                        'action_type': 'joint_observe',
+                        'action': 'approved',
+                        'state': 'approved',
+                        'workflow_state': 'ready',
+                        'reason': 'auto approved',
+                    }
+                ],
+            },
+        }, max_items=2, max_adjustments=5)
+        self.assertEqual(payload['schema_version'], 'm5_workbench_governance_view_v1')
+        self.assertEqual(payload['summary']['auto_batch_count'], 2)
+        self.assertEqual(payload['summary']['blocked_count'], 1)
+        self.assertEqual(payload['summary']['queued_count'], 1)
+        self.assertEqual(payload['summary']['ready_count'], 1)
+        self.assertIn('playbook::ready', [row['item_id'] for row in payload['lanes']['auto_batch']['items']])
+        self.assertEqual(payload['lanes']['blocked']['items'][0]['item_id'], 'playbook::manual')
+        self.assertTrue(payload['rollout']['frontier'])
+        self.assertEqual(payload['recent_adjustments'][0]['source'], 'auto_approval_execution')
+        self.assertGreaterEqual(payload['summary']['recent_adjustment_count'], 2)
 
     def test_build_workflow_attention_view_groups_manual_and_blocked_items(self):
         payload = build_workflow_attention_view({

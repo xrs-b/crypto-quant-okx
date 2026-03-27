@@ -52,7 +52,7 @@ from signals.validator import SignalValidator
 from bot.run import execute_exchange_smoke, reconcile_exchange_positions, load_runtime_state
 from ml.engine import MLEngine
 from core.regime import RegimeDetector, detect_regime, Regime
-from analytics import StrategyBacktester, SignalQualityAnalyzer, ParameterOptimizer, GovernanceEngine, build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, attach_auto_approval_policy, execute_controlled_rollout_layer, execute_controlled_auto_approval_layer, execute_rollout_executor, build_workflow_consumer_view, build_workflow_attention_view, build_workflow_operator_digest, build_dashboard_summary_cards
+from analytics import StrategyBacktester, SignalQualityAnalyzer, ParameterOptimizer, GovernanceEngine, build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, attach_auto_approval_policy, execute_controlled_rollout_layer, execute_controlled_auto_approval_layer, execute_rollout_executor, build_workflow_consumer_view, build_workflow_attention_view, build_workflow_operator_digest, build_dashboard_summary_cards, build_workbench_governance_view
 from analytics.backtest import export_calibration_payload
 from analytics.mfe_mae import MFEAnalyzer, get_mfe_mae_analysis
 from core.regime_policy import summarize_observe_only_collection
@@ -2420,17 +2420,17 @@ def get_backtest_summary():
 def get_backtest_calibration_report():
     """获取 M5 calibration 聚合输出，默认返回 report-ready payload。"""
     view = (request.args.get('view') or 'report_ready').strip().lower()
-    if view not in {'report_ready', 'delivery', 'governance_ready', 'workflow_ready', 'operator_digest', 'dashboard_summary_cards', 'full'}:
-        return jsonify({'success': False, 'error': 'view must be one of report_ready|delivery|governance_ready|workflow_ready|operator_digest|dashboard_summary_cards|full'}), 400
+    if view not in {'report_ready', 'delivery', 'governance_ready', 'workflow_ready', 'operator_digest', 'dashboard_summary_cards', 'workbench_governance_view', 'full'}:
+        return jsonify({'success': False, 'error': 'view must be one of report_ready|delivery|governance_ready|workflow_ready|operator_digest|dashboard_summary_cards|workbench_governance_view|full'}), 400
 
     backtest_result = backtester.run_all(config.symbols)
     calibration_report = backtest_result.get('calibration_report') or {}
     payload = export_calibration_payload(
         calibration_report,
-        view='full' if view == 'full' else ('workflow_ready' if view in {'operator_digest', 'dashboard_summary_cards'} else view),
+        view='full' if view == 'full' else ('workflow_ready' if view in {'operator_digest', 'dashboard_summary_cards', 'workbench_governance_view'} else view),
     )
-    if view in {'workflow_ready', 'operator_digest', 'dashboard_summary_cards', 'full'}:
-        workflow_payload = payload if view in {'workflow_ready', 'operator_digest', 'dashboard_summary_cards'} else (payload.get('workflow_ready') or {})
+    if view in {'workflow_ready', 'operator_digest', 'dashboard_summary_cards', 'workbench_governance_view', 'full'}:
+        workflow_payload = payload if view in {'workflow_ready', 'operator_digest', 'dashboard_summary_cards', 'workbench_governance_view'} else (payload.get('workflow_ready') or {})
         payload_to_persist = dict(workflow_payload)
         if payload_to_persist:
             persisted_workflow = _persist_workflow_approval_payload(payload_to_persist, replay_source=f'calibration_report:{view}')
@@ -2440,13 +2440,16 @@ def get_backtest_calibration_report():
                 payload = build_workflow_operator_digest(persisted_workflow)
             elif view == 'dashboard_summary_cards':
                 payload = build_dashboard_summary_cards(persisted_workflow)
+            elif view == 'workbench_governance_view':
+                payload = build_workbench_governance_view(persisted_workflow)
             else:
                 payload['workflow_ready'] = persisted_workflow
                 payload['operator_digest'] = build_workflow_operator_digest(persisted_workflow)
                 payload['dashboard_summary_cards'] = build_dashboard_summary_cards(persisted_workflow)
+                payload['workbench_governance_view'] = build_workbench_governance_view(persisted_workflow)
     summary = calibration_report.get('summary') or {}
     governance_ready = payload if view == 'governance_ready' else (payload.get('governance_ready') or {})
-    workflow_ready = {} if view in {'operator_digest', 'dashboard_summary_cards'} else (payload if view == 'workflow_ready' else (payload.get('workflow_ready') or {}))
+    workflow_ready = {} if view in {'operator_digest', 'dashboard_summary_cards', 'workbench_governance_view'} else (payload if view == 'workflow_ready' else (payload.get('workflow_ready') or {}))
     return jsonify({
         'success': True,
         'view': view,
@@ -2460,6 +2463,7 @@ def get_backtest_calibration_report():
             'workflow_ready': workflow_ready.get('summary') or {},
             'operator_digest': payload.get('summary') or {} if view == 'operator_digest' else (payload.get('workflow_operator_digest') or payload.get('operator_digest') or {}).get('summary') or {},
             'dashboard_summary_cards': payload.get('summary') or {} if view == 'dashboard_summary_cards' else (payload.get('dashboard_summary_cards') or {}).get('summary') or {},
+            'workbench_governance_view': payload.get('summary') or {} if view == 'workbench_governance_view' else (payload.get('workbench_governance_view') or {}).get('summary') or {},
             'joint_governance_summary': summary.get('joint_governance_summary') or {},
         }
     })
@@ -2544,6 +2548,24 @@ def get_backtest_dashboard_summary_cards():
         'view': 'dashboard_summary_cards',
         'data': cards,
         'summary': cards.get('summary') or {},
+    })
+
+
+@app.route('/api/backtest/workbench-governance-view')
+def get_backtest_workbench_governance_view():
+    """返回 approval / rollout 工作台聚合视图，适合 dashboard/agent/人工巡检低干预消费。"""
+    max_items = max(1, min(int(request.args.get('max_items', 5)), 50))
+    max_adjustments = max(1, min(int(request.args.get('max_adjustments', 10)), 50))
+    backtest_result = backtester.run_all(config.symbols)
+    calibration_report = backtest_result.get('calibration_report') or {}
+    payload = export_calibration_payload(calibration_report, view='workflow_ready')
+    payload = _persist_workflow_approval_payload(payload, replay_source='workbench_governance_view_api')
+    workbench_view = build_workbench_governance_view(payload, max_items=max_items, max_adjustments=max_adjustments)
+    return jsonify({
+        'success': True,
+        'view': 'workbench_governance_view',
+        'data': workbench_view,
+        'summary': workbench_view.get('summary') or {},
     })
 
 

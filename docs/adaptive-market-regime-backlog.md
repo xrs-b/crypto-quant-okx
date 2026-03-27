@@ -82,6 +82,7 @@
 | AR-M5-08 | rollout executor skeleton / dispatch-plan-apply-result layer | M5 | P0 | 默认否（仅 skeleton / dry-run / very-safe controlled apply） | rollout execution orchestration |
 | AR-M5-09 | workflow operator digest / low-intervention governance summary API | M5 | P0 | 否（仅聚合已有 workflow/approval/executor 状态） | dashboard / API / low-touch consumption |
 | AR-M5-10 | workflow attention view / manual approval + blocked follow-up API | M5 | P0 | 否（仅聚合已有 workflow/approval/executor 状态） | dashboard / API / agent / low-touch巡检消费 |
+| AR-M5-11 | approval / rollout workbench governance aggregate view | M5 | P0 | 否（仅聚合已有 workflow/approval/executor 状态） | dashboard / API / agent / 人工巡检工作台消费 |
 
 ---
 
@@ -104,6 +105,21 @@
   - dashboard replay 会把已持久化状态重新叠加回 workflow-ready 视图，供恢复/审计使用。
 - **安全边界**：仅落地“审批状态账本”和“回放/恢复视图”；即使审批通过，也不会新增任何危险自动执行链路。
 
+
+### AR-M5-11｜approval / rollout workbench governance aggregate view
+
+- **阶段 / 优先级**：M5 / P0
+- **生效范围**：仅聚合已有 `workflow_state / approval_state / workflow-consumer-view / workflow-operator-digest / workflow-attention-view / rollout_executor`，**不触发真实自动执行**
+- **目标**：补一层更适合“工作台”直接消费的集中聚合输出，让 dashboard / agent / 人工巡检一眼看到：
+  1. 哪些 item 可自动批（`auto_batch`）；
+  2. 哪些仍 blocked / manual approval；
+  3. 哪些 queued / ready；
+  4. rollout stage 当前推进到哪；
+  5. 最近系统自动调整了什么（auto approval / controlled rollout / rollout executor）。
+- **输出结构**：稳定 JSON，包含 `headline / summary / lanes / rollout / recent_adjustments / upstreams`，序列化稳定，适合后端直出给 dashboard / agent / 人工巡检。
+- **API**：新增 `GET /api/backtest/workbench-governance-view`，并支持 `calibration-report?view=workbench_governance_view`。
+- **兼容性**：不替换现有 consumer / attention / digest / summary-cards 视图；只是往更集中、更适合 approval+rollout 工作台消费的方向补一层聚合入口。
+- **测试**：覆盖 helper 聚合 payload、独立 API、calibration-report view，确保 lane / rollout / recent adjustment 结构稳定存在。
 
 ### AR-M5-10｜workflow attention view / manual approval + blocked follow-up API
 

@@ -275,10 +275,26 @@ def _build_policy_ab_regime_lookup(policy_ab_diffs: List[Dict]) -> Dict[Tuple[st
     return lookup
 
 
+def _build_strategy_regime_lookup(rows: List[Dict]) -> Dict[Tuple[str, str], Dict]:
+    return {
+        (_normalize_bucket_tag(row.get('secondary_bucket')), _normalize_bucket_tag(row.get('bucket'))): row
+        for row in (rows or [])
+    }
+
+
+def _build_regime_strategy_fit_lookup(rows: List[Dict]) -> Dict[str, Dict]:
+    return {
+        _normalize_bucket_tag(row.get('regime')): row
+        for row in (rows or [])
+    }
+
+
 def _delivery_bucket_id(regime: str, policy_version: str) -> str:
     return f'{_normalize_bucket_tag(regime)}::{_normalize_bucket_tag(policy_version)}'
 
 
+def _delivery_strategy_bucket_id(regime: str, strategy: str) -> str:
+    return f'strategy::{_normalize_bucket_tag(regime)}::{_normalize_bucket_tag(strategy)}'
 
 
 def _priority_rank(value: Optional[str]) -> int:
@@ -416,6 +432,7 @@ def _build_calibration_delivery_payload(
     policy_ab_diffs: List[Dict],
     rollout_gates: List[Dict],
     recommendations: List[Dict],
+    strategy_governance: Optional[Dict] = None,
 ) -> Dict:
     gate_lookup = {
         (_normalize_bucket_tag(row.get('regime')), _normalize_bucket_tag(row.get('policy_version'))): row
@@ -608,6 +625,7 @@ def _build_calibration_delivery_payload(
                 'policy_ab_diffs': policy_ab_diffs,
                 'rollout_gates': rollout_gates,
                 'recommendations': recommendations[:50],
+                'strategy_recommendations': (strategy_governance or {}).get('items') or [],
             },
         },
         'render_ready': {
@@ -627,6 +645,8 @@ def _build_calibration_delivery_payload(
                 'sample_gap_queue': _queue_filter(recommendation_type='collect_more_samples'),
                 'next_actions': next_actions[:10],
                 'review_checkpoints': review_checkpoints[:10],
+                'strategy_priority_queue': ((strategy_governance or {}).get('priority_queue') or [])[:10],
+                'strategy_blocking_items': ((strategy_governance or {}).get('blocking') or [])[:10],
             },
         },
         'orchestration_ready': {
@@ -652,6 +672,8 @@ def _build_calibration_delivery_payload(
                     for action in (rec.get('actions') or [])
                 }
             }.items())),
+            'strategy_priority_queue': (strategy_governance or {}).get('priority_queue') or [],
+            'strategy_next_actions': (strategy_governance or {}).get('next_actions') or [],
         },
     }
 
@@ -969,6 +991,304 @@ def _build_calibration_recommendation(gate: Dict, bucket_row: Dict, ab_row: Opti
     }
 
 
+
+def _build_strategy_governance_recommendation(row: Dict, regime_fit: Optional[Dict], *, min_sample_size: int) -> Dict:
+    strategy = _normalize_bucket_tag(row.get('bucket'))
+    regime = _normalize_bucket_tag(row.get('secondary_bucket'))
+    trade_count = int(row.get('trade_count') or 0)
+    avg_return_pct = float(row.get('avg_return_pct') or 0.0)
+    win_rate = float(row.get('win_rate') or 0.0)
+    total_return_pct = float(row.get('total_return_pct') or 0.0)
+    sample_ready = trade_count >= min_sample_size
+    best_strategy = _normalize_bucket_tag((regime_fit or {}).get('best_strategy'))
+    worst_strategy = _normalize_bucket_tag((regime_fit or {}).get('worst_strategy'))
+    best_avg_return_pct = float((regime_fit or {}).get('best_avg_return_pct') or 0.0)
+    worst_avg_return_pct = float((regime_fit or {}).get('worst_avg_return_pct') or 0.0)
+    delta_vs_best = round(avg_return_pct - best_avg_return_pct, 4) if regime_fit else None
+    delta_vs_worst = round(avg_return_pct - worst_avg_return_pct, 4) if regime_fit else None
+    is_best = bool(regime_fit and strategy == best_strategy)
+    is_worst = bool(regime_fit and strategy == worst_strategy)
+
+    priority = 'low'
+    confidence = 'low' if not sample_ready else 'medium'
+    recommendation_type = 'strategy_observe'
+    category = 'mixed_signal'
+    governance_mode = 'observe'
+    blocking_issue = None
+    suggested_action = '维持当前 strategy 权重，继续观察更多 regime 样本。'
+    actions = [
+        _governance_action(
+            'maintain_guardrails',
+            '维持 strategy guardrails',
+            '保持当前 strategy 权重与 guardrails，不做自动放量。',
+            owner='research',
+            urgency='normal',
+        )
+    ]
+    rollout_plan = {'mode': 'hold', 'target_weight_pct': None, 'requires_fast_rollback': False}
+    thresholds = {'target_min_trade_count': min_sample_size}
+    guardrails = []
+    reason = f'{strategy} 在 {regime} 下暂无明确优势，先保持观察。'
+    summary_line = f'{regime} × {strategy}: strategy_observe (hold/{priority}/{confidence})'
+    next_review_after = max(min_sample_size, trade_count + 2)
+
+    if not sample_ready:
+        priority = 'medium'
+        recommendation_type = 'collect_more_samples'
+        category = 'sample_sufficiency'
+        governance_mode = 'observe'
+        blocking_issue = 'insufficient_strategy_sample'
+        suggested_action = f'该 strategy 在 {regime} 下样本未达标，先补齐至至少 {min_sample_size} 笔，再决定是否调权或冻结。'
+        actions = [
+            _governance_action(
+                'collect_more_samples',
+                '补齐 strategy 样本',
+                f'继续收集 {strategy} 在 {regime} 下的样本，至少补到 {min_sample_size} 笔。',
+                owner='research',
+                target_sample_size=min_sample_size,
+                missing_samples=max(min_sample_size - trade_count, 0),
+                urgency='normal',
+            ),
+            _governance_action(
+                'rollout_freeze',
+                '冻结 strategy 扩量',
+                '样本不足期间不扩大该 strategy 在当前 regime 下的权重。',
+                owner='ops',
+                urgency='normal',
+            ),
+        ]
+        rollout_plan = {'mode': 'freeze', 'target_weight_pct': 0, 'requires_fast_rollback': False}
+        thresholds = {'target_min_trade_count': min_sample_size, 'current_trade_count': trade_count}
+        guardrails = ['until_strategy_sample_ready']
+        reason = f'{strategy} 在 {regime} 下仅有 {trade_count} 笔样本，未达到最小治理门槛。'
+        summary_line = f'{regime} × {strategy}: collect_more_samples (observe/{priority}/{confidence})'
+        next_review_after = min_sample_size
+    elif avg_return_pct < 0 and win_rate < 45:
+        priority = 'critical'
+        confidence = 'high' if trade_count >= min_sample_size + 2 else 'medium'
+        recommendation_type = 'rollout_freeze'
+        category = 'underperform'
+        governance_mode = 'rollback'
+        blocking_issue = 'strategy_negative_return_and_low_win_rate'
+        suggested_action = '该 strategy 在当前 regime 下应先冻结/下线，避免继续放大负边际。'
+        actions = [
+            _governance_action('rollout_freeze', '冻结 strategy', '立即冻结该 strategy 在当前 regime 的新增权重。', owner='ops', urgency='immediate'),
+            _governance_action('deweight_strategy', '下调 strategy 权重', '把该 strategy 权重降到最低或 0，待复核通过再恢复。', owner='ops', urgency='immediate'),
+            _governance_action('repricing_review', '复核 strategy 定价/触发逻辑', '检查触发条件、仓位、止损与执行容忍度是否失配。', owner='research', urgency='high'),
+        ]
+        rollout_plan = {'mode': 'freeze', 'target_weight_pct': 0, 'requires_fast_rollback': True}
+        thresholds = {'max_negative_avg_return_pct': 0.0, 'min_win_rate_pct': 45.0}
+        guardrails = ['strategy_disabled_until_review']
+        reason = f'{strategy} 在 {regime} 下平均回报为负且胜率偏低，应优先冻结。'
+        summary_line = f'{regime} × {strategy}: rollout_freeze (rollback/{priority}/{confidence})'
+    elif avg_return_pct < 0 or (is_worst and delta_vs_best is not None and delta_vs_best <= -0.5):
+        priority = 'high'
+        confidence = 'high' if trade_count >= min_sample_size + 1 else 'medium'
+        recommendation_type = 'deweight_strategy'
+        category = 'underperform'
+        governance_mode = 'tighten'
+        blocking_issue = 'strategy_underperforming_regime_fit'
+        suggested_action = '该 strategy 在当前 regime 下应先降权并进入 review，避免继续主导该 bucket。'
+        actions = [
+            _governance_action('deweight_strategy', '下调 strategy 权重', '降低该 strategy 在当前 regime 下的权重占比。', owner='ops', urgency='high'),
+            _governance_action('repricing_review', '复核 strategy 参数', '确认是否需要收紧触发阈值或重定价。', owner='research', urgency='high'),
+        ]
+        rollout_plan = {'mode': 'deweight', 'target_weight_pct': 10, 'requires_fast_rollback': True}
+        thresholds = {'max_negative_avg_return_pct': 0.0, 'max_gap_vs_best_avg_return_pct': -0.5}
+        guardrails = ['reduced_strategy_weight_cap']
+        reason = f'{strategy} 在 {regime} 下落后于最佳 strategy，建议降权并复核。'
+        summary_line = f'{regime} × {strategy}: deweight_strategy (tighten/{priority}/{confidence})'
+    elif is_best and win_rate >= 60 and avg_return_pct > 0:
+        priority = 'medium'
+        confidence = 'high' if trade_count >= min_sample_size + 1 else 'medium'
+        recommendation_type = 'expand_guarded'
+        category = 'validated_edge'
+        governance_mode = 'rollout'
+        suggested_action = '该 strategy 在当前 regime 下 fit 明显，可小步扩张，但保留快速回退。'
+        actions = [
+            _governance_action('expand_guarded', '小步扩张 strategy 权重', '逐步提高该 strategy 在当前 regime 的权重。', owner='ops', urgency='normal'),
+            _governance_action('monitor_drift', '监控 strategy 漂移', '扩张后持续观察收益、胜率与 regime 漂移。', owner='ops', urgency='normal'),
+        ]
+        rollout_plan = {'mode': 'guarded_expand', 'target_weight_pct': 35, 'requires_fast_rollback': True}
+        thresholds = {'min_win_rate_pct': 60.0, 'min_avg_return_pct': 0.0}
+        guardrails = ['fast_rollback_ready', 'post_expand_monitoring']
+        reason = f'{strategy} 当前是 {regime} 下的最佳 fit，可按 guardrail 逐步扩张。'
+        summary_line = f'{regime} × {strategy}: expand_guarded (rollout/{priority}/{confidence})'
+    elif avg_return_pct > 0 and win_rate < 55:
+        priority = 'medium'
+        recommendation_type = 'repricing_review'
+        category = 'instability'
+        governance_mode = 'review'
+        blocking_issue = 'unstable_strategy_edge'
+        suggested_action = '收益为正但稳定性不足，先观察并复核触发/定价逻辑。'
+        actions = [
+            _governance_action('repricing_review', '复核 strategy edge 稳定性', '检查是否依赖少量极端收益支撑。', owner='research', urgency='high'),
+            _governance_action('maintain_guardrails', '保持保守 guardrails', '在稳定前不自动扩量。', owner='ops', urgency='normal'),
+        ]
+        rollout_plan = {'mode': 'hold', 'target_weight_pct': None, 'requires_fast_rollback': True}
+        thresholds = {'min_win_rate_pct': 55.0}
+        guardrails = ['no_expand_until_stable']
+        reason = f'{strategy} 在 {regime} 下收益为正，但稳定性不足，需先 review。'
+        summary_line = f'{regime} × {strategy}: repricing_review (review/{priority}/{confidence})'
+
+    return {
+        'scope': 'strategy',
+        'regime': regime,
+        'strategy': strategy,
+        'type': recommendation_type,
+        'category': category,
+        'priority': priority,
+        'confidence': confidence,
+        'reason': reason,
+        'suggested_action': suggested_action,
+        'blocking_issue': blocking_issue,
+        'governance_mode': governance_mode,
+        'next_review_after_trade_count': next_review_after,
+        'actions': actions,
+        'rollout_plan': rollout_plan,
+        'thresholds': thresholds,
+        'guardrails': guardrails,
+        'summary_line': summary_line,
+        'blocking': bool(blocking_issue or guardrails),
+        'priority_rank': _priority_rank(priority),
+        'confidence_rank': _confidence_rank(confidence),
+        'fit_status': 'best' if is_best else 'worst' if is_worst else 'mixed',
+        'evidence': {
+            'trade_count': trade_count,
+            'min_sample_size': min_sample_size,
+            'win_rate': win_rate,
+            'avg_return_pct': avg_return_pct,
+            'total_return_pct': total_return_pct,
+            'sample_ready': sample_ready,
+            'best_strategy': best_strategy if regime_fit else None,
+            'worst_strategy': worst_strategy if regime_fit else None,
+            'delta_vs_best_avg_return_pct': delta_vs_best,
+            'delta_vs_worst_avg_return_pct': delta_vs_worst,
+            'qualified_strategies': (regime_fit or {}).get('qualified_strategies'),
+            'strategies_seen': (regime_fit or {}).get('strategies_seen'),
+        },
+    }
+
+
+def _build_strategy_governance_summary(recommendations: List[Dict]) -> Dict:
+    action_types = sorted({action['type'] for rec in recommendations for action in (rec.get('actions') or [])})
+    return {
+        'critical': sum(1 for item in recommendations if item.get('priority') == 'critical'),
+        'high': sum(1 for item in recommendations if item.get('priority') == 'high'),
+        'medium': sum(1 for item in recommendations if item.get('priority') == 'medium'),
+        'low': sum(1 for item in recommendations if item.get('priority') == 'low'),
+        'by_type': dict(sorted({
+            rec['type']: sum(1 for row in recommendations if row.get('type') == rec['type'])
+            for rec in recommendations
+        }.items())),
+        'by_governance_mode': dict(sorted({
+            rec['governance_mode']: sum(1 for row in recommendations if row.get('governance_mode') == rec['governance_mode'])
+            for rec in recommendations
+        }.items())),
+        'blocking': sum(1 for item in recommendations if item.get('blocking')),
+        'top_actions': {
+            action_type: sum(1 for rec in recommendations for action in (rec.get('actions') or []) if action['type'] == action_type)
+            for action_type in action_types
+        },
+        'top_priority_items': [
+            {
+                'regime': item.get('regime'),
+                'strategy': item.get('strategy'),
+                'type': item.get('type'),
+                'priority': item.get('priority'),
+                'summary_line': item.get('summary_line'),
+            }
+            for item in recommendations[:5]
+        ],
+    }
+
+
+def _build_strategy_governance_delivery(strategy_recommendations: List[Dict]) -> Dict:
+    items = []
+    for rec in strategy_recommendations:
+        item = {
+            'bucket_id': _delivery_strategy_bucket_id(rec.get('regime'), rec.get('strategy')),
+            'scope': 'strategy',
+            'regime': rec.get('regime'),
+            'strategy': rec.get('strategy'),
+            'recommendation': {
+                'type': rec.get('type'),
+                'category': rec.get('category'),
+                'priority': rec.get('priority'),
+                'confidence': rec.get('confidence'),
+                'governance_mode': rec.get('governance_mode'),
+                'blocking_issue': rec.get('blocking_issue'),
+                'suggested_action': rec.get('suggested_action'),
+                'summary_line': rec.get('summary_line'),
+                'reason': rec.get('reason'),
+                'actions': rec.get('actions') or [],
+                'rollout_plan': rec.get('rollout_plan') or {},
+                'guardrails': rec.get('guardrails') or [],
+                'thresholds': rec.get('thresholds') or {},
+                'next_review_after_trade_count': rec.get('next_review_after_trade_count'),
+            },
+            'fit': {
+                'status': rec.get('fit_status'),
+                **(rec.get('evidence') or {}),
+            },
+            'status': {
+                'blocking': bool(rec.get('blocking')),
+                'priority_rank': rec.get('priority_rank', _priority_rank(rec.get('priority'))),
+                'confidence_rank': rec.get('confidence_rank', _confidence_rank(rec.get('confidence'))),
+            },
+        }
+        item['orchestration'] = _build_orchestration_plan(item)
+        item['status']['blocking'] = bool(item['orchestration']['blockers'])
+        items.append(item)
+
+    items.sort(key=lambda item: (
+        item['status']['priority_rank'],
+        item['status']['confidence_rank'],
+        -(item['fit'].get('trade_count') or 0),
+        item.get('regime') or '',
+        item.get('strategy') or '',
+    ))
+
+    priority_queue = [
+        {
+            'bucket_id': item['bucket_id'],
+            'scope': 'strategy',
+            'regime': item['regime'],
+            'strategy': item['strategy'],
+            'recommendation_type': item['recommendation']['type'],
+            'governance_mode': item['recommendation']['governance_mode'],
+            'priority': item['recommendation']['priority'],
+            'confidence': item['recommendation']['confidence'],
+            'blocking': item['status']['blocking'],
+            'primary_action': (item['recommendation']['actions'] or [{}])[0].get('type'),
+            'summary_line': item['recommendation']['summary_line'],
+            'next_actions': item['orchestration']['next_actions'],
+            'blocking_chain': item['orchestration']['blocking_chain'],
+            'review_checkpoints': item['orchestration']['review_checkpoints'],
+        }
+        for item in items
+    ]
+
+    return {
+        'items': items,
+        'priority_queue': priority_queue,
+        'summary': _build_strategy_governance_summary(strategy_recommendations),
+        'blocking': [row for row in priority_queue if row.get('blocking')],
+        'next_actions': [
+            {
+                'bucket_id': item['bucket_id'],
+                'regime': item['regime'],
+                'strategy': item['strategy'],
+                'next_actions': item['orchestration']['next_actions'],
+                'action_queue': item['orchestration']['action_queue'],
+                'blocking_chain': item['orchestration']['blocking_chain'],
+            }
+            for item in items
+            if item['orchestration']['next_actions']
+        ],
+    }
+
+
 def _coerce_calibration_report_source(source: Dict) -> Dict:
     if not isinstance(source, dict):
         return {}
@@ -1017,6 +1337,26 @@ def build_regime_policy_calibration_report(symbol_results: List[Dict]) -> Dict:
 
     min_sample_size = 3
     strategy_fit = build_strategy_fit_summary(all_trades, min_sample_size=min_sample_size)
+    strategy_regime_lookup = _build_strategy_regime_lookup(strategy_fit['by_regime_strategy'])
+    regime_fit_lookup = _build_regime_strategy_fit_lookup(strategy_fit['regime_strategy_fit'])
+    strategy_recommendations = [
+        _build_strategy_governance_recommendation(
+            row,
+            regime_fit_lookup.get(_normalize_bucket_tag(row.get('secondary_bucket'))),
+            min_sample_size=min_sample_size,
+        )
+        for row in strategy_fit['by_regime_strategy']
+    ]
+    strategy_recommendations.sort(
+        key=lambda item: (
+            item.get('priority_rank', _priority_rank(item.get('priority'))),
+            item.get('confidence_rank', _confidence_rank(item.get('confidence'))),
+            -((item.get('evidence') or {}).get('trade_count') or 0),
+            item.get('regime') or '',
+            item.get('strategy') or '',
+        )
+    )
+    strategy_governance = _build_strategy_governance_delivery(strategy_recommendations)
     rollout_gates = []
     bucket_lookup = {}
     for row in by_regime_policy:
@@ -1105,6 +1445,7 @@ def build_regime_policy_calibration_report(symbol_results: List[Dict]) -> Dict:
         'strategy_fit_ready': bool(strategy_fit['by_strategy']),
         'rollout_gate_summary': rollout_gate_summary,
         'recommendation_summary': recommendation_summary,
+        'strategy_governance_summary': strategy_governance['summary'],
     }
     delivery = _build_calibration_delivery_payload(
         summary=summary,
@@ -1115,6 +1456,7 @@ def build_regime_policy_calibration_report(symbol_results: List[Dict]) -> Dict:
         policy_ab_diffs=policy_ab_diffs,
         rollout_gates=rollout_gates,
         recommendations=recommendations[:50],
+        strategy_governance=strategy_governance,
     )
     summary['delivery_ready'] = {
         'schema_version': delivery['schema_version'],
@@ -1124,6 +1466,8 @@ def build_regime_policy_calibration_report(symbol_results: List[Dict]) -> Dict:
         'next_action_bucket_count': len(delivery['orchestration_ready']['next_actions']),
         'blocking_chain_count': len(delivery['orchestration_ready']['blocking_chain']),
         'rollback_candidate_count': len(delivery['orchestration_ready']['rollback_candidates']),
+        'strategy_priority_queue_size': len(delivery['orchestration_ready']['strategy_priority_queue']),
+        'strategy_next_action_bucket_count': len(delivery['orchestration_ready']['strategy_next_actions']),
     }
     return {
         'summary': summary,
@@ -1136,6 +1480,8 @@ def build_regime_policy_calibration_report(symbol_results: List[Dict]) -> Dict:
         'strategy_fit': {
             'regime_strategy_fit': strategy_fit['regime_strategy_fit'],
             'strategy_policy_fit': strategy_fit['strategy_policy_fit'],
+            'strategy_recommendations': strategy_recommendations[:50],
+            'strategy_governance': strategy_governance,
         },
         'policy_ab_diffs': policy_ab_diffs,
         'rollout_gates': rollout_gates,

@@ -539,6 +539,8 @@
   - 当前回测聚合结果已补 `all_trades`、symbol 级 `regime_policy_calibration`，以及聚合级 `calibration_report`，可直接看到 `by_regime / by_policy_version / by_regime_policy` 的 trade_count、win_rate、avg_return_pct、total_return_pct。
   - 本次继续把 `strategy × regime` 校准入口真正落地：trade 级结果开始保留 `strategy_tags / dominant_strategy / strategy_reasons`，并在 symbol / aggregate calibration report 中新增 `by_strategy / by_regime_strategy / by_policy_strategy / regime_strategy_fit / strategy_policy_fit`，让 adaptive strategy 调整不再只看 policy bucket，而能直接看各 regime 下边个 strategy 真有 fit。
   - delivery / report-ready payload 亦同步暴露 strategy fit 表格与 `top_strategy` headline，方便后续 dashboard / report / agent 直接消费，而唔需要再自己由原始 trade reasons 横向拼装。
+  - 现进一步把治理建议从 `regime × policy_version` 扩展到 `regime × strategy`：基于现有 `by_regime_strategy + regime_strategy_fit` 输出 `strategy_recommendations / strategy_governance`，可直接回答某 strategy 在某 regime 下应扩张、降权、冻结、观察、补样、repricing/review 的治理动作。
+  - strategy governance 保持与既有 rollout gate / recommendation 风格一致，统一给出 `type / governance_mode / priority / confidence / blocking / actions / summary_line / orchestration`，并在聚合级 delivery 中补 `strategy_priority_queue / strategy_next_actions / strategy_blocking_items`，方便后续 report / orchestration 直接消费。
 - **阶段 / 优先级**：M5 / P1
 - **生效范围**：不直接生效
 - **目标**：形成 `strategy × regime` 的二维统计，为后续 policy 调整提供数据依据。

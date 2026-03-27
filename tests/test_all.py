@@ -4214,6 +4214,39 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
         self.assertTrue(summary['top_priority_items'])
         self.assertIn('summary_line', summary['top_priority_items'][0])
 
+    def test_calibration_report_builds_strategy_governance_recommendations_and_summary(self):
+        report = build_regime_policy_calibration_report([
+            {
+                'symbol': 'BTC/USDT',
+                'all_trades': [
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 1.4},
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 1.2},
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v2', 'strategy_tags': ['Breakout'], 'return_pct': 1.1},
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v1', 'strategy_tags': ['MeanRevert'], 'return_pct': -0.7},
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v2', 'strategy_tags': ['MeanRevert'], 'return_pct': -0.5},
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v2', 'strategy_tags': ['MeanRevert'], 'return_pct': -0.4},
+                    {'regime_tag': 'range', 'policy_tag': 'policy_v2', 'strategy_tags': ['Scalp'], 'return_pct': 0.4},
+                ],
+            }
+        ])
+        strategy_fit = report['strategy_fit']
+        self.assertIn('strategy_recommendations', strategy_fit)
+        self.assertIn('strategy_governance', strategy_fit)
+        breakout = next(item for item in strategy_fit['strategy_recommendations'] if item['regime'] == 'trend_up' and item['strategy'] == 'Breakout')
+        mean_revert = next(item for item in strategy_fit['strategy_recommendations'] if item['regime'] == 'trend_up' and item['strategy'] == 'MeanRevert')
+        scalp = next(item for item in strategy_fit['strategy_recommendations'] if item['regime'] == 'range' and item['strategy'] == 'Scalp')
+        self.assertEqual(breakout['type'], 'expand_guarded')
+        self.assertEqual(breakout['governance_mode'], 'rollout')
+        self.assertEqual(mean_revert['type'], 'rollout_freeze')
+        self.assertEqual(mean_revert['blocking_issue'], 'strategy_negative_return_and_low_win_rate')
+        self.assertEqual(mean_revert['actions'][1]['type'], 'deweight_strategy')
+        self.assertEqual(scalp['type'], 'collect_more_samples')
+        strategy_summary = report['summary']['strategy_governance_summary']
+        self.assertGreaterEqual(strategy_summary['by_type']['expand_guarded'], 1)
+        self.assertGreaterEqual(strategy_summary['by_type']['rollout_freeze'], 1)
+        self.assertGreaterEqual(strategy_summary['by_governance_mode']['observe'], 1)
+        self.assertGreaterEqual(strategy_summary['top_actions']['collect_more_samples'], 1)
+
     def test_calibration_report_exposes_delivery_payload_for_render_and_orchestration(self):
         report = build_regime_policy_calibration_report([
             {
@@ -4304,6 +4337,38 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
         self.assertTrue(any(checkpoint['type'] == 'thresholds' for checkpoint in review_row['checkpoints']))
         rollback_candidates = delivery['orchestration_ready']['rollback_candidates']
         self.assertTrue(any(row['bucket_id'] == rollback_item['bucket_id'] for row in rollback_candidates))
+
+    def test_calibration_report_exposes_strategy_governance_delivery_for_report_and_orchestration(self):
+        report = build_regime_policy_calibration_report([
+            {
+                'symbol': 'BTC/USDT',
+                'all_trades': [
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 1.4},
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 1.2},
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v2', 'strategy_tags': ['Breakout'], 'return_pct': 1.1},
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v1', 'strategy_tags': ['MeanRevert'], 'return_pct': -0.7},
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v2', 'strategy_tags': ['MeanRevert'], 'return_pct': -0.5},
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v2', 'strategy_tags': ['MeanRevert'], 'return_pct': -0.4},
+                    {'regime_tag': 'range', 'policy_tag': 'policy_v2', 'strategy_tags': ['Scalp'], 'return_pct': 0.4},
+                ],
+            }
+        ])
+        strategy_delivery = report['strategy_fit']['strategy_governance']
+        self.assertTrue(strategy_delivery['items'])
+        self.assertTrue(strategy_delivery['priority_queue'])
+        first_item = strategy_delivery['items'][0]
+        self.assertEqual(first_item['scope'], 'strategy')
+        self.assertIn('fit', first_item)
+        self.assertIn('orchestration', first_item)
+        self.assertIn('strategy_recommendations', report['delivery']['views']['tables'])
+        self.assertTrue(report['delivery']['render_ready']['sections']['strategy_priority_queue'])
+        self.assertTrue(report['delivery']['orchestration_ready']['strategy_priority_queue'])
+        self.assertGreaterEqual(report['summary']['delivery_ready']['strategy_priority_queue_size'], 1)
+        self.assertGreaterEqual(report['summary']['delivery_ready']['strategy_next_action_bucket_count'], 1)
+        freeze_queue = next(row for row in strategy_delivery['priority_queue'] if row['strategy'] == 'MeanRevert')
+        self.assertEqual(freeze_queue['primary_action'], 'rollout_freeze')
+        next_action_row = next(row for row in report['delivery']['orchestration_ready']['strategy_next_actions'] if row['strategy'] == 'MeanRevert')
+        self.assertEqual(next_action_row['next_actions'][0]['type'], 'rollout_freeze')
 
     def test_calibration_report_ready_payload_flattens_delivery_for_consumers(self):
         report = build_regime_policy_calibration_report([

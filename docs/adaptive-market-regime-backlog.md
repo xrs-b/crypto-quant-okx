@@ -97,6 +97,32 @@
   - dashboard replay 会把已持久化状态重新叠加回 workflow-ready 视图，供恢复/审计使用。
 - **安全边界**：仅落地“审批状态账本”和“回放/恢复视图”；即使审批通过，也不会新增任何危险自动执行链路。
 
+### AR-M5-05｜approval audit / stale cleanup / decision diff layer
+
+- **阶段 / 优先级**：M5 / P0
+- **生效范围**：仅审计与状态卫生；**不触发真实自动执行**
+- **目标**：补齐 approval/workflow 向低干预巡检、自动恢复、后续自动 approval 靠拢时最缺的三块：
+  1. 哪些 pending/ready 已 stale；
+  2. 最近 decision / state / workflow_state 有什么变化；
+  3. 单个 item 的 timeline 概览 / 摘要如何。
+- **涉及模块**：`core/database.py`、`dashboard/api.py`、`analytics/helper.py`、`tests/`
+- **新增能力**：
+  - `get_stale_approval_states`：返回超时未刷新、仍处于 `pending/ready/replayed` 的审批项；
+  - `cleanup_stale_approval_states`：支持 dry-run 预览与真实清理，把 stale pending 安全标记为 `expired`，并写入 `stale_cleanup` immutable event；
+  - `get_recent_approval_decision_diff`：从 immutable timeline 中提炼最近 decision/state/workflow_state diff；
+  - `get_approval_timeline_summary`：按 item 生成当前状态、decision path、event counts、timeline preview 等摘要；
+  - dashboard/API 增加 `stale` / `cleanup` / `decision-diff` / `timeline-summary` / `audit-overview` 入口。
+- **状态语义**：
+  - stale cleanup 只处理非终态的 `pending/ready/replayed`；
+  - cleanup 默认 dry-run，显式 POST 才会落库；
+  - cleanup 只把 stale 项标记为 `expired`，不会触发 preset apply、rollout、交易执行；
+  - timeline rebuild 继续保留终态锁定语义，避免 stale cleanup 覆盖人工终态判断。
+- **验收重点**：
+  - 能回答“哪些 pending 已 stale”；
+  - 能回答“最近 decision 有什么变化”；
+  - 能回答“某 item 的 timeline 概览/摘要如何”；
+  - 测试覆盖 cleanup / diff / timeline summary 语义。
+
 ## 3. M0：基础定义与观测位（只观察不生效）
 
 > M0 直接开工清单：[`docs/adaptive-market-regime-m0-implementation.md`](./adaptive-market-regime-m0-implementation.md)

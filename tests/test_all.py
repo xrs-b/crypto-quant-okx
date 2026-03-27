@@ -5079,7 +5079,7 @@ class TestExecutionObservability(unittest.TestCase):
             self.assertIn('recent_decisions', snapshot['summary'])
             self.assertTrue(snapshot['summary']['observe_only_banner'])
 
-from analytics.helper import build_workflow_approval_records, merge_persisted_approval_state
+from analytics.helper import build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview
 
 
 class TestApprovalPersistence(unittest.TestCase):
@@ -5217,6 +5217,66 @@ class TestApprovalPersistence(unittest.TestCase):
         self.assertEqual(workflow_item['workflow_state'], 'ready')
         self.assertEqual(workflow_item['persisted_decision'], 'approved')
 
+    def test_stale_pending_cleanup_and_timeline_summary(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(str(Path(tmpdir) / 'approval_cleanup.db'))
+            item_id = 'pool_switch::btc-focused'
+            db.sync_approval_items([
+                {
+                    'item_id': item_id,
+                    'approval_type': 'pool_switch',
+                    'target': 'btc-focused',
+                    'title': '切换主池',
+                    'approval_state': 'pending',
+                    'workflow_state': 'pending',
+                }
+            ], replay_source='workflow_replay')
+            with sqlite3.connect(Path(tmpdir) / 'approval_cleanup.db') as conn:
+                conn.execute("UPDATE approval_state SET created_at = datetime('now', '-180 minutes'), updated_at = datetime('now', '-180 minutes'), last_seen_at = datetime('now', '-180 minutes') WHERE item_id = ?", (item_id,))
+                conn.commit()
+            stale_rows = db.get_stale_approval_states(stale_after_minutes=60)
+            self.assertEqual(stale_rows[0]['item_id'], item_id)
+            preview = db.cleanup_stale_approval_states(stale_after_minutes=60, dry_run=True)
+            self.assertEqual(preview['matched_count'], 1)
+            self.assertEqual(preview['items'][0]['action'], 'would_expire')
+            result = db.cleanup_stale_approval_states(stale_after_minutes=60, dry_run=False)
+            self.assertEqual(result['expired_count'], 1)
+            state_row = db.get_approval_state(item_id)
+            self.assertEqual(state_row['state'], 'expired')
+            summary = db.get_approval_timeline_summary(item_id)
+            self.assertEqual(summary['current']['state'], 'expired')
+            self.assertIn('stale_cleanup', summary['event_counts'])
+            self.assertTrue(any(step['state'] == 'expired' for step in summary['decision_path']))
+
+    def test_recent_approval_decision_diff_tracks_state_transitions(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(str(Path(tmpdir) / 'approval_diff.db'))
+            item_id = 'pool_switch::btc-focused'
+            db.sync_approval_items([
+                {
+                    'item_id': item_id,
+                    'approval_type': 'pool_switch',
+                    'target': 'btc-focused',
+                    'title': '切换主池',
+                    'approval_state': 'pending',
+                    'workflow_state': 'pending',
+                }
+            ], replay_source='workflow_replay')
+            db.record_approval('pool_switch', 'btc-focused', 'deferred', {
+                'item_id': item_id,
+                'state': 'deferred',
+                'workflow_state': 'deferred',
+                'reason': 'wait more data',
+                'actor': 'tester',
+            })
+            diffs = db.get_recent_approval_decision_diff(limit=5)
+            self.assertEqual(len(diffs), 1)
+            self.assertEqual(diffs[0]['from']['state'], 'pending')
+            self.assertEqual(diffs[0]['to']['state'], 'deferred')
+            self.assertIn('state', diffs[0]['changed_fields'])
+            overview = build_approval_audit_overview(decision_diffs=diffs)
+            self.assertEqual(overview['decision_diff']['count'], 1)
+
     def test_approval_state_api_and_replay_endpoint_expose_persisted_rows(self):
         import dashboard.api as dashboard_api
 
@@ -5277,6 +5337,41 @@ class TestApprovalPersistence(unittest.TestCase):
                 timeline_payload = timeline_resp.get_json()
                 self.assertGreaterEqual(timeline_payload['summary']['count'], 2)
                 self.assertEqual(timeline_payload['data'][0]['event_type'], 'decision_recorded')
+
+                timeline_summary_resp = client.get(f"/api/approvals/timeline-summary?item_id={approval_item['approval_id']}")
+                self.assertEqual(timeline_summary_resp.status_code, 200)
+                timeline_summary_payload = timeline_summary_resp.get_json()
+                self.assertEqual(timeline_summary_payload['data']['current']['state'], 'deferred')
+                self.assertTrue(timeline_summary_payload['data']['decision_path'])
+
+                decision_diff_resp = client.get('/api/approvals/decision-diff?limit=5')
+                self.assertEqual(decision_diff_resp.status_code, 200)
+                decision_diff_payload = decision_diff_resp.get_json()
+                self.assertGreaterEqual(decision_diff_payload['summary']['count'], 1)
+
+                with sqlite3.connect(Path(tmpdir) / 'api_approval_state.db') as conn:
+                    conn.execute("UPDATE approval_state SET created_at = datetime('now', '-180 minutes'), updated_at = datetime('now', '-180 minutes'), last_seen_at = datetime('now', '-180 minutes'), state = 'pending', decision = 'pending', workflow_state = 'pending' WHERE item_id = ?", (approval_item['approval_id'],))
+                    conn.commit()
+                stale_resp = client.get('/api/approvals/stale?stale_after_minutes=60')
+                self.assertEqual(stale_resp.status_code, 200)
+                stale_payload = stale_resp.get_json()
+                self.assertGreaterEqual(stale_payload['summary']['count'], 1)
+
+                cleanup_preview_resp = client.get('/api/approvals/cleanup?stale_after_minutes=60')
+                self.assertEqual(cleanup_preview_resp.status_code, 200)
+                cleanup_preview_payload = cleanup_preview_resp.get_json()
+                self.assertEqual(cleanup_preview_payload['data']['matched_count'], 1)
+                cleanup_resp = client.post('/api/approvals/cleanup', json={'stale_after_minutes': 60})
+                self.assertEqual(cleanup_resp.status_code, 200)
+                cleanup_payload = cleanup_resp.get_json()
+                self.assertEqual(cleanup_payload['data']['expired_count'], 1)
+
+                audit_overview_resp = client.get(f"/api/approvals/audit-overview?item_id={approval_item['approval_id']}&stale_after_minutes=60")
+                self.assertEqual(audit_overview_resp.status_code, 200)
+                audit_overview_payload = audit_overview_resp.get_json()
+                self.assertIn('stale_pending', audit_overview_payload['data'])
+                self.assertIn('decision_diff', audit_overview_payload['data'])
+                self.assertIn('timeline_summary', audit_overview_payload['data'])
 
                 with sqlite3.connect(Path(tmpdir) / 'api_approval_state.db') as conn:
                     conn.execute('DELETE FROM approval_state WHERE item_id = ?', (approval_item['approval_id'],))

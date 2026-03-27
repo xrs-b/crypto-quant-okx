@@ -52,7 +52,7 @@ from signals.validator import SignalValidator
 from bot.run import execute_exchange_smoke, reconcile_exchange_positions, load_runtime_state
 from ml.engine import MLEngine
 from core.regime import RegimeDetector, detect_regime, Regime
-from analytics import StrategyBacktester, SignalQualityAnalyzer, ParameterOptimizer, GovernanceEngine, build_workflow_approval_records, merge_persisted_approval_state
+from analytics import StrategyBacktester, SignalQualityAnalyzer, ParameterOptimizer, GovernanceEngine, build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview
 from analytics.backtest import export_calibration_payload
 from analytics.mfe_mae import MFEAnalyzer, get_mfe_mae_analysis
 from core.regime_policy import summarize_observe_only_collection
@@ -2645,6 +2645,88 @@ def get_approval_timeline_api():
     target = request.args.get('target')
     rows = db.get_approval_timeline(item_id=item_id, approval_type=approval_type, target=target, limit=limit)
     return jsonify({'success': True, 'data': rows, 'summary': {'count': len(rows), 'item_id': item_id, 'type': approval_type, 'target': target}})
+
+
+@app.route('/api/approvals/timeline-summary')
+def get_approval_timeline_summary_api():
+    """返回单个 approval item 的 timeline 概览摘要。"""
+    item_id = request.args.get('item_id')
+    if not item_id:
+        return jsonify({'success': False, 'error': 'missing item_id'}), 400
+    summary = db.get_approval_timeline_summary(item_id)
+    if not summary:
+        return jsonify({'success': False, 'error': 'approval item not found'}), 404
+    return jsonify({'success': True, 'data': summary, 'summary': {
+        'item_id': item_id,
+        'event_count': summary.get('event_count'),
+        'current_state': (summary.get('current') or {}).get('state'),
+        'stale': summary.get('stale', False),
+    }})
+
+
+@app.route('/api/approvals/decision-diff')
+def get_approval_decision_diff_api():
+    """返回最近 approval decision/state/workflow 变化。"""
+    limit = int(request.args.get('limit', 20))
+    approval_type = request.args.get('type')
+    rows = db.get_recent_approval_decision_diff(limit=limit, approval_type=approval_type)
+    return jsonify({'success': True, 'data': rows, 'summary': {
+        'count': len(rows),
+        'type': approval_type,
+    }})
+
+
+@app.route('/api/approvals/stale')
+def get_stale_approvals_api():
+    """列出 stale pending/ready approvals，方便低干预巡检。"""
+    stale_after_minutes = int(request.args.get('stale_after_minutes', 60))
+    limit = int(request.args.get('limit', 100))
+    approval_type = request.args.get('type')
+    rows = db.get_stale_approval_states(stale_after_minutes=stale_after_minutes, approval_type=approval_type, limit=limit)
+    return jsonify({'success': True, 'data': rows, 'summary': {
+        'count': len(rows),
+        'stale_after_minutes': stale_after_minutes,
+        'type': approval_type,
+    }})
+
+
+@app.route('/api/approvals/cleanup', methods=['GET', 'POST'])
+def cleanup_stale_approvals_api():
+    """预览/执行 stale approval cleanup；仅过期 stale pending，不触发真实执行。"""
+    dry_run = request.method != 'POST'
+    stale_after_minutes = int(request.args.get('stale_after_minutes') or (request.get_json(silent=True) or {}).get('stale_after_minutes') or 60)
+    limit = int(request.args.get('limit') or (request.get_json(silent=True) or {}).get('limit') or 100)
+    approval_type = request.args.get('type') or (request.get_json(silent=True) or {}).get('type')
+    result = db.cleanup_stale_approval_states(
+        stale_after_minutes=stale_after_minutes,
+        approval_type=approval_type,
+        limit=limit,
+        dry_run=dry_run,
+    )
+    return jsonify({'success': True, 'data': result, 'summary': {
+        'dry_run': dry_run,
+        'matched_count': result.get('matched_count', 0),
+        'expired_count': result.get('expired_count', 0),
+    }})
+
+
+@app.route('/api/approvals/audit-overview')
+def get_approval_audit_overview_api():
+    """聚合 stale pending、decision diff、timeline summary。"""
+    stale_after_minutes = int(request.args.get('stale_after_minutes', 60))
+    limit = int(request.args.get('limit', 20))
+    approval_type = request.args.get('type')
+    item_id = request.args.get('item_id')
+    overview = build_approval_audit_overview(
+        stale_rows=db.get_stale_approval_states(stale_after_minutes=stale_after_minutes, approval_type=approval_type, limit=limit),
+        decision_diffs=db.get_recent_approval_decision_diff(limit=limit, approval_type=approval_type),
+        timeline_summary=db.get_approval_timeline_summary(item_id) if item_id else None,
+    )
+    return jsonify({'success': True, 'data': overview, 'summary': {
+        'stale_count': overview['stale_pending']['count'],
+        'decision_diff_count': overview['decision_diff']['count'],
+        'has_timeline_summary': bool(overview.get('timeline_summary')),
+    }})
 
 
 @app.route('/api/approvals/recover', methods=['POST'])

@@ -1589,6 +1589,212 @@ class Database:
             df['details'] = df['details'].apply(lambda x: json.loads(x) if x else {})
         return df.to_dict('records')
 
+    def get_stale_approval_states(self, stale_after_minutes: int = 60, approval_type: str = None,
+                                  limit: int = 100) -> List[Dict]:
+        stale_after_minutes = max(1, int(stale_after_minutes or 60))
+        conn = self._get_connection()
+        query = """
+            SELECT *
+            FROM approval_state
+            WHERE state IN ('pending', 'ready', 'replayed')
+              AND COALESCE(last_seen_at, updated_at, created_at) <= datetime('now', ?)
+        """
+        params = [f'-{stale_after_minutes} minutes']
+        if approval_type:
+            query += " AND approval_type = ?"
+            params.append(approval_type)
+        query += " ORDER BY COALESCE(last_seen_at, updated_at, created_at) ASC, item_id ASC LIMIT ?"
+        params.append(limit)
+        df = pd.read_sql_query(query, conn, params=tuple(params))
+        conn.close()
+        if df.empty:
+            return []
+        df['details'] = df['details'].apply(lambda x: json.loads(x) if x else {})
+        rows = df.to_dict('records')
+        now = datetime.utcnow()
+        for row in rows:
+            last_seen_raw = row.get('last_seen_at') or row.get('updated_at') or row.get('created_at')
+            try:
+                last_seen_dt = datetime.fromisoformat(str(last_seen_raw).replace('Z', '+00:00')) if last_seen_raw else None
+            except Exception:
+                last_seen_dt = None
+            stale_minutes = int((now - last_seen_dt.replace(tzinfo=None)).total_seconds() // 60) if last_seen_dt else stale_after_minutes
+            row['stale'] = True
+            row['stale_after_minutes'] = stale_after_minutes
+            row['stale_minutes'] = max(stale_minutes, stale_after_minutes)
+        return rows
+
+    def cleanup_stale_approval_states(self, stale_after_minutes: int = 60, approval_type: str = None,
+                                      limit: int = 100, dry_run: bool = True,
+                                      actor: str = 'system:stale-cleanup') -> Dict[str, Any]:
+        stale_rows = self.get_stale_approval_states(stale_after_minutes=stale_after_minutes, approval_type=approval_type, limit=limit)
+        result = {
+            'dry_run': bool(dry_run),
+            'stale_after_minutes': max(1, int(stale_after_minutes or 60)),
+            'approval_type': approval_type,
+            'matched_count': len(stale_rows),
+            'expired_count': 0,
+            'items': [],
+        }
+        for row in stale_rows:
+            item = {
+                'item_id': row.get('item_id'),
+                'approval_type': row.get('approval_type'),
+                'target': row.get('target'),
+                'previous_state': row.get('state'),
+                'previous_decision': row.get('decision'),
+                'stale_minutes': row.get('stale_minutes'),
+                'last_seen_at': row.get('last_seen_at') or row.get('updated_at') or row.get('created_at'),
+                'action': 'would_expire' if dry_run else 'expired',
+            }
+            result['items'].append(item)
+        if dry_run or not stale_rows:
+            return result
+
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        for row in stale_rows:
+            details = self._safe_json_dict(row.get('details'))
+            details['stale_cleanup'] = {
+                'expired_from_state': row.get('state'),
+                'expired_from_decision': row.get('decision'),
+                'stale_minutes': row.get('stale_minutes'),
+                'stale_after_minutes': result['stale_after_minutes'],
+                'expired_at': datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S'),
+            }
+            cursor.execute(
+                """
+                UPDATE approval_state
+                SET state = 'expired',
+                    workflow_state = CASE WHEN workflow_state IN ('approved', 'rejected', 'deferred', 'expired') THEN workflow_state ELSE 'expired' END,
+                    reason = COALESCE(reason, 'stale pending approval expired by cleanup'),
+                    actor = ?,
+                    replay_source = 'stale_cleanup',
+                    details = ?,
+                    updated_at = CURRENT_TIMESTAMP,
+                    last_seen_at = CURRENT_TIMESTAMP
+                WHERE item_id = ?
+                """,
+                (actor, json.dumps(details, ensure_ascii=False), row.get('item_id'))
+            )
+            self.append_approval_event(
+                item_id=row.get('item_id'),
+                approval_type=row.get('approval_type'),
+                target=row.get('target'),
+                title=row.get('title'),
+                event_type='stale_cleanup',
+                decision=row.get('decision') or 'pending',
+                state='expired',
+                workflow_state='expired',
+                reason='stale pending approval expired by cleanup',
+                actor=actor,
+                source='stale_cleanup',
+                details=details,
+                conn=conn,
+            )
+            result['expired_count'] += 1
+        conn.commit()
+        conn.close()
+        return result
+
+    def get_recent_approval_decision_diff(self, limit: int = 20, approval_type: str = None) -> List[Dict]:
+        query_limit = max(20, int(limit or 20) * 10)
+        timeline = self.get_approval_timeline(approval_type=approval_type, limit=query_limit, ascending=True)
+        diffs = []
+        previous_by_item = {}
+        for event in timeline:
+            prev = previous_by_item.get(event.get('item_id'))
+            current = {
+                'decision': event.get('decision') or 'pending',
+                'state': event.get('state') or 'pending',
+                'workflow_state': event.get('workflow_state') or 'pending',
+                'reason': event.get('reason'),
+                'actor': event.get('actor'),
+                'event_type': event.get('event_type'),
+                'created_at': event.get('created_at'),
+            }
+            if prev:
+                changed_fields = []
+                for field in ('decision', 'state', 'workflow_state', 'reason'):
+                    if (prev.get(field) or None) != (current.get(field) or None):
+                        changed_fields.append(field)
+                if changed_fields:
+                    diffs.append({
+                        'item_id': event.get('item_id'),
+                        'approval_type': event.get('approval_type'),
+                        'target': event.get('target'),
+                        'title': event.get('title'),
+                        'event_type': event.get('event_type'),
+                        'changed_at': event.get('created_at'),
+                        'actor': event.get('actor'),
+                        'changed_fields': changed_fields,
+                        'from': prev,
+                        'to': current,
+                        'summary': f"{event.get('item_id')}: {prev.get('state')} -> {current.get('state')} ({event.get('event_type')})",
+                    })
+            previous_by_item[event.get('item_id')] = current
+        return list(reversed(diffs[-int(limit or 20):]))
+
+    def get_approval_timeline_summary(self, item_id: str) -> Optional[Dict[str, Any]]:
+        timeline = self.get_approval_timeline(item_id=item_id, limit=1000, ascending=True)
+        if not timeline:
+            return None
+        state_row = self.get_approval_state(item_id) or self.rebuild_approval_snapshot(item_id) or {}
+        first_event = timeline[0]
+        last_event = timeline[-1]
+        state_counts: Dict[str, int] = {}
+        event_counts: Dict[str, int] = {}
+        decision_path = []
+        last_decision_key = None
+        for event in timeline:
+            state_value = event.get('state') or 'pending'
+            event_type = event.get('event_type') or 'unknown'
+            state_counts[state_value] = state_counts.get(state_value, 0) + 1
+            event_counts[event_type] = event_counts.get(event_type, 0) + 1
+            decision_key = (event.get('decision') or 'pending', state_value, event.get('workflow_state') or 'pending')
+            if decision_key != last_decision_key:
+                decision_path.append({
+                    'decision': decision_key[0],
+                    'state': decision_key[1],
+                    'workflow_state': decision_key[2],
+                    'event_type': event_type,
+                    'created_at': event.get('created_at'),
+                    'actor': event.get('actor'),
+                    'reason': event.get('reason'),
+                })
+                last_decision_key = decision_key
+        stale_minutes = None
+        stale = False
+        if state_row.get('state') in {'pending', 'ready', 'replayed'}:
+            stale_rows = self.get_stale_approval_states(stale_after_minutes=60, limit=1000)
+            stale_lookup = {row.get('item_id'): row for row in stale_rows}
+            stale_row = stale_lookup.get(item_id)
+            if stale_row:
+                stale = True
+                stale_minutes = stale_row.get('stale_minutes')
+        summary_line = f"{state_row.get('approval_type') or first_event.get('approval_type')}::{state_row.get('target') or first_event.get('target') or '--'} | {state_row.get('state') or last_event.get('state')} | {len(timeline)} events"
+        if stale:
+            summary_line += f" | stale {stale_minutes}m"
+        return {
+            'item_id': item_id,
+            'approval_type': state_row.get('approval_type') or first_event.get('approval_type'),
+            'target': state_row.get('target') or first_event.get('target'),
+            'title': state_row.get('title') or first_event.get('title'),
+            'current': state_row,
+            'summary_line': summary_line,
+            'first_seen_at': first_event.get('created_at'),
+            'last_seen_at': last_event.get('created_at'),
+            'event_count': len(timeline),
+            'state_counts': state_counts,
+            'event_counts': event_counts,
+            'decision_path': decision_path,
+            'stale': stale,
+            'stale_minutes': stale_minutes,
+            'latest_reason': state_row.get('reason') or last_event.get('reason'),
+            'latest_actor': state_row.get('actor') or last_event.get('actor'),
+            'timeline_preview': timeline[-5:],
+        }
+
     def get_approval_states(self, state: str = None, approval_type: str = None, limit: int = 100) -> List[Dict]:
         conn = self._get_connection()
         query = "SELECT * FROM approval_state WHERE 1=1"

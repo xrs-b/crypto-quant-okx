@@ -1,7 +1,7 @@
 """Approval/workflow persistence helpers."""
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 
 
 TERMINAL_APPROVAL_STATES = {'approved', 'rejected', 'deferred', 'expired'}
@@ -99,3 +99,23 @@ def merge_persisted_approval_state(payload: Dict, persisted_rows: Optional[List[
     workflow_summary['deferred_count'] = sum(1 for row in workflow_items if row.get('workflow_state') == 'deferred')
     workflow_state['summary'] = workflow_summary
     return payload
+
+
+def build_approval_audit_overview(*, stale_rows: Optional[List[Dict]] = None,
+                                  decision_diffs: Optional[List[Dict]] = None,
+                                  timeline_summary: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    stale_rows = stale_rows or []
+    decision_diffs = decision_diffs or []
+    overview = {
+        'stale_pending': {
+            'count': len(stale_rows),
+            'items': stale_rows,
+        },
+        'decision_diff': {
+            'count': len(decision_diffs),
+            'items': decision_diffs,
+        },
+    }
+    if timeline_summary:
+        overview['timeline_summary'] = timeline_summary
+    return overview

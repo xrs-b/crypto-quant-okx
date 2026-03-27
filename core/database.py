@@ -200,6 +200,66 @@ class Database:
             'execution_status': execution_status or 'planned',
             'summary': f"{('recovered_monitoring' if execution_status == 'recovered' else ('retry' if execution_status == 'error' and retryable else 'manual_recovery' if execution_status == 'error' else 'rollback_candidate' if normalized_workflow == 'rollback_pending' else 'blocked_recovery' if blocked_by else 'observe'))} -> {('freeze_followup' if normalized_workflow == 'rollback_pending' else ('retry' if execution_status == 'error' and retryable else 'escalate' if execution_status == 'error' else 'review_schedule' if blocked_by else 'observe_only_followup'))}",
         }
+        retry_count = max(int(execution_timeline.get('retry_count') or 0), 0)
+        retry_delay_min = [5, 15, 30, 60][min(retry_count, 3)]
+        recovery_bucket = 'observe'
+        recovery_route = 'observe_only_followup'
+        manual_reason = None
+        if execution_status == 'recovered':
+            recovery_bucket = 'recovered_monitoring'
+        elif normalized_workflow == 'rollback_pending' or (rollback_candidate and execution_status == 'error' and not retryable):
+            recovery_bucket = 'rollback_candidate'
+            recovery_route = 'rollback_candidate_queue'
+        elif execution_status == 'error' or normalized_workflow in {'execution_failed', 'retry_pending'}:
+            if retryable and retry_count < 3:
+                recovery_bucket = 'retry_queue'
+                recovery_route = 'retry_queue'
+            elif rollback_candidate:
+                recovery_bucket = 'rollback_candidate'
+                recovery_route = 'rollback_candidate_queue'
+            else:
+                recovery_bucket = 'manual_recovery'
+                recovery_route = 'manual_recovery_queue'
+                manual_reason = 'execution_failed_without_safe_retry_or_rollback'
+        elif blocked_by:
+            if retryable:
+                recovery_bucket = 'retry_queue'
+                recovery_route = 'retry_queue'
+            elif rollback_candidate:
+                recovery_bucket = 'rollback_candidate'
+                recovery_route = 'rollback_candidate_queue'
+            else:
+                recovery_bucket = 'manual_recovery'
+                recovery_route = 'manual_recovery_queue'
+                manual_reason = 'blocked_item_requires_operator_resolution'
+        recovery_orchestration = {
+            'schema_version': 'm5_recovery_orchestration_v1',
+            'item_id': item_id,
+            'queue_bucket': recovery_bucket,
+            'target_route': recovery_route,
+            'retry_stage': ('initial_retry' if retry_count == 0 else ('backoff_retry' if retry_count < 3 else 'final_retry_window')) if recovery_bucket == 'retry_queue' else None,
+            'retry_schedule': {
+                'attempt_count': execution_timeline.get('attempt_count') or 1,
+                'retry_count': retry_count,
+                'delay_minutes': retry_delay_min if recovery_bucket == 'retry_queue' else None,
+            },
+            'rollback_candidate': recovery_bucket == 'rollback_candidate' or rollback_candidate,
+            'rollback_route': 'rollback_candidate_queue' if (recovery_bucket == 'rollback_candidate' or rollback_candidate) else None,
+            'rollback_hint': rollback_hint,
+            'manual_recovery': {
+                'required': recovery_bucket == 'manual_recovery',
+                'route': 'manual_recovery_queue' if recovery_bucket == 'manual_recovery' else None,
+                'reason': manual_reason,
+                'fallback_action': 'operator_review_and_safe_requeue' if recovery_bucket == 'manual_recovery' else None,
+            },
+            'dispatch_route': dispatch_route,
+            'next_transition': next_transition,
+            'workflow_state': normalized_workflow,
+            'execution_status': execution_status or 'planned',
+            'blocked_by': blocked_by,
+            'policy': recovery_policy.get('policy'),
+            'summary': f"{recovery_bucket} via {recovery_route}",
+        }
         payload['state_machine'] = {
             'schema_version': 'm5_unified_state_machine_v2',
             'item_id': item_id,
@@ -222,6 +282,7 @@ class Database:
             'rollback_hint': rollback_hint,
             'execution_timeline': execution_timeline,
             'recovery_policy': recovery_policy,
+            'recovery_orchestration': recovery_orchestration,
             'operator_action_policy': {
                 'schema_version': 'm5_operator_action_policy_v1',
                 'item_id': item_id,

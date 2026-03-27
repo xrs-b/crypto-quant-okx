@@ -387,6 +387,129 @@ def _build_recovery_policy(*, item_id: Optional[str] = None, workflow_state: Opt
     }
 
 
+def _build_recovery_orchestration(*, item_id: Optional[str] = None, workflow_state: Optional[str] = None,
+                                  execution_status: Optional[str] = None, retryable: Optional[bool] = None,
+                                  rollback_candidate: Optional[bool] = None, rollback_hint: Optional[str] = None,
+                                  blocked_by: Optional[List[str]] = None, dispatch_route: Optional[str] = None,
+                                  next_transition: Optional[str] = None, execution_timeline: Optional[Dict[str, Any]] = None,
+                                  recovery_policy: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    normalized_workflow = str(workflow_state or 'pending').strip().lower() or 'pending'
+    normalized_execution = str(execution_status or 'planned').strip().lower() or 'planned'
+    blockers = _dedupe_strings(blocked_by or [])
+    retry_flag = bool(retryable)
+    rollback_flag = bool(rollback_candidate or rollback_hint)
+    explicit_rollback = bool(rollback_hint)
+    timeline = dict(execution_timeline or {}) if isinstance(execution_timeline, dict) else {}
+    policy = dict(recovery_policy or {}) if isinstance(recovery_policy, dict) else {}
+    retry_count = max(int(timeline.get('retry_count') or 0), 0)
+    attempt_count = max(int(timeline.get('attempt_count') or 1), 1)
+
+    base_delay_minutes = [5, 15, 30, 60]
+    retry_delay_min = base_delay_minutes[min(retry_count, len(base_delay_minutes) - 1)]
+    retry_stage = 'initial_retry' if retry_count == 0 else ('backoff_retry' if retry_count < 3 else 'final_retry_window')
+    queue_bucket = 'observe'
+    target_route = 'observe_only_followup'
+    manual_reason = None
+    routing_reason = []
+
+    high_risk_blockers = {
+        'critical_risk',
+        'freeze_apply_not_automated_in_executor',
+        'policy_switch_not_automated_in_executor',
+        'rollout_freeze_not_automated_in_executor',
+        'live_rollout_parameter_change_not_supported',
+    }
+
+    if normalized_execution == 'recovered':
+        queue_bucket = 'recovered_monitoring'
+        target_route = 'observe_only_followup'
+        routing_reason.append('recovered_execution_watch_window')
+    elif normalized_workflow == 'rollback_pending' or (explicit_rollback and normalized_execution in {'error', 'recovered'} and not retry_flag):
+        queue_bucket = 'rollback_candidate'
+        target_route = 'rollback_candidate_queue'
+        routing_reason.append('rollback_path_preferred')
+    elif normalized_execution == 'error' or normalized_workflow in {'execution_failed', 'retry_pending'}:
+        if any(blocker in high_risk_blockers for blocker in blockers):
+            queue_bucket = 'manual_recovery'
+            target_route = 'manual_recovery_queue'
+            manual_reason = 'high_risk_execution_failure_requires_operator_resolution'
+            routing_reason.append('manual_recovery_required')
+        elif retry_flag:
+            queue_bucket = 'retry_queue'
+            target_route = 'retry_queue'
+            routing_reason.append('retryable_execution_failure')
+        elif rollback_flag:
+            queue_bucket = 'rollback_candidate'
+            target_route = 'rollback_candidate_queue'
+            routing_reason.append('retry_exhausted_or_not_safe')
+        else:
+            queue_bucket = 'manual_recovery'
+            target_route = 'manual_recovery_queue'
+            manual_reason = 'execution_failed_without_safe_retry_or_rollback'
+            routing_reason.append('manual_recovery_required')
+    elif blockers:
+        if any(blocker in high_risk_blockers for blocker in blockers):
+            queue_bucket = 'manual_recovery'
+            target_route = 'manual_recovery_queue'
+            manual_reason = 'high_risk_blocker_requires_operator_resolution'
+            routing_reason.append('manual_blocker_resolution')
+        elif retry_flag:
+            queue_bucket = 'retry_queue'
+            target_route = 'retry_queue'
+            routing_reason.append('blockers_clear_then_retry')
+        elif rollback_flag:
+            queue_bucket = 'rollback_candidate'
+            target_route = 'rollback_candidate_queue'
+            routing_reason.append('blocked_item_has_rollback_path')
+        else:
+            queue_bucket = 'manual_recovery'
+            target_route = 'manual_recovery_queue'
+            manual_reason = 'blocked_item_requires_operator_resolution'
+            routing_reason.append('manual_blocker_resolution')
+
+    if queue_bucket == 'retry_queue' and retry_count >= 3:
+        queue_bucket = 'manual_recovery'
+        target_route = 'manual_recovery_queue'
+        manual_reason = 'retry_budget_exhausted'
+        routing_reason.append('retry_budget_exhausted')
+
+    should_retry_at = None
+    if queue_bucket == 'retry_queue':
+        should_retry_at = (datetime.now(timezone.utc) + timedelta(minutes=retry_delay_min)).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
+
+    return {
+        'schema_version': 'm5_recovery_orchestration_v1',
+        'item_id': item_id,
+        'queue_bucket': queue_bucket,
+        'target_route': target_route,
+        'routing_reason_codes': routing_reason or ['observe_only'],
+        'retry_stage': retry_stage if queue_bucket == 'retry_queue' else None,
+        'retry_schedule': {
+            'attempt_count': attempt_count,
+            'retry_count': retry_count,
+            'delay_minutes': retry_delay_min if queue_bucket == 'retry_queue' else None,
+            'should_retry_at': should_retry_at,
+            'retry_window': 'blocked_clear' if blockers else 'time_backoff',
+        },
+        'rollback_candidate': queue_bucket == 'rollback_candidate' or rollback_flag,
+        'rollback_route': 'rollback_candidate_queue' if (queue_bucket == 'rollback_candidate' or rollback_flag) else None,
+        'rollback_hint': rollback_hint,
+        'manual_recovery': {
+            'required': queue_bucket == 'manual_recovery',
+            'route': 'manual_recovery_queue' if queue_bucket == 'manual_recovery' else None,
+            'reason': manual_reason,
+            'fallback_action': 'operator_review_and_safe_requeue' if queue_bucket == 'manual_recovery' else None,
+        },
+        'dispatch_route': dispatch_route,
+        'next_transition': next_transition,
+        'workflow_state': normalized_workflow,
+        'execution_status': normalized_execution,
+        'blocked_by': blockers,
+        'policy': policy.get('policy') if policy else None,
+        'summary': f"{queue_bucket} via {target_route}",
+    }
+
+
 def _normalize_action_execution_status(value: Optional[str], *, workflow_state: Optional[str] = None, queue_status: Optional[str] = None, executor_status: Optional[str] = None) -> Optional[str]:
     normalized = str(value or '').strip().lower()
     if normalized in ACTION_EXECUTION_ALLOWED_STATUSES:
@@ -625,6 +748,19 @@ def _build_state_machine_semantics(*, item_id: Optional[str] = None, approval_st
         last_transition=last_transition,
         recovered_from_execution_status=recovered_from_execution_status,
     )
+    recovery_orchestration = _build_recovery_orchestration(
+        item_id=item_id,
+        workflow_state=normalized_workflow,
+        execution_status=normalized_execution,
+        retryable=retry_flag,
+        rollback_candidate=rollback_flag,
+        rollback_hint=rollback_hint,
+        blocked_by=blocked,
+        dispatch_route=dispatch_route,
+        next_transition=next_transition,
+        execution_timeline=execution_timeline,
+        recovery_policy=recovery_policy,
+    )
     return {
         'schema_version': 'm5_unified_state_machine_v2',
         'item_id': item_id,
@@ -651,6 +787,7 @@ def _build_state_machine_semantics(*, item_id: Optional[str] = None, approval_st
         'operator_action_policy': operator_action_policy,
         'execution_timeline': execution_timeline,
         'recovery_policy': recovery_policy,
+        'recovery_orchestration': recovery_orchestration,
     }
 
 
@@ -1176,6 +1313,10 @@ def merge_persisted_approval_state(payload: Dict, persisted_rows: Optional[List[
         'recovery_policy_counts': {
             key: sum(1 for row in workflow_items if (((row.get('state_machine') or {}).get('recovery_policy') or {}).get('policy') or 'observe') == key)
             for key in sorted({(((row.get('state_machine') or {}).get('recovery_policy') or {}).get('policy') or 'observe') for row in workflow_items})
+        },
+        'recovery_queue_counts': {
+            key: sum(1 for row in workflow_items if (((row.get('state_machine') or {}).get('recovery_orchestration') or {}).get('queue_bucket') or 'observe') == key)
+            for key in sorted({(((row.get('state_machine') or {}).get('recovery_orchestration') or {}).get('queue_bucket') or 'observe') for row in workflow_items})
         },
         'execution_status_counts': {
             key: sum(1 for row in workflow_items if (((row.get('state_machine') or {}).get('execution_timeline') or {}).get('latest_status') or 'unknown') == key)
@@ -2588,6 +2729,7 @@ def build_workflow_consumer_view(payload: Optional[Dict] = None) -> Dict[str, An
     controlled_rollout = payload.get('controlled_rollout_execution') or {}
     auto_approval = payload.get('auto_approval_execution') or {}
     stage_progression = build_rollout_stage_progression(payload, rollout_executor)
+    recovery_view = payload.get('workflow_recovery_view') or build_workflow_recovery_view(payload)
     approval_items = approval_state.get('items') or []
     workflow_items = workflow_state.get('item_states') or []
     view = {
@@ -2600,6 +2742,7 @@ def build_workflow_consumer_view(payload: Optional[Dict] = None) -> Dict[str, An
             'queue_count': sum(len(v or []) for v in queues.values() if isinstance(v, list)),
             'rollout_executor_status': rollout_executor.get('status') or 'disabled',
             'rollout_stage_progression': stage_progression.get('summary') or {},
+            'recovery_queue_summary': recovery_view.get('summary') or {},
             'controlled_rollout_executed_count': controlled_rollout.get('executed_count', 0),
             'auto_approval_executed_count': auto_approval.get('executed_count', 0),
         },
@@ -2608,10 +2751,75 @@ def build_workflow_consumer_view(payload: Optional[Dict] = None) -> Dict[str, An
         'queues': queues,
         'rollout_executor': rollout_executor,
         'rollout_stage_progression': stage_progression,
+        'workflow_recovery_view': recovery_view,
         'controlled_rollout_execution': controlled_rollout,
         'auto_approval_execution': auto_approval,
     }
     payload['consumer_view'] = view
+    return view
+
+
+def build_workflow_recovery_view(payload: Optional[Dict] = None, *, max_items: int = 50) -> Dict[str, Any]:
+    payload = payload or {}
+    workflow_items = ((payload.get('workflow_state') or {}).get('item_states') or [])
+    approval_items = ((payload.get('approval_state') or {}).get('items') or [])
+    approval_by_playbook = {row.get('playbook_id'): row for row in approval_items if row.get('playbook_id')}
+
+    retry_queue = []
+    rollback_candidates = []
+    manual_recovery = []
+
+    for workflow_item in workflow_items:
+        item_id = workflow_item.get('item_id')
+        approval_item = approval_by_playbook.get(item_id) or {}
+        state_machine = workflow_item.get('state_machine') or approval_item.get('state_machine') or {}
+        orchestration = (state_machine.get('recovery_orchestration') or {}) if isinstance(state_machine, dict) else {}
+        bucket = orchestration.get('queue_bucket') or 'observe'
+        row = {
+            'item_id': item_id,
+            'approval_id': approval_item.get('approval_id'),
+            'title': workflow_item.get('title') or approval_item.get('title') or item_id,
+            'action_type': workflow_item.get('action_type') or approval_item.get('action_type'),
+            'workflow_state': workflow_item.get('workflow_state') or approval_item.get('workflow_state') or 'pending',
+            'approval_state': approval_item.get('approval_state') or 'not_required',
+            'risk_level': workflow_item.get('risk_level') or approval_item.get('risk_level') or 'unknown',
+            'blocked_by': list(dict.fromkeys((workflow_item.get('blocking_reasons') or []) + (approval_item.get('blocked_by') or []))),
+            'execution_timeline': state_machine.get('execution_timeline') or {},
+            'recovery_policy': state_machine.get('recovery_policy') or {},
+            'recovery_orchestration': orchestration,
+        }
+        if bucket == 'retry_queue':
+            retry_queue.append(row)
+        elif bucket == 'rollback_candidate':
+            rollback_candidates.append(row)
+        elif bucket == 'manual_recovery':
+            manual_recovery.append(row)
+
+    retry_queue = sorted(retry_queue, key=lambda row: (str(((row.get('recovery_orchestration') or {}).get('retry_schedule') or {}).get('should_retry_at') or ''), str(row.get('title') or row.get('item_id') or '')))
+    rollback_candidates = sorted(rollback_candidates, key=lambda row: (str(row.get('risk_level') or 'unknown'), str(row.get('title') or row.get('item_id') or '')))
+    manual_recovery = sorted(manual_recovery, key=lambda row: (str(row.get('risk_level') or 'unknown'), str(row.get('title') or row.get('item_id') or '')))
+
+    next_retry_at = next(
+        ((((row.get('recovery_orchestration') or {}).get('retry_schedule') or {}).get('should_retry_at'))
+         for row in retry_queue
+         if (((row.get('recovery_orchestration') or {}).get('retry_schedule') or {}).get('should_retry_at'))),
+        None,
+    )
+    view = {
+        'schema_version': 'm5_workflow_recovery_view_v1',
+        'summary': {
+            'retry_queue_count': len(retry_queue),
+            'rollback_candidate_count': len(rollback_candidates),
+            'manual_recovery_count': len(manual_recovery),
+            'next_retry_at': next_retry_at,
+        },
+        'queues': {
+            'retry_queue': retry_queue[:max_items],
+            'rollback_candidates': rollback_candidates[:max_items],
+            'manual_recovery': manual_recovery[:max_items],
+        },
+    }
+    payload['workflow_recovery_view'] = view
     return view
 
 

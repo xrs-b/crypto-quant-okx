@@ -5753,7 +5753,7 @@ class TestExecutionObservability(unittest.TestCase):
             self.assertIn('recent_decisions', snapshot['summary'])
             self.assertTrue(snapshot['summary']['observe_only_banner'])
 
-from analytics.helper import build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, attach_auto_approval_policy, execute_controlled_rollout_layer, execute_controlled_auto_approval_layer, execute_rollout_executor, build_workflow_attention_view, build_workflow_operator_digest, build_dashboard_summary_cards, build_workbench_governance_view, build_workbench_governance_detail_view, build_workbench_merged_timeline, build_workbench_timeline_summary_aggregation, _build_state_machine_semantics
+from analytics.helper import build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, attach_auto_approval_policy, execute_controlled_rollout_layer, execute_controlled_auto_approval_layer, execute_rollout_executor, build_workflow_recovery_view, build_workflow_attention_view, build_workflow_operator_digest, build_dashboard_summary_cards, build_workbench_governance_view, build_workbench_governance_detail_view, build_workbench_merged_timeline, build_workbench_timeline_summary_aggregation, _build_state_machine_semantics
 
 
 class TestApprovalPersistence(unittest.TestCase):
@@ -6401,6 +6401,35 @@ class TestApprovalPersistence(unittest.TestCase):
         self.assertEqual(semantics['recovery_policy']['policy'], 'recovered_monitoring')
         self.assertTrue(semantics['recovery_policy']['rollback_candidate'])
         self.assertEqual(semantics['recovery_policy']['recommended_action'], 'observe_only_followup')
+        self.assertEqual(semantics['recovery_orchestration']['queue_bucket'], 'recovered_monitoring')
+
+    def test_workflow_recovery_view_routes_retry_rollback_and_manual_items(self):
+        payload = {
+            'workflow_state': {
+                'item_states': [
+                    {'item_id': 'playbook::retry', 'title': 'Retry item', 'workflow_state': 'execution_failed', 'action_type': 'joint_observe', 'state_machine': _build_state_machine_semantics(item_id='approval::retry', approval_state='pending', workflow_state='execution_failed', execution_status='error', retryable=True, blocked_by=[], rollback_hint='restore_previous_state_from_approval_timeline', dispatch_route='retry_queue', next_transition='retry_execution')},
+                    {'item_id': 'playbook::rollback', 'title': 'Rollback item', 'workflow_state': 'rollback_pending', 'action_type': 'joint_stage_prepare', 'state_machine': _build_state_machine_semantics(item_id='approval::rollback', approval_state='pending', workflow_state='rollback_pending', execution_status='error', retryable=False, rollback_hint='revert_stage_metadata_to_previous_stage', dispatch_route='rollback_candidate_queue', next_transition='freeze_and_review')},
+                    {'item_id': 'playbook::manual', 'title': 'Manual item', 'workflow_state': 'execution_failed', 'action_type': 'joint_expand_guarded', 'state_machine': _build_state_machine_semantics(item_id='approval::manual', approval_state='pending', workflow_state='execution_failed', execution_status='error', retryable=False, blocked_by=['critical_risk'])},
+                ],
+                'summary': {},
+            },
+            'approval_state': {
+                'items': [
+                    {'approval_id': 'approval::retry', 'playbook_id': 'playbook::retry', 'approval_state': 'pending'},
+                    {'approval_id': 'approval::rollback', 'playbook_id': 'playbook::rollback', 'approval_state': 'pending'},
+                    {'approval_id': 'approval::manual', 'playbook_id': 'playbook::manual', 'approval_state': 'pending'},
+                ],
+                'summary': {},
+            },
+        }
+        recovery = build_workflow_recovery_view(payload)
+        self.assertEqual(recovery['schema_version'], 'm5_workflow_recovery_view_v1')
+        self.assertEqual(recovery['summary']['retry_queue_count'], 1)
+        self.assertEqual(recovery['summary']['rollback_candidate_count'], 1)
+        self.assertEqual(recovery['summary']['manual_recovery_count'], 1)
+        self.assertEqual(recovery['queues']['retry_queue'][0]['item_id'], 'playbook::retry')
+        self.assertEqual(recovery['queues']['rollback_candidates'][0]['item_id'], 'playbook::rollback')
+        self.assertEqual(recovery['queues']['manual_recovery'][0]['item_id'], 'playbook::manual')
 
     def test_attach_auto_approval_policy_marks_low_risk_items_auto_approvable(self):
         payload = attach_auto_approval_policy({
@@ -6766,6 +6795,45 @@ class TestApprovalPersistence(unittest.TestCase):
             finally:
                 app.config['db_instance'] = old_db
                 dashboard_api_module.db = old_module_db
+
+    def test_workflow_recovery_view_api_exposes_retry_and_manual_buckets(self):
+        sample_payload = {
+            'summary': {},
+            'workflow_state': {
+                'item_states': [
+                    {'item_id': 'playbook::retry', 'title': 'Retry item', 'workflow_state': 'execution_failed', 'action_type': 'joint_observe', 'state_machine': _build_state_machine_semantics(item_id='approval::retry', approval_state='pending', workflow_state='execution_failed', execution_status='error', retryable=True, rollback_hint='restore_previous_state_from_approval_timeline', dispatch_route='retry_queue', next_transition='retry_execution')},
+                    {'item_id': 'playbook::manual', 'title': 'Manual item', 'workflow_state': 'execution_failed', 'action_type': 'joint_expand_guarded', 'state_machine': _build_state_machine_semantics(item_id='approval::manual', approval_state='pending', workflow_state='execution_failed', execution_status='error', retryable=False, blocked_by=['critical_risk'])},
+                ],
+                'summary': {},
+            },
+            'approval_state': {
+                'items': [
+                    {'approval_id': 'approval::retry', 'playbook_id': 'playbook::retry', 'approval_state': 'pending'},
+                    {'approval_id': 'approval::manual', 'playbook_id': 'playbook::manual', 'approval_state': 'pending'},
+                ],
+                'summary': {},
+            },
+        }
+        import dashboard.api as dashboard_api_module
+        old_export = dashboard_api_module.export_calibration_payload
+        old_run_all = dashboard_api_module.backtester.run_all
+        old_persist = dashboard_api_module._persist_workflow_approval_payload
+        dashboard_api_module.export_calibration_payload = lambda report, view='workflow_ready': sample_payload
+        dashboard_api_module.backtester.run_all = lambda symbols: {'calibration_report': {}}
+        dashboard_api_module._persist_workflow_approval_payload = lambda payload, replay_source='workflow_recovery_view_api': payload
+        try:
+            with app.test_client() as client:
+                response = client.get('/api/backtest/workflow-recovery-view')
+                self.assertEqual(response.status_code, 200)
+                payload = response.get_json()
+                self.assertEqual(payload['view'], 'workflow_recovery_view')
+                self.assertEqual(payload['data']['schema_version'], 'm5_workflow_recovery_view_v1')
+                self.assertEqual(payload['summary']['retry_queue_count'], 1)
+                self.assertEqual(payload['summary']['manual_recovery_count'], 1)
+        finally:
+            dashboard_api_module.export_calibration_payload = old_export
+            dashboard_api_module.backtester.run_all = old_run_all
+            dashboard_api_module._persist_workflow_approval_payload = old_persist
 
     def test_rollout_executor_skeleton_dry_run_plans_without_persisting(self):
         class StubConfig:

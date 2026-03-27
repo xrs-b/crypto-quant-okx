@@ -1322,6 +1322,92 @@ def _build_rollout_queue_plan(action_type: str, row: Dict[str, Any], workflow_it
     }
 
 
+def _consume_rollout_queue_plan(*, db: Any, row: Dict[str, Any], workflow_item: Dict[str, Any], approval_id: str,
+                                action_type: str, current_state: str, current_workflow_state: str,
+                                queue_plan: Dict[str, Any], transition_rule: Dict[str, Any],
+                                execution_settings: Dict[str, Any], replay_source: str,
+                                handler: Dict[str, Any], handler_key: str, dispatch_mode: str,
+                                executor_class: str, audit_code: str, idempotency_key: str) -> Dict[str, Any]:
+    queue_status = str(((queue_plan or {}).get('queue_progression') or {}).get('status') or 'ready_to_queue').strip().lower() or 'ready_to_queue'
+    persisted_state = current_state
+    persisted_workflow_state = current_workflow_state
+    event_type = 'rollout_executor_queue_consumed'
+    result_action = 'queued'
+
+    if queue_status == 'ready_to_queue':
+        persisted_workflow_state = 'queued'
+        event_type = 'rollout_executor_queue_promoted'
+        result_action = 'queued'
+    elif queue_status == 'blocked_by_approval':
+        persisted_workflow_state = 'blocked_by_approval'
+        event_type = 'rollout_executor_queue_blocked'
+        result_action = 'blocked_by_approval'
+    elif queue_status == 'deferred':
+        persisted_state = 'deferred'
+        persisted_workflow_state = 'deferred'
+        event_type = 'rollout_executor_queue_deferred'
+        result_action = 'deferred'
+
+    reason = ((queue_plan or {}).get('queue_transition') or {}).get('transition_reason') or ((queue_plan or {}).get('approval_hook') or {}).get('gate_reason') or (queue_plan or {}).get('blocked_reason') or 'queue_plan_consumed'
+    details = {
+        'queue_result_action': result_action,
+        'item_id': approval_id,
+        'approval_id': approval_id,
+        'playbook_id': row.get('playbook_id'),
+        'title': row.get('title') or workflow_item.get('title'),
+        'action_type': action_type,
+        'state': persisted_state,
+        'workflow_state': persisted_workflow_state,
+        'reason': reason,
+        'actor': execution_settings['actor'],
+        'source': execution_settings['source'],
+        'replay_source': replay_source,
+        'execution_layer': 'rollout_queue_executor',
+        'execution_mode': execution_settings['mode'],
+        'dispatch_mode': dispatch_mode,
+        'executor_class': executor_class,
+        'handler_key': handler_key,
+        'audit_code': audit_code,
+        'queue_plan_consumed': True,
+        'queue_plan': queue_plan,
+        'approval_hook': (queue_plan or {}).get('approval_hook') or {},
+        'queue_transition': (queue_plan or {}).get('queue_transition') or {},
+        'queue_progression': (queue_plan or {}).get('queue_progression') or {},
+        'transition_rule': transition_rule.get('transition_rule'),
+        'dispatch_route': transition_rule.get('dispatch_route'),
+        'next_transition': transition_rule.get('next_transition'),
+        'retryable': bool(transition_rule.get('retryable', True)),
+        'rollback_hint': transition_rule.get('rollback_hint'),
+        'queue_name': queue_plan.get('queue_name'),
+        'queue_priority': queue_plan.get('queue_priority'),
+        'safe_handler_route': handler.get('route'),
+        'safe_handler_disposition': handler.get('disposition'),
+        'safe_handler_stage_family': handler.get('stage_family'),
+        'idempotency_key': idempotency_key,
+        'real_trade_execution': False,
+        'dangerous_live_parameter_change': False,
+        'serialization_ready': True,
+    }
+    db.upsert_approval_state(
+        item_id=approval_id,
+        approval_type=row.get('action_type') or workflow_item.get('action_type') or 'workflow_approval',
+        target=row.get('playbook_id'),
+        title=row.get('title') or workflow_item.get('title'),
+        decision=row.get('persisted_decision') or row.get('approval_state') or current_state or 'pending',
+        state=persisted_state,
+        workflow_state=persisted_workflow_state,
+        reason=reason,
+        actor=execution_settings['actor'],
+        replay_source=replay_source,
+        details=details,
+        preserve_terminal=True,
+        event_type=event_type,
+        append_event=True,
+    )
+    persisted_row = db.get_approval_state(approval_id)
+    return persisted_row or {}
+
+
 def execute_rollout_executor(payload: Dict, db: Any, *, config: Any = None, settings: Optional[Dict[str, Any]] = None,
                              replay_source: str = 'workflow_ready') -> Dict:
     payload = payload or {}
@@ -1520,30 +1606,69 @@ def execute_rollout_executor(payload: Dict, db: Any, *, config: Any = None, sett
             queue_plan = _build_rollout_queue_plan(action_type, row, workflow_item, spec, approval_hook=approval_hook, transition_rule=transition_rule)
             result_row['plan']['queue_plan'] = queue_plan
             queue_status = queue_plan['queue_progression']['status']
+            dispatch_code = 'QUEUE_ONLY'
+            dispatch_reason = spec.get('blocked_reason') or 'queue_only_action'
+            apply_status = 'queued'
+            disposition = 'queued'
+            item_status = 'queued'
+            queue_consumed_row = None
             if queue_status == 'ready_to_queue':
-                result_row['dispatch'] = _build_rollout_dispatch_envelope(mode=dispatch_mode, executor_class=executor_class, handler_key=handler_key, allowed=True, status='queued', reason='queue_only', code='QUEUE_ONLY', queue_name=queue_plan['queue_name'], dispatch_route=transition_rule.get('dispatch_route'), transition_rule=transition_rule.get('transition_rule'), next_transition=transition_rule.get('next_transition'), retryable=bool(transition_rule.get('retryable', True)), rollback_hint=transition_rule.get('rollback_hint'))
-                result_row['apply'] = _build_rollout_apply_envelope(status='queued', operation='queue_plan_only', idempotency_key=idempotency_key)
-                result_row['result'] = _build_rollout_result_envelope(disposition='queued', status='queued', reason=spec.get('blocked_reason') or 'queue_only_action', code='QUEUE_ONLY', transition_rule=transition_rule.get('transition_rule'), dispatch_route=transition_rule.get('dispatch_route'), next_transition=transition_rule.get('next_transition'), retryable=bool(transition_rule.get('retryable', True)), rollback_hint=transition_rule.get('rollback_hint'))
-                result_row['status'] = 'queued'
                 result['summary']['queued_count'] += 1
-                result['items'].append(result_row)
-                bump('queued', 'queued')
             elif queue_status == 'blocked_by_approval':
-                result_row['dispatch'] = _build_rollout_dispatch_envelope(mode=dispatch_mode, executor_class=executor_class, handler_key=handler_key, allowed=True, status='blocked_by_approval', reason=approval_hook.get('gate_reason') or 'approval_gated_dispatch', code='APPROVAL_GATED_QUEUE', queue_name=queue_plan['queue_name'], dispatch_route=transition_rule.get('dispatch_route'), transition_rule=transition_rule.get('transition_rule'), next_transition=transition_rule.get('next_transition'), retryable=bool(transition_rule.get('retryable', True)), rollback_hint=transition_rule.get('rollback_hint'))
-                result_row['apply'] = _build_rollout_apply_envelope(status='approval_gated', operation='queue_plan_only', idempotency_key=idempotency_key)
-                result_row['result'] = _build_rollout_result_envelope(disposition='blocked_by_approval', status='blocked_by_approval', reason=approval_hook.get('gate_reason') or 'approval_gated_dispatch', code='APPROVAL_GATED_QUEUE', transition_rule=transition_rule.get('transition_rule'), dispatch_route=transition_rule.get('dispatch_route'), next_transition=transition_rule.get('next_transition'), retryable=bool(transition_rule.get('retryable', True)), rollback_hint=transition_rule.get('rollback_hint'))
-                result_row['status'] = 'blocked_by_approval'
+                dispatch_code = 'APPROVAL_GATED_QUEUE'
+                dispatch_reason = approval_hook.get('gate_reason') or 'approval_gated_dispatch'
+                apply_status = 'approval_gated'
+                disposition = 'blocked_by_approval'
+                item_status = 'blocked_by_approval'
                 result['summary']['skipped_count'] += 1
-                result['items'].append(result_row)
-                bump('blocked_by_approval', 'blocked_by_approval')
             else:
-                result_row['dispatch'] = _build_rollout_dispatch_envelope(mode=dispatch_mode, executor_class=executor_class, handler_key=handler_key, allowed=True, status='deferred', reason=approval_hook.get('gate_reason') or 'queue_deferred', code='QUEUE_DEFERRED', queue_name=queue_plan['queue_name'], dispatch_route=transition_rule.get('dispatch_route'), transition_rule=transition_rule.get('transition_rule'), next_transition=transition_rule.get('next_transition'), retryable=bool(transition_rule.get('retryable', True)), rollback_hint=transition_rule.get('rollback_hint'))
-                result_row['apply'] = _build_rollout_apply_envelope(status='deferred', operation='queue_plan_only', idempotency_key=idempotency_key)
-                result_row['result'] = _build_rollout_result_envelope(disposition='deferred', status='deferred', reason=approval_hook.get('gate_reason') or 'queue_deferred', code='QUEUE_DEFERRED', transition_rule=transition_rule.get('transition_rule'), dispatch_route=transition_rule.get('dispatch_route'), next_transition=transition_rule.get('next_transition'), retryable=bool(transition_rule.get('retryable', True)), rollback_hint=transition_rule.get('rollback_hint'))
-                result_row['status'] = 'deferred'
+                dispatch_code = 'QUEUE_DEFERRED'
+                dispatch_reason = approval_hook.get('gate_reason') or 'queue_deferred'
+                apply_status = 'deferred'
+                disposition = 'deferred'
+                item_status = 'deferred'
                 result['summary']['skipped_count'] += 1
-                result['items'].append(result_row)
-                bump('deferred', 'deferred')
+            result_row['dispatch'] = _build_rollout_dispatch_envelope(mode=dispatch_mode, executor_class=executor_class, handler_key=handler_key, allowed=True, status=item_status, reason=dispatch_reason, code=dispatch_code, queue_name=queue_plan['queue_name'], dispatch_route=transition_rule.get('dispatch_route'), transition_rule=transition_rule.get('transition_rule'), next_transition=transition_rule.get('next_transition'), retryable=bool(transition_rule.get('retryable', True)), rollback_hint=transition_rule.get('rollback_hint'))
+            if result['dry_run']:
+                result_row['apply'] = _build_rollout_apply_envelope(attempted=True, persisted=False, status='dry_run', operation='queue_plan_consume', idempotency_key=idempotency_key)
+                result_row['result'] = _build_rollout_result_envelope(disposition='dry_run' if queue_status == 'ready_to_queue' else disposition, status='dry_run', reason=dispatch_reason, code='DRY_RUN_ONLY', state=current_state, workflow_state=current_workflow_state, transition_rule=transition_rule.get('transition_rule'), dispatch_route=transition_rule.get('dispatch_route'), next_transition=transition_rule.get('next_transition'), retryable=bool(transition_rule.get('retryable', True)), rollback_hint=transition_rule.get('rollback_hint'))
+                result_row['status'] = 'dry_run'
+                result['summary']['dry_run_count'] += 1
+                bump('dry_run', 'dry_run')
+            else:
+                try:
+                    queue_consumed_row = _consume_rollout_queue_plan(
+                        db=db,
+                        row=row,
+                        workflow_item=workflow_item,
+                        approval_id=approval_id,
+                        action_type=action_type,
+                        current_state=current_state,
+                        current_workflow_state=current_workflow_state,
+                        queue_plan=queue_plan,
+                        transition_rule=transition_rule,
+                        execution_settings=execution_settings,
+                        replay_source=replay_source,
+                        handler=handler,
+                        handler_key=handler_key,
+                        dispatch_mode=dispatch_mode,
+                        executor_class=executor_class,
+                        audit_code=(spec or {}).get('audit_code') or 'QUEUE_ONLY',
+                        idempotency_key=idempotency_key,
+                    )
+                    if queue_consumed_row:
+                        executed_rows.append(queue_consumed_row)
+                    result_row['apply'] = _build_rollout_apply_envelope(attempted=True, persisted=True, status=apply_status, operation='queue_plan_consume', idempotency_key=idempotency_key, effect_applied=True)
+                    result_row['result'] = _build_rollout_result_envelope(disposition=disposition, status=item_status, reason=dispatch_reason, code=dispatch_code, state=(queue_consumed_row or {}).get('state'), workflow_state=(queue_consumed_row or {}).get('workflow_state'), transition_rule=transition_rule.get('transition_rule'), dispatch_route=transition_rule.get('dispatch_route'), next_transition=transition_rule.get('next_transition'), retryable=bool(transition_rule.get('retryable', True)), rollback_hint=transition_rule.get('rollback_hint'))
+                    result_row['status'] = item_status
+                    bump(disposition, item_status)
+                except Exception as exc:
+                    result_row['apply'] = _build_rollout_apply_envelope(attempted=True, persisted=False, status='error', operation='queue_plan_consume', idempotency_key=idempotency_key)
+                    result_row['result'] = _build_rollout_result_envelope(disposition='error', status='error', reason=str(exc), code='QUEUE_CONSUME_EXCEPTION', transition_rule=transition_rule.get('transition_rule'), dispatch_route=transition_rule.get('dispatch_route'), next_transition=transition_rule.get('next_transition'), retryable=bool(transition_rule.get('retryable', True)), rollback_hint=transition_rule.get('rollback_hint'))
+                    result_row['status'] = 'error'
+                    result['summary']['error_count'] += 1
+                    bump('error', 'error')
+            result['items'].append(result_row)
             continue
         elif approval_required:
             skip_reason, skip_code = 'approval_required', 'APPROVAL_REQUIRED'
@@ -1663,7 +1788,7 @@ def execute_rollout_executor(payload: Dict, db: Any, *, config: Any = None, sett
         merge_persisted_approval_state(payload, executed_rows)
     if result['summary']['error_count']:
         result['status'] = 'error'
-    elif result['summary']['applied_count'] and not result['dry_run']:
+    elif not result['dry_run'] and (result['summary']['applied_count'] or result['summary']['queued_count'] or result['summary']['by_status'].get('blocked_by_approval') or result['summary']['by_status'].get('deferred')):
         result['status'] = 'executed'
     return payload
 

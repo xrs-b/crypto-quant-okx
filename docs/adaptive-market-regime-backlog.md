@@ -206,6 +206,11 @@
   - `joint_stage_prepare / joint_queue_promote_safe / joint_review_schedule / joint_metadata_annotate` 各自补 richer handler payload（`stage_handler / queue_handler / review_handler / metadata_handler`），并统一保留 `safe_handler_key / route / disposition / stage_family / observability / serialization_ready`；
   - unsupported action 明确走 fallback handler：`unsupported::unsupported_action` + `unsupported_hold`，避免未来扩 action type 时 silently 混进默认 apply；
   - 继续保持安全边界：所有 handler 都只落状态/元数据/审计，不触发真实交易执行，不做危险 live parameter apply。
+- **2026-03-27 skeleton+5 / queue executor 真消费增量**：
+  - queue-only path 不再只停留在 result 展示；executor 现会真正消费 `queue_plan / approval_hook / dispatch_route`，把 queue disposition 持久化进 approval/workflow 状态链；
+  - `ready_to_queue / blocked_by_approval / deferred` 会分别写入稳定 workflow 状态（例如 `queued / blocked_by_approval / deferred`）与 immutable timeline event；
+  - 持久化 details 统一保留 `queue_plan / approval_hook / queue_transition / queue_progression / dispatch_route / next_transition / retryable / rollback_hint / queue_plan_consumed`，方便 dashboard/api/audit/回滚解释直接复用；
+  - 继续保持 fail-closed：只推进治理/队列/审批状态，不做真实交易执行，不改 live 参数。
 
 ### VEP-01 / VEP-04｜Shadow Validation Entry Pack（step 2 已落地）
 

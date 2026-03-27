@@ -889,3 +889,75 @@ workflow safe-apply 则应该同步建设，专门服务 governance / approval /
 5. 最后才把 case-based testnet execute bridge 接上
 
 做到第 3 步，其实已经可以明显解除当前“等自然单”的停滞问题。
+
+---
+
+## 19. 2026-03-27 / Shadow Validation Entry Pack step 1 实现状态
+
+本轮已先落地 **最小可用骨架**，目标不是一次做大全，而是先把“可持续喂 case、可稳定出 diff、绝不碰真实下单”打通。
+
+### 已实现
+
+1. **统一 case schema 最小骨架**
+   - 文件化 YAML/JSON case；
+   - 首批支持 `shadow_signal / shadow_execution`；
+   - 统一字段：`case_id / case_type / mode / input.signal / config_overrides / expect`。
+
+2. **可运行 CLI / entrypoint**
+   - 命令：
+   ```bash
+   python bot/run.py --validation-entry run --case tests/fixtures/validation/execution/high-vol-tighten-long-001.yaml
+   ```
+   - 可选输出 report：
+   ```bash
+   python bot/run.py --validation-entry run --case <case.yaml> --validation-output tmp/report.json
+   ```
+
+3. **首批 shadow evaluation 链路**
+   - baseline：当前默认配置；
+   - adaptive：在同一份输入上叠加 case `config_overrides`；
+   - 复用真实核心逻辑：
+     - `EntryDecider`
+     - `SignalValidator`
+     - `build_risk_effective_snapshot`
+     - `build_execution_effective_snapshot`
+   - 当前输出已能覆盖 decision / validator / risk / execution 这一段的 shadow summary 与 baseline vs adaptive diff。
+
+4. **固定 report envelope**
+   - 固定输出：
+   ```json
+   {
+     "case_id": "...",
+     "case_type": "shadow_execution",
+     "mode": "guarded_execute",
+     "status": "pass|fail",
+     "baseline": {},
+     "adaptive": {},
+     "diff": {},
+     "assertions": [],
+     "artifacts": {},
+     "audit": {
+       "real_trade_execution": false,
+       "exchange_mode": "shadow"
+     }
+   }
+   ```
+
+5. **安全边界**
+   - runner 不接 `TradingExecutor.open_position()`；
+   - 不发订单；
+   - audit 强制标记 `real_trade_execution=false`；
+   - 当前用途只限 schema / logic / diff / observability 验证。
+
+### 仍未完成（留待下一步）
+
+- `shadow_workflow` / `workflow_dry_run`
+- `--validation-replay <dir>` 批量回归入口
+- direction lock / intent / layer gap / queue progression 等更深 execution/workflow case basket
+- testnet controlled execute bridge
+
+### 结论
+
+虽然目前仍是第一步，但已经把最现实的卡点先打通：
+
+> **而家唔使等自然开单，已经可以主动喂 case，稳定拿到 baseline vs adaptive 的结构化 diff。**

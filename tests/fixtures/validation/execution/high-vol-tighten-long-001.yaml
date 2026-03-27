@@ -1,0 +1,64 @@
+case_id: high-vol-tighten-long-001
+case_type: shadow_execution
+mode: guarded_execute
+input:
+  signal:
+    symbol: BTC/USDT
+    signal_type: buy
+    price: 50000
+    strength: 74
+    strategies_triggered: [MACD, Volume]
+    reasons:
+      - strategy: MACD
+        action: buy
+        strength: 30
+        confidence: 0.81
+      - strategy: Volume
+        action: buy
+        strength: 22
+        confidence: 0.72
+    direction_score:
+      buy: 44
+      sell: 0
+      net: 44
+    market_context:
+      trend: bullish
+      volatility: 0.065
+      atr_ratio: 0.065
+      volatility_too_low: false
+      volatility_too_high: false
+      regime: high_vol
+      regime_confidence: 0.88
+      regime_details: high vol validation case
+config_overrides:
+  adaptive_regime:
+    enabled: true
+    mode: guarded_execute
+    guarded_execute:
+      validator_enforcement_enabled: true
+      risk_hints_enabled: true
+      risk_enforcement_enabled: true
+      execution_profile_hints_enabled: true
+      execution_profile_enforcement_enabled: true
+      layering_profile_enforcement_enabled: true
+      rollout_symbols: [BTC/USDT]
+      validator_enforcement_categories: [thresholds]
+    regimes:
+      high_vol:
+        validation_overrides:
+          min_strength: 80
+        risk_overrides:
+          base_entry_margin_ratio: 0.05
+          symbol_margin_cap_ratio: 0.1
+          leverage_cap: 5
+        execution_overrides:
+          layer_max_total_ratio: 0.13
+          max_layers_per_signal: 1
+          min_add_interval_seconds: 600
+          profit_only_add: true
+expect:
+  decision: allow
+  validator_pass: false
+  risk_would_tighten: true
+  execution_profile_really_enforced: true
+  layering_profile_really_enforced: true

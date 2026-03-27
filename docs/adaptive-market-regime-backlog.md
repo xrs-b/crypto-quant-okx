@@ -207,6 +207,25 @@
   - unsupported action 明确走 fallback handler：`unsupported::unsupported_action` + `unsupported_hold`，避免未来扩 action type 时 silently 混进默认 apply；
   - 继续保持安全边界：所有 handler 都只落状态/元数据/审计，不触发真实交易执行，不做危险 live parameter apply。
 
+### VEP-01 / VEP-02｜Shadow Validation Entry Pack（step 1 已落地）
+
+- **阶段 / 优先级**：Validation Entry Pack / P0
+- **生效范围**：仅 shadow / dry-run；**不做真实下单**
+- **本次已落地内容**：
+  - 新增 `validation/shadow_runner.py`，提供统一 case loader + shadow runner；
+  - 新增统一 case schema 最小骨架，首批支持 `shadow_signal / shadow_execution`；
+  - 新增 CLI 入口：`python bot/run.py --validation-entry run --case <file>`；
+  - runner 现阶段复用真实链路中的 `EntryDecider / SignalValidator / build_risk_effective_snapshot / build_execution_effective_snapshot`，输出 baseline vs adaptive diff；
+  - 输出 envelope 固定包含：`case_id / case_type / mode / status / baseline / adaptive / diff / assertions / artifacts / audit`；
+  - `audit.real_trade_execution=false`、`audit.exchange_mode=shadow` 明确安全边界；
+  - 首个 fixture：`tests/fixtures/validation/execution/high-vol-tighten-long-001.yaml`；
+  - 首批测试覆盖 case schema / helper / CLI。
+- **当前未覆盖**：workflow_dry_run、批量 replay basket、testnet bridge。
+- **下一步建议**：
+  1. 补 `shadow_workflow` case type；
+  2. 补 `--validation-replay <dir>` 批量回归；
+  3. 把 direction lock / intent / layer gap 这些 execution-time guard case 也纳入 fixture basket。
+
 ### AR-M5-05｜approval audit / stale cleanup / decision diff layer
 
 - **阶段 / 优先级**：M5 / P0

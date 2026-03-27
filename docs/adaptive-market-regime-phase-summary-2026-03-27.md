@@ -54,6 +54,7 @@
 - `action_playbook` / `approval_ready` 准备层（含 `preconditions` / `approval_required` / `rollback_plan` / `risk_level` / `owner_hint` / `execution_window`）
 - `workflow_ready` 工作流直出层（含 `actions` / `approval_queue` / `queues` / `filters` / `by_bucket`，供 dashboard/agent/人工治理直接消费）
 - orchestration semantics（action queue / next actions / blocking chain / rollback candidates）
+- controlled rollout state-apply execution layer（默认关闭，仅允许低风险白名单动作把持久化 state/workflow_state 推进到 ready，并保留完整审计链）
 
 ---
 

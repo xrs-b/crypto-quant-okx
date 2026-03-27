@@ -289,6 +289,11 @@ def _normalize_auto_approval_execution_mode(value: Optional[str]) -> str:
     return normalized if normalized in {'disabled', 'controlled'} else 'disabled'
 
 
+def _normalize_controlled_rollout_execution_mode(value: Optional[str]) -> str:
+    normalized = str(value or '').strip().lower()
+    return normalized if normalized in {'disabled', 'state_apply'} else 'disabled'
+
+
 def _get_auto_approval_execution_settings(config: Any = None, overrides: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     overrides = dict(overrides or {})
     getter = getattr(config, 'get', None)
@@ -305,6 +310,163 @@ def _get_auto_approval_execution_settings(config: Any = None, overrides: Optiona
     settings['enabled'] = bool(settings.get('enabled', False))
     settings['mode'] = _normalize_auto_approval_execution_mode(settings.get('mode'))
     return settings
+
+
+def _get_controlled_rollout_execution_settings(config: Any = None, overrides: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    overrides = dict(overrides or {})
+    getter = getattr(config, 'get', None)
+    raw = getter('governance.controlled_rollout_execution', {}) if callable(getter) else {}
+    raw = dict(raw or {}) if isinstance(raw, dict) else {}
+    allowed_action_types = _dedupe_strings(raw.get('allowed_action_types') or ['joint_observe'])
+    settings = {
+        'enabled': bool(raw.get('enabled', False)),
+        'mode': _normalize_controlled_rollout_execution_mode(raw.get('mode')),
+        'actor': str(raw.get('actor') or 'system:controlled-rollout'),
+        'source': str(raw.get('source') or 'controlled_rollout_execution'),
+        'reason_prefix': str(raw.get('reason_prefix') or 'controlled rollout state apply'),
+        'allowed_action_types': allowed_action_types,
+        'target_workflow_state': str(raw.get('target_workflow_state') or 'ready').strip().lower() or 'ready',
+        'target_state': str(raw.get('target_state') or 'ready').strip().lower() or 'ready',
+    }
+    settings.update({k: v for k, v in overrides.items() if v is not None})
+    settings['enabled'] = bool(settings.get('enabled', False))
+    settings['mode'] = _normalize_controlled_rollout_execution_mode(settings.get('mode'))
+    settings['allowed_action_types'] = _dedupe_strings(settings.get('allowed_action_types') or ['joint_observe'])
+    settings['target_workflow_state'] = str(settings.get('target_workflow_state') or 'ready').strip().lower() or 'ready'
+    settings['target_state'] = str(settings.get('target_state') or 'ready').strip().lower() or 'ready'
+    return settings
+
+
+def execute_controlled_rollout_layer(payload: Dict, db: Any, *, config: Any = None, settings: Optional[Dict[str, Any]] = None, replay_source: str = 'workflow_ready') -> Dict:
+    payload = payload or {}
+    execution_settings = _get_controlled_rollout_execution_settings(config=config, overrides=settings)
+    approval_state = payload.get('approval_state') or {}
+    workflow_state = payload.get('workflow_state') or {}
+    approval_items = approval_state.get('items') or []
+    workflow_lookup = {row.get('item_id'): row for row in (workflow_state.get('item_states') or []) if row.get('item_id')}
+
+    result = {
+        'enabled': execution_settings.get('enabled', False),
+        'mode': execution_settings.get('mode'),
+        'actor': execution_settings.get('actor'),
+        'source': execution_settings.get('source'),
+        'replay_source': replay_source,
+        'allowed_action_types': execution_settings.get('allowed_action_types') or [],
+        'executed_count': 0,
+        'skipped_count': 0,
+        'items': [],
+    }
+    payload['controlled_rollout_execution'] = result
+
+    if not result['enabled'] or result['mode'] != 'state_apply' or not approval_items:
+        result['skipped_count'] = len(approval_items)
+        return payload
+
+    executed_rows = []
+    for row in approval_items:
+        approval_id = row.get('approval_id') or row.get('item_id') or row.get('playbook_id')
+        workflow_item = workflow_lookup.get(row.get('playbook_id')) or {}
+        persisted_row = db.get_approval_state(approval_id) if approval_id else None
+        persisted_details = (persisted_row or {}).get('details') or {}
+        action_type = str(row.get('action_type') or workflow_item.get('action_type') or (persisted_row or {}).get('approval_type') or '').strip().lower()
+        current_state = str((persisted_row or {}).get('state') or row.get('approval_state') or row.get('persisted_state') or row.get('state') or 'pending').strip().lower()
+        current_workflow_state = str((persisted_row or {}).get('workflow_state') or row.get('persisted_workflow_state') or workflow_item.get('workflow_state') or row.get('decision_state') or 'pending').strip().lower()
+        auto_decision = _normalize_auto_approval_decision(row.get('auto_approval_decision'))
+        blocked_by = _dedupe_strings(row.get('blocked_by') or workflow_item.get('blocked_by') or workflow_item.get('blocking_reasons') or [])
+        risk_level = str(row.get('risk_level') or workflow_item.get('risk_level') or '').strip().lower()
+        requires_manual = bool(row.get('requires_manual'))
+        approval_required = bool(row.get('approval_required') if row.get('approval_required') is not None else workflow_item.get('approval_required'))
+        eligible = bool(row.get('auto_approval_eligible'))
+
+        skip_reason = None
+        if current_state in TERMINAL_APPROVAL_STATES:
+            skip_reason = f'terminal_state:{current_state}'
+        elif current_state == execution_settings['target_state'] and current_workflow_state == execution_settings['target_workflow_state']:
+            skip_reason = 'already_applied'
+        elif action_type not in set(execution_settings.get('allowed_action_types') or []):
+            skip_reason = f'action_type_not_allowlisted:{action_type or "unknown"}'
+        elif auto_decision != 'auto_approve':
+            skip_reason = f'judgement:{auto_decision}'
+        elif not eligible:
+            skip_reason = 'not_eligible'
+        elif requires_manual:
+            skip_reason = 'requires_manual'
+        elif approval_required:
+            skip_reason = 'approval_required'
+        elif risk_level != 'low':
+            skip_reason = f'risk_level:{risk_level or "unknown"}'
+        elif blocked_by:
+            skip_reason = 'blocked_by:' + ','.join(blocked_by)
+
+        if skip_reason:
+            result['items'].append({
+                'item_id': approval_id,
+                'playbook_id': row.get('playbook_id'),
+                'action': 'skipped',
+                'reason': skip_reason,
+                'state': current_state,
+                'workflow_state': current_workflow_state,
+            })
+            result['skipped_count'] += 1
+            continue
+
+        reason = f"{execution_settings['reason_prefix']}: {row.get('reason') or 'policy judged item as low-risk state-apply candidate'}"
+        details = {
+            'item_id': approval_id,
+            'approval_id': approval_id,
+            'playbook_id': row.get('playbook_id'),
+            'title': row.get('title') or workflow_item.get('title'),
+            'bucket_id': row.get('bucket_id'),
+            'state': execution_settings['target_state'],
+            'workflow_state': execution_settings['target_workflow_state'],
+            'reason': reason,
+            'actor': execution_settings['actor'],
+            'source': execution_settings['source'],
+            'replay_source': replay_source,
+            'auto_approval_decision': auto_decision,
+            'auto_approval_reason': row.get('reason'),
+            'auto_approval_confidence': row.get('confidence'),
+            'auto_approval_eligible': True,
+            'requires_manual': False,
+            'blocked_by': blocked_by,
+            'rule_hits': row.get('rule_hits') or [],
+            'risk_level': row.get('risk_level') or workflow_item.get('risk_level'),
+            'action_type': action_type,
+            'execution_layer': 'controlled_rollout_state_apply',
+            'execution_mode': execution_settings['mode'],
+            'safe_apply': True,
+            'real_trade_execution': False,
+        }
+        db.upsert_approval_state(
+            item_id=approval_id,
+            approval_type=row.get('action_type') or workflow_item.get('action_type') or 'workflow_approval',
+            target=row.get('playbook_id'),
+            title=row.get('title') or workflow_item.get('title'),
+            decision=row.get('persisted_decision') or row.get('approval_state') or 'pending',
+            state=execution_settings['target_state'],
+            workflow_state=execution_settings['target_workflow_state'],
+            reason=reason,
+            actor=execution_settings['actor'],
+            replay_source=replay_source,
+            details=details,
+            preserve_terminal=True,
+            event_type='controlled_rollout_state_apply',
+            append_event=True,
+        )
+        executed_rows.append(db.get_approval_state(approval_id))
+        result['items'].append({
+            'item_id': approval_id,
+            'playbook_id': row.get('playbook_id'),
+            'action': 'state_applied',
+            'state': execution_settings['target_state'],
+            'workflow_state': execution_settings['target_workflow_state'],
+            'reason': reason,
+        })
+        result['executed_count'] += 1
+
+    if executed_rows:
+        merge_persisted_approval_state(payload, executed_rows)
+    return payload
 
 
 def execute_controlled_auto_approval_layer(payload: Dict, db: Any, *, config: Any = None, settings: Optional[Dict[str, Any]] = None, replay_source: str = 'workflow_ready') -> Dict:
@@ -335,7 +497,8 @@ def execute_controlled_auto_approval_layer(payload: Dict, db: Any, *, config: An
     for row in approval_items:
         approval_id = row.get('approval_id') or row.get('item_id') or row.get('playbook_id')
         workflow_item = workflow_lookup.get(row.get('playbook_id')) or {}
-        current_state = str(row.get('approval_state') or row.get('persisted_state') or row.get('state') or 'pending').strip().lower()
+        persisted_row = db.get_approval_state(approval_id) if approval_id else None
+        current_state = str((persisted_row or {}).get('state') or row.get('approval_state') or row.get('persisted_state') or row.get('state') or 'pending').strip().lower()
         auto_decision = _normalize_auto_approval_decision(row.get('auto_approval_decision'))
         blocked_by = _dedupe_strings(row.get('blocked_by') or workflow_item.get('blocked_by') or [])
         risk_level = str(row.get('risk_level') or workflow_item.get('risk_level') or '').strip().lower()
@@ -346,6 +509,8 @@ def execute_controlled_auto_approval_layer(payload: Dict, db: Any, *, config: An
         skip_reason = None
         if current_state in TERMINAL_APPROVAL_STATES:
             skip_reason = f'terminal_state:{current_state}'
+        elif current_state == 'ready':
+            skip_reason = 'already_ready'
         elif auto_decision != 'auto_approve':
             skip_reason = f'judgement:{auto_decision}'
         elif not eligible:

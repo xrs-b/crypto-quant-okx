@@ -97,6 +97,24 @@
   - dashboard replay 会把已持久化状态重新叠加回 workflow-ready 视图，供恢复/审计使用。
 - **安全边界**：仅落地“审批状态账本”和“回放/恢复视图”；即使审批通过，也不会新增任何危险自动执行链路。
 
+### AR-M5-06｜controlled rollout state-apply execution layer
+
+- **阶段 / 优先级**：M5 / P0
+- **生效范围**：仅对白名单低风险治理动作落地 `state/workflow_state`；**不做真实交易执行、不直接改交易参数、不直接下单**
+- **目标**：在 approval/workflow persistence 之上，补一个比 auto-approval 更保守的真实落地层：
+  1. 默认关闭；
+  2. 只允许 allowlist action type（默认 `joint_observe`）进入 `state_apply`；
+  3. 仅把持久化状态从 `pending` 推进到 `ready`，用于 rollout orchestration / dashboard / agent 消费；
+  4. 保留完整 `actor/source/reason/replay_source/details/event_type` 审计痕迹；
+  5. 保持 terminal state 不可被后续 replay/state-apply 覆盖。
+- **涉及模块**：`analytics/helper.py`、`analytics/__init__.py`、`dashboard/api.py`、`config/config.yaml.example`、`tests/`
+- **配置**：`governance.controlled_rollout_execution.enabled/mode/allowed_action_types/actor/source/reason_prefix/target_state/target_workflow_state`
+- **安全边界**：
+  - 只对 low-risk + auto-approval-policy 判定可自动处理 + 无 blocker + 无人工审批要求的项生效；
+  - 只做 `controlled_rollout_state_apply` immutable event；
+  - `decision` 保持原值（通常仍是 `pending`），避免把 state-apply 冒充人工批准；
+  - 若 item 已在终态（approved/rejected/deferred/expired），则必须跳过。
+
 ### AR-M5-05｜approval audit / stale cleanup / decision diff layer
 
 - **阶段 / 优先级**：M5 / P0

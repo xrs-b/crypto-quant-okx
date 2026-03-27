@@ -5107,7 +5107,7 @@ class TestExecutionObservability(unittest.TestCase):
             self.assertIn('recent_decisions', snapshot['summary'])
             self.assertTrue(snapshot['summary']['observe_only_banner'])
 
-from analytics.helper import build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, attach_auto_approval_policy, execute_controlled_auto_approval_layer
+from analytics.helper import build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, attach_auto_approval_policy, execute_controlled_rollout_layer, execute_controlled_auto_approval_layer
 
 
 class TestApprovalPersistence(unittest.TestCase):
@@ -5330,6 +5330,174 @@ class TestApprovalPersistence(unittest.TestCase):
             self.assertIn('state', diffs[0]['changed_fields'])
             overview = build_approval_audit_overview(decision_diffs=diffs)
             self.assertEqual(overview['decision_diff']['count'], 1)
+
+    def test_controlled_rollout_execution_defaults_to_disabled(self):
+        class StubConfig:
+            def __init__(self, values=None):
+                self.values = values or {}
+
+            def get(self, key, default=None):
+                return self.values.get(key, default)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(str(Path(tmpdir) / 'controlled_rollout_disabled.db'))
+            payload = {
+                'workflow_state': {
+                    'item_states': [{
+                        'item_id': 'playbook::observe',
+                        'title': 'Safe observe item',
+                        'action_type': 'joint_observe',
+                        'decision': 'expand',
+                        'governance_mode': 'rollout',
+                        'risk_level': 'low',
+                        'approval_required': False,
+                        'blocking_reasons': [],
+                        'preconditions': [],
+                        'workflow_state': 'pending',
+                        'confidence': 'high',
+                    }],
+                    'summary': {},
+                },
+                'approval_state': {
+                    'items': [{
+                        'approval_id': 'approval::observe',
+                        'playbook_id': 'playbook::observe',
+                        'title': 'Safe observe item',
+                        'action_type': 'joint_observe',
+                        'approval_state': 'pending',
+                        'decision_state': 'pending',
+                        'risk_level': 'low',
+                        'approval_required': False,
+                        'blocked_by': [],
+                    }],
+                    'summary': {},
+                },
+            }
+            payload = attach_auto_approval_policy(payload)
+            db.sync_approval_items(build_workflow_approval_records(payload), replay_source='unit-test')
+            result = execute_controlled_rollout_layer(payload, db, config=StubConfig())
+            state_row = db.get_approval_state('approval::observe')
+            self.assertEqual(state_row['state'], 'pending')
+            self.assertEqual(state_row['decision'], 'pending')
+            self.assertEqual(state_row['workflow_state'], 'pending')
+            self.assertEqual(result['controlled_rollout_execution']['executed_count'], 0)
+            self.assertEqual(result['controlled_rollout_execution']['skipped_count'], 1)
+
+    def test_controlled_rollout_execution_applies_safe_ready_state_without_auto_approval(self):
+        class StubConfig:
+            def __init__(self, values=None):
+                self.values = values or {}
+
+            def get(self, key, default=None):
+                return self.values.get(key, default)
+
+        config = StubConfig({
+            'governance.controlled_rollout_execution': {
+                'enabled': True,
+                'mode': 'state_apply',
+                'actor': 'system:test-controlled-rollout',
+                'source': 'unit_test_controlled_rollout',
+                'reason_prefix': 'unit-test controlled rollout state apply',
+                'allowed_action_types': ['joint_observe'],
+            }
+        })
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(str(Path(tmpdir) / 'controlled_rollout_enabled.db'))
+            payload = {
+                'workflow_state': {
+                    'item_states': [
+                        {
+                            'item_id': 'playbook::observe',
+                            'title': 'Safe observe item',
+                            'action_type': 'joint_observe',
+                            'decision': 'expand',
+                            'governance_mode': 'rollout',
+                            'risk_level': 'low',
+                            'approval_required': False,
+                            'blocking_reasons': [],
+                            'preconditions': [],
+                            'workflow_state': 'pending',
+                            'confidence': 'high',
+                        },
+                        {
+                            'item_id': 'playbook::expand',
+                            'title': 'Guarded expand item',
+                            'action_type': 'joint_expand_guarded',
+                            'decision': 'expand',
+                            'governance_mode': 'rollout',
+                            'risk_level': 'low',
+                            'approval_required': False,
+                            'blocking_reasons': [],
+                            'preconditions': [],
+                            'workflow_state': 'pending',
+                            'confidence': 'high',
+                        },
+                    ],
+                    'summary': {},
+                },
+                'approval_state': {
+                    'items': [
+                        {'approval_id': 'approval::observe', 'playbook_id': 'playbook::observe', 'title': 'Safe observe item', 'action_type': 'joint_observe', 'approval_state': 'pending', 'decision_state': 'pending', 'risk_level': 'low', 'approval_required': False, 'blocked_by': []},
+                        {'approval_id': 'approval::expand', 'playbook_id': 'playbook::expand', 'title': 'Guarded expand item', 'action_type': 'joint_expand_guarded', 'approval_state': 'pending', 'decision_state': 'pending', 'risk_level': 'low', 'approval_required': False, 'blocked_by': []},
+                    ],
+                    'summary': {},
+                },
+            }
+            payload = attach_auto_approval_policy(payload)
+            db.sync_approval_items(build_workflow_approval_records(payload), replay_source='unit-test')
+            result = execute_controlled_rollout_layer(payload, db, config=config, replay_source='unit-test-replay')
+            observe = db.get_approval_state('approval::observe')
+            expand = db.get_approval_state('approval::expand')
+            self.assertEqual(observe['state'], 'ready')
+            self.assertEqual(observe['decision'], 'pending')
+            self.assertEqual(observe['workflow_state'], 'ready')
+            self.assertEqual(observe['actor'], 'system:test-controlled-rollout')
+            self.assertEqual(observe['replay_source'], 'unit-test-replay')
+            self.assertEqual(observe['details']['source'], 'unit_test_controlled_rollout')
+            self.assertEqual(observe['details']['execution_layer'], 'controlled_rollout_state_apply')
+            self.assertFalse(observe['details']['real_trade_execution'])
+            timeline = db.get_approval_timeline(item_id='approval::observe', ascending=True)
+            self.assertEqual(timeline[-1]['event_type'], 'controlled_rollout_state_apply')
+            self.assertEqual(timeline[-1]['state'], 'ready')
+            self.assertEqual(timeline[-1]['decision'], 'pending')
+            self.assertEqual(timeline[-1]['workflow_state'], 'ready')
+            self.assertEqual(timeline[-1]['actor'], 'system:test-controlled-rollout')
+            self.assertEqual(timeline[-1]['source'], 'unit-test-replay')
+            self.assertEqual(expand['state'], 'pending')
+            self.assertEqual(expand['workflow_state'], 'pending')
+            self.assertEqual(result['controlled_rollout_execution']['executed_count'], 1)
+            self.assertGreaterEqual(result['controlled_rollout_execution']['skipped_count'], 1)
+
+    def test_controlled_rollout_execution_preserves_terminal_state(self):
+        class StubConfig:
+            def __init__(self, values=None):
+                self.values = values or {}
+
+            def get(self, key, default=None):
+                return self.values.get(key, default)
+
+        config = StubConfig({
+            'governance.controlled_rollout_execution': {
+                'enabled': True,
+                'mode': 'state_apply',
+            }
+        })
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(str(Path(tmpdir) / 'controlled_rollout_terminal.db'))
+            payload = {
+                'workflow_state': {'item_states': [{'item_id': 'playbook::observe', 'title': 'Safe observe item', 'action_type': 'joint_observe', 'decision': 'expand', 'governance_mode': 'rollout', 'risk_level': 'low', 'approval_required': False, 'blocking_reasons': [], 'preconditions': [], 'workflow_state': 'pending', 'confidence': 'high'}], 'summary': {}},
+                'approval_state': {'items': [{'approval_id': 'approval::observe', 'playbook_id': 'playbook::observe', 'title': 'Safe observe item', 'action_type': 'joint_observe', 'approval_state': 'pending', 'decision_state': 'pending', 'risk_level': 'low', 'approval_required': False, 'blocked_by': []}], 'summary': {}},
+            }
+            payload = attach_auto_approval_policy(payload)
+            db.sync_approval_items(build_workflow_approval_records(payload), replay_source='unit-test')
+            db.record_approval('joint_observe', 'playbook::observe', 'approved', {'item_id': 'approval::observe', 'state': 'approved', 'workflow_state': 'approved', 'reason': 'manual final approval', 'actor': 'tester', 'replay_source': 'manual-test'})
+            result = execute_controlled_rollout_layer(payload, db, config=config, replay_source='unit-test-replay')
+            observe = db.get_approval_state('approval::observe')
+            self.assertEqual(observe['state'], 'approved')
+            self.assertEqual(observe['decision'], 'approved')
+            self.assertEqual(observe['workflow_state'], 'approved')
+            self.assertEqual(result['controlled_rollout_execution']['executed_count'], 0)
+            self.assertGreaterEqual(result['controlled_rollout_execution']['skipped_count'], 1)
 
     def test_controlled_auto_approval_execution_defaults_to_disabled(self):
         class StubConfig:

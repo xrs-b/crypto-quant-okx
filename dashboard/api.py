@@ -52,7 +52,7 @@ from signals.validator import SignalValidator
 from bot.run import execute_exchange_smoke, reconcile_exchange_positions, load_runtime_state
 from ml.engine import MLEngine
 from core.regime import RegimeDetector, detect_regime, Regime
-from analytics import StrategyBacktester, SignalQualityAnalyzer, ParameterOptimizer, GovernanceEngine, build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, attach_auto_approval_policy
+from analytics import StrategyBacktester, SignalQualityAnalyzer, ParameterOptimizer, GovernanceEngine, build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, attach_auto_approval_policy, execute_controlled_auto_approval_layer
 from analytics.backtest import export_calibration_payload
 from analytics.mfe_mae import MFEAnalyzer, get_mfe_mae_analysis
 from core.regime_policy import summarize_observe_only_collection
@@ -87,11 +87,23 @@ def _persist_workflow_approval_payload(payload: Dict[str, Any], replay_source: s
     payload = attach_auto_approval_policy(payload)
     approval_records = build_workflow_approval_records(payload)
     if not approval_records:
+        payload['auto_approval_execution'] = {
+            'enabled': bool(config.get('governance.auto_approval_execution.enabled', False)),
+            'mode': str(config.get('governance.auto_approval_execution.mode', 'disabled') or 'disabled'),
+            'actor': str(config.get('governance.auto_approval_execution.actor', 'system:auto-approval') or 'system:auto-approval'),
+            'source': str(config.get('governance.auto_approval_execution.source', 'auto_approval_execution') or 'auto_approval_execution'),
+            'replay_source': replay_source,
+            'executed_count': 0,
+            'skipped_count': 0,
+            'items': [],
+        }
         return payload
     db.sync_approval_items(approval_records, replay_source=replay_source, preserve_terminal=True)
     persisted_rows = [db.get_approval_state(row.get('item_id')) for row in approval_records if row.get('item_id')]
     persisted_rows = [row for row in persisted_rows if row]
-    return attach_auto_approval_policy(merge_persisted_approval_state(payload, persisted_rows))
+    payload = attach_auto_approval_policy(merge_persisted_approval_state(payload, persisted_rows))
+    payload = execute_controlled_auto_approval_layer(payload, db, config=config, replay_source=replay_source)
+    return attach_auto_approval_policy(payload)
 
 
 def _get_exchange_client():

@@ -3,4 +3,4 @@ from .optimizer import ParameterOptimizer
 from .governance import GovernanceEngine
 from .mfe_mae import MFEAnalyzer, get_mfe_mae_analysis
 from .recommendation import RecommendationProvider, get_recommendation_provider
-from .helper import build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, attach_auto_approval_policy
+from .helper import build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, attach_auto_approval_policy, execute_controlled_auto_approval_layer

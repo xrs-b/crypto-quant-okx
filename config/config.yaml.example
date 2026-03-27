@@ -48,6 +48,12 @@ governance:
   pool_switch:
     min_hold_hours: 6
     score_margin: 1.0
+  auto_approval_execution:
+    enabled: false
+    mode: disabled   # disabled|controlled；默认安全关闭，只有 controlled 才会把符合条件项推进到真实 approved/ready
+    actor: system:auto-approval
+    source: auto_approval_execution
+    reason_prefix: controlled auto-approval execution
 
 logging:
   backup_count: 5

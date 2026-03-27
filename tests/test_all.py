@@ -5107,7 +5107,7 @@ class TestExecutionObservability(unittest.TestCase):
             self.assertIn('recent_decisions', snapshot['summary'])
             self.assertTrue(snapshot['summary']['observe_only_banner'])
 
-from analytics.helper import build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, attach_auto_approval_policy
+from analytics.helper import build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, attach_auto_approval_policy, execute_controlled_auto_approval_layer
 
 
 class TestApprovalPersistence(unittest.TestCase):
@@ -5330,6 +5330,179 @@ class TestApprovalPersistence(unittest.TestCase):
             self.assertIn('state', diffs[0]['changed_fields'])
             overview = build_approval_audit_overview(decision_diffs=diffs)
             self.assertEqual(overview['decision_diff']['count'], 1)
+
+    def test_controlled_auto_approval_execution_defaults_to_disabled(self):
+        class StubConfig:
+            def __init__(self, values=None):
+                self.values = values or {}
+
+            def get(self, key, default=None):
+                return self.values.get(key, default)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(str(Path(tmpdir) / 'auto_approval_disabled.db'))
+            payload = {
+                'workflow_state': {
+                    'item_states': [{
+                        'item_id': 'playbook::low-risk',
+                        'title': 'Low risk observe item',
+                        'action_type': 'joint_observe',
+                        'decision': 'expand',
+                        'governance_mode': 'rollout',
+                        'risk_level': 'low',
+                        'approval_required': False,
+                        'blocking_reasons': [],
+                        'preconditions': [],
+                        'workflow_state': 'pending',
+                        'confidence': 'medium',
+                    }],
+                    'summary': {},
+                },
+                'approval_state': {
+                    'items': [{
+                        'approval_id': 'approval::low-risk',
+                        'playbook_id': 'playbook::low-risk',
+                        'title': 'Low risk observe item',
+                        'action_type': 'joint_observe',
+                        'approval_state': 'pending',
+                        'decision_state': 'pending',
+                        'risk_level': 'low',
+                        'approval_required': False,
+                        'blocked_by': [],
+                    }],
+                    'summary': {},
+                },
+            }
+            payload = attach_auto_approval_policy(payload)
+            db.sync_approval_items(build_workflow_approval_records(payload), replay_source='unit-test')
+            result = execute_controlled_auto_approval_layer(payload, db, config=StubConfig())
+            state_row = db.get_approval_state('approval::low-risk')
+            self.assertEqual(state_row['state'], 'pending')
+            self.assertEqual(result['auto_approval_execution']['executed_count'], 0)
+            self.assertEqual(result['auto_approval_execution']['skipped_count'], 1)
+
+    def test_controlled_auto_approval_execution_approves_only_eligible_items(self):
+        class StubConfig:
+            def __init__(self, values=None):
+                self.values = values or {}
+
+            def get(self, key, default=None):
+                return self.values.get(key, default)
+
+        config = StubConfig({
+            'governance.auto_approval_execution': {
+                'enabled': True,
+                'mode': 'controlled',
+                'actor': 'system:test-auto-approval',
+                'source': 'unit_test_auto_approval',
+                'reason_prefix': 'unit-test controlled auto approval',
+            }
+        })
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(str(Path(tmpdir) / 'auto_approval_enabled.db'))
+            payload = {
+                'workflow_state': {
+                    'item_states': [
+                        {
+                            'item_id': 'playbook::eligible',
+                            'title': 'Eligible low risk item',
+                            'action_type': 'joint_observe',
+                            'decision': 'expand',
+                            'governance_mode': 'rollout',
+                            'risk_level': 'low',
+                            'approval_required': False,
+                            'blocking_reasons': [],
+                            'preconditions': [],
+                            'workflow_state': 'pending',
+                            'confidence': 'high',
+                        },
+                        {
+                            'item_id': 'playbook::manual',
+                            'title': 'Manual review item',
+                            'action_type': 'joint_expand_guarded',
+                            'decision': 'expand',
+                            'governance_mode': 'rollout',
+                            'risk_level': 'medium',
+                            'approval_required': True,
+                            'blocking_reasons': [],
+                            'preconditions': [],
+                            'workflow_state': 'pending',
+                            'confidence': 'high',
+                        },
+                        {
+                            'item_id': 'playbook::freeze',
+                            'title': 'Freeze item',
+                            'action_type': 'joint_freeze',
+                            'decision': 'freeze',
+                            'governance_mode': 'rollback',
+                            'risk_level': 'critical',
+                            'approval_required': True,
+                            'blocking_reasons': [],
+                            'preconditions': [],
+                            'workflow_state': 'pending',
+                            'confidence': 'high',
+                        },
+                        {
+                            'item_id': 'playbook::defer',
+                            'title': 'Deferred item',
+                            'action_type': 'joint_observe',
+                            'decision': 'observe',
+                            'governance_mode': 'review',
+                            'risk_level': 'low',
+                            'approval_required': False,
+                            'blocking_reasons': ['blocking_issue'],
+                            'preconditions': [{'type': 'wait', 'value': 'more_samples', 'status': 'open'}],
+                            'workflow_state': 'pending',
+                            'confidence': 'medium',
+                        },
+                    ],
+                    'summary': {},
+                },
+                'approval_state': {
+                    'items': [
+                        {'approval_id': 'approval::eligible', 'playbook_id': 'playbook::eligible', 'title': 'Eligible low risk item', 'action_type': 'joint_observe', 'approval_state': 'pending', 'decision_state': 'pending', 'risk_level': 'low', 'approval_required': False, 'blocked_by': []},
+                        {'approval_id': 'approval::manual', 'playbook_id': 'playbook::manual', 'title': 'Manual review item', 'action_type': 'joint_expand_guarded', 'approval_state': 'pending', 'decision_state': 'pending', 'risk_level': 'medium', 'approval_required': True, 'blocked_by': []},
+                        {'approval_id': 'approval::freeze', 'playbook_id': 'playbook::freeze', 'title': 'Freeze item', 'action_type': 'joint_freeze', 'approval_state': 'pending', 'decision_state': 'pending', 'risk_level': 'critical', 'approval_required': True, 'blocked_by': []},
+                        {'approval_id': 'approval::defer', 'playbook_id': 'playbook::defer', 'title': 'Deferred item', 'action_type': 'joint_observe', 'approval_state': 'pending', 'decision_state': 'pending', 'risk_level': 'low', 'approval_required': False, 'blocked_by': ['blocking_issue']},
+                    ],
+                    'summary': {},
+                },
+            }
+            payload = attach_auto_approval_policy(payload)
+            db.sync_approval_items(build_workflow_approval_records(payload), replay_source='unit-test')
+            db.record_approval('joint_observe', 'playbook::defer', 'deferred', {
+                'item_id': 'approval::defer',
+                'state': 'deferred',
+                'workflow_state': 'deferred',
+                'reason': 'already deferred',
+                'actor': 'tester',
+                'replay_source': 'unit-test-manual',
+            })
+            result = execute_controlled_auto_approval_layer(payload, db, config=config, replay_source='unit-test-replay')
+            eligible = db.get_approval_state('approval::eligible')
+            manual = db.get_approval_state('approval::manual')
+            freeze = db.get_approval_state('approval::freeze')
+            deferred = db.get_approval_state('approval::defer')
+            self.assertEqual(eligible['state'], 'approved')
+            self.assertEqual(eligible['decision'], 'approved')
+            self.assertEqual(eligible['workflow_state'], 'ready')
+            self.assertEqual(eligible['actor'], 'system:test-auto-approval')
+            self.assertEqual(eligible['replay_source'], 'unit-test-replay')
+            self.assertEqual(eligible['details']['source'], 'unit_test_auto_approval')
+            self.assertEqual(eligible['details']['execution_layer'], 'controlled_auto_approval')
+            timeline = db.get_approval_timeline(item_id='approval::eligible', ascending=True)
+            self.assertEqual(timeline[-1]['event_type'], 'decision_recorded')
+            self.assertEqual(timeline[-1]['decision'], 'approved')
+            self.assertEqual(timeline[-1]['state'], 'approved')
+            self.assertEqual(timeline[-1]['workflow_state'], 'ready')
+            self.assertEqual(timeline[-1]['actor'], 'system:test-auto-approval')
+            self.assertEqual(timeline[-1]['source'], 'unit-test-replay')
+            self.assertEqual(timeline[-1]['details']['source'], 'unit_test_auto_approval')
+            self.assertEqual(manual['state'], 'pending')
+            self.assertEqual(freeze['state'], 'pending')
+            self.assertEqual(deferred['state'], 'deferred')
+            self.assertEqual(result['auto_approval_execution']['executed_count'], 1)
+            self.assertGreaterEqual(result['auto_approval_execution']['skipped_count'], 3)
 
     def test_approval_state_api_and_replay_endpoint_expose_persisted_rows(self):
         import dashboard.api as dashboard_api

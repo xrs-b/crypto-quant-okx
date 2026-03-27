@@ -151,3 +151,5 @@
 
 
 - 2026-03-27 dual-layer approval update：审批持久化从单层 latest state 扩展成 `approval_events`（immutable event log）+ `approval_state`（latest snapshot）双层模型；新增稳定事件字段 `item_id / event_type / decision / actor / reason / created_at / source / details`，并补齐 timeline 查询与基于 event log 的 snapshot recovery，仍保持 no-op，不触发真实自动 rollout / execution。
+
+- 2026-03-27 controlled auto-approval execution layer：在既有自动审批判断层之上，新增默认关闭的受控执行层；只会把 low-risk / 无 blocker / 无需人工审批 / judgement=auto_approve / 非终态 的审批项推进到真实 `approved + ready`，并写入完整 `reason / actor / source / replay_source / event log` 审计痕迹；仍保持 no-op，不触发真实策略执行。

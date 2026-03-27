@@ -225,6 +225,7 @@ def merge_persisted_approval_state(payload: Dict, persisted_rows: Optional[List[
         persisted_details = persisted.get('details') or {}
         row['persisted_state'] = persisted.get('state')
         row['persisted_decision'] = persisted.get('decision')
+        row['persisted_workflow_state'] = persisted.get('workflow_state')
         row['persisted_updated_at'] = persisted.get('updated_at')
         row['approval_reason'] = persisted.get('reason') or row.get('approval_reason')
         row['actor'] = persisted.get('actor') or row.get('actor')
@@ -253,7 +254,10 @@ def merge_persisted_approval_state(payload: Dict, persisted_rows: Optional[List[
         row['approval_state'] = approval_row.get('approval_state') or row.get('approval_state')
         row['persisted_approval_state'] = approval_row.get('persisted_state')
         row['persisted_decision'] = approval_row.get('persisted_decision')
-        if row.get('approval_required') and approval_row.get('approval_state') == 'approved' and row.get('workflow_state') == 'pending':
+        row['persisted_workflow_state'] = approval_row.get('persisted_workflow_state')
+        if approval_row.get('persisted_workflow_state'):
+            row['workflow_state'] = approval_row.get('persisted_workflow_state')
+        elif row.get('approval_required') and approval_row.get('approval_state') == 'approved' and row.get('workflow_state') == 'pending':
             row['workflow_state'] = 'ready'
         elif approval_row.get('approval_state') in {'rejected', 'deferred', 'expired'}:
             row['workflow_state'] = approval_row.get('approval_state')
@@ -275,6 +279,135 @@ def merge_persisted_approval_state(payload: Dict, persisted_rows: Optional[List[
     workflow_summary['rejected_count'] = sum(1 for row in workflow_items if row.get('workflow_state') == 'rejected')
     workflow_summary['deferred_count'] = sum(1 for row in workflow_items if row.get('workflow_state') == 'deferred')
     workflow_state['summary'] = workflow_summary
+    return payload
+
+
+
+
+def _normalize_auto_approval_execution_mode(value: Optional[str]) -> str:
+    normalized = str(value or '').strip().lower()
+    return normalized if normalized in {'disabled', 'controlled'} else 'disabled'
+
+
+def _get_auto_approval_execution_settings(config: Any = None, overrides: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    overrides = dict(overrides or {})
+    getter = getattr(config, 'get', None)
+    raw = getter('governance.auto_approval_execution', {}) if callable(getter) else {}
+    raw = dict(raw or {}) if isinstance(raw, dict) else {}
+    settings = {
+        'enabled': bool(raw.get('enabled', False)),
+        'mode': _normalize_auto_approval_execution_mode(raw.get('mode')),
+        'actor': str(raw.get('actor') or 'system:auto-approval'),
+        'source': str(raw.get('source') or 'auto_approval_execution'),
+        'reason_prefix': str(raw.get('reason_prefix') or 'controlled auto-approval execution'),
+    }
+    settings.update({k: v for k, v in overrides.items() if v is not None})
+    settings['enabled'] = bool(settings.get('enabled', False))
+    settings['mode'] = _normalize_auto_approval_execution_mode(settings.get('mode'))
+    return settings
+
+
+def execute_controlled_auto_approval_layer(payload: Dict, db: Any, *, config: Any = None, settings: Optional[Dict[str, Any]] = None, replay_source: str = 'workflow_ready') -> Dict:
+    payload = payload or {}
+    execution_settings = _get_auto_approval_execution_settings(config=config, overrides=settings)
+    approval_state = payload.get('approval_state') or {}
+    workflow_state = payload.get('workflow_state') or {}
+    approval_items = approval_state.get('items') or []
+    workflow_lookup = {row.get('item_id'): row for row in (workflow_state.get('item_states') or []) if row.get('item_id')}
+
+    result = {
+        'enabled': execution_settings.get('enabled', False),
+        'mode': execution_settings.get('mode'),
+        'actor': execution_settings.get('actor'),
+        'source': execution_settings.get('source'),
+        'replay_source': replay_source,
+        'executed_count': 0,
+        'skipped_count': 0,
+        'items': [],
+    }
+    payload['auto_approval_execution'] = result
+
+    if not result['enabled'] or result['mode'] != 'controlled' or not approval_items:
+        result['skipped_count'] = len(approval_items)
+        return payload
+
+    executed_rows = []
+    for row in approval_items:
+        approval_id = row.get('approval_id') or row.get('item_id') or row.get('playbook_id')
+        workflow_item = workflow_lookup.get(row.get('playbook_id')) or {}
+        current_state = str(row.get('approval_state') or row.get('persisted_state') or row.get('state') or 'pending').strip().lower()
+        auto_decision = _normalize_auto_approval_decision(row.get('auto_approval_decision'))
+        blocked_by = _dedupe_strings(row.get('blocked_by') or workflow_item.get('blocked_by') or [])
+        risk_level = str(row.get('risk_level') or workflow_item.get('risk_level') or '').strip().lower()
+        requires_manual = bool(row.get('requires_manual'))
+        approval_required = bool(row.get('approval_required') if row.get('approval_required') is not None else workflow_item.get('approval_required'))
+        eligible = bool(row.get('auto_approval_eligible'))
+
+        skip_reason = None
+        if current_state in TERMINAL_APPROVAL_STATES:
+            skip_reason = f'terminal_state:{current_state}'
+        elif auto_decision != 'auto_approve':
+            skip_reason = f'judgement:{auto_decision}'
+        elif not eligible:
+            skip_reason = 'not_eligible'
+        elif requires_manual:
+            skip_reason = 'requires_manual'
+        elif approval_required:
+            skip_reason = 'approval_required'
+        elif risk_level != 'low':
+            skip_reason = f'risk_level:{risk_level or "unknown"}'
+        elif blocked_by:
+            skip_reason = 'blocked_by:' + ','.join(blocked_by)
+
+        if skip_reason:
+            result['items'].append({
+                'item_id': approval_id,
+                'playbook_id': row.get('playbook_id'),
+                'action': 'skipped',
+                'reason': skip_reason,
+                'state': current_state,
+            })
+            result['skipped_count'] += 1
+            continue
+
+        reason = f"{execution_settings['reason_prefix']}: {row.get('reason') or 'policy judged item as low-risk auto-approve'}"
+        details = {
+            'item_id': approval_id,
+            'approval_id': approval_id,
+            'playbook_id': row.get('playbook_id'),
+            'title': row.get('title') or workflow_item.get('title'),
+            'bucket_id': row.get('bucket_id'),
+            'state': 'approved',
+            'workflow_state': 'ready',
+            'reason': reason,
+            'actor': execution_settings['actor'],
+            'source': execution_settings['source'],
+            'replay_source': replay_source,
+            'auto_approval_decision': auto_decision,
+            'auto_approval_reason': row.get('reason'),
+            'auto_approval_confidence': row.get('confidence'),
+            'auto_approval_eligible': True,
+            'requires_manual': False,
+            'blocked_by': blocked_by,
+            'rule_hits': row.get('rule_hits') or [],
+            'risk_level': row.get('risk_level') or workflow_item.get('risk_level'),
+            'execution_layer': 'controlled_auto_approval',
+            'execution_mode': execution_settings['mode'],
+        }
+        db.record_approval(row.get('action_type') or workflow_item.get('action_type') or 'workflow_approval', row.get('playbook_id'), 'approved', details)
+        executed_rows.append(db.get_approval_state(approval_id))
+        result['items'].append({
+            'item_id': approval_id,
+            'playbook_id': row.get('playbook_id'),
+            'action': 'approved',
+            'state': 'approved',
+            'workflow_state': 'ready',
+            'reason': reason,
+        })
+        result['executed_count'] += 1
+
+    if executed_rows:
+        merge_persisted_approval_state(payload, executed_rows)
     return payload
 
 

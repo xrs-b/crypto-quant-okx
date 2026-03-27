@@ -24,7 +24,7 @@ from core.notifier import NotificationManager
 from signals import Signal, SignalDetector, SignalValidator, SignalRecorder, EntryDecider
 from trading import TradingExecutor, RiskManager
 from trading.executor import build_observability_context
-from analytics.backtest import StrategyBacktester
+from analytics.backtest import StrategyBacktester, build_regime_policy_calibration_report
 from strategies.strategy_library import StrategyManager
 from bot.run import build_exchange_diagnostics, build_exchange_smoke_plan, build_runtime_health_summary, maybe_send_daily_health_summary, execute_exchange_smoke, reconcile_exchange_positions
 from dashboard.api import app
@@ -3938,6 +3938,8 @@ class TestBacktestObserveOnlyTags(unittest.TestCase):
         self.assertIn('regime_tags', result)
         self.assertIn('policy_tags', result)
         self.assertIn('observe_only_tags', result)
+        self.assertIn('all_trades', result)
+        self.assertIn('regime_policy_calibration', result)
         if result['recent_trades']:
             trade = result['recent_trades'][-1]
             self.assertIn('observe_only', trade)
@@ -3960,6 +3962,10 @@ class TestBacktestObserveOnlyTags(unittest.TestCase):
                 'total_return_pct': 3.2,
                 'avg_return_pct': 1.6,
                 'max_drawdown_pct': -1.1,
+                'all_trades': [
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v1', 'return_pct': 2.4},
+                    {'regime_tag': 'range', 'policy_tag': 'policy_v1', 'return_pct': 0.8},
+                ],
                 'recent_trades': [],
                 'regime_tags': ['trend'],
                 'policy_tags': ['adaptive_policy_v1_m1'],
@@ -3973,6 +3979,45 @@ class TestBacktestObserveOnlyTags(unittest.TestCase):
         self.assertIn('top_tags', summary['summary']['observe_only_summary_view'])
         self.assertIn('trend', summary['summary']['regime_tags'])
         self.assertIn('adaptive_policy_v1_m1', summary['summary']['policy_tags'])
+        self.assertIn('calibration_report', summary)
+        self.assertTrue(summary['summary']['calibration_ready'])
+
+
+class TestRegimePolicyCalibrationReport(unittest.TestCase):
+    def test_calibration_report_groups_trades_by_regime_and_policy(self):
+        report = build_regime_policy_calibration_report([
+            {
+                'symbol': 'BTC/USDT',
+                'all_trades': [
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v1', 'return_pct': 3.0},
+                    {'regime_tag': 'trend_up', 'policy_tag': 'policy_v1', 'return_pct': 1.0},
+                    {'regime_tag': 'range', 'policy_tag': 'policy_v2', 'return_pct': -2.0},
+                    {'regime_tag': 'range', 'policy_tag': 'policy_v2', 'return_pct': -1.0},
+                    {'regime_tag': 'range', 'policy_tag': 'policy_v2', 'return_pct': 0.5},
+                ],
+            }
+        ])
+        self.assertTrue(report['summary']['calibration_ready'])
+        self.assertEqual(report['summary']['trade_count'], 5)
+        by_regime = {row['bucket']: row for row in report['by_regime']}
+        by_policy = {row['bucket']: row for row in report['by_policy_version']}
+        pair = {(row['bucket'], row['secondary_bucket']): row for row in report['by_regime_policy']}
+        self.assertEqual(by_regime['trend_up']['trade_count'], 2)
+        self.assertEqual(by_policy['policy_v2']['trade_count'], 3)
+        self.assertAlmostEqual(pair[('range', 'policy_v2')]['avg_return_pct'], -0.8333, places=4)
+        self.assertTrue(any(item['type'] == 'tighten_or_reprice' and item['regime'] == 'range' for item in report['recommendations']))
+
+    def test_calibration_report_marks_sample_gap_when_bucket_is_too_small(self):
+        report = build_regime_policy_calibration_report([
+            {
+                'symbol': 'ETH/USDT',
+                'all_trades': [
+                    {'regime_tag': 'high_vol', 'policy_tag': 'policy_v3', 'return_pct': 1.2},
+                ],
+            }
+        ])
+        self.assertEqual(report['summary']['trade_count'], 1)
+        self.assertTrue(any(item['type'] == 'sample_gap' for item in report['recommendations']))
 
 
 def run_tests():

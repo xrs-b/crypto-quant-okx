@@ -533,6 +533,11 @@
 
 ### AR-M5-01｜strategy × regime 离线分析报告
 
+- **Status（2026-03-27 / M5 Step 1）**：partial done
+- **Notes**：
+  - 已在 `analytics/backtest.py` 落地首版 `regime × policy` calibration report，先把全链路 adaptive 样本按 `regime_tag / policy_tag` 收口成统一离线分析出口。
+  - 当前回测聚合结果已补 `all_trades`、symbol 级 `regime_policy_calibration`，以及聚合级 `calibration_report`，可直接看到 `by_regime / by_policy_version / by_regime_policy` 的 trade_count、win_rate、avg_return_pct、total_return_pct。
+  - 这是 M5 闭环的第一步：先把 policy 校准真正需要的 regime / policy 样本分桶与摘要打通；更细的 `strategy × regime` 维度可在后续基于 signal reasons / strategy breakdown 继续扩展。
 - **阶段 / 优先级**：M5 / P1
 - **生效范围**：不直接生效
 - **目标**：形成 `strategy × regime` 的二维统计，为后续 policy 调整提供数据依据。
@@ -547,6 +552,11 @@
 
 ### AR-M5-02｜policy version 比较与建议生成
 
+- **Status（2026-03-27 / M5 Step 1）**：partial done
+- **Notes**：
+  - 首版 `calibration_report` 已同时输出 `by_policy_version` 与 `by_regime_policy`，并内置最小建议生成：`sample_gap`、`tighten_or_reprice`、`keep_or_expand_rollout`。
+  - 当前目标不是直接自动改 policy，而是让每次回测/复盘先有版本分桶和建议摘要，帮助下一步做更稳的 rollout / calibration / rollback 决策。
+  - 后续可继续补 A/B diff 视图（明确 policy A vs B 在同 regime 下的 delta），但现在已经先把“版本比较必须有统一出口”这件事钉住。
 - **阶段 / 优先级**：M5 / P1
 - **生效范围**：不直接生效
 - **目标**：让每次 policy 更新都有版本号、差异说明与基于数据的建议，而不是拍脑袋改 multiplier/threshold。

@@ -1,7 +1,9 @@
 """回测与信号质量分析模块"""
 from __future__ import annotations
 
+import math
 import os
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -14,6 +16,106 @@ from core.database import Database
 from signals.detector import SignalDetector
 from signals.validator import SignalValidator
 from core.regime_policy import normalize_observe_only_view, summarize_observe_only_collection
+
+
+def _normalize_bucket_tag(value: Optional[str], fallback: str = 'unknown') -> str:
+    value = str(value or '').strip()
+    return value or fallback
+
+
+def summarize_trade_buckets(
+    trades: List[Dict],
+    primary_key: str,
+    secondary_key: Optional[str] = None,
+) -> List[Dict]:
+    buckets: Dict[tuple, List[Dict]] = defaultdict(list)
+    for trade in trades:
+        primary = _normalize_bucket_tag(trade.get(primary_key))
+        secondary = _normalize_bucket_tag(trade.get(secondary_key)) if secondary_key else None
+        buckets[(primary, secondary)].append(trade)
+
+    rows = []
+    for (primary, secondary), bucket_trades in sorted(buckets.items(), key=lambda item: (item[0][0], item[0][1] or '')):
+        returns = [float(t.get('return_pct', 0) or 0) for t in bucket_trades]
+        wins = sum(1 for value in returns if value > 0)
+        losses = sum(1 for value in returns if value < 0)
+        avg_return = sum(returns) / len(returns) if returns else 0.0
+        rows.append({
+            'bucket': primary,
+            'secondary_bucket': secondary,
+            'trade_count': len(bucket_trades),
+            'wins': wins,
+            'losses': losses,
+            'win_rate': round((wins / len(bucket_trades) * 100), 2) if bucket_trades else 0.0,
+            'total_return_pct': round(sum(returns), 4),
+            'avg_return_pct': round(avg_return, 4),
+            'avg_abs_return_pct': round(sum(abs(v) for v in returns) / len(returns), 4) if returns else 0.0,
+        })
+    rows.sort(key=lambda row: (-row['trade_count'], row['bucket'], row.get('secondary_bucket') or ''))
+    return rows
+
+
+def build_regime_policy_calibration_report(symbol_results: List[Dict]) -> Dict:
+    all_trades = [
+        trade
+        for row in symbol_results
+        for trade in (row.get('all_trades') or row.get('recent_trades') or [])
+    ]
+    by_regime = summarize_trade_buckets(all_trades, 'regime_tag')
+    by_policy = summarize_trade_buckets(all_trades, 'policy_tag')
+    by_regime_policy = summarize_trade_buckets(all_trades, 'regime_tag', 'policy_tag')
+
+    recommendations = []
+    min_sample_size = 3
+    for row in by_regime_policy:
+        bucket = row['bucket']
+        policy = row.get('secondary_bucket') or 'unknown'
+        if row['trade_count'] < min_sample_size:
+            recommendations.append({
+                'type': 'sample_gap',
+                'regime': bucket,
+                'policy_version': policy,
+                'message': f'{bucket} × {policy} 样本仍少，先继续收集再调参',
+                'trade_count': row['trade_count'],
+            })
+            continue
+        if row['avg_return_pct'] < 0:
+            recommendations.append({
+                'type': 'tighten_or_reprice',
+                'regime': bucket,
+                'policy_version': policy,
+                'message': f'{bucket} × {policy} 平均回报为负，优先检查 decision/risk/execution 收紧是否足够',
+                'trade_count': row['trade_count'],
+                'avg_return_pct': row['avg_return_pct'],
+                'win_rate': row['win_rate'],
+            })
+        elif row['win_rate'] >= 60 and row['avg_return_pct'] > 0:
+            recommendations.append({
+                'type': 'keep_or_expand_rollout',
+                'regime': bucket,
+                'policy_version': policy,
+                'message': f'{bucket} × {policy} 表现稳定，可作为后续 rollout / calibration 优先候选',
+                'trade_count': row['trade_count'],
+                'avg_return_pct': row['avg_return_pct'],
+                'win_rate': row['win_rate'],
+            })
+
+    top_regime = by_regime[0]['bucket'] if by_regime else 'unknown'
+    top_policy = by_policy[0]['bucket'] if by_policy else 'unknown'
+    return {
+        'summary': {
+            'trade_count': len(all_trades),
+            'regimes': len(by_regime),
+            'policy_versions': len(by_policy),
+            'top_regime': top_regime,
+            'top_policy_version': top_policy,
+            'calibration_ready': bool(all_trades),
+        },
+        'by_regime': by_regime,
+        'by_policy_version': by_policy,
+        'by_regime_policy': by_regime_policy,
+        'recommendations': recommendations[:20],
+    }
 
 
 @dataclass
@@ -251,11 +353,17 @@ class StrategyBacktester:
             'total_return_pct': round(total_return, 4),
             'avg_return_pct': round((total_return / len(trades)), 4) if trades else 0.0,
             'max_drawdown_pct': round(max_drawdown, 4),
+            'all_trades': trades,
             'recent_trades': trades[-10:],
             'observe_only_summary_view': summarize_observe_only_collection(trades[-10:]),
             'regime_tags': regime_tags,
             'policy_tags': policy_tags,
             'observe_only_tags': observe_only_tags,
+            'regime_policy_calibration': {
+                'by_regime': summarize_trade_buckets(trades, 'regime_tag'),
+                'by_policy_version': summarize_trade_buckets(trades, 'policy_tag'),
+                'by_regime_policy': summarize_trade_buckets(trades, 'regime_tag', 'policy_tag'),
+            },
         }
 
     def _aggregate_results(self, symbol_results: List[Dict]) -> Dict:
@@ -272,6 +380,7 @@ class StrategyBacktester:
             for trade in (row.get('recent_trades') or [])
             if trade.get('observe_only')
         ])
+        calibration_report = build_regime_policy_calibration_report(symbol_results)
         return {
             'summary': {
                 'symbols': len(symbol_results),
@@ -285,8 +394,10 @@ class StrategyBacktester:
                 'observe_only_summary_view': observe_only_summary_view,
                 'regime_tags': regime_tags,
                 'policy_tags': policy_tags,
+                'calibration_ready': calibration_report['summary']['calibration_ready'],
             },
             'symbols': symbol_results,
+            'calibration_report': calibration_report,
         }
 
 

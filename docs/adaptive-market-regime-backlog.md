@@ -80,6 +80,7 @@
 | AR-M5-03 | regime detector / policy calibration playbook | M5 | P2 | 否 | 运维与迭代 |
 | AR-M5-04 | approval decision persistence / replay state layer | M5 | P0 | 否（仅持久化与恢复） | workflow / approval 闭环 |
 | AR-M5-08 | rollout executor skeleton / dispatch-plan-apply-result layer | M5 | P0 | 默认否（仅 skeleton / dry-run / very-safe controlled apply） | rollout execution orchestration |
+| AR-M5-09 | workflow operator digest / low-intervention governance summary API | M5 | P0 | 否（仅聚合已有 workflow/approval/executor 状态） | dashboard / API / low-touch consumption |
 
 ---
 
@@ -211,6 +212,28 @@
   - `ready_to_queue / blocked_by_approval / deferred` 会分别写入稳定 workflow 状态（例如 `queued / blocked_by_approval / deferred`）与 immutable timeline event；
   - 持久化 details 统一保留 `queue_plan / approval_hook / queue_transition / queue_progression / dispatch_route / next_transition / retryable / rollback_hint / queue_plan_consumed`，方便 dashboard/api/audit/回滚解释直接复用；
   - 继续保持 fail-closed：只推进治理/队列/审批状态，不做真实交易执行，不改 live 参数。
+
+### AR-M5-09｜workflow operator digest / low-intervention governance summary API
+
+- **阶段 / 优先级**：M5 / P0
+- **生效范围**：只读聚合；**不触发真实执行、不改审批结论、不改 live 参数**
+- **目标**：在已有 `governance_ready / workflow_ready / workflow_state / approval_state / workflow-consumer-view / calibration-report` 之上，再补一层真正给人/agent/后端入口直接消费的低干预摘要：
+  1. 一眼看到 `manual approval / blocked / ready / queued / deferred` 的当前状态；
+  2. 把 `workflow_state + approval_state + rollout_stage_progression + rollout_executor` 汇总成稳定 digest；
+  3. 输出 `headline / summary / attention / next_actions / execution / stage_progression`，减少上层自己拼字段；
+  4. 通过独立 API 与 `calibration-report?view=operator_digest` 双入口暴露，方便 dashboard/backend/agent 共用。
+- **涉及模块**：`analytics/helper.py`、`analytics/__init__.py`、`dashboard/api.py`、`tests/`
+- **输出契约**：`schema_version = m5_workflow_operator_digest_v1`
+- **安全边界**：
+  - 只复用已有 workflow/approval/executor 状态；
+  - 不新增自动执行；
+  - 不覆盖 terminal state；
+  - 不把 digest 冒充审批状态源，它只是消费层摘要。
+- **验收重点**：
+  - helper 能识别人工审批、blocked、ready、queued、auto-advance candidate；
+  - `/api/backtest/workflow-operator-digest` 返回稳定摘要；
+  - `/api/backtest/calibration-report?view=operator_digest` 可直接复用同一摘要层；
+  - 测试覆盖 helper + API 双入口。
 
 ### VEP-01 / VEP-04｜Shadow Validation Entry Pack（step 2 已落地）
 

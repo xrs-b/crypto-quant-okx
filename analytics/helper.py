@@ -1916,6 +1916,164 @@ def build_workflow_consumer_view(payload: Optional[Dict] = None) -> Dict[str, An
     payload['consumer_view'] = view
     return view
 
+
+def build_workflow_operator_digest(payload: Optional[Dict] = None, *, max_items: int = 5) -> Dict[str, Any]:
+    payload = payload or {}
+    consumer_view = payload.get('consumer_view') or build_workflow_consumer_view(payload)
+    workflow_items = ((consumer_view.get('workflow_state') or {}).get('item_states') or [])
+    approval_items = ((consumer_view.get('approval_state') or {}).get('items') or [])
+    stage_items = ((consumer_view.get('rollout_stage_progression') or {}).get('items') or [])
+    rollout_executor = consumer_view.get('rollout_executor') or {}
+    auto_approval = consumer_view.get('auto_approval_execution') or {}
+    controlled_rollout = consumer_view.get('controlled_rollout_execution') or {}
+
+    workflow_lookup = {row.get('item_id'): row for row in workflow_items if row.get('item_id')}
+    approval_by_playbook = {row.get('playbook_id'): row for row in approval_items if row.get('playbook_id')}
+
+    manual_approval_items = []
+    blocked_items = []
+    ready_items = []
+    queued_items = []
+    deferred_items = []
+    auto_advance_items = []
+
+    def _sort_key(row: Dict[str, Any]):
+        risk_rank = {'critical': 0, 'high': 1, 'medium': 2, 'low': 3}
+        return (
+            risk_rank.get(str(row.get('risk_level') or '').lower(), 9),
+            0 if row.get('requires_manual') else 1,
+            0 if row.get('approval_required') else 1,
+            str(row.get('title') or row.get('item_id') or ''),
+        )
+
+    for workflow_item in workflow_items:
+        item_id = workflow_item.get('item_id')
+        approval_item = approval_by_playbook.get(item_id) or {}
+        workflow_state = workflow_item.get('workflow_state') or 'pending'
+        blocked_by = list(dict.fromkeys((workflow_item.get('blocking_reasons') or []) + (approval_item.get('blocked_by') or [])))
+        row = {
+            'item_id': item_id,
+            'approval_id': approval_item.get('approval_id'),
+            'title': workflow_item.get('title') or approval_item.get('title') or item_id,
+            'action_type': workflow_item.get('action_type') or approval_item.get('action_type'),
+            'workflow_state': workflow_state,
+            'approval_state': approval_item.get('approval_state') or 'not_required',
+            'decision_state': approval_item.get('decision_state') or workflow_item.get('decision_state') or workflow_state,
+            'risk_level': workflow_item.get('risk_level') or approval_item.get('risk_level') or 'unknown',
+            'requires_manual': bool(workflow_item.get('requires_manual', approval_item.get('requires_manual'))),
+            'approval_required': bool(workflow_item.get('approval_required', approval_item.get('approval_required'))),
+            'auto_approval_decision': workflow_item.get('auto_approval_decision') or approval_item.get('auto_approval_decision') or 'manual_review',
+            'blocked_by': blocked_by,
+            'queue_progression': workflow_item.get('queue_progression') or {},
+            'stage_model': workflow_item.get('stage_model') or {},
+            'current_rollout_stage': workflow_item.get('current_rollout_stage'),
+            'target_rollout_stage': workflow_item.get('target_rollout_stage'),
+        }
+        if row['requires_manual'] and row['approval_state'] == 'pending':
+            manual_approval_items.append(row)
+        if workflow_state in {'blocked_by_approval', 'blocked', 'deferred'} or blocked_by:
+            blocked_items.append(row)
+        if workflow_state == 'ready':
+            ready_items.append(row)
+        if workflow_state == 'queued':
+            queued_items.append(row)
+        if workflow_state == 'deferred':
+            deferred_items.append(row)
+        if row['auto_approval_decision'] == 'auto_approve' and not row['requires_manual'] and not blocked_by and workflow_state in {'ready', 'queued'}:
+            auto_advance_items.append(row)
+
+    blocked_items.sort(key=_sort_key)
+    manual_approval_items.sort(key=_sort_key)
+    ready_items.sort(key=_sort_key)
+    queued_items.sort(key=_sort_key)
+    deferred_items.sort(key=_sort_key)
+    auto_advance_items.sort(key=_sort_key)
+
+    next_actions = []
+    if manual_approval_items:
+        next_actions.append({
+            'kind': 'manual_approval',
+            'priority': 'high',
+            'count': len(manual_approval_items),
+            'message': f"{len(manual_approval_items)} item(s) waiting for manual approval",
+            'items': manual_approval_items[:max_items],
+        })
+    if blocked_items:
+        next_actions.append({
+            'kind': 'blocked_followup',
+            'priority': 'high' if manual_approval_items else 'medium',
+            'count': len(blocked_items),
+            'message': f"{len(blocked_items)} item(s) still blocked or deferred",
+            'items': blocked_items[:max_items],
+        })
+    if ready_items:
+        next_actions.append({
+            'kind': 'ready_to_consume',
+            'priority': 'medium',
+            'count': len(ready_items),
+            'message': f"{len(ready_items)} item(s) already ready for rollout/governance consumption",
+            'items': ready_items[:max_items],
+        })
+    if queued_items:
+        next_actions.append({
+            'kind': 'queued_watch',
+            'priority': 'medium',
+            'count': len(queued_items),
+            'message': f"{len(queued_items)} item(s) are queued and should be watched for progression",
+            'items': queued_items[:max_items],
+        })
+
+    headline_status = 'attention_required' if manual_approval_items or blocked_items else 'steady'
+    if ready_items and not manual_approval_items and not blocked_items:
+        headline_status = 'ready_to_consume'
+
+    digest = {
+        'schema_version': 'm5_workflow_operator_digest_v1',
+        'headline': {
+            'status': headline_status,
+            'message': (
+                f"{len(manual_approval_items)} manual approval / {len(blocked_items)} blocked / {len(ready_items)} ready / {len(queued_items)} queued"
+            ),
+            'rollout_executor_status': rollout_executor.get('status') or 'disabled',
+        },
+        'summary': {
+            'workflow_item_count': len(workflow_items),
+            'approval_item_count': len(approval_items),
+            'manual_approval_count': len(manual_approval_items),
+            'blocked_count': len(blocked_items),
+            'ready_count': len(ready_items),
+            'queued_count': len(queued_items),
+            'deferred_count': len(deferred_items),
+            'auto_advance_candidate_count': len(auto_advance_items),
+            'rollout_executor_status': rollout_executor.get('status') or 'disabled',
+            'auto_approval_executed_count': auto_approval.get('executed_count', 0),
+            'controlled_rollout_executed_count': controlled_rollout.get('executed_count', 0),
+            'stage_progression': (consumer_view.get('rollout_stage_progression') or {}).get('summary') or {},
+        },
+        'attention': {
+            'manual_approval': manual_approval_items[:max_items],
+            'blocked': blocked_items[:max_items],
+            'queued': queued_items[:max_items],
+            'ready': ready_items[:max_items],
+            'auto_advance_candidates': auto_advance_items[:max_items],
+        },
+        'next_actions': next_actions,
+        'execution': {
+            'rollout_executor': {
+                'status': rollout_executor.get('status') or 'disabled',
+                'summary': rollout_executor.get('summary') or {},
+            },
+            'auto_approval_execution': auto_approval,
+            'controlled_rollout_execution': controlled_rollout,
+        },
+        'stage_progression': {
+            'summary': (consumer_view.get('rollout_stage_progression') or {}).get('summary') or {},
+            'items': stage_items[:max_items],
+        },
+    }
+    payload['operator_digest'] = digest
+    return digest
+
 def build_approval_audit_overview(*, stale_rows: Optional[List[Dict]] = None,
                                   decision_diffs: Optional[List[Dict]] = None,
                                   timeline_summary: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:

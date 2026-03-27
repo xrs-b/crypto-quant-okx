@@ -52,7 +52,7 @@ from signals.validator import SignalValidator
 from bot.run import execute_exchange_smoke, reconcile_exchange_positions, load_runtime_state
 from ml.engine import MLEngine
 from core.regime import RegimeDetector, detect_regime, Regime
-from analytics import StrategyBacktester, SignalQualityAnalyzer, ParameterOptimizer, GovernanceEngine, build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, attach_auto_approval_policy, execute_controlled_rollout_layer, execute_controlled_auto_approval_layer, execute_rollout_executor, build_workflow_consumer_view
+from analytics import StrategyBacktester, SignalQualityAnalyzer, ParameterOptimizer, GovernanceEngine, build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, attach_auto_approval_policy, execute_controlled_rollout_layer, execute_controlled_auto_approval_layer, execute_rollout_executor, build_workflow_consumer_view, build_workflow_operator_digest
 from analytics.backtest import export_calibration_payload
 from analytics.mfe_mae import MFEAnalyzer, get_mfe_mae_analysis
 from core.regime_policy import summarize_observe_only_collection
@@ -2420,27 +2420,30 @@ def get_backtest_summary():
 def get_backtest_calibration_report():
     """获取 M5 calibration 聚合输出，默认返回 report-ready payload。"""
     view = (request.args.get('view') or 'report_ready').strip().lower()
-    if view not in {'report_ready', 'delivery', 'governance_ready', 'workflow_ready', 'full'}:
-        return jsonify({'success': False, 'error': 'view must be one of report_ready|delivery|governance_ready|workflow_ready|full'}), 400
+    if view not in {'report_ready', 'delivery', 'governance_ready', 'workflow_ready', 'operator_digest', 'full'}:
+        return jsonify({'success': False, 'error': 'view must be one of report_ready|delivery|governance_ready|workflow_ready|operator_digest|full'}), 400
 
     backtest_result = backtester.run_all(config.symbols)
     calibration_report = backtest_result.get('calibration_report') or {}
     payload = export_calibration_payload(
         calibration_report,
-        view='full' if view == 'full' else view,
+        view='full' if view == 'full' else ('workflow_ready' if view == 'operator_digest' else view),
     )
-    if view in {'workflow_ready', 'full'}:
-        workflow_payload = payload if view == 'workflow_ready' else (payload.get('workflow_ready') or {})
+    if view in {'workflow_ready', 'operator_digest', 'full'}:
+        workflow_payload = payload if view in {'workflow_ready', 'operator_digest'} else (payload.get('workflow_ready') or {})
         payload_to_persist = dict(workflow_payload)
         if payload_to_persist:
             persisted_workflow = _persist_workflow_approval_payload(payload_to_persist, replay_source=f'calibration_report:{view}')
             if view == 'workflow_ready':
                 payload = persisted_workflow
+            elif view == 'operator_digest':
+                payload = build_workflow_operator_digest(persisted_workflow)
             else:
                 payload['workflow_ready'] = persisted_workflow
+                payload['operator_digest'] = build_workflow_operator_digest(persisted_workflow)
     summary = calibration_report.get('summary') or {}
     governance_ready = payload if view == 'governance_ready' else (payload.get('governance_ready') or {})
-    workflow_ready = payload if view == 'workflow_ready' else (payload.get('workflow_ready') or {})
+    workflow_ready = {} if view == 'operator_digest' else (payload if view == 'workflow_ready' else (payload.get('workflow_ready') or {}))
     return jsonify({
         'success': True,
         'view': view,
@@ -2452,6 +2455,7 @@ def get_backtest_calibration_report():
             'delivery_ready': summary.get('delivery_ready') or {},
             'governance_ready': summary.get('governance_ready') or (governance_ready.get('summary') or {}),
             'workflow_ready': workflow_ready.get('summary') or {},
+            'operator_digest': payload.get('summary') or {} if view == 'operator_digest' else (payload.get('operator_digest') or {}).get('summary') or {},
             'joint_governance_summary': summary.get('joint_governance_summary') or {},
         }
     })
@@ -2485,6 +2489,23 @@ def get_backtest_workflow_consumer_view():
         'view': 'workflow_consumer_view',
         'data': consumer_view,
         'summary': consumer_view.get('summary') or {},
+    })
+
+
+@app.route('/api/backtest/workflow-operator-digest')
+def get_backtest_workflow_operator_digest():
+    """返回低干预治理/巡检摘要，优先给 dashboard、agent、人工巡检入口直接消费。"""
+    max_items = max(1, min(int(request.args.get('max_items', 5)), 20))
+    backtest_result = backtester.run_all(config.symbols)
+    calibration_report = backtest_result.get('calibration_report') or {}
+    payload = export_calibration_payload(calibration_report, view='workflow_ready')
+    payload = _persist_workflow_approval_payload(payload, replay_source='workflow_operator_digest_api')
+    digest = build_workflow_operator_digest(payload, max_items=max_items)
+    return jsonify({
+        'success': True,
+        'view': 'workflow_operator_digest',
+        'data': digest,
+        'summary': digest.get('summary') or {},
     })
 
 

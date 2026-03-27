@@ -1,5 +1,7 @@
 # Adaptive Market Regime 阶段总结（2026-03-27）
 
+> 2026-03-27 晚补记：在 testnet bridge 阶段性完成后，消费层继续补了一层 `workflow operator digest` 摘要 API（`/api/backtest/workflow-operator-digest` 与 `calibration-report?view=operator_digest`），把 `workflow_state / approval_state / rollout_stage_progression / rollout_executor` 汇成低干预巡检入口，方便 dashboard / agent / 人工治理直接消费。
+
 ## 一句话结论
 当前项目已从“近几个月数据驱动的局部适配策略”，推进到一套 **带 regime 感知、带 rollout/gate、带治理闭环雏形** 的自适应市场策略框架。
 

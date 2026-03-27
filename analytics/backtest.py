@@ -1632,6 +1632,7 @@ def build_calibration_report_ready_payload(source: Dict) -> Dict:
     delivery = report.get('delivery') or {}
     summary = report.get('summary') or {}
     views = delivery.get('views') or {}
+    governance_ready = build_joint_governance_ready_payload(report)
     return {
         'schema_version': 'm5_report_ready_v1',
         'delivery_schema_version': delivery.get('schema_version'),
@@ -1642,8 +1643,16 @@ def build_calibration_report_ready_payload(source: Dict) -> Dict:
         },
         'render_ready': delivery.get('render_ready') or {},
         'orchestration_ready': delivery.get('orchestration_ready') or {},
-        'governance_ready': build_joint_governance_ready_payload(report),
-        'tables': views.get('tables') or {},
+        'governance_ready': governance_ready,
+        'joint_governance': governance_ready.get('items') or [],
+        'priority_queue': governance_ready.get('priority_queue') or [],
+        'next_actions': governance_ready.get('next_actions') or [],
+        'blocking_items': governance_ready.get('blocking_items') or [],
+        'bucket_index': governance_ready.get('bucket_index') or {},
+        'tables': {
+            **(views.get('tables') or {}),
+            'governance_ready': governance_ready,
+        },
     }
 
 
@@ -1838,6 +1847,11 @@ def build_regime_policy_calibration_report(symbol_results: List[Dict]) -> Dict:
         'delivery': delivery,
         'joint_governance': joint_governance,
     })
+    summary['governance_ready'] = {
+        'schema_version': delivery['governance_ready']['schema_version'],
+        'delivery_schema_version': delivery['governance_ready']['delivery_schema_version'],
+        **(delivery['governance_ready'].get('summary') or {}),
+    }
     return {
         'summary': summary,
         'by_regime': by_regime,

@@ -2401,6 +2401,7 @@ def get_backtest_calibration_report():
         view='full' if view == 'full' else view,
     )
     summary = calibration_report.get('summary') or {}
+    governance_ready = payload if view == 'governance_ready' else (payload.get('governance_ready') or {})
     return jsonify({
         'success': True,
         'view': view,
@@ -2410,6 +2411,7 @@ def get_backtest_calibration_report():
             'trade_count': summary.get('trade_count', 0),
             'calibration_ready': bool(summary.get('calibration_ready')),
             'delivery_ready': summary.get('delivery_ready') or {},
+            'governance_ready': summary.get('governance_ready') or (governance_ready.get('summary') or {}),
             'joint_governance_summary': summary.get('joint_governance_summary') or {},
         }
     })

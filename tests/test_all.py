@@ -4473,7 +4473,13 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
         self.assertEqual(payload['render_ready'], report['delivery']['render_ready'])
         self.assertEqual(payload['orchestration_ready'], report['delivery']['orchestration_ready'])
         self.assertEqual(payload['governance_ready'], report['delivery']['governance_ready'])
-        self.assertEqual(payload['tables'], report['delivery']['views']['tables'])
+        self.assertEqual(payload['joint_governance'], report['delivery']['governance_ready']['items'])
+        self.assertEqual(payload['priority_queue'], report['delivery']['governance_ready']['priority_queue'])
+        self.assertEqual(payload['next_actions'], report['delivery']['governance_ready']['next_actions'])
+        self.assertEqual(payload['blocking_items'], report['delivery']['governance_ready']['blocking_items'])
+        self.assertEqual(payload['bucket_index'], report['delivery']['governance_ready']['bucket_index'])
+        self.assertEqual(payload['tables']['governance_ready'], report['delivery']['governance_ready'])
+        self.assertEqual(payload['tables']['joint_governance'], report['delivery']['views']['tables']['joint_governance'])
 
     def test_joint_governance_ready_payload_provides_direct_consumer_entrypoint(self):
         report = build_regime_policy_calibration_report([
@@ -4498,6 +4504,8 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
         self.assertEqual(payload['blocking_items'], report['delivery']['render_ready']['sections']['joint_blocking_items'])
         self.assertEqual(payload['tables']['joint_priority_queue'], payload['priority_queue'])
         self.assertIn(payload['priority_queue'][0]['bucket_id'], payload['bucket_index'])
+        self.assertEqual(report['summary']['governance_ready']['schema_version'], payload['schema_version'])
+        self.assertEqual(report['summary']['governance_ready']['item_count'], payload['summary']['item_count'])
 
     def test_export_calibration_payload_supports_delivery_governance_ready_and_full_views(self):
         report = build_regime_policy_calibration_report([
@@ -4550,7 +4558,10 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
             self.assertEqual(payload['view'], 'report_ready')
             self.assertEqual(payload['data']['schema_version'], 'm5_report_ready_v1')
             self.assertEqual(payload['data']['delivery_ready'], report['summary']['delivery_ready'])
+            self.assertEqual(payload['data']['priority_queue'], report['delivery']['governance_ready']['priority_queue'])
+            self.assertEqual(payload['data']['blocking_items'], report['delivery']['governance_ready']['blocking_items'])
             self.assertEqual(payload['summary']['delivery_ready'], report['summary']['delivery_ready'])
+            self.assertEqual(payload['summary']['governance_ready'], report['summary']['governance_ready'])
         finally:
             dashboard_api.backtester = old_backtester
 
@@ -4624,6 +4635,7 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
             self.assertEqual(payload['view'], 'governance_ready')
             self.assertEqual(payload['data']['schema_version'], 'm5_joint_governance_ready_v1')
             self.assertEqual(payload['data']['priority_queue'], report['delivery']['governance_ready']['priority_queue'])
+            self.assertEqual(payload['summary']['governance_ready'], report['summary']['governance_ready'])
             self.assertEqual(payload['summary']['joint_governance_summary'], report['summary']['joint_governance_summary'])
         finally:
             dashboard_api.backtester = old_backtester

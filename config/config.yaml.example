@@ -50,13 +50,14 @@ governance:
     score_margin: 1.0
   controlled_rollout_execution:
     enabled: false
-    mode: disabled   # disabled|state_apply；默认安全关闭，只允许低风险白名单动作把持久化 state/workflow_state 推进到 ready，不做真实交易执行
+    mode: disabled   # disabled|state_apply；默认安全关闭，只允许低风险白名单动作做受控持久化，不做真实交易执行
     actor: system:controlled-rollout
     source: controlled_rollout_execution
     reason_prefix: controlled rollout state apply
-    allowed_action_types: [joint_observe]
+    allowed_action_types: [joint_observe]   # 支持的 very-safe 动作：joint_observe/joint_queue_promote_safe/joint_stage_prepare/joint_review_schedule/joint_metadata_annotate；默认仍只开 joint_observe
     target_state: ready
     target_workflow_state: ready
+    default_review_after_hours: 24
   auto_approval_execution:
     enabled: false
     mode: disabled   # disabled|controlled；默认安全关闭，只有 controlled 才会把符合条件项推进到真实 approved/ready

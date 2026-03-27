@@ -1,11 +1,49 @@
 """Approval/workflow persistence helpers."""
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Any
 
 
 TERMINAL_APPROVAL_STATES = {'approved', 'rejected', 'deferred', 'expired'}
 AUTO_APPROVAL_DECISIONS = {'auto_approve', 'manual_review', 'freeze', 'defer'}
+CONTROLLED_ROLLOUT_ACTION_SPECS = {
+    'joint_observe': {
+        'state': 'ready',
+        'workflow_state': 'ready',
+        'event_type': 'controlled_rollout_state_apply',
+        'result_action': 'state_applied',
+        'effect': 'safe_state_transition',
+    },
+    'joint_queue_promote_safe': {
+        'state': 'ready',
+        'workflow_state': 'ready',
+        'event_type': 'controlled_rollout_queue_promote',
+        'result_action': 'queue_promoted',
+        'effect': 'safe_queue_promotion',
+    },
+    'joint_stage_prepare': {
+        'state': 'ready',
+        'workflow_state': 'ready',
+        'event_type': 'controlled_rollout_stage_prepare',
+        'result_action': 'stage_prepared',
+        'effect': 'safe_rollout_stage_transition',
+    },
+    'joint_review_schedule': {
+        'state': 'pending',
+        'workflow_state': 'pending',
+        'event_type': 'controlled_rollout_review_schedule',
+        'result_action': 'review_scheduled',
+        'effect': 'safe_review_scheduling',
+    },
+    'joint_metadata_annotate': {
+        'state': 'pending',
+        'workflow_state': 'pending',
+        'event_type': 'controlled_rollout_metadata_annotate',
+        'result_action': 'metadata_annotated',
+        'effect': 'safe_metadata_annotation',
+    },
+}
 
 
 def _normalize_auto_approval_decision(value: Optional[str]) -> str:
@@ -294,6 +332,60 @@ def _normalize_controlled_rollout_execution_mode(value: Optional[str]) -> str:
     return normalized if normalized in {'disabled', 'state_apply'} else 'disabled'
 
 
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
+
+
+def _build_controlled_rollout_action_details(action_type: str, row: Dict, workflow_item: Dict, spec: Dict, settings: Dict) -> Dict[str, Any]:
+    now_iso = _utc_now_iso()
+    details: Dict[str, Any] = {
+        'effect': spec.get('effect') or 'safe_state_transition',
+        'action_type': action_type,
+        'safe_apply': True,
+        'real_trade_execution': False,
+        'dangerous_live_parameter_change': False,
+    }
+
+    if action_type == 'joint_queue_promote_safe':
+        queue_name = row.get('target_queue') or workflow_item.get('queue_name') or row.get('bucket_id') or workflow_item.get('bucket_id') or 'priority_queue'
+        details.update({
+            'queue_name': queue_name,
+            'queue_action': 'promote_safe',
+            'queue_priority': row.get('queue_priority') or workflow_item.get('queue_priority') or 'expedite_safe',
+        })
+    elif action_type == 'joint_stage_prepare':
+        target_stage = str(row.get('target_rollout_stage') or workflow_item.get('target_rollout_stage') or 'prepared').strip().lower() or 'prepared'
+        previous_stage = str(row.get('current_rollout_stage') or workflow_item.get('current_rollout_stage') or row.get('rollout_stage') or workflow_item.get('rollout_stage') or 'pending').strip().lower() or 'pending'
+        details.update({
+            'rollout_stage': target_stage,
+            'stage_transition': {'from': previous_stage, 'to': target_stage},
+        })
+    elif action_type == 'joint_review_schedule':
+        review_after_hours = int(row.get('review_after_hours') or workflow_item.get('review_after_hours') or settings.get('default_review_after_hours') or 24)
+        review_after_hours = max(1, min(review_after_hours, 24 * 14))
+        due_at = row.get('review_due_at') or workflow_item.get('review_due_at')
+        if not due_at:
+            due_at = (datetime.now(timezone.utc) + timedelta(hours=review_after_hours)).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
+        details.update({
+            'review_status': 'scheduled',
+            'review_scheduled_at': now_iso,
+            'review_due_at': due_at,
+            'review_after_hours': review_after_hours,
+        })
+    elif action_type == 'joint_metadata_annotate':
+        annotations = row.get('annotations') or workflow_item.get('annotations') or row.get('metadata_annotations') or workflow_item.get('metadata_annotations') or {}
+        tags = _dedupe_strings(row.get('annotation_tags') or workflow_item.get('annotation_tags') or row.get('tags') or workflow_item.get('tags') or [])
+        note = row.get('annotation_note') or workflow_item.get('annotation_note') or row.get('note') or workflow_item.get('note')
+        details.update({
+            'annotations': annotations if isinstance(annotations, dict) else {'value': annotations},
+            'annotation_tags': tags,
+            'annotation_note': note,
+            'annotated_at': now_iso,
+        })
+
+    return details
+
+
 def _get_auto_approval_execution_settings(config: Any = None, overrides: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     overrides = dict(overrides or {})
     getter = getattr(config, 'get', None)
@@ -327,6 +419,7 @@ def _get_controlled_rollout_execution_settings(config: Any = None, overrides: Op
         'allowed_action_types': allowed_action_types,
         'target_workflow_state': str(raw.get('target_workflow_state') or 'ready').strip().lower() or 'ready',
         'target_state': str(raw.get('target_state') or 'ready').strip().lower() or 'ready',
+        'default_review_after_hours': int(raw.get('default_review_after_hours') or 24),
     }
     settings.update({k: v for k, v in overrides.items() if v is not None})
     settings['enabled'] = bool(settings.get('enabled', False))
@@ -334,6 +427,7 @@ def _get_controlled_rollout_execution_settings(config: Any = None, overrides: Op
     settings['allowed_action_types'] = _dedupe_strings(settings.get('allowed_action_types') or ['joint_observe'])
     settings['target_workflow_state'] = str(settings.get('target_workflow_state') or 'ready').strip().lower() or 'ready'
     settings['target_state'] = str(settings.get('target_state') or 'ready').strip().lower() or 'ready'
+    settings['default_review_after_hours'] = max(1, min(int(settings.get('default_review_after_hours') or 24), 24 * 14))
     return settings
 
 
@@ -362,6 +456,7 @@ def execute_controlled_rollout_layer(payload: Dict, db: Any, *, config: Any = No
         result['skipped_count'] = len(approval_items)
         return payload
 
+    allowed_action_types = set(execution_settings.get('allowed_action_types') or [])
     executed_rows = []
     for row in approval_items:
         approval_id = row.get('approval_id') or row.get('item_id') or row.get('playbook_id')
@@ -369,6 +464,7 @@ def execute_controlled_rollout_layer(payload: Dict, db: Any, *, config: Any = No
         persisted_row = db.get_approval_state(approval_id) if approval_id else None
         persisted_details = (persisted_row or {}).get('details') or {}
         action_type = str(row.get('action_type') or workflow_item.get('action_type') or (persisted_row or {}).get('approval_type') or '').strip().lower()
+        action_spec = CONTROLLED_ROLLOUT_ACTION_SPECS.get(action_type)
         current_state = str((persisted_row or {}).get('state') or row.get('approval_state') or row.get('persisted_state') or row.get('state') or 'pending').strip().lower()
         current_workflow_state = str((persisted_row or {}).get('workflow_state') or row.get('persisted_workflow_state') or workflow_item.get('workflow_state') or row.get('decision_state') or 'pending').strip().lower()
         auto_decision = _normalize_auto_approval_decision(row.get('auto_approval_decision'))
@@ -378,21 +474,35 @@ def execute_controlled_rollout_layer(payload: Dict, db: Any, *, config: Any = No
         approval_required = bool(row.get('approval_required') if row.get('approval_required') is not None else workflow_item.get('approval_required'))
         eligible = bool(row.get('auto_approval_eligible'))
 
+        target_state = str((action_spec or {}).get('state') or execution_settings['target_state']).strip().lower() or execution_settings['target_state']
+        target_workflow_state = str((action_spec or {}).get('workflow_state') or execution_settings['target_workflow_state']).strip().lower() or execution_settings['target_workflow_state']
+        event_type = str((action_spec or {}).get('event_type') or 'controlled_rollout_state_apply')
+        result_action = str((action_spec or {}).get('result_action') or 'state_applied')
+
         skip_reason = None
+        already_effect_applied = (
+            current_state == target_state
+            and current_workflow_state == target_workflow_state
+            and persisted_details.get('effect') == (action_spec or {}).get('effect')
+            and persisted_details.get('action_type') == action_type
+        )
+
         if current_state in TERMINAL_APPROVAL_STATES:
             skip_reason = f'terminal_state:{current_state}'
-        elif current_state == execution_settings['target_state'] and current_workflow_state == execution_settings['target_workflow_state']:
-            skip_reason = 'already_applied'
-        elif action_type not in set(execution_settings.get('allowed_action_types') or []):
+        elif action_type not in allowed_action_types:
             skip_reason = f'action_type_not_allowlisted:{action_type or "unknown"}'
-        elif auto_decision != 'auto_approve':
-            skip_reason = f'judgement:{auto_decision}'
-        elif not eligible:
-            skip_reason = 'not_eligible'
-        elif requires_manual:
-            skip_reason = 'requires_manual'
+        elif not action_spec:
+            skip_reason = f'action_type_not_supported:{action_type or "unknown"}'
+        elif already_effect_applied:
+            skip_reason = 'already_applied'
         elif approval_required:
             skip_reason = 'approval_required'
+        elif requires_manual:
+            skip_reason = 'requires_manual'
+        elif not eligible:
+            skip_reason = 'not_eligible'
+        elif auto_decision != 'auto_approve':
+            skip_reason = f'judgement:{auto_decision}'
         elif risk_level != 'low':
             skip_reason = f'risk_level:{risk_level or "unknown"}'
         elif blocked_by:
@@ -402,6 +512,7 @@ def execute_controlled_rollout_layer(payload: Dict, db: Any, *, config: Any = No
             result['items'].append({
                 'item_id': approval_id,
                 'playbook_id': row.get('playbook_id'),
+                'action_type': action_type,
                 'action': 'skipped',
                 'reason': skip_reason,
                 'state': current_state,
@@ -410,15 +521,15 @@ def execute_controlled_rollout_layer(payload: Dict, db: Any, *, config: Any = No
             result['skipped_count'] += 1
             continue
 
-        reason = f"{execution_settings['reason_prefix']}: {row.get('reason') or 'policy judged item as low-risk state-apply candidate'}"
+        reason = f"{execution_settings['reason_prefix']}: {row.get('reason') or 'policy judged item as low-risk controlled-rollout candidate'}"
         details = {
             'item_id': approval_id,
             'approval_id': approval_id,
             'playbook_id': row.get('playbook_id'),
             'title': row.get('title') or workflow_item.get('title'),
-            'bucket_id': row.get('bucket_id'),
-            'state': execution_settings['target_state'],
-            'workflow_state': execution_settings['target_workflow_state'],
+            'bucket_id': row.get('bucket_id') or workflow_item.get('bucket_id'),
+            'state': target_state,
+            'workflow_state': target_workflow_state,
             'reason': reason,
             'actor': execution_settings['actor'],
             'source': execution_settings['source'],
@@ -434,32 +545,32 @@ def execute_controlled_rollout_layer(payload: Dict, db: Any, *, config: Any = No
             'action_type': action_type,
             'execution_layer': 'controlled_rollout_state_apply',
             'execution_mode': execution_settings['mode'],
-            'safe_apply': True,
-            'real_trade_execution': False,
         }
+        details.update(_build_controlled_rollout_action_details(action_type, row, workflow_item, action_spec, execution_settings))
         db.upsert_approval_state(
             item_id=approval_id,
             approval_type=row.get('action_type') or workflow_item.get('action_type') or 'workflow_approval',
             target=row.get('playbook_id'),
             title=row.get('title') or workflow_item.get('title'),
             decision=row.get('persisted_decision') or row.get('approval_state') or 'pending',
-            state=execution_settings['target_state'],
-            workflow_state=execution_settings['target_workflow_state'],
+            state=target_state,
+            workflow_state=target_workflow_state,
             reason=reason,
             actor=execution_settings['actor'],
             replay_source=replay_source,
             details=details,
             preserve_terminal=True,
-            event_type='controlled_rollout_state_apply',
+            event_type=event_type,
             append_event=True,
         )
         executed_rows.append(db.get_approval_state(approval_id))
         result['items'].append({
             'item_id': approval_id,
             'playbook_id': row.get('playbook_id'),
-            'action': 'state_applied',
-            'state': execution_settings['target_state'],
-            'workflow_state': execution_settings['target_workflow_state'],
+            'action_type': action_type,
+            'action': result_action,
+            'state': target_state,
+            'workflow_state': target_workflow_state,
             'reason': reason,
         })
         result['executed_count'] += 1

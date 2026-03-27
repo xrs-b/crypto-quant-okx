@@ -5468,6 +5468,142 @@ class TestApprovalPersistence(unittest.TestCase):
             self.assertEqual(result['controlled_rollout_execution']['executed_count'], 1)
             self.assertGreaterEqual(result['controlled_rollout_execution']['skipped_count'], 1)
 
+    def test_controlled_rollout_execution_supports_safe_extended_action_types(self):
+        class StubConfig:
+            def __init__(self, values=None):
+                self.values = values or {}
+
+            def get(self, key, default=None):
+                return self.values.get(key, default)
+
+        config = StubConfig({
+            'governance.controlled_rollout_execution': {
+                'enabled': True,
+                'mode': 'state_apply',
+                'actor': 'system:test-controlled-rollout',
+                'source': 'unit_test_controlled_rollout',
+                'reason_prefix': 'unit-test controlled rollout state apply',
+                'default_review_after_hours': 6,
+                'allowed_action_types': [
+                    'joint_observe',
+                    'joint_queue_promote_safe',
+                    'joint_stage_prepare',
+                    'joint_review_schedule',
+                    'joint_metadata_annotate',
+                ],
+            }
+        })
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(str(Path(tmpdir) / 'controlled_rollout_extended.db'))
+            payload = {
+                'workflow_state': {
+                    'item_states': [
+                        {'item_id': 'playbook::queue', 'title': 'Queue promotion item', 'action_type': 'joint_queue_promote_safe', 'decision': 'expand', 'governance_mode': 'rollout', 'risk_level': 'low', 'approval_required': False, 'blocking_reasons': [], 'preconditions': [], 'workflow_state': 'pending', 'confidence': 'high', 'bucket_id': 'bucket::priority'},
+                        {'item_id': 'playbook::stage', 'title': 'Stage prepare item', 'action_type': 'joint_stage_prepare', 'decision': 'expand', 'governance_mode': 'rollout', 'risk_level': 'low', 'approval_required': False, 'blocking_reasons': [], 'preconditions': [], 'workflow_state': 'pending', 'confidence': 'high', 'current_rollout_stage': 'observe'},
+                        {'item_id': 'playbook::review', 'title': 'Review schedule item', 'action_type': 'joint_review_schedule', 'decision': 'expand', 'governance_mode': 'rollout', 'risk_level': 'low', 'approval_required': False, 'blocking_reasons': [], 'preconditions': [], 'workflow_state': 'pending', 'confidence': 'high', 'review_after_hours': 4},
+                        {'item_id': 'playbook::annotate', 'title': 'Metadata annotation item', 'action_type': 'joint_metadata_annotate', 'decision': 'expand', 'governance_mode': 'rollout', 'risk_level': 'low', 'approval_required': False, 'blocking_reasons': [], 'preconditions': [], 'workflow_state': 'pending', 'confidence': 'high', 'annotations': {'operator_note': 'safe for staged rollout'}, 'annotation_tags': ['safe', 'audit']},
+                    ],
+                    'summary': {},
+                },
+                'approval_state': {
+                    'items': [
+                        {'approval_id': 'approval::queue', 'playbook_id': 'playbook::queue', 'title': 'Queue promotion item', 'action_type': 'joint_queue_promote_safe', 'approval_state': 'pending', 'decision_state': 'pending', 'risk_level': 'low', 'approval_required': False, 'blocked_by': [], 'bucket_id': 'bucket::priority'},
+                        {'approval_id': 'approval::stage', 'playbook_id': 'playbook::stage', 'title': 'Stage prepare item', 'action_type': 'joint_stage_prepare', 'approval_state': 'pending', 'decision_state': 'pending', 'risk_level': 'low', 'approval_required': False, 'blocked_by': []},
+                        {'approval_id': 'approval::review', 'playbook_id': 'playbook::review', 'title': 'Review schedule item', 'action_type': 'joint_review_schedule', 'approval_state': 'pending', 'decision_state': 'pending', 'risk_level': 'low', 'approval_required': False, 'blocked_by': [], 'review_after_hours': 4},
+                        {'approval_id': 'approval::annotate', 'playbook_id': 'playbook::annotate', 'title': 'Metadata annotation item', 'action_type': 'joint_metadata_annotate', 'approval_state': 'pending', 'decision_state': 'pending', 'risk_level': 'low', 'approval_required': False, 'blocked_by': [], 'annotations': {'operator_note': 'safe for staged rollout'}, 'annotation_tags': ['safe', 'audit']},
+                    ],
+                    'summary': {},
+                },
+            }
+            payload = attach_auto_approval_policy(payload)
+            db.sync_approval_items(build_workflow_approval_records(payload), replay_source='unit-test')
+            result = execute_controlled_rollout_layer(payload, db, config=config, replay_source='unit-test-replay')
+
+            queue_row = db.get_approval_state('approval::queue')
+            self.assertEqual(queue_row['state'], 'ready')
+            self.assertEqual(queue_row['workflow_state'], 'ready')
+            self.assertEqual(queue_row['details']['queue_action'], 'promote_safe')
+            self.assertEqual(queue_row['details']['queue_name'], 'bucket::priority')
+            self.assertFalse(queue_row['details']['real_trade_execution'])
+            self.assertFalse(queue_row['details']['dangerous_live_parameter_change'])
+            queue_timeline = db.get_approval_timeline(item_id='approval::queue', ascending=True)
+            self.assertEqual(queue_timeline[-1]['event_type'], 'controlled_rollout_queue_promote')
+
+            stage_row = db.get_approval_state('approval::stage')
+            self.assertEqual(stage_row['state'], 'ready')
+            self.assertEqual(stage_row['workflow_state'], 'ready')
+            self.assertEqual(stage_row['details']['rollout_stage'], 'prepared')
+            self.assertEqual(stage_row['details']['stage_transition']['from'], 'observe')
+            self.assertEqual(stage_row['details']['stage_transition']['to'], 'prepared')
+
+            review_row = db.get_approval_state('approval::review')
+            self.assertEqual(review_row['state'], 'pending')
+            self.assertEqual(review_row['workflow_state'], 'pending')
+            self.assertEqual(review_row['details']['review_status'], 'scheduled')
+            self.assertEqual(review_row['details']['review_after_hours'], 4)
+            self.assertIn('T', review_row['details']['review_due_at'])
+            review_timeline = db.get_approval_timeline(item_id='approval::review', ascending=True)
+            self.assertEqual(review_timeline[-1]['event_type'], 'controlled_rollout_review_schedule')
+
+            annotate_row = db.get_approval_state('approval::annotate')
+            self.assertEqual(annotate_row['state'], 'pending')
+            self.assertEqual(annotate_row['workflow_state'], 'pending')
+            self.assertEqual(annotate_row['details']['annotations']['operator_note'], 'safe for staged rollout')
+            self.assertEqual(annotate_row['details']['annotation_tags'], ['safe', 'audit'])
+            annotate_timeline = db.get_approval_timeline(item_id='approval::annotate', ascending=True)
+            self.assertEqual(annotate_timeline[-1]['event_type'], 'controlled_rollout_metadata_annotate')
+
+            self.assertEqual(result['controlled_rollout_execution']['executed_count'], 4)
+            self.assertEqual(result['controlled_rollout_execution']['skipped_count'], 0)
+
+    def test_controlled_rollout_execution_respects_extended_action_allowlist_and_manual_gates(self):
+        class StubConfig:
+            def __init__(self, values=None):
+                self.values = values or {}
+
+            def get(self, key, default=None):
+                return self.values.get(key, default)
+
+        config = StubConfig({
+            'governance.controlled_rollout_execution': {
+                'enabled': True,
+                'mode': 'state_apply',
+                'allowed_action_types': ['joint_queue_promote_safe'],
+            }
+        })
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(str(Path(tmpdir) / 'controlled_rollout_gatekeeping.db'))
+            payload = {
+                'workflow_state': {
+                    'item_states': [
+                        {'item_id': 'playbook::queue-ok', 'title': 'Queue ok', 'action_type': 'joint_queue_promote_safe', 'decision': 'expand', 'governance_mode': 'rollout', 'risk_level': 'low', 'approval_required': False, 'blocking_reasons': [], 'preconditions': [], 'workflow_state': 'pending', 'confidence': 'high'},
+                        {'item_id': 'playbook::review', 'title': 'Review not allowlisted', 'action_type': 'joint_review_schedule', 'decision': 'expand', 'governance_mode': 'rollout', 'risk_level': 'low', 'approval_required': False, 'blocking_reasons': [], 'preconditions': [], 'workflow_state': 'pending', 'confidence': 'high'},
+                        {'item_id': 'playbook::manual', 'title': 'Queue manual gate', 'action_type': 'joint_queue_promote_safe', 'decision': 'expand', 'governance_mode': 'rollout', 'risk_level': 'low', 'approval_required': True, 'blocking_reasons': [], 'preconditions': [], 'workflow_state': 'pending', 'confidence': 'high'},
+                    ],
+                    'summary': {},
+                },
+                'approval_state': {
+                    'items': [
+                        {'approval_id': 'approval::queue-ok', 'playbook_id': 'playbook::queue-ok', 'title': 'Queue ok', 'action_type': 'joint_queue_promote_safe', 'approval_state': 'pending', 'decision_state': 'pending', 'risk_level': 'low', 'approval_required': False, 'blocked_by': []},
+                        {'approval_id': 'approval::review', 'playbook_id': 'playbook::review', 'title': 'Review not allowlisted', 'action_type': 'joint_review_schedule', 'approval_state': 'pending', 'decision_state': 'pending', 'risk_level': 'low', 'approval_required': False, 'blocked_by': []},
+                        {'approval_id': 'approval::manual', 'playbook_id': 'playbook::manual', 'title': 'Queue manual gate', 'action_type': 'joint_queue_promote_safe', 'approval_state': 'pending', 'decision_state': 'pending', 'risk_level': 'low', 'approval_required': True, 'blocked_by': []},
+                    ],
+                    'summary': {},
+                },
+            }
+            payload = attach_auto_approval_policy(payload)
+            db.sync_approval_items(build_workflow_approval_records(payload), replay_source='unit-test')
+            result = execute_controlled_rollout_layer(payload, db, config=config, replay_source='unit-test-replay')
+
+            self.assertEqual(db.get_approval_state('approval::queue-ok')['state'], 'ready')
+            self.assertEqual(db.get_approval_state('approval::review')['state'], 'pending')
+            self.assertEqual(db.get_approval_state('approval::manual')['state'], 'pending')
+            reasons = {row['item_id']: row['reason'] for row in result['controlled_rollout_execution']['items'] if row['action'] == 'skipped'}
+            self.assertEqual(reasons['approval::review'], 'action_type_not_allowlisted:joint_review_schedule')
+            self.assertEqual(reasons['approval::manual'], 'approval_required')
+            self.assertEqual(result['controlled_rollout_execution']['executed_count'], 1)
+            self.assertEqual(result['controlled_rollout_execution']['skipped_count'], 2)
+
     def test_controlled_rollout_execution_preserves_terminal_state(self):
         class StubConfig:
             def __init__(self, values=None):

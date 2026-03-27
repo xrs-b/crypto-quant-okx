@@ -104,11 +104,16 @@
 - **目标**：在 approval/workflow persistence 之上，补一个比 auto-approval 更保守的真实落地层：
   1. 默认关闭；
   2. 只允许 allowlist action type（默认 `joint_observe`）进入 `state_apply`；
-  3. 仅把持久化状态从 `pending` 推进到 `ready`，用于 rollout orchestration / dashboard / agent 消费；
+  3. 支持少量更丰富但仍 very-safe 的动作类型：
+     - `joint_observe`：把 `state/workflow_state` 安全推进到 `ready`；
+     - `joint_queue_promote_safe`：只记录 safe queue promotion 审计与 ready 状态，不触发真实执行；
+     - `joint_stage_prepare`：只记录 rollout stage prepare / stage transition 元数据，不触发真实执行；
+     - `joint_review_schedule`：只写 review scheduling 元数据与 timeline event，状态保持 `pending`；
+     - `joint_metadata_annotate`：只写 metadata / annotation / tags，状态保持 `pending`；
   4. 保留完整 `actor/source/reason/replay_source/details/event_type` 审计痕迹；
   5. 保持 terminal state 不可被后续 replay/state-apply 覆盖。
 - **涉及模块**：`analytics/helper.py`、`analytics/__init__.py`、`dashboard/api.py`、`config/config.yaml.example`、`tests/`
-- **配置**：`governance.controlled_rollout_execution.enabled/mode/allowed_action_types/actor/source/reason_prefix/target_state/target_workflow_state`
+- **配置**：`governance.controlled_rollout_execution.enabled/mode/allowed_action_types/actor/source/reason_prefix/target_state/target_workflow_state/default_review_after_hours`
 - **安全边界**：
   - 只对 low-risk + auto-approval-policy 判定可自动处理 + 无 blocker + 无人工审批要求的项生效；
   - 只做 `controlled_rollout_state_apply` immutable event；

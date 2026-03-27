@@ -304,13 +304,16 @@ def _run_testnet_bridge(case_data: Dict[str, Any], workflow_ready: Dict[str, Any
     bridge_cfg = copy.deepcopy(case_data.get('testnet_bridge') or {})
     enabled = bool(bridge_cfg.get('enabled', False))
     if not enabled:
-        return {'enabled': False, 'mode': 'disabled', 'plan_only': True, 'result': None, 'audit': {'real_trade_execution': False, 'dangerous_live_parameter_change': False}}
+        return {'enabled': False, 'mode': 'disabled', 'plan_only': True, 'status': 'skipped', 'result': None, 'audit': {'real_trade_execution': False, 'dangerous_live_parameter_change': False}}
 
     cfg = ShadowConfig(base=base_config or Config(), overrides=bridge_cfg.get('config_overrides') or {})
     symbol = bridge_cfg.get('symbol')
     side = bridge_cfg.get('side') or 'long'
     allow_execute = bool(bridge_cfg.get('allow_execute', False))
     plan_only = not allow_execute
+    require_no_pending_approvals = bool(bridge_cfg.get('require_no_pending_approvals', True))
+    cleanup_required = bool(bridge_cfg.get('cleanup_required', True))
+    requested_execute_profile = bridge_cfg.get('execute_profile') or ('minimal_smoke' if allow_execute else 'preview_only')
 
     class _BridgeExchangeStub:
         def fetch_balance(self):
@@ -339,12 +342,63 @@ def _run_testnet_bridge(case_data: Dict[str, Any], workflow_ready: Dict[str, Any
         'workflow_pending_approvals': sum(1 for row in ((workflow_ready.get('approval_state') or {}).get('items') or []) if row.get('approval_state') == 'pending'),
         'executor_applied_count': (((executor_result or {}).get('executed') or {}).get('summary') or {}).get('applied_count', 0),
         'executor_queued_count': (((executor_result or {}).get('executed') or {}).get('summary') or {}).get('queued_count', 0),
+        'require_no_pending_approvals': require_no_pending_approvals,
+        'cleanup_required': cleanup_required,
     }
-    result = {'enabled': True, 'mode': 'plan_only' if plan_only else 'controlled_execute', 'plan_only': plan_only, 'plan': plan, 'gating': gating, 'result': None, 'audit': {'real_trade_execution': False, 'dangerous_live_parameter_change': False, 'exchange_mode': cfg.get('exchange.mode', 'testnet'), 'allow_execute': allow_execute}}
-    if plan_only or bridge_runner is None:
+    bridge_runner = bridge_runner or execute_exchange_smoke
+    status = 'plan_only' if plan_only else 'controlled_execute'
+    blocking_reasons = []
+    if not plan.get('execute_ready', False):
+        blocking_reasons.append('plan_not_execute_ready')
+    if require_no_pending_approvals and gating['workflow_pending_approvals'] > 0:
+        blocking_reasons.append('workflow_pending_approvals_present')
+    exchange_mode = str(cfg.get('exchange.mode', 'testnet') or 'testnet').lower()
+    if exchange_mode != 'testnet':
+        blocking_reasons.append('exchange_mode_not_testnet')
+    if requested_execute_profile != 'minimal_smoke':
+        blocking_reasons.append('unsupported_execute_profile')
+
+    result = {
+        'enabled': True,
+        'mode': 'plan_only' if plan_only else 'controlled_execute',
+        'plan_only': plan_only,
+        'status': status,
+        'plan': plan,
+        'gating': gating,
+        'result': None,
+        'error': None,
+        'blocking_reasons': blocking_reasons,
+        'audit': {
+            'real_trade_execution': False,
+            'dangerous_live_parameter_change': False,
+            'exchange_mode': cfg.get('exchange.mode', 'testnet'),
+            'allow_execute': allow_execute,
+            'execute_profile': requested_execute_profile,
+            'cleanup_required': cleanup_required,
+            'rollback_expected': cleanup_required,
+            'blocked': False,
+        },
+    }
+    if plan_only:
         return result
-    result['result'] = bridge_runner(cfg, exchange, symbol=symbol, side=side)
-    result['audit']['real_trade_execution'] = bool((result['result'] or {}).get('opened') or (result['result'] or {}).get('closed'))
+    if blocking_reasons:
+        result['status'] = 'blocked'
+        result['audit']['blocked'] = True
+        return result
+    try:
+        result['result'] = bridge_runner(cfg, exchange, symbol=symbol, side=side)
+        result['audit']['real_trade_execution'] = bool((result['result'] or {}).get('opened') or (result['result'] or {}).get('closed'))
+        if (result['result'] or {}).get('error'):
+            result['status'] = 'error'
+            result['error'] = (result['result'] or {}).get('error')
+        elif cleanup_required and not bool((result['result'] or {}).get('closed')):
+            result['status'] = 'error'
+            result['error'] = 'cleanup_required_but_close_not_confirmed'
+        else:
+            result['status'] = 'controlled_execute'
+    except Exception as exc:
+        result['status'] = 'error'
+        result['error'] = str(exc)
     return result
 
 
@@ -360,7 +414,7 @@ def _build_workflow_diff(workflow_ready: Dict[str, Any], replay_result: Dict[str
         'workflow': {'action_count': len(actions), 'approval_count': len(approvals), 'pending_approval_count': sum(1 for row in approvals if row.get('approval_state') == 'pending'), 'blocked_count': sum(1 for row in (workflow_ready.get('workflow_state') or {}).get('item_states', []) if row.get('workflow_state') == 'blocked'), 'ready_count': sum(1 for row in (workflow_ready.get('workflow_state') or {}).get('item_states', []) if row.get('workflow_state') == 'ready')},
         'replay': {'synced_count': replay_result.get('synced_count', 0), 'timeline_events': len(replay_result.get('timeline') or []), 'replayed_state_count': len(replay_states), 'pending_state_count': sum(1 for row in replay_states if row.get('state') == 'pending')},
         'executor': {'enabled': bool((executor_result or {}).get('enabled')), 'mode': (executor_result or {}).get('mode') or 'disabled', 'planned_count': executor_summary.get('planned_count', 0), 'queued_count': executor_summary.get('queued_count', 0), 'dry_run_count': executor_summary.get('dry_run_count', 0), 'applied_count': executor_summary.get('applied_count', 0), 'error_count': executor_summary.get('error_count', 0), 'stage_ready_count': stage_progression.get('ready_stage_count', 0), 'blocked_count': stage_progression.get('blocked_count', 0)},
-        'testnet_bridge': {'enabled': bool(bridge_result.get('enabled')), 'mode': bridge_result.get('mode') or 'disabled', 'plan_only': bool(bridge_result.get('plan_only', True)), 'execute_ready': bool((bridge_result.get('plan') or {}).get('execute_ready', False)), 'pending_approval_count': (bridge_result.get('gating') or {}).get('workflow_pending_approvals', 0), 'executor_applied_count': (bridge_result.get('gating') or {}).get('executor_applied_count', 0)},
+        'testnet_bridge': {'enabled': bool(bridge_result.get('enabled')), 'mode': bridge_result.get('mode') or 'disabled', 'status': bridge_result.get('status') or ('disabled' if not bridge_result.get('enabled') else 'plan_only'), 'plan_only': bool(bridge_result.get('plan_only', True)), 'execute_ready': bool((bridge_result.get('plan') or {}).get('execute_ready', False)), 'pending_approval_count': (bridge_result.get('gating') or {}).get('workflow_pending_approvals', 0), 'executor_applied_count': (bridge_result.get('gating') or {}).get('executor_applied_count', 0), 'blocked': bool(bridge_result.get('status') == 'blocked'), 'error': bridge_result.get('error')},
     }
 
 def _evaluate_assertions(case_data: Dict[str, Any], adaptive: Optional[Dict[str, Any]], diff: Dict[str, Any], *, workflow_ready: Optional[Dict[str, Any]] = None, replay_result: Optional[Dict[str, Any]] = None) -> Tuple[bool, list]:
@@ -404,6 +458,10 @@ def _evaluate_assertions(case_data: Dict[str, Any], adaptive: Optional[Dict[str,
             actual = diff.get('testnet_bridge', {}).get('execute_ready')
         elif key == 'testnet_bridge_mode':
             actual = diff.get('testnet_bridge', {}).get('mode')
+        elif key == 'testnet_bridge_status':
+            actual = diff.get('testnet_bridge', {}).get('status')
+        elif key == 'testnet_bridge_blocked':
+            actual = diff.get('testnet_bridge', {}).get('blocked')
         else:
             actual = None
         results.append({"field": key, "expected": expected, "actual": actual, "passed": actual == expected})

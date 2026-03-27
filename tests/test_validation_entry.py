@@ -22,6 +22,8 @@ EXECUTION_FIXTURE = 'tests/fixtures/validation/execution/high-vol-tighten-long-0
 WORKFLOW_FIXTURE = 'tests/fixtures/validation/workflow/governance-approval-replay-001.yaml'
 WORKFLOW_EXECUTOR_FIXTURE = 'tests/fixtures/validation/workflow/queue-executor-dry-run-001.yaml'
 WORKFLOW_TESTNET_BRIDGE_FIXTURE = 'tests/fixtures/validation/workflow/testnet-bridge-plan-001.yaml'
+WORKFLOW_TESTNET_BRIDGE_EXECUTE_FIXTURE = 'tests/fixtures/validation/workflow/testnet-bridge-execute-001.yaml'
+WORKFLOW_TESTNET_BRIDGE_REAL_MODE_BLOCKED_FIXTURE = 'tests/fixtures/validation/workflow/testnet-bridge-real-mode-blocked-001.yaml'
 FIXTURE_DIR = 'tests/fixtures/validation'
 
 
@@ -94,6 +96,28 @@ class TestShadowValidationEntry(unittest.TestCase):
         self.assertEqual(report['artifacts']['testnet_bridge']['mode'], 'plan_only')
         self.assertFalse(report['audit']['real_trade_execution'])
         self.assertEqual(report['artifacts']['workflow_consumer_view']['schema_version'], 'm5_workflow_consumer_view_v1')
+
+    def test_shadow_workflow_runner_supports_testnet_bridge_controlled_execute_fixture(self):
+        report = run_shadow_validation_case(WORKFLOW_TESTNET_BRIDGE_EXECUTE_FIXTURE)
+        self.assertEqual(report['case_type'], 'shadow_workflow')
+        self.assertEqual(report['status'], 'pass')
+        self.assertEqual(report['diff']['testnet_bridge']['mode'], 'controlled_execute')
+        self.assertEqual(report['diff']['testnet_bridge']['status'], 'controlled_execute')
+        self.assertFalse(report['diff']['testnet_bridge']['blocked'])
+        self.assertTrue(report['artifacts']['testnet_bridge']['result']['opened'])
+        self.assertTrue(report['artifacts']['testnet_bridge']['result']['closed'])
+        self.assertTrue(report['audit']['real_trade_execution'])
+        self.assertTrue(report['artifacts']['testnet_bridge']['audit']['rollback_expected'])
+
+    def test_shadow_workflow_runner_blocks_testnet_bridge_when_real_mode_requested(self):
+        report = run_shadow_validation_case(WORKFLOW_TESTNET_BRIDGE_REAL_MODE_BLOCKED_FIXTURE)
+        self.assertEqual(report['case_type'], 'shadow_workflow')
+        self.assertEqual(report['status'], 'pass')
+        self.assertEqual(report['diff']['testnet_bridge']['status'], 'blocked')
+        self.assertTrue(report['diff']['testnet_bridge']['blocked'])
+        self.assertIn('exchange_mode_not_testnet', report['artifacts']['testnet_bridge']['blocking_reasons'])
+        self.assertFalse(report['audit']['real_trade_execution'])
+        self.assertIsNone(report['artifacts']['testnet_bridge']['result'])
 
     def test_collect_validation_case_paths_supports_directory(self):
         paths = collect_validation_case_paths([FIXTURE_DIR])

@@ -117,9 +117,10 @@
   4. rollout stage 当前推进到哪；
   5. 最近系统自动调整了什么（auto approval / controlled rollout / rollout executor）。
 - **输出结构**：稳定 JSON，包含 `headline / summary / lanes / rollout / recent_adjustments / upstreams`，序列化稳定，适合后端直出给 dashboard / agent / 人工巡检。
-- **API**：新增 `GET /api/backtest/workbench-governance-view`，并支持 `calibration-report?view=workbench_governance_view`。
-- **兼容性**：不替换现有 consumer / attention / digest / summary-cards 视图；只是往更集中、更适合 approval+rollout 工作台消费的方向补一层聚合入口。
-- **测试**：覆盖 helper 聚合 payload、独立 API、calibration-report view，确保 lane / rollout / recent adjustment 结构稳定存在。
+- **API**：新增 `GET /api/backtest/workbench-governance-view`，并支持 `calibration-report?view=workbench_governance_view`；继续补 `GET /api/backtest/workbench-governance-items`（lane/action/risk/stage/bucket/filter 入口）与 `GET /api/backtest/workbench-governance-detail`（detail / why / next-step 入口）。
+- **细化消费能力**：workbench item catalog 统一标准化 `lane_id / action_type / risk_level / approval_state / workflow_state / current_rollout_stage / target_rollout_stage / bucket_tags / why / next_step`，让调用方可以直接回答“某类 item 具体有哪些、为什么在这里、下一步是什么”。
+- **兼容性**：不替换现有 consumer / attention / digest / summary-cards 视图；只是往更集中、更适合 approval+rollout 工作台消费的方向补一层聚合入口，并把 filter/detail 复用同一份序列化稳定的 item catalog。
+- **测试**：覆盖 helper 聚合 payload、独立 API、calibration-report view，并补 filter/detail API 用例，确保 lane / rollout / recent adjustment / why / next-step 结构稳定存在。
 
 ### AR-M5-10｜workflow attention view / manual approval + blocked follow-up API
 

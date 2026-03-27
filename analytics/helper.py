@@ -2350,12 +2350,322 @@ def build_dashboard_summary_cards(payload: Optional[Dict] = None, *, max_items: 
     return summary_cards
 
 
-def build_workbench_governance_view(payload: Optional[Dict] = None, *, max_items: int = 5,
-                                    max_adjustments: int = 10) -> Dict[str, Any]:
+
+def _workbench_risk_rank(value: Optional[str]) -> int:
+    return {'critical': 0, 'high': 1, 'medium': 2, 'low': 3}.get(str(value or '').lower(), 9)
+
+
+def _workbench_item_sort_key(row: Dict[str, Any]):
+    return (
+        _workbench_risk_rank(row.get('risk_level')),
+        0 if row.get('requires_manual') else 1,
+        0 if row.get('approval_required') else 1,
+        str(row.get('lane_id') or ''),
+        str(row.get('title') or row.get('item_id') or ''),
+    )
+
+
+def _build_workbench_item_catalog(payload: Optional[Dict] = None) -> Dict[str, Any]:
     payload = payload or {}
     consumer_view = payload.get('consumer_view') or build_workflow_consumer_view(payload)
-    attention_view = payload.get('attention_view') or build_workflow_attention_view(payload, max_items=max_items)
-    operator_digest = payload.get('operator_digest') or build_workflow_operator_digest(payload, max_items=max_items)
+    attention_view = payload.get('attention_view') or build_workflow_attention_view(payload)
+    operator_digest = payload.get('operator_digest') or build_workflow_operator_digest(payload)
+    stage_progression = consumer_view.get('rollout_stage_progression') or {}
+    stage_summary = stage_progression.get('summary') or {}
+    rollout_executor = consumer_view.get('rollout_executor') or {}
+    auto_approval = consumer_view.get('auto_approval_execution') or {}
+    controlled_rollout = consumer_view.get('controlled_rollout_execution') or {}
+    workflow_items = ((consumer_view.get('workflow_state') or {}).get('item_states') or [])
+    approval_items = ((consumer_view.get('approval_state') or {}).get('items') or [])
+    workflow_lookup = {row.get('item_id'): row for row in workflow_items if row.get('item_id')}
+    approval_by_playbook = {row.get('playbook_id'): row for row in approval_items if row.get('playbook_id')}
+
+    attention_map = {}
+    for bucket_id, rows in (operator_digest.get('attention') or {}).items():
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            item_id = row.get('item_id') or row.get('playbook_id')
+            if item_id:
+                attention_map.setdefault(item_id, set()).add(bucket_id)
+
+    def _merge_snapshot(row: Dict[str, Any], lane_id: str) -> Dict[str, Any]:
+        item_id = row.get('item_id') or row.get('playbook_id')
+        workflow_item = workflow_lookup.get(item_id) or row
+        approval_item = approval_by_playbook.get(item_id) or {}
+        blocked_by = list(dict.fromkeys((workflow_item.get('blocking_reasons') or []) + (approval_item.get('blocked_by') or []) + (row.get('blocked_by') or [])))
+        workflow_state = workflow_item.get('workflow_state') or approval_item.get('workflow_state') or row.get('workflow_state') or 'pending'
+        approval_state = approval_item.get('approval_state') or row.get('approval_state') or 'not_required'
+        current_stage = workflow_item.get('current_rollout_stage') or approval_item.get('rollout_stage') or row.get('current_rollout_stage') or row.get('rollout_stage') or 'pending'
+        target_stage = workflow_item.get('target_rollout_stage') or approval_item.get('target_rollout_stage') or row.get('target_rollout_stage') or row.get('rollout_stage') or current_stage
+        queue_progression = workflow_item.get('queue_progression') or row.get('queue_progression') or {}
+        stage_model = workflow_item.get('stage_model') or approval_item.get('stage_model') or {}
+        auto_decision = workflow_item.get('auto_approval_decision') or approval_item.get('auto_approval_decision') or row.get('auto_approval_decision') or 'manual_review'
+        requires_manual = bool(workflow_item.get('requires_manual', approval_item.get('requires_manual', row.get('requires_manual'))))
+        approval_required = bool(workflow_item.get('approval_required', approval_item.get('approval_required', row.get('approval_required'))))
+        bucket_tags = sorted(attention_map.get(item_id) or set())
+        if lane_id == 'blocked' and 'blocked' not in bucket_tags:
+            bucket_tags.append('blocked')
+        if lane_id == 'manual_approval' and 'manual_approval' not in bucket_tags:
+            bucket_tags.append('manual_approval')
+        if lane_id == 'auto_batch' and 'auto_batch' not in bucket_tags:
+            bucket_tags.append('auto_batch')
+        if lane_id == 'queued' and 'queued' not in bucket_tags:
+            bucket_tags.append('queued')
+        if lane_id == 'ready' and 'ready' not in bucket_tags:
+            bucket_tags.append('ready')
+        why_parts = []
+        if blocked_by:
+            why_parts.append('blocked_by=' + ','.join(blocked_by))
+        if approval_required:
+            why_parts.append(f'approval={approval_state}')
+        else:
+            why_parts.append(f'workflow={workflow_state}')
+        why_parts.append(f'rollout={current_stage}->{target_stage}')
+        if auto_decision:
+            why_parts.append(f'auto={auto_decision}')
+        if queue_progression.get('next_action'):
+            next_step = queue_progression.get('next_action')
+        elif approval_required and approval_state == 'pending':
+            next_step = 'await_manual_approval'
+        elif lane_id == 'blocked':
+            next_step = 'resolve_blockers'
+        elif lane_id == 'queued':
+            next_step = 'queue_follow_up'
+        elif lane_id in {'ready', 'auto_batch'}:
+            next_step = 'ready_for_rollout_or_execution'
+        else:
+            next_step = stage_model.get('next_on_approval') or 'observe'
+        return {
+            'item_id': item_id,
+            'approval_id': approval_item.get('approval_id') or row.get('approval_id'),
+            'title': workflow_item.get('title') or approval_item.get('title') or row.get('title') or item_id,
+            'action_type': workflow_item.get('action_type') or approval_item.get('action_type') or row.get('action_type') or 'unknown',
+            'workflow_state': workflow_state,
+            'approval_state': approval_state,
+            'decision_state': approval_item.get('decision_state') or workflow_item.get('decision_state') or workflow_state,
+            'risk_level': workflow_item.get('risk_level') or approval_item.get('risk_level') or row.get('risk_level') or 'unknown',
+            'auto_approval_decision': auto_decision,
+            'auto_approval_eligible': bool(workflow_item.get('auto_approval_eligible', approval_item.get('auto_approval_eligible', row.get('auto_approval_eligible')))),
+            'requires_manual': requires_manual,
+            'approval_required': approval_required,
+            'blocked_by': blocked_by,
+            'owner_hint': workflow_item.get('owner_hint') or approval_item.get('owner_hint') or row.get('owner_hint'),
+            'queue_progression': queue_progression,
+            'stage_model': stage_model,
+            'current_rollout_stage': current_stage,
+            'target_rollout_stage': target_stage,
+            'scheduled_review': workflow_item.get('scheduled_review') or approval_item.get('scheduled_review') or row.get('scheduled_review') or {},
+            'lane_id': lane_id,
+            'lane_title': lane_id.replace('_', ' '),
+            'bucket_tags': sorted(set(bucket_tags)),
+            'why': why_parts,
+            'why_summary': ' | '.join(why_parts),
+            'next_step': next_step,
+            'detail': {
+                'workflow_item': workflow_item,
+                'approval_item': approval_item,
+                'attention_buckets': sorted(attention_map.get(item_id) or set()),
+            },
+        }
+
+    lane_specs = {
+        'auto_batch': (operator_digest.get('attention') or {}).get('auto_advance_candidates') or [],
+        'blocked': (operator_digest.get('attention') or {}).get('blocked') or [],
+        'queued': (operator_digest.get('attention') or {}).get('queued') or [],
+        'ready': (operator_digest.get('attention') or {}).get('ready') or [],
+        'manual_approval': (operator_digest.get('attention') or {}).get('manual_approval') or [],
+    }
+
+    items = []
+    seen = set()
+    lane_counts = {}
+    for lane_id, rows in lane_specs.items():
+        snapshots = sorted((_merge_snapshot(row, lane_id) for row in rows), key=_workbench_item_sort_key)
+        lane_counts[lane_id] = len(snapshots)
+        for snapshot in snapshots:
+            key = (snapshot.get('lane_id'), snapshot.get('item_id'), snapshot.get('approval_id'))
+            if key in seen:
+                continue
+            seen.add(key)
+            items.append(snapshot)
+
+    filters = {
+        'lane_ids': sorted({row.get('lane_id') for row in items if row.get('lane_id')}),
+        'action_types': sorted({row.get('action_type') or 'unknown' for row in items}),
+        'risk_levels': sorted({row.get('risk_level') or 'unknown' for row in items}),
+        'workflow_states': sorted({row.get('workflow_state') or 'pending' for row in items}),
+        'approval_states': sorted({row.get('approval_state') or 'not_required' for row in items}),
+        'current_rollout_stages': sorted({row.get('current_rollout_stage') or 'pending' for row in items}),
+        'target_rollout_stages': sorted({row.get('target_rollout_stage') or 'pending' for row in items}),
+        'bucket_tags': sorted({tag for row in items for tag in (row.get('bucket_tags') or [])}),
+        'auto_approval_decisions': sorted({row.get('auto_approval_decision') or 'manual_review' for row in items}),
+        'owner_hints': sorted({row.get('owner_hint') for row in items if row.get('owner_hint')}),
+    }
+
+    catalog = {
+        'schema_version': 'm5_workbench_governance_catalog_v1',
+        'summary': {
+            'item_count': len(items),
+            'lane_counts': lane_counts,
+            'rollout_executor_status': rollout_executor.get('status') or 'disabled',
+            'stage_progression': stage_summary,
+        },
+        'filters': filters,
+        'items': items,
+        'upstreams': {
+            'workflow_consumer_view': consumer_view,
+            'workflow_attention_view': attention_view,
+            'workflow_operator_digest': operator_digest,
+        },
+    }
+    payload['workbench_governance_catalog'] = catalog
+    return catalog
+
+
+def _normalize_filter_values(value: Any) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        values = value
+    else:
+        values = str(value).split(',')
+    return [str(v).strip().lower() for v in values if str(v).strip()]
+
+
+def _filter_workbench_catalog_items(items: List[Dict[str, Any]], *, lane_ids: Any = None, action_types: Any = None,
+                                    risk_levels: Any = None, workflow_states: Any = None, approval_states: Any = None,
+                                    current_rollout_stages: Any = None, target_rollout_stages: Any = None,
+                                    bucket_tags: Any = None, auto_approval_decisions: Any = None,
+                                    owner_hints: Any = None, q: Optional[str] = None) -> List[Dict[str, Any]]:
+    lane_filter = set(_normalize_filter_values(lane_ids))
+    action_filter = set(_normalize_filter_values(action_types))
+    risk_filter = set(_normalize_filter_values(risk_levels))
+    workflow_filter = set(_normalize_filter_values(workflow_states))
+    approval_filter = set(_normalize_filter_values(approval_states))
+    current_stage_filter = set(_normalize_filter_values(current_rollout_stages))
+    target_stage_filter = set(_normalize_filter_values(target_rollout_stages))
+    bucket_filter = set(_normalize_filter_values(bucket_tags))
+    auto_filter = set(_normalize_filter_values(auto_approval_decisions))
+    owner_filter = set(_normalize_filter_values(owner_hints))
+    q_norm = str(q or '').strip().lower()
+
+    def _matches(row: Dict[str, Any]) -> bool:
+        if lane_filter and str(row.get('lane_id') or '').lower() not in lane_filter:
+            return False
+        if action_filter and str(row.get('action_type') or '').lower() not in action_filter:
+            return False
+        if risk_filter and str(row.get('risk_level') or '').lower() not in risk_filter:
+            return False
+        if workflow_filter and str(row.get('workflow_state') or '').lower() not in workflow_filter:
+            return False
+        if approval_filter and str(row.get('approval_state') or '').lower() not in approval_filter:
+            return False
+        if current_stage_filter and str(row.get('current_rollout_stage') or '').lower() not in current_stage_filter:
+            return False
+        if target_stage_filter and str(row.get('target_rollout_stage') or '').lower() not in target_stage_filter:
+            return False
+        if auto_filter and str(row.get('auto_approval_decision') or '').lower() not in auto_filter:
+            return False
+        if owner_filter and str(row.get('owner_hint') or '').lower() not in owner_filter:
+            return False
+        if bucket_filter and not bucket_filter.intersection({str(tag).lower() for tag in (row.get('bucket_tags') or [])}):
+            return False
+        if q_norm:
+            haystacks = [
+                row.get('item_id'), row.get('approval_id'), row.get('title'), row.get('action_type'), row.get('workflow_state'),
+                row.get('approval_state'), row.get('risk_level'), row.get('owner_hint'), row.get('why_summary'), row.get('next_step'),
+            ] + list(row.get('blocked_by') or []) + list(row.get('bucket_tags') or [])
+            if q_norm not in ' '.join(str(v or '').lower() for v in haystacks):
+                return False
+        return True
+
+    return [row for row in items if _matches(row)]
+
+
+def build_workbench_governance_filter_view(payload: Optional[Dict] = None, *, lane_ids: Any = None, action_types: Any = None,
+                                           risk_levels: Any = None, workflow_states: Any = None, approval_states: Any = None,
+                                           current_rollout_stages: Any = None, target_rollout_stages: Any = None, bucket_tags: Any = None,
+                                           auto_approval_decisions: Any = None, owner_hints: Any = None, q: Optional[str] = None,
+                                           limit: int = 50) -> Dict[str, Any]:
+    payload = payload or {}
+    catalog = payload.get('workbench_governance_catalog') or _build_workbench_item_catalog(payload)
+    filtered_items = sorted(_filter_workbench_catalog_items(
+        catalog.get('items') or [],
+        lane_ids=lane_ids,
+        action_types=action_types,
+        risk_levels=risk_levels,
+        workflow_states=workflow_states,
+        approval_states=approval_states,
+        current_rollout_stages=current_rollout_stages,
+        target_rollout_stages=target_rollout_stages,
+        bucket_tags=bucket_tags,
+        auto_approval_decisions=auto_approval_decisions,
+        owner_hints=owner_hints,
+        q=q,
+    ), key=_workbench_item_sort_key)
+    response = {
+        'schema_version': 'm5_workbench_governance_filter_view_v1',
+        'summary': {
+            'matched_count': len(filtered_items),
+            'returned_count': min(len(filtered_items), limit),
+            'lane_counts': dict(sorted({lane: sum(1 for row in filtered_items if row.get('lane_id') == lane) for lane in {row.get('lane_id') for row in filtered_items if row.get('lane_id')}}.items())),
+        },
+        'applied_filters': {
+            'lane_ids': _normalize_filter_values(lane_ids),
+            'action_types': _normalize_filter_values(action_types),
+            'risk_levels': _normalize_filter_values(risk_levels),
+            'workflow_states': _normalize_filter_values(workflow_states),
+            'approval_states': _normalize_filter_values(approval_states),
+            'current_rollout_stages': _normalize_filter_values(current_rollout_stages),
+            'target_rollout_stages': _normalize_filter_values(target_rollout_stages),
+            'bucket_tags': _normalize_filter_values(bucket_tags),
+            'auto_approval_decisions': _normalize_filter_values(auto_approval_decisions),
+            'owner_hints': _normalize_filter_values(owner_hints),
+            'q': str(q or '').strip(),
+        },
+        'available_filters': catalog.get('filters') or {},
+        'items': filtered_items[:limit],
+    }
+    payload['workbench_governance_filter_view'] = response
+    return response
+
+
+def build_workbench_governance_detail_view(payload: Optional[Dict] = None, *, item_id: Optional[str] = None,
+                                           approval_id: Optional[str] = None, lane_id: Optional[str] = None) -> Dict[str, Any]:
+    payload = payload or {}
+    catalog = payload.get('workbench_governance_catalog') or _build_workbench_item_catalog(payload)
+    candidates = catalog.get('items') or []
+    if item_id:
+        candidates = [row for row in candidates if row.get('item_id') == item_id]
+    if approval_id:
+        candidates = [row for row in candidates if row.get('approval_id') == approval_id]
+    if lane_id:
+        candidates = [row for row in candidates if row.get('lane_id') == lane_id]
+    matched = sorted(candidates, key=_workbench_item_sort_key)
+    item = matched[0] if matched else None
+    return {
+        'schema_version': 'm5_workbench_governance_detail_view_v1',
+        'found': bool(item),
+        'item': item,
+        'alternatives': matched[1:10] if len(matched) > 1 else [],
+        'summary': {
+            'item_id': (item or {}).get('item_id'),
+            'approval_id': (item or {}).get('approval_id'),
+            'lane_id': (item or {}).get('lane_id'),
+            'why_summary': (item or {}).get('why_summary'),
+            'next_step': (item or {}).get('next_step'),
+        },
+    }
+
+
+def build_workbench_governance_view(payload: Optional[Dict] = None, *, max_items: int = 5,
+                                    max_adjustments: int = 10, filters: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    payload = payload or {}
+    catalog = payload.get('workbench_governance_catalog') or _build_workbench_item_catalog(payload)
+    consumer_view = (catalog.get('upstreams') or {}).get('workflow_consumer_view') or payload.get('consumer_view') or build_workflow_consumer_view(payload)
+    attention_view = (catalog.get('upstreams') or {}).get('workflow_attention_view') or payload.get('attention_view') or build_workflow_attention_view(payload, max_items=max_items)
+    operator_digest = (catalog.get('upstreams') or {}).get('workflow_operator_digest') or payload.get('operator_digest') or build_workflow_operator_digest(payload, max_items=max_items)
     stage_progression = consumer_view.get('rollout_stage_progression') or {}
     stage_summary = stage_progression.get('summary') or {}
     rollout_executor = consumer_view.get('rollout_executor') or {}
@@ -2364,46 +2674,36 @@ def build_workbench_governance_view(payload: Optional[Dict] = None, *, max_items
     workflow_items = ((consumer_view.get('workflow_state') or {}).get('item_states') or [])
     approval_items = ((consumer_view.get('approval_state') or {}).get('items') or [])
 
-    workflow_lookup = {row.get('item_id'): row for row in workflow_items if row.get('item_id')}
-    approval_by_playbook = {row.get('playbook_id'): row for row in approval_items if row.get('playbook_id')}
+    filtered_view = build_workbench_governance_filter_view(payload, limit=10000, **(filters or {})) if filters else None
+    active_items = (filtered_view or {}).get('items') or catalog.get('items') or []
 
-    def _item_snapshot(row: Dict[str, Any]) -> Dict[str, Any]:
-        item_id = row.get('item_id') or row.get('playbook_id')
-        workflow_item = workflow_lookup.get(item_id) or row
-        approval_item = approval_by_playbook.get(item_id) or {}
-        blocked_by = list(dict.fromkeys((workflow_item.get('blocking_reasons') or []) + (approval_item.get('blocked_by') or []) + (row.get('blocked_by') or [])))
+    lane_titles = {
+        'auto_batch': 'Auto-batch candidates',
+        'blocked': 'Blocked follow-up',
+        'queued': 'Queued items',
+        'ready': 'Ready items',
+        'manual_approval': 'Manual approval items',
+    }
+
+    def _bucket(bucket_id: str, title: str, items: List[Dict[str, Any]]) -> Dict[str, Any]:
         return {
-            'item_id': item_id,
-            'approval_id': approval_item.get('approval_id') or row.get('approval_id'),
-            'title': workflow_item.get('title') or approval_item.get('title') or row.get('title') or item_id,
-            'action_type': workflow_item.get('action_type') or approval_item.get('action_type') or row.get('action_type'),
-            'workflow_state': workflow_item.get('workflow_state') or approval_item.get('workflow_state') or row.get('workflow_state') or 'pending',
-            'approval_state': approval_item.get('approval_state') or row.get('approval_state') or 'not_required',
-            'risk_level': workflow_item.get('risk_level') or approval_item.get('risk_level') or row.get('risk_level') or 'unknown',
-            'auto_approval_decision': workflow_item.get('auto_approval_decision') or approval_item.get('auto_approval_decision') or row.get('auto_approval_decision') or 'manual_review',
-            'auto_approval_eligible': bool(workflow_item.get('auto_approval_eligible', approval_item.get('auto_approval_eligible', row.get('auto_approval_eligible')))),
-            'requires_manual': bool(workflow_item.get('requires_manual', approval_item.get('requires_manual', row.get('requires_manual')))),
-            'approval_required': bool(workflow_item.get('approval_required', approval_item.get('approval_required', row.get('approval_required')))),
-            'blocked_by': blocked_by,
-            'queue_progression': workflow_item.get('queue_progression') or row.get('queue_progression') or {},
-            'current_rollout_stage': workflow_item.get('current_rollout_stage') or row.get('current_rollout_stage'),
-            'target_rollout_stage': workflow_item.get('target_rollout_stage') or row.get('target_rollout_stage'),
+            'bucket_id': bucket_id,
+            'title': title,
+            'count': len(items),
+            'items': items[:max_items],
+            'filters': {
+                'workflow_states': sorted({row.get('workflow_state') or 'pending' for row in items}),
+                'approval_states': sorted({row.get('approval_state') or 'not_required' for row in items}),
+                'risk_levels': sorted({row.get('risk_level') or 'unknown' for row in items}),
+                'action_types': sorted({row.get('action_type') or 'unknown' for row in items}),
+                'bucket_tags': sorted({tag for row in items for tag in (row.get('bucket_tags') or [])}),
+            },
         }
 
-    def _sort_key(row: Dict[str, Any]):
-        risk_rank = {'critical': 0, 'high': 1, 'medium': 2, 'low': 3}
-        return (
-            risk_rank.get(str(row.get('risk_level') or '').lower(), 9),
-            0 if row.get('requires_manual') else 1,
-            0 if row.get('approval_required') else 1,
-            str(row.get('title') or row.get('item_id') or ''),
-        )
-
-    ready_items = sorted((_item_snapshot(row) for row in (operator_digest.get('attention') or {}).get('ready') or []), key=_sort_key)
-    queued_items = sorted((_item_snapshot(row) for row in (operator_digest.get('attention') or {}).get('queued') or []), key=_sort_key)
-    blocked_items = sorted((_item_snapshot(row) for row in (operator_digest.get('attention') or {}).get('blocked') or []), key=_sort_key)
-    auto_batch_items = sorted((_item_snapshot(row) for row in (operator_digest.get('attention') or {}).get('auto_advance_candidates') or []), key=_sort_key)
-    manual_items = sorted((_item_snapshot(row) for row in (operator_digest.get('attention') or {}).get('manual_approval') or []), key=_sort_key)
+    lanes = {}
+    for lane_id, title in lane_titles.items():
+        lane_items = sorted([row for row in active_items if row.get('lane_id') == lane_id], key=_workbench_item_sort_key)
+        lanes[lane_id] = _bucket(lane_id, title, lane_items)
 
     stage_frontier = []
     for key, count in sorted((stage_summary.get('by_stage') or {}).items(), key=lambda item: (-item[1], item[0]))[:max_items]:
@@ -2422,27 +2722,17 @@ def build_workbench_governance_view(payload: Optional[Dict] = None, *, max_items
             status = row.get(status_field) or row.get('status') or row.get('disposition')
             if status in {'skipped', 'planned', 'dry_run', 'disabled', None, ''}:
                 continue
-            snapshot = _item_snapshot({
+            recent_adjustments.append({
+                'source': source,
                 'item_id': row.get('playbook_id') or row.get('item_id'),
                 'approval_id': row.get('item_id'),
                 'title': row.get('title'),
                 'action_type': row.get('action_type'),
+                'status': status,
+                'state': row.get('state'),
                 'workflow_state': row.get('workflow_state'),
-                'approval_state': row.get('state'),
                 'current_rollout_stage': row.get('rollout_stage'),
                 'target_rollout_stage': row.get('target_rollout_stage'),
-            })
-            recent_adjustments.append({
-                'source': source,
-                'item_id': snapshot.get('item_id'),
-                'approval_id': snapshot.get('approval_id'),
-                'title': snapshot.get('title'),
-                'action_type': snapshot.get('action_type'),
-                'status': status,
-                'state': row.get('state') or snapshot.get('approval_state'),
-                'workflow_state': row.get('workflow_state') or snapshot.get('workflow_state'),
-                'current_rollout_stage': row.get('rollout_stage') or snapshot.get('current_rollout_stage'),
-                'target_rollout_stage': row.get('target_rollout_stage') or snapshot.get('target_rollout_stage'),
                 'reason': row.get('reason'),
             })
 
@@ -2450,22 +2740,8 @@ def build_workbench_governance_view(payload: Optional[Dict] = None, *, max_items
     _push_adjustment('controlled_rollout_execution', controlled_rollout.get('items') or [])
     _push_adjustment('rollout_executor', rollout_executor.get('items') or [], status_field='status')
 
-    def _bucket(bucket_id: str, title: str, items: List[Dict[str, Any]]) -> Dict[str, Any]:
-        return {
-            'bucket_id': bucket_id,
-            'title': title,
-            'count': len(items),
-            'items': items[:max_items],
-            'filters': {
-                'workflow_states': sorted({row.get('workflow_state') or 'pending' for row in items}),
-                'approval_states': sorted({row.get('approval_state') or 'not_required' for row in items}),
-                'risk_levels': sorted({row.get('risk_level') or 'unknown' for row in items}),
-                'action_types': sorted({row.get('action_type') or 'unknown' for row in items}),
-            },
-        }
-
     view = {
-        'schema_version': 'm5_workbench_governance_view_v1',
+        'schema_version': 'm5_workbench_governance_view_v2',
         'headline': {
             'status': operator_digest.get('headline', {}).get('status') or 'steady',
             'message': operator_digest.get('headline', {}).get('message') or '',
@@ -2474,22 +2750,20 @@ def build_workbench_governance_view(payload: Optional[Dict] = None, *, max_items
         'summary': {
             'workflow_item_count': len(workflow_items),
             'approval_item_count': len(approval_items),
-            'auto_batch_count': len(auto_batch_items),
-            'manual_approval_count': len(manual_items),
-            'blocked_count': len(blocked_items),
-            'queued_count': len(queued_items),
-            'ready_count': len(ready_items),
+            'catalog_item_count': len(catalog.get('items') or []),
+            'filtered_item_count': len(active_items),
+            'auto_batch_count': lanes['auto_batch']['count'],
+            'manual_approval_count': lanes['manual_approval']['count'],
+            'blocked_count': lanes['blocked']['count'],
+            'queued_count': lanes['queued']['count'],
+            'ready_count': lanes['ready']['count'],
             'recent_adjustment_count': len(recent_adjustments),
             'rollout_executor_status': rollout_executor.get('status') or 'disabled',
             'stage_progression': stage_summary,
         },
-        'lanes': {
-            'auto_batch': _bucket('auto_batch', 'Auto-batch candidates', auto_batch_items),
-            'blocked': _bucket('blocked', 'Blocked follow-up', blocked_items),
-            'queued': _bucket('queued', 'Queued items', queued_items),
-            'ready': _bucket('ready', 'Ready items', ready_items),
-            'manual_approval': _bucket('manual_approval', 'Manual approval items', manual_items),
-        },
+        'filters': catalog.get('filters') or {},
+        'applied_filters': (filtered_view or {}).get('applied_filters') or {},
+        'lanes': lanes,
         'rollout': {
             'summary': stage_summary,
             'frontier': stage_frontier,

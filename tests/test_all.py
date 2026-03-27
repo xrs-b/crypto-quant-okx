@@ -5107,7 +5107,7 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
             payload = response.get_json()
             self.assertTrue(payload['success'])
             self.assertEqual(payload['view'], 'workbench_governance_view')
-            self.assertEqual(payload['data']['schema_version'], 'm5_workbench_governance_view_v1')
+            self.assertEqual(payload['data']['schema_version'], 'm5_workbench_governance_view_v2')
             self.assertIn('lanes', payload['data'])
             self.assertIn('rollout', payload['data'])
             self.assertIn('recent_adjustments', payload['data'])
@@ -5150,9 +5150,100 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             payload = response.get_json()
             self.assertEqual(payload['view'], 'workbench_governance_view')
-            self.assertEqual(payload['data']['schema_version'], 'm5_workbench_governance_view_v1')
+            self.assertEqual(payload['data']['schema_version'], 'm5_workbench_governance_view_v2')
             self.assertEqual(payload['summary']['workbench_governance_view'], payload['data']['summary'])
             self.assertIn('lanes', payload['data'])
+        finally:
+            dashboard_api.backtester = old_backtester
+
+
+    def test_backtest_workbench_governance_items_api_supports_lane_and_action_filters(self):
+        import dashboard.api as dashboard_api
+
+        report = build_regime_policy_calibration_report([
+            {
+                'symbol': 'BTC/USDT',
+                'all_trades': [
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 0.3},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 0.2},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 0.1},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v2', 'strategy_tags': ['Breakout'], 'return_pct': -1.4},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v2', 'strategy_tags': ['Breakout'], 'return_pct': -1.0},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v2', 'strategy_tags': ['Breakout'], 'return_pct': -0.8},
+                ],
+            }
+        ])
+
+        class StubBacktester:
+            def run_all(self, symbols):
+                return {
+                    'summary': {'symbols': len(symbols)},
+                    'symbols': [{'symbol': 'BTC/USDT'}],
+                    'calibration_report': report,
+                }
+
+        old_backtester = dashboard_api.backtester
+        dashboard_api.backtester = StubBacktester()
+        try:
+            client = app.test_client()
+            seed_response = client.get('/api/backtest/workbench-governance-items?lane=manual_approval&limit=10')
+            self.assertEqual(seed_response.status_code, 200)
+            seed_payload = seed_response.get_json()
+            self.assertGreater(seed_payload['data']['summary']['matched_count'], 0)
+            selected_action = seed_payload['data']['items'][0]['action_type']
+            response = client.get(f'/api/backtest/workbench-governance-items?lane=manual_approval&action={selected_action}&limit=10')
+            self.assertEqual(response.status_code, 200)
+            payload = response.get_json()
+            self.assertEqual(payload['view'], 'workbench_governance_filter_view')
+            self.assertEqual(payload['data']['schema_version'], 'm5_workbench_governance_filter_view_v1')
+            self.assertGreater(payload['data']['summary']['matched_count'], 0)
+            self.assertTrue(all(row['lane_id'] == 'manual_approval' for row in payload['data']['items']))
+            self.assertTrue(all(row['action_type'] == selected_action for row in payload['data']['items']))
+            self.assertIn('available_filters', payload['data'])
+        finally:
+            dashboard_api.backtester = old_backtester
+
+    def test_backtest_workbench_governance_detail_api_returns_why_and_next_step(self):
+        import dashboard.api as dashboard_api
+
+        report = build_regime_policy_calibration_report([
+            {
+                'symbol': 'BTC/USDT',
+                'all_trades': [
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 0.3},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 0.2},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 0.1},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v2', 'strategy_tags': ['Breakout'], 'return_pct': -1.4},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v2', 'strategy_tags': ['Breakout'], 'return_pct': -1.0},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v2', 'strategy_tags': ['Breakout'], 'return_pct': -0.8},
+                ],
+            }
+        ])
+
+        class StubBacktester:
+            def run_all(self, symbols):
+                return {
+                    'summary': {'symbols': len(symbols)},
+                    'symbols': [{'symbol': 'BTC/USDT'}],
+                    'calibration_report': report,
+                }
+
+        old_backtester = dashboard_api.backtester
+        dashboard_api.backtester = StubBacktester()
+        try:
+            client = app.test_client()
+            list_response = client.get('/api/backtest/workbench-governance-items?lane=manual_approval&limit=1')
+            self.assertEqual(list_response.status_code, 200)
+            item = list_response.get_json()['data']['items'][0]
+            response = client.get(f"/api/backtest/workbench-governance-detail?item_id={item['item_id']}&lane={item['lane_id']}")
+            self.assertEqual(response.status_code, 200)
+            payload = response.get_json()
+            self.assertEqual(payload['view'], 'workbench_governance_detail_view')
+            self.assertEqual(payload['data']['schema_version'], 'm5_workbench_governance_detail_view_v1')
+            self.assertTrue(payload['data']['found'])
+            self.assertEqual(payload['data']['item']['item_id'], item['item_id'])
+            self.assertTrue(payload['data']['item']['why'])
+            self.assertTrue(payload['data']['item']['next_step'])
         finally:
             dashboard_api.backtester = old_backtester
 

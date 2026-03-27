@@ -52,7 +52,7 @@ from signals.validator import SignalValidator
 from bot.run import execute_exchange_smoke, reconcile_exchange_positions, load_runtime_state
 from ml.engine import MLEngine
 from core.regime import RegimeDetector, detect_regime, Regime
-from analytics import StrategyBacktester, SignalQualityAnalyzer, ParameterOptimizer, GovernanceEngine, build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, attach_auto_approval_policy, execute_controlled_rollout_layer, execute_controlled_auto_approval_layer, execute_rollout_executor, build_workflow_consumer_view, build_workflow_attention_view, build_workflow_operator_digest, build_dashboard_summary_cards, build_workbench_governance_view
+from analytics import StrategyBacktester, SignalQualityAnalyzer, ParameterOptimizer, GovernanceEngine, build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, attach_auto_approval_policy, execute_controlled_rollout_layer, execute_controlled_auto_approval_layer, execute_rollout_executor, build_workflow_consumer_view, build_workflow_attention_view, build_workflow_operator_digest, build_dashboard_summary_cards, build_workbench_governance_view, build_workbench_governance_filter_view, build_workbench_governance_detail_view
 from analytics.backtest import export_calibration_payload
 from analytics.mfe_mae import MFEAnalyzer, get_mfe_mae_analysis
 from core.regime_policy import summarize_observe_only_collection
@@ -2567,6 +2567,50 @@ def get_backtest_workbench_governance_view():
         'data': workbench_view,
         'summary': workbench_view.get('summary') or {},
     })
+
+
+@app.route('/api/backtest/workbench-governance-items')
+def get_backtest_workbench_governance_items():
+    """返回 approval / rollout 工作台 item 过滤视图，适合按 lane/action/risk/stage/bucket 快速定位具体项。"""
+    limit = max(1, min(int(request.args.get('limit', 50)), 200))
+    backtest_result = backtester.run_all(config.symbols)
+    calibration_report = backtest_result.get('calibration_report') or {}
+    payload = export_calibration_payload(calibration_report, view='workflow_ready')
+    payload = _persist_workflow_approval_payload(payload, replay_source='workbench_governance_filter_api')
+    filtered = build_workbench_governance_filter_view(
+        payload,
+        lane_ids=request.args.get('lane') or request.args.get('lane_ids'),
+        action_types=request.args.get('action') or request.args.get('action_types'),
+        risk_levels=request.args.get('risk') or request.args.get('risk_levels'),
+        workflow_states=request.args.get('workflow_state') or request.args.get('workflow_states'),
+        approval_states=request.args.get('approval_state') or request.args.get('approval_states'),
+        current_rollout_stages=request.args.get('stage') or request.args.get('current_rollout_stages'),
+        target_rollout_stages=request.args.get('target_stage') or request.args.get('target_rollout_stages'),
+        bucket_tags=request.args.get('bucket') or request.args.get('bucket_tags'),
+        auto_approval_decisions=request.args.get('auto_decision') or request.args.get('auto_approval_decisions'),
+        owner_hints=request.args.get('owner') or request.args.get('owner_hints'),
+        q=request.args.get('q'),
+        limit=limit,
+    )
+    return jsonify({'success': True, 'view': 'workbench_governance_filter_view', 'data': filtered, 'summary': filtered.get('summary') or {}})
+
+
+@app.route('/api/backtest/workbench-governance-detail')
+def get_backtest_workbench_governance_detail():
+    """返回指定 approval / rollout 工作台 item 的 detail 视图，说明它为何在这里、下一步是什么。"""
+    item_id = request.args.get('item_id')
+    approval_id = request.args.get('approval_id')
+    lane_id = request.args.get('lane') or request.args.get('lane_id')
+    if not item_id and not approval_id:
+        return jsonify({'success': False, 'error': 'item_id or approval_id is required'}), 400
+    backtest_result = backtester.run_all(config.symbols)
+    calibration_report = backtest_result.get('calibration_report') or {}
+    payload = export_calibration_payload(calibration_report, view='workflow_ready')
+    payload = _persist_workflow_approval_payload(payload, replay_source='workbench_governance_detail_api')
+    detail = build_workbench_governance_detail_view(payload, item_id=item_id, approval_id=approval_id, lane_id=lane_id)
+    if not detail.get('found'):
+        return jsonify({'success': False, 'error': 'workbench item not found', 'data': detail}), 404
+    return jsonify({'success': True, 'view': 'workbench_governance_detail_view', 'data': detail, 'summary': detail.get('summary') or {}})
 
 
 @app.route('/api/signal-quality')

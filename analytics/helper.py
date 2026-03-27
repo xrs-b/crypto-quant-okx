@@ -4616,6 +4616,203 @@ def build_workbench_governance_view(payload: Optional[Dict] = None, *, max_items
     return view
 
 
+
+def build_unified_workbench_overview(payload: Optional[Dict] = None, *, max_items: int = 5,
+                                     max_adjustments: int = 10, filters: Optional[Dict[str, Any]] = None,
+                                     approval_timeline_fetcher: Optional[Any] = None,
+                                     approval_timeline_limit: int = 200) -> Dict[str, Any]:
+    payload = payload or {}
+    consumer_view = payload.get('consumer_view') or build_workflow_consumer_view(payload)
+    recovery_view = payload.get('workflow_recovery_view') or build_workflow_recovery_view(payload, max_items=max_items)
+    operator_digest = payload.get('workflow_operator_digest') or payload.get('operator_digest') or build_workflow_operator_digest(payload, max_items=max_items)
+    workbench_view = payload.get('workbench_governance_view') or build_workbench_governance_view(
+        payload,
+        max_items=max_items,
+        max_adjustments=max_adjustments,
+        filters=filters,
+    )
+    timeline_summary = payload.get('workbench_timeline_summary_aggregation') or build_workbench_timeline_summary_aggregation(
+        payload,
+        approval_timeline_fetcher=approval_timeline_fetcher,
+        approval_timeline_limit=approval_timeline_limit,
+        max_items_per_group=max_items,
+        **(filters or {}),
+    )
+
+    workflow_summary = (consumer_view.get('workflow_state') or {}).get('summary') or {}
+    approval_summary = (consumer_view.get('approval_state') or {}).get('summary') or {}
+    recovery_summary = recovery_view.get('summary') or {}
+    workbench_summary = workbench_view.get('summary') or {}
+    timeline_groups = (timeline_summary.get('groups') or {}) if isinstance(timeline_summary, dict) else {}
+    timeline_summary_meta = timeline_summary.get('summary') or {} if isinstance(timeline_summary, dict) else {}
+
+    def _take(rows: Any, limit: int = max_items) -> List[Dict[str, Any]]:
+        return list(rows or [])[:limit]
+
+    def _state_rank(state: str) -> int:
+        order = {
+            'attention_required': 0,
+            'recovery_required': 1,
+            'blocked': 2,
+            'active': 3,
+            'ready_to_consume': 4,
+            'steady': 5,
+        }
+        return order.get(str(state or '').strip().lower(), 99)
+
+    approval_manual_items = _take(((operator_digest.get('attention') or {}).get('manual_approval') or []))
+    approval_blocked_items = _take(((operator_digest.get('attention') or {}).get('blocked') or []))
+    ready_items = _take(((operator_digest.get('attention') or {}).get('ready') or []))
+    queued_items = _take(((operator_digest.get('attention') or {}).get('queued') or []))
+    recent_adjustments = _take(workbench_view.get('recent_adjustments') or [])
+    retry_queue = _take(((recovery_view.get('queues') or {}).get('retry_queue') or []))
+    rollback_candidates = _take(((recovery_view.get('queues') or {}).get('rollback_candidates') or []))
+    manual_recovery = _take(((recovery_view.get('queues') or {}).get('manual_recovery') or []))
+
+    approval_state = 'attention_required' if approval_summary.get('pending_count', 0) or workbench_summary.get('manual_approval_count', 0) else 'steady'
+    rollout_state = 'blocked' if workbench_summary.get('blocked_count', 0) else ('active' if workbench_summary.get('queued_count', 0) or workbench_summary.get('ready_count', 0) or workbench_summary.get('recent_adjustment_count', 0) else 'steady')
+    recovery_state = 'recovery_required' if any(recovery_summary.get(key, 0) for key in ('retry_queue_count', 'rollback_candidate_count', 'manual_recovery_count')) else 'steady'
+
+    line_states = {'approval': approval_state, 'rollout': rollout_state, 'recovery': recovery_state}
+    dominant_line = sorted(line_states.items(), key=lambda item: (_state_rank(item[1]), item[0]))[0][0] if line_states else 'approval'
+    overall_state = line_states.get(dominant_line, 'steady')
+
+    approval_next_actions = [
+        row for row in (operator_digest.get('next_actions') or [])
+        if row.get('kind') in {'review_schedule', 'escalate'} or row.get('route') == 'manual_approval_queue' or row.get('follow_up') == 'await_manual_approval'
+    ]
+    rollout_next_actions = [
+        row for row in (operator_digest.get('next_actions') or [])
+        if row.get('kind') in {'retry', 'freeze_followup', 'observe_only_followup'} or row.get('route') in {'rollout_readiness_queue', 'safe_state_apply', 'review_metadata_apply'}
+    ]
+    recovery_next_actions = []
+    if manual_recovery:
+        recovery_next_actions.append({
+            'kind': 'manual_recovery',
+            'priority': 'high',
+            'count': len((recovery_view.get('queues') or {}).get('manual_recovery') or []),
+            'message': f"{len((recovery_view.get('queues') or {}).get('manual_recovery') or [])} item(s) require manual recovery review",
+            'route': 'manual_recovery_queue',
+            'follow_up': 'operator_review_and_safe_requeue',
+            'items': manual_recovery,
+        })
+    if rollback_candidates:
+        recovery_next_actions.append({
+            'kind': 'rollback_candidate_review',
+            'priority': 'high',
+            'count': len((recovery_view.get('queues') or {}).get('rollback_candidates') or []),
+            'message': f"{len((recovery_view.get('queues') or {}).get('rollback_candidates') or [])} item(s) are rollback candidates",
+            'route': 'rollback_candidate_queue',
+            'follow_up': 'freeze_and_review',
+            'items': rollback_candidates,
+        })
+    if retry_queue:
+        recovery_next_actions.append({
+            'kind': 'retry_recovery',
+            'priority': 'medium',
+            'count': len((recovery_view.get('queues') or {}).get('retry_queue') or []),
+            'message': f"{len((recovery_view.get('queues') or {}).get('retry_queue') or [])} item(s) can be retried through recovery queue",
+            'route': 'retry_queue',
+            'follow_up': 'retry_execution',
+            'items': retry_queue,
+        })
+
+    lines = {
+        'approval': {
+            'current_state': approval_state,
+            'headline': {
+                'status': approval_state,
+                'message': f"{approval_summary.get('pending_count', 0)} pending approval / {approval_summary.get('approved_count', 0)} approved / {approval_summary.get('rejected_count', 0)} rejected / {approval_summary.get('deferred_count', 0)} deferred",
+            },
+            'counts': {
+                'total': workbench_summary.get('manual_approval_count', 0) + max(0, approval_summary.get('approved_count', 0)) + max(0, approval_summary.get('rejected_count', 0)) + max(0, approval_summary.get('deferred_count', 0)),
+                'pending': approval_summary.get('pending_count', 0),
+                'approved': approval_summary.get('approved_count', 0),
+                'rejected': approval_summary.get('rejected_count', 0),
+                'deferred': approval_summary.get('deferred_count', 0),
+                'manual_approval': workbench_summary.get('manual_approval_count', 0),
+                'blocked_follow_up': workbench_summary.get('blocked_count', 0),
+            },
+            'key_alerts': approval_manual_items + [row for row in approval_blocked_items if row.get('item_id') not in {item.get('item_id') for item in approval_manual_items}][:max(0, max_items - len(approval_manual_items))],
+            'next_actions': _take(approval_next_actions),
+        },
+        'rollout': {
+            'current_state': rollout_state,
+            'headline': {
+                'status': rollout_state,
+                'message': f"{workbench_summary.get('blocked_count', 0)} blocked / {workbench_summary.get('queued_count', 0)} queued / {workbench_summary.get('ready_count', 0)} ready / {workbench_summary.get('auto_batch_count', 0)} auto-batch",
+            },
+            'counts': {
+                'total': workflow_summary.get('item_count', workbench_summary.get('filtered_item_count', 0)),
+                'blocked': workbench_summary.get('blocked_count', 0),
+                'queued': workbench_summary.get('queued_count', 0),
+                'ready': workbench_summary.get('ready_count', 0),
+                'auto_batch': workbench_summary.get('auto_batch_count', 0),
+                'recent_adjustments': workbench_summary.get('recent_adjustment_count', 0),
+                'stage_paths': len((workbench_view.get('rollout') or {}).get('frontier') or []),
+            },
+            'headline_stage_frontier': _take((workbench_view.get('rollout') or {}).get('frontier') or []),
+            'key_alerts': _take(approval_blocked_items + queued_items + ready_items),
+            'next_actions': _take(rollout_next_actions),
+        },
+        'recovery': {
+            'current_state': recovery_state,
+            'headline': {
+                'status': recovery_state,
+                'message': f"{recovery_summary.get('manual_recovery_count', 0)} manual recovery / {recovery_summary.get('rollback_candidate_count', 0)} rollback candidate / {recovery_summary.get('retry_queue_count', 0)} retry queue",
+            },
+            'counts': {
+                'retry_queue': recovery_summary.get('retry_queue_count', 0),
+                'rollback_candidates': recovery_summary.get('rollback_candidate_count', 0),
+                'manual_recovery': recovery_summary.get('manual_recovery_count', 0),
+            },
+            'key_alerts': _take(manual_recovery + rollback_candidates + retry_queue),
+            'next_actions': _take(recovery_next_actions),
+            'next_retry_at': recovery_summary.get('next_retry_at'),
+        },
+    }
+
+    overview = {
+        'schema_version': 'm5_unified_workbench_overview_v1',
+        'headline': {
+            'status': overall_state,
+            'dominant_line': dominant_line,
+            'message': f"approval={approval_state} / rollout={rollout_state} / recovery={recovery_state}",
+        },
+        'summary': {
+            'workflow_item_count': workbench_summary.get('workflow_item_count', workflow_summary.get('item_count', 0)),
+            'approval_item_count': workbench_summary.get('approval_item_count', approval_summary.get('item_count', 0)),
+            'filtered_item_count': workbench_summary.get('filtered_item_count', workbench_summary.get('catalog_item_count', 0)),
+            'line_states': line_states,
+            'approval': lines['approval']['counts'],
+            'rollout': lines['rollout']['counts'],
+            'recovery': lines['recovery']['counts'],
+            'operator_action_policy_summary': (operator_digest.get('summary') or {}).get('group_summaries') or {},
+            'timeline_group_counts': {
+                'bucket': len(timeline_groups.get('by_bucket') or []),
+                'action_type': len(timeline_groups.get('by_action_type') or []),
+                'lane': len(timeline_groups.get('by_lane') or []),
+                'operator_action': len(timeline_groups.get('by_operator_action') or []),
+                'operator_route': len(timeline_groups.get('by_operator_route') or []),
+                'follow_up': len(timeline_groups.get('by_follow_up') or []),
+            },
+            'timeline_event_count_total': timeline_summary_meta.get('timeline_event_count_total', 0),
+            'merged_event_count_total': timeline_summary_meta.get('merged_event_count_total', 0),
+        },
+        'lines': lines,
+        'top_key_alerts': _take(lines['approval']['key_alerts'] + [row for row in lines['recovery']['key_alerts'] if row.get('item_id') not in {item.get('item_id') for item in lines['approval']['key_alerts']}] + [row for row in lines['rollout']['key_alerts'] if row.get('item_id') not in {item.get('item_id') for item in lines['approval']['key_alerts'] + lines['recovery']['key_alerts']}]),
+        'top_next_actions': _take(lines['approval']['next_actions'] + lines['recovery']['next_actions'] + lines['rollout']['next_actions']),
+        'upstreams': {
+            'workflow_consumer_view': consumer_view,
+            'workflow_operator_digest': operator_digest,
+            'workflow_recovery_view': recovery_view,
+            'workbench_governance_view': workbench_view,
+            'workbench_timeline_summary_aggregation': timeline_summary,
+        },
+    }
+    payload['unified_workbench_overview'] = overview
+    return overview
+
 def build_approval_audit_overview(*, stale_rows: Optional[List[Dict]] = None,
                                   decision_diffs: Optional[List[Dict]] = None,
                                   timeline_summary: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:

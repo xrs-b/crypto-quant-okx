@@ -5208,6 +5208,72 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
         finally:
             dashboard_api.backtester = old_backtester
 
+    def test_backtest_unified_workbench_overview_api_returns_three_line_snapshot(self):
+        import dashboard.api as dashboard_api_module
+        original_run_all = dashboard_api_module.backtester.run_all
+        original_persist = dashboard_api_module._persist_workflow_approval_payload
+        try:
+            dashboard_api_module.backtester.run_all = lambda symbols: {'calibration_report': {'summary': {}, 'workflow_ready': {}}}
+            dashboard_api_module.export_calibration_payload = lambda report, view='workflow_ready': {
+                'workflow_state': {
+                    'item_states': [
+                        {'item_id': 'playbook::manual', 'title': 'Manual gate item', 'action_type': 'joint_expand_guarded', 'risk_level': 'high', 'approval_required': True, 'requires_manual': True, 'workflow_state': 'blocked_by_approval', 'blocking_reasons': []},
+                        {'item_id': 'playbook::recover', 'title': 'Recover item', 'action_type': 'joint_stage_prepare', 'risk_level': 'critical', 'approval_required': False, 'requires_manual': False, 'workflow_state': 'execution_failed', 'blocking_reasons': ['critical_risk'], 'state_machine': _build_state_machine_semantics(item_id='approval::recover', approval_state='pending', workflow_state='execution_failed', execution_status='error', retryable=False, blocked_by=['critical_risk'])},
+                    ],
+                    'summary': {'item_count': 2},
+                },
+                'approval_state': {
+                    'items': [
+                        {'approval_id': 'approval::manual', 'playbook_id': 'playbook::manual', 'title': 'Manual gate item', 'action_type': 'joint_expand_guarded', 'approval_state': 'pending', 'decision_state': 'pending', 'risk_level': 'high', 'approval_required': True, 'requires_manual': True, 'blocked_by': []},
+                        {'approval_id': 'approval::recover', 'playbook_id': 'playbook::recover', 'title': 'Recover item', 'action_type': 'joint_stage_prepare', 'approval_state': 'pending', 'decision_state': 'pending', 'risk_level': 'critical', 'approval_required': False, 'requires_manual': False, 'blocked_by': ['critical_risk']},
+                    ],
+                    'summary': {'pending_count': 2},
+                },
+                'rollout_executor': {'status': 'controlled', 'summary': {}},
+                'controlled_rollout_execution': {'mode': 'state_apply', 'executed_count': 0, 'items': []},
+                'auto_approval_execution': {'mode': 'controlled', 'executed_count': 0, 'items': []},
+            }
+            dashboard_api_module._persist_workflow_approval_payload = lambda payload, replay_source='unified_workbench_overview_api': payload
+            client = dashboard_api_module.app.test_client()
+            response = client.get('/api/backtest/unified-workbench-overview?max_items=2')
+            self.assertEqual(response.status_code, 200)
+            payload = response.get_json()
+            self.assertEqual(payload['view'], 'unified_workbench_overview')
+            self.assertEqual(payload['data']['schema_version'], 'm5_unified_workbench_overview_v1')
+            self.assertIn('approval', payload['data']['lines'])
+            self.assertIn('rollout', payload['data']['lines'])
+            self.assertIn('recovery', payload['data']['lines'])
+        finally:
+            dashboard_api_module.backtester.run_all = original_run_all
+            dashboard_api_module._persist_workflow_approval_payload = original_persist
+
+    def test_backtest_calibration_report_api_supports_unified_workbench_overview(self):
+        import dashboard.api as dashboard_api_module
+        original_run_all = dashboard_api_module.backtester.run_all
+        original_persist = dashboard_api_module._persist_workflow_approval_payload
+        original_export = dashboard_api_module.export_calibration_payload
+        try:
+            dashboard_api_module.backtester.run_all = lambda symbols: {'symbols': ['BTC-USDT'], 'calibration_report': {'summary': {'trade_count': 1, 'calibration_ready': True}}}
+            dashboard_api_module.export_calibration_payload = lambda report, view='workflow_ready': {
+                'workflow_state': {'item_states': [], 'summary': {}},
+                'approval_state': {'items': [], 'summary': {}},
+                'rollout_executor': {'status': 'disabled', 'summary': {}},
+                'controlled_rollout_execution': {'mode': 'disabled', 'items': []},
+                'auto_approval_execution': {'mode': 'disabled', 'items': []},
+            }
+            dashboard_api_module._persist_workflow_approval_payload = lambda payload, replay_source='calibration_report:unified_workbench_overview': payload
+            client = dashboard_api_module.app.test_client()
+            response = client.get('/api/backtest/calibration-report?view=unified_workbench_overview')
+            self.assertEqual(response.status_code, 200)
+            payload = response.get_json()
+            self.assertEqual(payload['view'], 'unified_workbench_overview')
+            self.assertEqual(payload['data']['schema_version'], 'm5_unified_workbench_overview_v1')
+            self.assertEqual(payload['summary']['unified_workbench_overview'], payload['data']['summary'])
+        finally:
+            dashboard_api_module.backtester.run_all = original_run_all
+            dashboard_api_module._persist_workflow_approval_payload = original_persist
+            dashboard_api_module.export_calibration_payload = original_export
+
     def test_backtest_calibration_report_api_supports_workbench_governance_view(self):
         import dashboard.api as dashboard_api
 
@@ -5753,7 +5819,7 @@ class TestExecutionObservability(unittest.TestCase):
             self.assertIn('recent_decisions', snapshot['summary'])
             self.assertTrue(snapshot['summary']['observe_only_banner'])
 
-from analytics.helper import build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, attach_auto_approval_policy, execute_controlled_rollout_layer, execute_controlled_auto_approval_layer, execute_rollout_executor, build_workflow_recovery_view, build_workflow_attention_view, build_workflow_operator_digest, build_dashboard_summary_cards, build_workbench_governance_view, build_workbench_governance_detail_view, build_workbench_merged_timeline, build_workbench_timeline_summary_aggregation, _build_state_machine_semantics
+from analytics.helper import build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, attach_auto_approval_policy, execute_controlled_rollout_layer, execute_controlled_auto_approval_layer, execute_rollout_executor, build_workflow_recovery_view, build_workflow_attention_view, build_workflow_operator_digest, build_dashboard_summary_cards, build_workbench_governance_view, build_workbench_governance_detail_view, build_workbench_merged_timeline, build_workbench_timeline_summary_aggregation, build_unified_workbench_overview, _build_state_machine_semantics
 
 
 class TestApprovalPersistence(unittest.TestCase):
@@ -6035,6 +6101,99 @@ class TestApprovalPersistence(unittest.TestCase):
         self.assertGreaterEqual(payload['summary']['recent_adjustment_count'], 2)
         self.assertEqual(payload['lanes']['manual_approval']['low_intervention_summary']['dominant_follow_up'], 'await_manual_approval')
         self.assertEqual(next(row for row in payload['group_summaries']['by_operator_route'] if row['group_id'] == 'manual_approval_queue')['summary']['dominant_follow_up'], 'await_manual_approval')
+
+    def test_build_unified_workbench_overview_summarizes_approval_rollout_and_recovery_lines(self):
+        payload = build_unified_workbench_overview({
+            'workflow_state': {
+                'item_states': [
+                    {
+                        'item_id': 'playbook::manual',
+                        'title': 'Manual gate item',
+                        'action_type': 'joint_expand_guarded',
+                        'risk_level': 'high',
+                        'approval_required': True,
+                        'requires_manual': True,
+                        'workflow_state': 'blocked_by_approval',
+                        'blocking_reasons': [],
+                        'current_rollout_stage': 'guarded',
+                        'target_rollout_stage': 'expanded',
+                        'state_machine': _build_state_machine_semantics(item_id='approval::manual', approval_state='pending', workflow_state='blocked_by_approval', dispatch_route='manual_review_queue', next_transition='await_manual_approval'),
+                    },
+                    {
+                        'item_id': 'playbook::queued',
+                        'title': 'Queued stage item',
+                        'action_type': 'joint_stage_prepare',
+                        'risk_level': 'medium',
+                        'approval_required': False,
+                        'requires_manual': False,
+                        'workflow_state': 'queued',
+                        'blocking_reasons': [],
+                        'auto_approval_decision': 'auto_approve',
+                        'auto_approval_eligible': True,
+                        'current_rollout_stage': 'observe',
+                        'target_rollout_stage': 'guarded',
+                    },
+                    {
+                        'item_id': 'playbook::recover',
+                        'title': 'Recovery item',
+                        'action_type': 'joint_stage_prepare',
+                        'workflow_state': 'execution_failed',
+                        'risk_level': 'critical',
+                        'approval_required': False,
+                        'requires_manual': False,
+                        'blocking_reasons': ['critical_risk'],
+                        'state_machine': _build_state_machine_semantics(item_id='approval::recover', approval_state='pending', workflow_state='execution_failed', execution_status='error', retryable=False, blocked_by=['critical_risk']),
+                    },
+                ],
+                'summary': {'item_count': 3},
+            },
+            'approval_state': {
+                'items': [
+                    {
+                        'approval_id': 'approval::manual',
+                        'playbook_id': 'playbook::manual',
+                        'title': 'Manual gate item',
+                        'action_type': 'joint_expand_guarded',
+                        'approval_state': 'pending',
+                        'decision_state': 'pending',
+                        'risk_level': 'high',
+                        'approval_required': True,
+                        'requires_manual': True,
+                        'blocked_by': [],
+                    },
+                    {
+                        'approval_id': 'approval::recover',
+                        'playbook_id': 'playbook::recover',
+                        'title': 'Recovery item',
+                        'action_type': 'joint_stage_prepare',
+                        'approval_state': 'pending',
+                        'decision_state': 'pending',
+                        'risk_level': 'critical',
+                        'approval_required': False,
+                        'requires_manual': False,
+                        'blocked_by': ['critical_risk'],
+                    },
+                ],
+                'summary': {'pending_count': 2},
+            },
+            'rollout_executor': {'status': 'controlled', 'summary': {'by_status': {'queued': 1}}},
+            'controlled_rollout_execution': {'mode': 'state_apply', 'executed_count': 1, 'items': []},
+            'auto_approval_execution': {'mode': 'controlled', 'executed_count': 1, 'items': []},
+        }, max_items=2)
+        self.assertEqual(payload['schema_version'], 'm5_unified_workbench_overview_v1')
+        self.assertEqual(payload['headline']['status'], 'attention_required')
+        self.assertEqual(payload['headline']['dominant_line'], 'approval')
+        self.assertEqual(payload['summary']['line_states']['approval'], 'attention_required')
+        self.assertEqual(payload['summary']['line_states']['rollout'], 'blocked')
+        self.assertEqual(payload['summary']['line_states']['recovery'], 'recovery_required')
+        self.assertEqual(payload['lines']['approval']['counts']['pending'], 2)
+        self.assertEqual(payload['lines']['rollout']['counts']['queued'], 1)
+        self.assertEqual(payload['lines']['recovery']['counts']['manual_recovery'], 1)
+        self.assertEqual(payload['lines']['approval']['next_actions'][0]['kind'], 'review_schedule')
+        self.assertEqual(payload['lines']['recovery']['next_actions'][0]['kind'], 'manual_recovery')
+        self.assertTrue(payload['top_key_alerts'])
+        self.assertTrue(payload['top_next_actions'])
+        self.assertEqual(payload['upstreams']['workflow_recovery_view']['summary']['manual_recovery_count'], 1)
 
     def test_build_workbench_governance_detail_view_adds_queue_approval_rollout_drilldown(self):
         payload = {
@@ -8132,3 +8291,73 @@ class TestUnifiedWorkflowStateMachine(unittest.TestCase):
                 self.assertEqual(payload['data'][0]['state_machine']['workflow_state'], 'queued')
             finally:
                 dashboard_api.db = old_db
+
+
+class TestUnifiedWorkbenchOverviewAPI(unittest.TestCase):
+    def test_backtest_unified_workbench_overview_api_returns_three_line_snapshot(self):
+        import dashboard.api as dashboard_api_module
+        original_run_all = dashboard_api_module.backtester.run_all
+        original_persist = dashboard_api_module._persist_workflow_approval_payload
+        original_export = dashboard_api_module.export_calibration_payload
+        try:
+            dashboard_api_module.backtester.run_all = lambda symbols: {'calibration_report': {'summary': {}, 'workflow_ready': {}}}
+            dashboard_api_module.export_calibration_payload = lambda report, view='workflow_ready': {
+                'workflow_state': {
+                    'item_states': [
+                        {'item_id': 'playbook::manual', 'title': 'Manual gate item', 'action_type': 'joint_expand_guarded', 'risk_level': 'high', 'approval_required': True, 'requires_manual': True, 'workflow_state': 'blocked_by_approval', 'blocking_reasons': []},
+                        {'item_id': 'playbook::recover', 'title': 'Recover item', 'action_type': 'joint_stage_prepare', 'risk_level': 'critical', 'approval_required': False, 'requires_manual': False, 'workflow_state': 'execution_failed', 'blocking_reasons': ['critical_risk'], 'state_machine': _build_state_machine_semantics(item_id='approval::recover', approval_state='pending', workflow_state='execution_failed', execution_status='error', retryable=False, blocked_by=['critical_risk'])},
+                    ],
+                    'summary': {'item_count': 2},
+                },
+                'approval_state': {
+                    'items': [
+                        {'approval_id': 'approval::manual', 'playbook_id': 'playbook::manual', 'title': 'Manual gate item', 'action_type': 'joint_expand_guarded', 'approval_state': 'pending', 'decision_state': 'pending', 'risk_level': 'high', 'approval_required': True, 'requires_manual': True, 'blocked_by': []},
+                        {'approval_id': 'approval::recover', 'playbook_id': 'playbook::recover', 'title': 'Recover item', 'action_type': 'joint_stage_prepare', 'approval_state': 'pending', 'decision_state': 'pending', 'risk_level': 'critical', 'approval_required': False, 'requires_manual': False, 'blocked_by': ['critical_risk']},
+                    ],
+                    'summary': {'pending_count': 2},
+                },
+                'rollout_executor': {'status': 'controlled', 'summary': {}},
+                'controlled_rollout_execution': {'mode': 'state_apply', 'executed_count': 0, 'items': []},
+                'auto_approval_execution': {'mode': 'controlled', 'executed_count': 0, 'items': []},
+            }
+            dashboard_api_module._persist_workflow_approval_payload = lambda payload, replay_source='unified_workbench_overview_api': payload
+            client = dashboard_api_module.app.test_client()
+            response = client.get('/api/backtest/unified-workbench-overview?max_items=2')
+            self.assertEqual(response.status_code, 200)
+            payload = response.get_json()
+            self.assertEqual(payload['view'], 'unified_workbench_overview')
+            self.assertEqual(payload['data']['schema_version'], 'm5_unified_workbench_overview_v1')
+            self.assertIn('approval', payload['data']['lines'])
+            self.assertIn('rollout', payload['data']['lines'])
+            self.assertIn('recovery', payload['data']['lines'])
+        finally:
+            dashboard_api_module.backtester.run_all = original_run_all
+            dashboard_api_module._persist_workflow_approval_payload = original_persist
+            dashboard_api_module.export_calibration_payload = original_export
+
+    def test_backtest_calibration_report_api_supports_unified_workbench_overview(self):
+        import dashboard.api as dashboard_api_module
+        original_run_all = dashboard_api_module.backtester.run_all
+        original_persist = dashboard_api_module._persist_workflow_approval_payload
+        original_export = dashboard_api_module.export_calibration_payload
+        try:
+            dashboard_api_module.backtester.run_all = lambda symbols: {'symbols': ['BTC-USDT'], 'calibration_report': {'summary': {'trade_count': 1, 'calibration_ready': True}}}
+            dashboard_api_module.export_calibration_payload = lambda report, view='workflow_ready': {
+                'workflow_state': {'item_states': [], 'summary': {}},
+                'approval_state': {'items': [], 'summary': {}},
+                'rollout_executor': {'status': 'disabled', 'summary': {}},
+                'controlled_rollout_execution': {'mode': 'disabled', 'items': []},
+                'auto_approval_execution': {'mode': 'disabled', 'items': []},
+            }
+            dashboard_api_module._persist_workflow_approval_payload = lambda payload, replay_source='calibration_report:unified_workbench_overview': payload
+            client = dashboard_api_module.app.test_client()
+            response = client.get('/api/backtest/calibration-report?view=unified_workbench_overview')
+            self.assertEqual(response.status_code, 200)
+            payload = response.get_json()
+            self.assertEqual(payload['view'], 'unified_workbench_overview')
+            self.assertEqual(payload['data']['schema_version'], 'm5_unified_workbench_overview_v1')
+            self.assertEqual(payload['summary']['unified_workbench_overview'], payload['data']['summary'])
+        finally:
+            dashboard_api_module.backtester.run_all = original_run_all
+            dashboard_api_module._persist_workflow_approval_payload = original_persist
+            dashboard_api_module.export_calibration_payload = original_export

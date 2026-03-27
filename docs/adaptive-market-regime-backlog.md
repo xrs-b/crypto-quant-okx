@@ -83,6 +83,10 @@
 
 ---
 
+> 验证入口专项方案：[`docs/adaptive-strategy-validation-entry-plan.md`](./adaptive-strategy-validation-entry-plan.md)
+>
+> 说明：当前 adaptive strategy / layering / rollout 的进一步推进，已明确不应再长期依赖“等自然开单再验”；后续涉及影子单、历史回放、受控 testnet、workflow/governance 受控验证入口时，统一先参考上述方案。
+
 ## 2.1 近期补充进展（2026-03-27）
 
 ### AR-M5-04｜approval decision persistence / replay state layer

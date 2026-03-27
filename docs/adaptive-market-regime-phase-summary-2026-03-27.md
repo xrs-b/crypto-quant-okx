@@ -128,9 +128,10 @@
 
 ## 当前建议的下一阶段方向
 优先级建议：
-1. 继续完善 M5 governance / orchestration 闭环（现已补 joint governance / conflict resolution 首版，可继续往自动执行/审批 playbook 推）
-2. 提高 report/API/dashboard 对 calibration delivery 的消费能力（已新增可消费的 joint priority queue / next actions；最新一轮再将 governance_ready 主入口上提到 report-ready 顶层与 API summary，默认消费路径更直接）
-3. 再决定是否继续做更深层的 adaptive rollout automation
+1. 先建设验证入口方案，解除 adaptive strategy / layering / rollout 长期依赖自然开单验证的停滞点：[`docs/adaptive-strategy-validation-entry-plan.md`](./adaptive-strategy-validation-entry-plan.md)
+2. 继续完善 M5 governance / orchestration 闭环（现已补 joint governance / conflict resolution 首版，可继续往自动执行/审批 playbook 推）
+3. 提高 report/API/dashboard 对 calibration delivery 的消费能力（已新增可消费的 joint priority queue / next actions；最新一轮再将 governance_ready 主入口上提到 report-ready 顶层与 API summary，默认消费路径更直接）
+4. 再决定是否继续做更深层的 adaptive rollout automation
 
 不建议当前阶段立刻做：
 - 更激进的 execution override

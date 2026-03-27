@@ -2391,8 +2391,8 @@ def get_backtest_summary():
 def get_backtest_calibration_report():
     """获取 M5 calibration 聚合输出，默认返回 report-ready payload。"""
     view = (request.args.get('view') or 'report_ready').strip().lower()
-    if view not in {'report_ready', 'delivery', 'governance_ready', 'full'}:
-        return jsonify({'success': False, 'error': 'view must be one of report_ready|delivery|governance_ready|full'}), 400
+    if view not in {'report_ready', 'delivery', 'governance_ready', 'workflow_ready', 'full'}:
+        return jsonify({'success': False, 'error': 'view must be one of report_ready|delivery|governance_ready|workflow_ready|full'}), 400
 
     backtest_result = backtester.run_all(config.symbols)
     calibration_report = backtest_result.get('calibration_report') or {}
@@ -2402,6 +2402,7 @@ def get_backtest_calibration_report():
     )
     summary = calibration_report.get('summary') or {}
     governance_ready = payload if view == 'governance_ready' else (payload.get('governance_ready') or {})
+    workflow_ready = payload if view == 'workflow_ready' else (payload.get('workflow_ready') or {})
     return jsonify({
         'success': True,
         'view': view,
@@ -2412,6 +2413,7 @@ def get_backtest_calibration_report():
             'calibration_ready': bool(summary.get('calibration_ready')),
             'delivery_ready': summary.get('delivery_ready') or {},
             'governance_ready': summary.get('governance_ready') or (governance_ready.get('summary') or {}),
+            'workflow_ready': workflow_ready.get('summary') or {},
             'joint_governance_summary': summary.get('joint_governance_summary') or {},
         }
     })

@@ -24,7 +24,7 @@ from core.notifier import NotificationManager
 from signals import Signal, SignalDetector, SignalValidator, SignalRecorder, EntryDecider
 from trading import TradingExecutor, RiskManager
 from trading.executor import build_observability_context
-from analytics.backtest import StrategyBacktester, build_regime_policy_calibration_report, build_calibration_report_ready_payload, build_joint_governance_ready_payload, export_calibration_payload
+from analytics.backtest import StrategyBacktester, build_regime_policy_calibration_report, build_calibration_report_ready_payload, build_joint_governance_ready_payload, build_governance_workflow_ready_payload, export_calibration_payload
 from strategies.strategy_library import StrategyManager
 from bot.run import build_exchange_diagnostics, build_exchange_smoke_plan, build_runtime_health_summary, maybe_send_daily_health_summary, execute_exchange_smoke, reconcile_exchange_positions
 from dashboard.api import app
@@ -4490,7 +4490,10 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
         self.assertEqual(payload['action_playbook'], report['delivery']['governance_ready']['action_playbook'])
         self.assertEqual(payload['approval_ready'], report['delivery']['governance_ready']['approval_ready'])
         self.assertEqual(payload['bucket_index'], report['delivery']['governance_ready']['bucket_index'])
+        self.assertEqual(payload['workflow_ready']['actions'], report['delivery']['governance_ready']['action_playbook']['items'])
+        self.assertEqual(payload['workflow_ready']['approval_queue'], report['delivery']['governance_ready']['approval_ready']['items'])
         self.assertEqual(payload['tables']['governance_ready'], report['delivery']['governance_ready'])
+        self.assertEqual(payload['tables']['workflow_ready'], payload['workflow_ready'])
         self.assertEqual(payload['tables']['joint_governance'], report['delivery']['views']['tables']['joint_governance'])
 
     def test_joint_governance_ready_payload_provides_direct_consumer_entrypoint(self):
@@ -4550,6 +4553,38 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
         self.assertTrue(bucket_ready['actions'])
         self.assertEqual(bucket_ready['actions'][0]['playbook_id'], approval_row['playbook_id'])
 
+    def test_governance_workflow_ready_payload_exposes_workflow_entrypoint(self):
+        report = build_regime_policy_calibration_report([
+            {
+                'symbol': 'BTC/USDT',
+                'all_trades': [
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 0.3},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 0.2},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 0.1},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v2', 'strategy_tags': ['Breakout'], 'return_pct': -1.4},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v2', 'strategy_tags': ['Breakout'], 'return_pct': -1.0},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v2', 'strategy_tags': ['Breakout'], 'return_pct': -0.8},
+                ],
+            }
+        ])
+        payload = build_governance_workflow_ready_payload(report)
+        self.assertEqual(payload['schema_version'], 'm5_governance_workflow_ready_v1')
+        self.assertEqual(payload['governance_schema_version'], report['delivery']['governance_ready']['schema_version'])
+        self.assertEqual(payload['actions'], report['delivery']['governance_ready']['action_playbook']['items'])
+        self.assertEqual(payload['approval_queue'], report['delivery']['governance_ready']['approval_ready']['items'])
+        self.assertEqual(payload['queues']['priority'], report['delivery']['governance_ready']['priority_queue'])
+        self.assertEqual(payload['queues']['approvals'], payload['approval_queue'])
+        self.assertTrue(payload['filters']['risk_levels'])
+        self.assertTrue(payload['filters']['owner_hints'])
+        self.assertIn('pending_approval', payload['filters']['statuses'])
+        self.assertEqual(payload['summary']['action_count'], len(payload['actions']))
+        self.assertEqual(payload['summary']['approval_count'], len(payload['approval_queue']))
+        approval_row = payload['approval_queue'][0]
+        self.assertTrue(any(
+            row['playbook_id'] == approval_row['playbook_id']
+            for row in payload['by_bucket'][approval_row['bucket_id']]['approvals']['actions']
+        ))
+
     def test_export_calibration_payload_supports_delivery_governance_ready_and_full_views(self):
         report = build_regime_policy_calibration_report([
             {
@@ -4563,6 +4598,7 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
         ])
         self.assertEqual(export_calibration_payload(report, view='delivery'), report['delivery'])
         self.assertEqual(export_calibration_payload(report, view='governance_ready'), report['delivery']['governance_ready'])
+        self.assertEqual(export_calibration_payload(report, view='workflow_ready'), build_governance_workflow_ready_payload(report))
         self.assertEqual(export_calibration_payload(report, view='full'), report)
 
     def test_backtest_calibration_report_api_returns_report_ready_view(self):
@@ -4640,6 +4676,47 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
             self.assertEqual(payload['view'], 'delivery')
             self.assertEqual(payload['data']['schema_version'], 'm5_delivery_v1')
             self.assertEqual(payload['data']['views']['items'], report['delivery']['views']['items'])
+        finally:
+            dashboard_api.backtester = old_backtester
+
+    def test_backtest_calibration_report_api_supports_workflow_ready_view(self):
+        import dashboard.api as dashboard_api
+
+        report = build_regime_policy_calibration_report([
+            {
+                'symbol': 'BTC/USDT',
+                'all_trades': [
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 0.3},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 0.2},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 0.1},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v2', 'strategy_tags': ['Breakout'], 'return_pct': -1.4},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v2', 'strategy_tags': ['Breakout'], 'return_pct': -1.0},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v2', 'strategy_tags': ['Breakout'], 'return_pct': -0.8},
+                ],
+            }
+        ])
+
+        class StubBacktester:
+            def run_all(self, symbols):
+                return {
+                    'summary': {'symbols': len(symbols)},
+                    'symbols': [{'symbol': 'BTC/USDT'}],
+                    'calibration_report': report,
+                }
+
+        old_backtester = dashboard_api.backtester
+        dashboard_api.backtester = StubBacktester()
+        try:
+            client = app.test_client()
+            response = client.get('/api/backtest/calibration-report?view=workflow_ready')
+            self.assertEqual(response.status_code, 200)
+            payload = response.get_json()
+            self.assertEqual(payload['view'], 'workflow_ready')
+            self.assertEqual(payload['data']['schema_version'], 'm5_governance_workflow_ready_v1')
+            self.assertEqual(payload['data']['actions'], report['delivery']['governance_ready']['action_playbook']['items'])
+            self.assertEqual(payload['data']['approval_queue'], report['delivery']['governance_ready']['approval_ready']['items'])
+            self.assertEqual(payload['summary']['workflow_ready'], payload['data']['summary'])
+            self.assertEqual(payload['summary']['governance_ready'], report['summary']['governance_ready'])
         finally:
             dashboard_api.backtester = old_backtester
 

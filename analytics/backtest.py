@@ -1,6 +1,7 @@
 """回测与信号质量分析模块"""
 from __future__ import annotations
 
+import json
 import math
 import os
 from collections import defaultdict
@@ -1871,12 +1872,83 @@ def build_joint_governance_ready_payload(source: Dict) -> Dict:
     }
 
 
+def build_governance_workflow_ready_payload(source: Dict) -> Dict:
+    report = _coerce_calibration_report_source(source)
+    governance_ready = build_joint_governance_ready_payload(report)
+    delivery = report.get('delivery') or {}
+    orchestration_ready = delivery.get('orchestration_ready') or {}
+    action_playbook = governance_ready.get('action_playbook') or {}
+    approval_ready = governance_ready.get('approval_ready') or {}
+    priority_queue = governance_ready.get('priority_queue') or []
+    next_actions = governance_ready.get('next_actions') or []
+    blocking_items = governance_ready.get('blocking_items') or []
+    bucket_index = governance_ready.get('bucket_index') or {}
+    actions = action_playbook.get('items') or []
+    approvals = approval_ready.get('items') or []
+
+    filters = {
+        'risk_levels': sorted({row.get('risk_level') for row in actions if row.get('risk_level')}),
+        'owner_hints': sorted({row.get('owner_hint') for row in actions if row.get('owner_hint')}),
+        'approval_roles': approval_ready.get('summary', {}).get('approver_roles') or [],
+        'statuses': sorted({row.get('status') for row in actions if row.get('status')}),
+        'decision_types': sorted({row.get('decision') for row in actions if row.get('decision')}),
+        'execution_windows': sorted({json.dumps(row.get('execution_window'), sort_keys=True, ensure_ascii=False) for row in actions if row.get('execution_window')}),
+        'bucket_ids': sorted(bucket_index.keys()),
+    }
+    queues = {
+        'priority': priority_queue,
+        'next_actions': next_actions,
+        'blocking': blocking_items,
+        'approvals': approvals,
+    }
+    workflow_summary = {
+        **(governance_ready.get('summary') or {}),
+        'action_count': len(actions),
+        'approval_count': len(approvals),
+        'approval_bucket_count': len(approval_ready.get('by_bucket') or {}),
+        'priority_queue_size': len(priority_queue),
+        'next_action_bucket_count': len(next_actions),
+        'blocking_item_count': len(blocking_items),
+        'filters': {key: len(value) for key, value in filters.items()},
+    }
+    return {
+        'schema_version': 'm5_governance_workflow_ready_v1',
+        'governance_schema_version': governance_ready.get('schema_version'),
+        'delivery_schema_version': governance_ready.get('delivery_schema_version'),
+        'summary': workflow_summary,
+        'actions': actions,
+        'approval_queue': approvals,
+        'action_playbook': action_playbook,
+        'approval_ready': approval_ready,
+        'queues': queues,
+        'filters': filters,
+        'bucket_index': bucket_index,
+        'by_bucket': {
+            bucket_id: {
+                'bucket_id': bucket_id,
+                'governance': bucket_index.get(bucket_id) or {},
+                'playbook': (action_playbook.get('by_bucket') or {}).get(bucket_id) or {},
+                'approvals': (approval_ready.get('by_bucket') or {}).get(bucket_id) or {},
+            }
+            for bucket_id in bucket_index
+        },
+        'tables': {
+            'actions': actions,
+            'approval_queue': approvals,
+            'priority_queue': priority_queue,
+            'next_actions': next_actions,
+            'blocking_items': blocking_items,
+        },
+    }
+
+
 def build_calibration_report_ready_payload(source: Dict) -> Dict:
     report = _coerce_calibration_report_source(source)
     delivery = report.get('delivery') or {}
     summary = report.get('summary') or {}
     views = delivery.get('views') or {}
     governance_ready = build_joint_governance_ready_payload(report)
+    workflow_ready = build_governance_workflow_ready_payload(report)
     return {
         'schema_version': 'm5_report_ready_v1',
         'delivery_schema_version': delivery.get('schema_version'),
@@ -1888,6 +1960,7 @@ def build_calibration_report_ready_payload(source: Dict) -> Dict:
         'render_ready': delivery.get('render_ready') or {},
         'orchestration_ready': delivery.get('orchestration_ready') or {},
         'governance_ready': governance_ready,
+        'workflow_ready': workflow_ready,
         'joint_governance': governance_ready.get('items') or [],
         'priority_queue': governance_ready.get('priority_queue') or [],
         'next_actions': governance_ready.get('next_actions') or [],
@@ -1898,6 +1971,7 @@ def build_calibration_report_ready_payload(source: Dict) -> Dict:
         'tables': {
             **(views.get('tables') or {}),
             'governance_ready': governance_ready,
+            'workflow_ready': workflow_ready,
         },
     }
 
@@ -1908,6 +1982,8 @@ def export_calibration_payload(source: Dict, *, view: str = 'report_ready') -> D
         return report.get('delivery') or {}
     if view == 'governance_ready':
         return build_joint_governance_ready_payload(report)
+    if view == 'workflow_ready':
+        return build_governance_workflow_ready_payload(report)
     if view == 'report_ready':
         return build_calibration_report_ready_payload(report)
     return report

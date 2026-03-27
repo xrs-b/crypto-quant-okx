@@ -1014,5 +1014,6 @@
   - `workflow_state.summary.state_machine` 新增 `operator_action_counts / operator_route_counts / follow_up_counts`，令消费层唔止知 blocked/stale，而系知应该点分流；
   - `workflow_operator_digest` 的 `next_actions` 已改为按 action policy 分组，workbench catalog/item 亦新增 `operator_action / operator_route / operator_follow_up` 过滤与明细字段；
   - `runtime approval hygiene` / `health_summary` 亦补 `operator_action_summary`，让 stale / decision diff 能直接带出 review / escalate / observe-only routing 建议；
+  - 2026-03-28 consumption-layer follow-up：`workbench-governance-detail` 现直接暴露 `operator_action_policy` 摘要与 `drilldown.operator_action`，同时 `workbench-governance-view / items / timeline-summary / detail` API 均支持按 `operator_action / operator_route / follow_up` 显式过滤，方便 agent / dashboard 低干预按 routing lane 消费；
   - 全部仍限定在 metadata / review / queue routing 层，不触发危险真实执行。
 - 2026-03-27 implementation update（dashboard state-machine summary API / done）：新增 `GET /api/approvals/state-machine`，直接返回 approval/rollout item 的统一状态机摘要与 `phase_counts / workflow_state_counts / rollback_candidate_count / retryable_count / terminal_count`，方便 dashboard / agent / 低干预巡检直接回答“当前处于 proposal / approval / queue / execution / terminal 哪一段、下一步去边、仲可唔可以 retry/rollback”。

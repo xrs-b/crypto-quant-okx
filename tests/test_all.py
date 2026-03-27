@@ -5189,7 +5189,7 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
         dashboard_api.backtester = StubBacktester()
         try:
             client = app.test_client()
-            response = client.get('/api/backtest/workbench-governance-view?max_items=2&max_adjustments=3')
+            response = client.get('/api/backtest/workbench-governance-view?operator_action=review_schedule&operator_route=manual_approval_queue&follow_up=await_manual_approval&max_items=2&max_adjustments=3')
             self.assertEqual(response.status_code, 200)
             payload = response.get_json()
             self.assertTrue(payload['success'])
@@ -5199,6 +5199,9 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
             self.assertIn('rollout', payload['data'])
             self.assertIn('recent_adjustments', payload['data'])
             self.assertEqual(payload['summary'], payload['data']['summary'])
+            self.assertEqual(payload['data']['applied_filters']['operator_actions'], ['review_schedule'])
+            self.assertEqual(payload['data']['applied_filters']['operator_routes'], ['manual_approval_queue'])
+            self.assertEqual(payload['data']['applied_filters']['operator_follow_ups'], ['await_manual_approval'])
             self.assertLessEqual(len(payload['data']['rollout']['items']), 2)
             self.assertLessEqual(len(payload['data']['recent_adjustments']), 3)
         finally:
@@ -5278,7 +5281,10 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
             seed_payload = seed_response.get_json()
             self.assertGreater(seed_payload['data']['summary']['matched_count'], 0)
             selected_action = seed_payload['data']['items'][0]['action_type']
-            response = client.get(f'/api/backtest/workbench-governance-items?lane=manual_approval&action={selected_action}&limit=10')
+            selected_operator_action = seed_payload['data']['items'][0]['operator_action']
+            selected_operator_route = seed_payload['data']['items'][0]['operator_route']
+            selected_follow_up = seed_payload['data']['items'][0]['operator_follow_up']
+            response = client.get(f'/api/backtest/workbench-governance-items?lane=manual_approval&action={selected_action}&operator_action={selected_operator_action}&operator_route={selected_operator_route}&follow_up={selected_follow_up}&limit=10')
             self.assertEqual(response.status_code, 200)
             payload = response.get_json()
             self.assertEqual(payload['view'], 'workbench_governance_filter_view')
@@ -5286,6 +5292,12 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
             self.assertGreater(payload['data']['summary']['matched_count'], 0)
             self.assertTrue(all(row['lane_id'] == 'manual_approval' for row in payload['data']['items']))
             self.assertTrue(all(row['action_type'] == selected_action for row in payload['data']['items']))
+            self.assertTrue(all(row['operator_action'] == selected_operator_action for row in payload['data']['items']))
+            self.assertTrue(all(row['operator_route'] == selected_operator_route for row in payload['data']['items']))
+            self.assertTrue(all(row['operator_follow_up'] == selected_follow_up for row in payload['data']['items']))
+            self.assertEqual(payload['data']['applied_filters']['operator_actions'], [selected_operator_action])
+            self.assertEqual(payload['data']['applied_filters']['operator_routes'], [selected_operator_route])
+            self.assertEqual(payload['data']['applied_filters']['operator_follow_ups'], [selected_follow_up])
             self.assertIn('available_filters', payload['data'])
         finally:
             dashboard_api.backtester = old_backtester
@@ -5322,7 +5334,7 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
             list_response = client.get('/api/backtest/workbench-governance-items?lane=manual_approval&limit=1')
             self.assertEqual(list_response.status_code, 200)
             item = list_response.get_json()['data']['items'][0]
-            response = client.get(f"/api/backtest/workbench-governance-detail?item_id={item['item_id']}&lane={item['lane_id']}")
+            response = client.get(f"/api/backtest/workbench-governance-detail?item_id={item['item_id']}&lane={item['lane_id']}&operator_action={item['operator_action']}&operator_route={item['operator_route']}&follow_up={item['operator_follow_up']}")
             self.assertEqual(response.status_code, 200)
             payload = response.get_json()
             self.assertEqual(payload['view'], 'workbench_governance_detail_view')
@@ -5335,6 +5347,10 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
             self.assertIn('queue', payload['data']['drilldown'])
             self.assertIn('timeline', payload['data']['drilldown'])
             self.assertIn('timeline', payload['data']['summary'])
+            self.assertEqual(payload['data']['summary']['operator_action'], item['operator_action'])
+            self.assertEqual(payload['data']['summary']['operator_route'], item['operator_route'])
+            self.assertEqual(payload['data']['summary']['follow_up'], item['operator_follow_up'])
+            self.assertIn('operator_action', payload['data']['drilldown'])
             self.assertIn('approval', payload['data']['drilldown'])
             self.assertIn('rollout', payload['data']['drilldown'])
             self.assertTrue(payload['data']['summary']['next_transition'])
@@ -5399,7 +5415,12 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
         dashboard_api.backtester = StubBacktester()
         try:
             client = app.test_client()
-            response = client.get('/api/backtest/workbench-governance-timeline-summary?bucket=manual_approval&max_items_per_group=5')
+            seed_response = client.get('/api/backtest/workbench-governance-items?lane=manual_approval&limit=1')
+            self.assertEqual(seed_response.status_code, 200)
+            seed_item = seed_response.get_json()['data']['items'][0]
+            response = client.get(
+                f"/api/backtest/workbench-governance-timeline-summary?bucket=manual_approval&operator_action={seed_item['operator_action']}&operator_route={seed_item['operator_route']}&follow_up={seed_item['operator_follow_up']}&max_items_per_group=5"
+            )
             self.assertEqual(response.status_code, 200)
             payload = response.get_json()
             self.assertEqual(payload['view'], 'workbench_timeline_summary_aggregation')
@@ -5407,6 +5428,9 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
             self.assertGreaterEqual(payload['summary']['item_count'], 1)
             self.assertTrue(payload['data']['groups']['by_bucket'])
             self.assertEqual(payload['data']['applied_filters']['bucket_tags'], ['manual_approval'])
+            self.assertEqual(payload['data']['applied_filters']['operator_actions'], ['review_schedule'])
+            self.assertEqual(payload['data']['applied_filters']['operator_routes'], [seed_item['operator_route']])
+            self.assertEqual(payload['data']['applied_filters']['operator_follow_ups'], ['await_manual_approval'])
             manual_bucket = next(group for group in payload['data']['groups']['by_bucket'] if group['group_id'] == 'manual_approval')
             self.assertGreaterEqual(manual_bucket['merged_timeline_summary']['event_count_total'], manual_bucket['merged_timeline_summary']['executor_event_count_total'])
             self.assertTrue(manual_bucket['items'])
@@ -6103,6 +6127,13 @@ class TestApprovalPersistence(unittest.TestCase):
         detail = build_workbench_governance_detail_view(payload, item_id='playbook::manual', lane_id='manual_approval')
         self.assertTrue(detail['found'])
         self.assertEqual(detail['schema_version'], 'm5_workbench_governance_detail_view_v3')
+        self.assertEqual(detail['summary']['operator_action'], 'review_schedule')
+        self.assertEqual(detail['summary']['operator_route'], 'manual_approval_queue')
+        self.assertEqual(detail['summary']['follow_up'], 'await_manual_approval')
+        self.assertIn('approval_gate_pending', detail['summary']['operator_reason_codes'])
+        self.assertEqual(detail['drilldown']['operator_action']['action'], 'review_schedule')
+        self.assertEqual(detail['drilldown']['operator_action']['route'], 'manual_approval_queue')
+        self.assertEqual(detail['drilldown']['operator_action']['follow_up'], 'await_manual_approval')
         self.assertEqual(detail['drilldown']['queue']['queue_name'], 'manual_review_queue')
         self.assertEqual(detail['drilldown']['queue']['route'], 'manual_review_queue')
         self.assertEqual(detail['drilldown']['approval']['current_transition'], 'manual_gate_before_dispatch')

@@ -2560,7 +2560,27 @@ def get_backtest_workbench_governance_view():
     calibration_report = backtest_result.get('calibration_report') or {}
     payload = export_calibration_payload(calibration_report, view='workflow_ready')
     payload = _persist_workflow_approval_payload(payload, replay_source='workbench_governance_view_api')
-    workbench_view = build_workbench_governance_view(payload, max_items=max_items, max_adjustments=max_adjustments)
+    workbench_view = build_workbench_governance_view(
+        payload,
+        max_items=max_items,
+        max_adjustments=max_adjustments,
+        filters={
+            'lane_ids': request.args.get('lane') or request.args.get('lane_ids'),
+            'action_types': request.args.get('action') or request.args.get('action_types'),
+            'risk_levels': request.args.get('risk') or request.args.get('risk_levels'),
+            'workflow_states': request.args.get('workflow_state') or request.args.get('workflow_states'),
+            'approval_states': request.args.get('approval_state') or request.args.get('approval_states'),
+            'current_rollout_stages': request.args.get('stage') or request.args.get('current_rollout_stages'),
+            'target_rollout_stages': request.args.get('target_stage') or request.args.get('target_rollout_stages'),
+            'bucket_tags': request.args.get('bucket') or request.args.get('bucket_tags'),
+            'auto_approval_decisions': request.args.get('auto_decision') or request.args.get('auto_approval_decisions'),
+            'operator_actions': request.args.get('operator_action') or request.args.get('operator_actions'),
+            'operator_routes': request.args.get('operator_route') or request.args.get('operator_routes'),
+            'operator_follow_ups': request.args.get('follow_up') or request.args.get('operator_follow_up') or request.args.get('operator_follow_ups'),
+            'owner_hints': request.args.get('owner') or request.args.get('owner_hints'),
+            'q': request.args.get('q'),
+        },
+    )
     return jsonify({
         'success': True,
         'view': 'workbench_governance_view',
@@ -2588,6 +2608,9 @@ def get_backtest_workbench_governance_items():
         target_rollout_stages=request.args.get('target_stage') or request.args.get('target_rollout_stages'),
         bucket_tags=request.args.get('bucket') or request.args.get('bucket_tags'),
         auto_approval_decisions=request.args.get('auto_decision') or request.args.get('auto_approval_decisions'),
+        operator_actions=request.args.get('operator_action') or request.args.get('operator_actions'),
+        operator_routes=request.args.get('operator_route') or request.args.get('operator_routes'),
+        operator_follow_ups=request.args.get('follow_up') or request.args.get('operator_follow_up') or request.args.get('operator_follow_ups'),
         owner_hints=request.args.get('owner') or request.args.get('owner_hints'),
         q=request.args.get('q'),
         limit=limit,
@@ -2608,7 +2631,16 @@ def get_backtest_workbench_governance_detail():
     payload = export_calibration_payload(calibration_report, view='workflow_ready')
     payload = _persist_workflow_approval_payload(payload, replay_source='workbench_governance_detail_api')
     approval_timeline = db.get_approval_timeline(item_id=approval_id, limit=200, ascending=True) if approval_id else []
-    detail = build_workbench_governance_detail_view(payload, item_id=item_id, approval_id=approval_id, lane_id=lane_id, approval_timeline=approval_timeline)
+    detail = build_workbench_governance_detail_view(
+        payload,
+        item_id=item_id,
+        approval_id=approval_id,
+        lane_id=lane_id,
+        operator_action=request.args.get('operator_action'),
+        operator_route=request.args.get('operator_route'),
+        follow_up=request.args.get('follow_up') or request.args.get('operator_follow_up'),
+        approval_timeline=approval_timeline,
+    )
     if not detail.get('found'):
         return jsonify({'success': False, 'error': 'workbench item not found', 'data': detail}), 404
     return jsonify({'success': True, 'view': 'workbench_governance_detail_view', 'data': detail, 'summary': detail.get('summary') or {}})
@@ -2659,6 +2691,9 @@ def get_backtest_workbench_governance_timeline_summary():
         target_rollout_stages=request.args.get('target_stage') or request.args.get('target_rollout_stages'),
         bucket_tags=request.args.get('bucket') or request.args.get('bucket_tags'),
         auto_approval_decisions=request.args.get('auto_decision') or request.args.get('auto_approval_decisions'),
+        operator_actions=request.args.get('operator_action') or request.args.get('operator_actions'),
+        operator_routes=request.args.get('operator_route') or request.args.get('operator_routes'),
+        operator_follow_ups=request.args.get('follow_up') or request.args.get('operator_follow_up') or request.args.get('operator_follow_ups'),
         owner_hints=request.args.get('owner') or request.args.get('owner_hints'),
         q=request.args.get('q'),
         approval_timeline_fetcher=lambda approval_id, limit: db.get_approval_timeline(item_id=approval_id, limit=limit, ascending=True) if approval_id else [],

@@ -2943,6 +2943,7 @@ def _filter_workbench_catalog_items(items: List[Dict[str, Any]], *, lane_ids: An
                                     risk_levels: Any = None, workflow_states: Any = None, approval_states: Any = None,
                                     current_rollout_stages: Any = None, target_rollout_stages: Any = None,
                                     bucket_tags: Any = None, auto_approval_decisions: Any = None,
+                                    operator_actions: Any = None, operator_routes: Any = None, operator_follow_ups: Any = None,
                                     owner_hints: Any = None, q: Optional[str] = None) -> List[Dict[str, Any]]:
     lane_filter = set(_normalize_filter_values(lane_ids))
     action_filter = set(_normalize_filter_values(action_types))
@@ -2953,6 +2954,9 @@ def _filter_workbench_catalog_items(items: List[Dict[str, Any]], *, lane_ids: An
     target_stage_filter = set(_normalize_filter_values(target_rollout_stages))
     bucket_filter = set(_normalize_filter_values(bucket_tags))
     auto_filter = set(_normalize_filter_values(auto_approval_decisions))
+    operator_action_filter = set(_normalize_filter_values(operator_actions))
+    operator_route_filter = set(_normalize_filter_values(operator_routes))
+    operator_follow_up_filter = set(_normalize_filter_values(operator_follow_ups))
     owner_filter = set(_normalize_filter_values(owner_hints))
     q_norm = str(q or '').strip().lower()
 
@@ -2973,6 +2977,12 @@ def _filter_workbench_catalog_items(items: List[Dict[str, Any]], *, lane_ids: An
             return False
         if auto_filter and str(row.get('auto_approval_decision') or '').lower() not in auto_filter:
             return False
+        if operator_action_filter and str(row.get('operator_action') or '').lower() not in operator_action_filter:
+            return False
+        if operator_route_filter and str(row.get('operator_route') or '').lower() not in operator_route_filter:
+            return False
+        if operator_follow_up_filter and str(row.get('operator_follow_up') or '').lower() not in operator_follow_up_filter:
+            return False
         if owner_filter and str(row.get('owner_hint') or '').lower() not in owner_filter:
             return False
         if bucket_filter and not bucket_filter.intersection({str(tag).lower() for tag in (row.get('bucket_tags') or [])}):
@@ -2981,6 +2991,7 @@ def _filter_workbench_catalog_items(items: List[Dict[str, Any]], *, lane_ids: An
             haystacks = [
                 row.get('item_id'), row.get('approval_id'), row.get('title'), row.get('action_type'), row.get('workflow_state'),
                 row.get('approval_state'), row.get('risk_level'), row.get('owner_hint'), row.get('why_summary'), row.get('next_step'),
+                row.get('operator_action'), row.get('operator_route'), row.get('operator_follow_up'),
             ] + list(row.get('blocked_by') or []) + list(row.get('bucket_tags') or [])
             if q_norm not in ' '.join(str(v or '').lower() for v in haystacks):
                 return False
@@ -2992,7 +3003,8 @@ def _filter_workbench_catalog_items(items: List[Dict[str, Any]], *, lane_ids: An
 def build_workbench_governance_filter_view(payload: Optional[Dict] = None, *, lane_ids: Any = None, action_types: Any = None,
                                            risk_levels: Any = None, workflow_states: Any = None, approval_states: Any = None,
                                            current_rollout_stages: Any = None, target_rollout_stages: Any = None, bucket_tags: Any = None,
-                                           auto_approval_decisions: Any = None, owner_hints: Any = None, q: Optional[str] = None,
+                                           auto_approval_decisions: Any = None, operator_actions: Any = None, operator_routes: Any = None,
+                                           operator_follow_ups: Any = None, owner_hints: Any = None, q: Optional[str] = None,
                                            limit: int = 50) -> Dict[str, Any]:
     payload = payload or {}
     catalog = payload.get('workbench_governance_catalog') or _build_workbench_item_catalog(payload)
@@ -3007,6 +3019,9 @@ def build_workbench_governance_filter_view(payload: Optional[Dict] = None, *, la
         target_rollout_stages=target_rollout_stages,
         bucket_tags=bucket_tags,
         auto_approval_decisions=auto_approval_decisions,
+        operator_actions=operator_actions,
+        operator_routes=operator_routes,
+        operator_follow_ups=operator_follow_ups,
         owner_hints=owner_hints,
         q=q,
     ), key=_workbench_item_sort_key)
@@ -3027,6 +3042,9 @@ def build_workbench_governance_filter_view(payload: Optional[Dict] = None, *, la
             'target_rollout_stages': _normalize_filter_values(target_rollout_stages),
             'bucket_tags': _normalize_filter_values(bucket_tags),
             'auto_approval_decisions': _normalize_filter_values(auto_approval_decisions),
+            'operator_actions': _normalize_filter_values(operator_actions),
+            'operator_routes': _normalize_filter_values(operator_routes),
+            'operator_follow_ups': _normalize_filter_values(operator_follow_ups),
             'owner_hints': _normalize_filter_values(owner_hints),
             'q': str(q or '').strip(),
         },
@@ -3460,7 +3478,8 @@ def _build_workbench_governance_drilldown(item: Dict[str, Any], payload: Optiona
 
 def build_workbench_governance_detail_view(payload: Optional[Dict] = None, *, item_id: Optional[str] = None,
                                            approval_id: Optional[str] = None, lane_id: Optional[str] = None,
-                                           approval_timeline: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+                                           operator_action: Optional[str] = None, operator_route: Optional[str] = None,
+                                           follow_up: Optional[str] = None, approval_timeline: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
     payload = payload or {}
     catalog = payload.get('workbench_governance_catalog') or _build_workbench_item_catalog(payload)
     candidates = catalog.get('items') or []
@@ -3470,6 +3489,12 @@ def build_workbench_governance_detail_view(payload: Optional[Dict] = None, *, it
         candidates = [row for row in candidates if row.get('approval_id') == approval_id]
     if lane_id:
         candidates = [row for row in candidates if row.get('lane_id') == lane_id]
+    if operator_action:
+        candidates = [row for row in candidates if (row.get('operator_action') or '').lower() == str(operator_action).strip().lower()]
+    if operator_route:
+        candidates = [row for row in candidates if (row.get('operator_route') or '').lower() == str(operator_route).strip().lower()]
+    if follow_up:
+        candidates = [row for row in candidates if (row.get('operator_follow_up') or '').lower() == str(follow_up).strip().lower()]
     if not candidates and (item_id or approval_id):
         consumer_view = payload.get('consumer_view') or build_workflow_consumer_view(payload)
         workflow_items = ((consumer_view.get('workflow_state') or {}).get('item_states') or [])
@@ -3520,12 +3545,32 @@ def build_workbench_governance_detail_view(payload: Optional[Dict] = None, *, it
     drilldown = _build_workbench_governance_drilldown(item, payload, approval_timeline=approval_timeline) if item else None
     timeline_summary = ((drilldown or {}).get('timeline') or {}).get('summary') or {}
     merged_timeline_summary = ((drilldown or {}).get('merged_timeline') or {}).get('summary') or {}
+    operator_action_policy = ((item or {}).get('operator_action_policy') or {})
+    if drilldown is not None:
+        drilldown['operator_action'] = {
+            'policy': operator_action_policy,
+            'action': operator_action_policy.get('action'),
+            'route': operator_action_policy.get('route'),
+            'follow_up': operator_action_policy.get('follow_up'),
+            'priority': operator_action_policy.get('priority'),
+            'owner': operator_action_policy.get('owner'),
+            'reason_codes': operator_action_policy.get('reason_codes') or [],
+            'why_summary': (item or {}).get('why_summary'),
+            'next_step': (item or {}).get('next_step'),
+        }
     summary = {
         'item_id': (item or {}).get('item_id'),
         'approval_id': (item or {}).get('approval_id'),
         'lane_id': (item or {}).get('lane_id'),
         'why_summary': (item or {}).get('why_summary'),
         'next_step': (item or {}).get('next_step'),
+        'operator_action_policy': operator_action_policy,
+        'operator_action': operator_action_policy.get('action'),
+        'operator_route': operator_action_policy.get('route'),
+        'follow_up': operator_action_policy.get('follow_up'),
+        'operator_priority': operator_action_policy.get('priority'),
+        'operator_owner': operator_action_policy.get('owner'),
+        'operator_reason_codes': operator_action_policy.get('reason_codes') or [],
         'queue_name': ((drilldown or {}).get('queue') or {}).get('queue_name'),
         'queue_route': ((drilldown or {}).get('queue') or {}).get('route'),
         'approval_route': ((drilldown or {}).get('approval') or {}).get('route'),
@@ -3568,7 +3613,8 @@ def build_workbench_governance_detail_view(payload: Optional[Dict] = None, *, it
 def build_workbench_timeline_summary_aggregation(payload: Optional[Dict] = None, *, lane_ids: Any = None, action_types: Any = None,
                                                  risk_levels: Any = None, workflow_states: Any = None, approval_states: Any = None,
                                                  current_rollout_stages: Any = None, target_rollout_stages: Any = None, bucket_tags: Any = None,
-                                                 auto_approval_decisions: Any = None, owner_hints: Any = None, q: Optional[str] = None,
+                                                 auto_approval_decisions: Any = None, operator_actions: Any = None, operator_routes: Any = None,
+                                                 operator_follow_ups: Any = None, owner_hints: Any = None, q: Optional[str] = None,
                                                  approval_timeline_fetcher: Optional[Any] = None, approval_timeline_limit: int = 200,
                                                  max_groups: int = 50, max_items_per_group: int = 20) -> Dict[str, Any]:
     payload = payload or {}
@@ -3584,6 +3630,9 @@ def build_workbench_timeline_summary_aggregation(payload: Optional[Dict] = None,
         target_rollout_stages=target_rollout_stages,
         bucket_tags=bucket_tags,
         auto_approval_decisions=auto_approval_decisions,
+        operator_actions=operator_actions,
+        operator_routes=operator_routes,
+        operator_follow_ups=operator_follow_ups,
         owner_hints=owner_hints,
         q=q,
     ), key=_workbench_item_sort_key)
@@ -3765,6 +3814,9 @@ def build_workbench_timeline_summary_aggregation(payload: Optional[Dict] = None,
             'target_rollout_stages': _normalize_filter_values(target_rollout_stages),
             'bucket_tags': _normalize_filter_values(bucket_tags),
             'auto_approval_decisions': _normalize_filter_values(auto_approval_decisions),
+            'operator_actions': _normalize_filter_values(operator_actions),
+            'operator_routes': _normalize_filter_values(operator_routes),
+            'operator_follow_ups': _normalize_filter_values(operator_follow_ups),
             'owner_hints': _normalize_filter_values(owner_hints),
             'q': str(q or '').strip(),
         },

@@ -258,6 +258,12 @@
   - `supported_action_map` 继续保留，同时新增 `stage_handlers / fallback_handler`，executor 结果里新增 `action_registry`，方便 dashboard / agent / audit 稳定读取；
   - `joint_stage_prepare / joint_queue_promote_safe / joint_review_schedule / joint_metadata_annotate` 各自补 richer handler payload（`stage_handler / queue_handler / review_handler / metadata_handler`），并统一保留 `safe_handler_key / route / disposition / stage_family / observability / serialization_ready`；
   - unsupported action 明确走 fallback handler：`unsupported::unsupported_action` + `unsupported_hold`，避免未来扩 action type 时 silently 混进默认 apply；
+- **2026-03-28 skeleton+5 / execution-timeline + recovery-policy 增量**：
+  - `state_machine` 继续下沉一层，新增稳定的 `execution_timeline` 与 `recovery_policy` 语义，不再只有 latest `execution_status`；
+  - `execution_timeline` 固定表达 `latest_status / previous_status / statuses / attempt_count / retry_count / recovered / recovered_from_status / recovery_stage / transition_rule / next_transition / rollback_hint`；
+  - `recovery_policy` 固定表达 `policy / recommended_action / owner / retryable / rollback_candidate / rollback_hint / blocked_by`，方便 dashboard / API / agent 直接回答“呢个 item 依家系重试、恢复完成、定要人工介入”；
+  - `core/database.py` 的 approval snapshot/timeline summary 同步透传上述结构，`/api/approvals/state-machine` summary 亦补 `recovered_count / recovery_policy_counts`；
+  - 保持安全边界：仍然只做状态、审计、消费层输出增强，不新增真实交易执行。
   - 继续保持安全边界：所有 handler 都只落状态/元数据/审计，不触发真实交易执行，不做危险 live parameter apply。
 - **2026-03-27 skeleton+5 / queue executor 真消费增量**：
   - queue-only path 不再只停留在 result 展示；executor 现会真正消费 `queue_plan / approval_hook / dispatch_route`，把 queue disposition 持久化进 approval/workflow 状态链；

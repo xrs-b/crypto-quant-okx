@@ -2899,13 +2899,18 @@ def get_approval_state_machine_list():
             'reason': row.get('reason'),
             'actor': row.get('actor'),
             'execution_status': execution_status,
+            'execution_timeline': (semantics.get('execution_timeline') or {}),
+            'recovery_policy': (semantics.get('recovery_policy') or {}),
             'state_machine': semantics,
         })
+    recovery_policy_counts = {policy: sum(1 for row in items if ((row.get('recovery_policy') or {}).get('policy') or 'observe') == policy) for policy in sorted({((row.get('recovery_policy') or {}).get('policy') or 'observe') for row in items})}
     return jsonify({'success': True, 'data': items, 'summary': {
         'count': len(items),
         'phase_counts': phase_counts,
         'workflow_state_counts': workflow_counts,
         'execution_status_counts': {status: sum(1 for row in items if row.get('execution_status') == status) for status in sorted({row.get('execution_status') for row in items if row.get('execution_status')})},
+        'recovery_policy_counts': recovery_policy_counts,
+        'recovered_count': sum(1 for row in items if (row.get('execution_timeline') or {}).get('recovered')),
         'rollback_candidate_count': sum(1 for row in items if (row.get('state_machine') or {}).get('rollback_candidate')),
         'retryable_count': sum(1 for row in items if (row.get('state_machine') or {}).get('retryable')),
         'terminal_count': sum(1 for row in items if (row.get('state_machine') or {}).get('terminal')),

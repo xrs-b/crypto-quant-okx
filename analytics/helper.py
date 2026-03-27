@@ -278,6 +278,115 @@ ACTION_EXECUTION_ALLOWED_STATUSES = {'queued', 'dispatching', 'applied', 'skippe
 ACTION_EXECUTION_TERMINAL_STATUSES = {'applied', 'skipped', 'error', 'recovered', 'disabled'}
 
 
+def _build_execution_timeline(*, item_id: Optional[str] = None, execution_status: Optional[str] = None,
+                              previous_execution_status: Optional[str] = None, workflow_state: Optional[str] = None,
+                              queue_status: Optional[str] = None, dispatch_route: Optional[str] = None,
+                              next_transition: Optional[str] = None, transition_rule: Optional[str] = None,
+                              retryable: Optional[bool] = None, rollback_hint: Optional[str] = None,
+                              recovered_from_execution_status: Optional[str] = None,
+                              last_transition: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    normalized_status = str(execution_status or 'planned').strip().lower() or 'planned'
+    previous_status = str(previous_execution_status or recovered_from_execution_status or '').strip().lower() or None
+    transition = dict(last_transition or {}) if isinstance(last_transition, dict) else {}
+    if not previous_status:
+        previous_status = str(transition.get('from_execution_status') or '').strip().lower() or None
+    if normalized_status == 'recovered' and not previous_status:
+        previous_status = 'error'
+    track = []
+    if previous_status and previous_status != normalized_status:
+        track.append(previous_status)
+    track.append(normalized_status)
+    track = _dedupe_strings(track)
+    attempts = 1
+    if normalized_status in {'error', 'recovered'} and previous_status:
+        attempts = 2
+    if normalized_status == 'recovered' and previous_status in {'blocked', 'deferred'}:
+        attempts = max(attempts, 2)
+    recovery_stage = 'steady'
+    if normalized_status == 'error':
+        recovery_stage = 'retry_pending' if bool(retryable) else 'manual_recovery_required'
+    elif normalized_status == 'recovered':
+        recovery_stage = 'recovered'
+    elif normalized_status in {'blocked', 'deferred'}:
+        recovery_stage = 'blocked_pending_recovery'
+    elif normalized_status == 'queued' and previous_status in {'error', 'blocked', 'deferred'}:
+        recovery_stage = 'retry_scheduled'
+    return {
+        'schema_version': 'm5_execution_timeline_v1',
+        'item_id': item_id,
+        'latest_status': normalized_status,
+        'previous_status': previous_status,
+        'statuses': track,
+        'attempt_count': attempts,
+        'retry_count': max(attempts - 1, 0),
+        'retryable': bool(retryable),
+        'recovered': normalized_status == 'recovered',
+        'recovered_from_status': recovered_from_execution_status or (previous_status if normalized_status == 'recovered' else None),
+        'dispatch_route': dispatch_route,
+        'queue_status': queue_status,
+        'workflow_state': workflow_state,
+        'transition_rule': transition_rule,
+        'next_transition': next_transition,
+        'rollback_hint': rollback_hint,
+        'recovery_stage': recovery_stage,
+        'last_transition': transition,
+        'summary': f"{normalized_status} via {dispatch_route or queue_status or workflow_state or 'unknown_route'}",
+    }
+
+
+def _build_recovery_policy(*, item_id: Optional[str] = None, workflow_state: Optional[str] = None,
+                           execution_status: Optional[str] = None, retryable: Optional[bool] = None,
+                           rollback_candidate: Optional[bool] = None, rollback_hint: Optional[str] = None,
+                           blocked_by: Optional[List[str]] = None, next_transition: Optional[str] = None,
+                           dispatch_route: Optional[str] = None, last_transition: Optional[Dict[str, Any]] = None,
+                           recovered_from_execution_status: Optional[str] = None) -> Dict[str, Any]:
+    normalized_workflow = str(workflow_state or 'pending').strip().lower() or 'pending'
+    normalized_execution = str(execution_status or 'planned').strip().lower() or 'planned'
+    blockers = _dedupe_strings(blocked_by or [])
+    retry_flag = bool(retryable)
+    rollback_flag = bool(rollback_candidate or rollback_hint)
+    policy = 'observe'
+    action = 'observe_only_followup'
+    owner = 'runtime'
+    if normalized_execution == 'recovered':
+        policy = 'recovered_monitoring'
+        action = 'observe_only_followup'
+    elif normalized_execution == 'error' or normalized_workflow in {'execution_failed', 'retry_pending'}:
+        policy = 'retry' if retry_flag else 'manual_recovery'
+        action = 'retry' if retry_flag else 'escalate'
+        owner = 'runtime' if retry_flag else 'operator'
+    elif normalized_workflow == 'rollback_pending':
+        policy = 'rollback_candidate'
+        action = 'freeze_followup'
+        owner = 'operator'
+    elif normalized_workflow == 'rolled_back':
+        policy = 'rollback_completed'
+        action = 'review_schedule'
+        owner = 'operator'
+    elif blockers:
+        policy = 'blocked_recovery'
+        action = 'retry' if retry_flag else 'review_schedule'
+        owner = 'runtime' if retry_flag else 'operator'
+    return {
+        'schema_version': 'm5_recovery_policy_v1',
+        'item_id': item_id,
+        'policy': policy,
+        'owner': owner,
+        'recommended_action': action,
+        'retryable': retry_flag,
+        'recovered': normalized_execution == 'recovered',
+        'recovered_from_status': recovered_from_execution_status or ((last_transition or {}).get('from_execution_status') if isinstance(last_transition, dict) else None),
+        'rollback_candidate': rollback_flag,
+        'rollback_hint': rollback_hint,
+        'blocked_by': blockers,
+        'dispatch_route': dispatch_route,
+        'next_transition': next_transition,
+        'workflow_state': normalized_workflow,
+        'execution_status': normalized_execution,
+        'summary': f"{policy} -> {action}",
+    }
+
+
 def _normalize_action_execution_status(value: Optional[str], *, workflow_state: Optional[str] = None, queue_status: Optional[str] = None, executor_status: Optional[str] = None) -> Optional[str]:
     normalized = str(value or '').strip().lower()
     if normalized in ACTION_EXECUTION_ALLOWED_STATUSES:
@@ -484,6 +593,38 @@ def _build_state_machine_semantics(*, item_id: Optional[str] = None, approval_st
         target_rollout_stage=target_rollout_stage,
         terminal=terminal,
     )
+    retry_flag = bool(retryable) if retryable is not None else normalized_workflow in {'queued', 'deferred', 'execution_failed', 'retry_pending'} or normalized_execution in {'queued', 'deferred', 'error'}
+    rollback_flag = bool(rollback_hint or normalized_workflow in {'ready', 'queued', 'execution_failed', 'rollback_pending'} or normalized_execution in {'applied', 'queued', 'error', 'recovered'})
+    recovered_from_execution_status = None
+    if isinstance(last_transition, dict):
+        recovered_from_execution_status = last_transition.get('from_execution_status')
+    execution_timeline = _build_execution_timeline(
+        item_id=item_id,
+        execution_status=normalized_execution,
+        previous_execution_status=recovered_from_execution_status,
+        workflow_state=normalized_workflow,
+        queue_status=normalized_queue,
+        dispatch_route=dispatch_route,
+        next_transition=next_transition,
+        transition_rule=transition_rule,
+        retryable=retry_flag,
+        rollback_hint=rollback_hint,
+        recovered_from_execution_status=recovered_from_execution_status,
+        last_transition=last_transition,
+    )
+    recovery_policy = _build_recovery_policy(
+        item_id=item_id,
+        workflow_state=normalized_workflow,
+        execution_status=normalized_execution,
+        retryable=retry_flag,
+        rollback_candidate=rollback_flag,
+        rollback_hint=rollback_hint,
+        blocked_by=blocked,
+        next_transition=next_transition,
+        dispatch_route=dispatch_route,
+        last_transition=last_transition,
+        recovered_from_execution_status=recovered_from_execution_status,
+    )
     return {
         'schema_version': 'm5_unified_state_machine_v2',
         'item_id': item_id,
@@ -503,11 +644,13 @@ def _build_state_machine_semantics(*, item_id: Optional[str] = None, approval_st
         'blocked': bool(blocked or normalized_workflow in {'blocked', 'blocked_by_approval', 'deferred', 'execution_failed'} or normalized_execution in {'blocked', 'deferred', 'error'}),
         'blocked_by': blocked,
         'terminal': terminal,
-        'retryable': bool(retryable) if retryable is not None else normalized_workflow in {'queued', 'deferred', 'execution_failed', 'retry_pending'} or normalized_execution in {'queued', 'deferred', 'error'},
-        'rollback_candidate': bool(rollback_hint or normalized_workflow in {'ready', 'queued', 'execution_failed', 'rollback_pending'} or normalized_execution in {'applied', 'queued', 'error', 'recovered'}),
+        'retryable': retry_flag,
+        'rollback_candidate': rollback_flag,
         'rollback_hint': rollback_hint,
         'lifecycle_path': lifecycle_path,
         'operator_action_policy': operator_action_policy,
+        'execution_timeline': execution_timeline,
+        'recovery_policy': recovery_policy,
     }
 
 
@@ -1029,6 +1172,15 @@ def merge_persisted_approval_state(payload: Dict, persisted_rows: Optional[List[
         'blocked_count': sum(1 for row in workflow_items if (row.get('state_machine') or {}).get('blocked')),
         'rollback_candidate_count': sum(1 for row in workflow_items if (row.get('state_machine') or {}).get('rollback_candidate')),
         'retryable_count': sum(1 for row in workflow_items if (row.get('state_machine') or {}).get('retryable')),
+        'recovered_count': sum(1 for row in workflow_items if ((row.get('state_machine') or {}).get('execution_timeline') or {}).get('recovered')),
+        'recovery_policy_counts': {
+            key: sum(1 for row in workflow_items if (((row.get('state_machine') or {}).get('recovery_policy') or {}).get('policy') or 'observe') == key)
+            for key in sorted({(((row.get('state_machine') or {}).get('recovery_policy') or {}).get('policy') or 'observe') for row in workflow_items})
+        },
+        'execution_status_counts': {
+            key: sum(1 for row in workflow_items if (((row.get('state_machine') or {}).get('execution_timeline') or {}).get('latest_status') or 'unknown') == key)
+            for key in sorted({(((row.get('state_machine') or {}).get('execution_timeline') or {}).get('latest_status') or 'unknown') for row in workflow_items})
+        },
         'phases': sorted({(row.get('state_machine') or {}).get('phase') or 'unknown' for row in workflow_items}),
         'operator_action_counts': action_counts,
         'operator_route_counts': route_counts,

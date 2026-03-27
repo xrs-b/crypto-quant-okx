@@ -127,11 +127,12 @@ class Database:
             phase = 'approval'
         terminal = normalized_state in {'approved', 'rejected', 'deferred', 'expired'} or normalized_workflow in {'approved', 'rejected', 'deferred', 'expired'}
         retryable = bool(payload.get('retryable', queue_progression.get('retryable')))
+        recovered_from_execution_status = payload.get('recovered_from_execution_status') or payload.get('previous_execution_status')
         if not last_transition:
             last_transition = {
                 'from_workflow_state': payload.get('previous_workflow_state') or normalized_workflow,
                 'to_workflow_state': normalized_workflow,
-                'from_execution_status': payload.get('previous_execution_status'),
+                'from_execution_status': recovered_from_execution_status,
                 'to_execution_status': execution_status,
                 'rule': transition_rule,
                 'dispatch_route': dispatch_route,
@@ -158,6 +159,47 @@ class Database:
         payload['execution_status'] = execution_status
         payload['transition_rule'] = transition_rule
         payload['last_transition'] = last_transition
+        rollback_candidate = bool(payload.get('rollback_hint') or queue_transition.get('rollback_hint') or payload.get('rollback_capable'))
+        rollback_hint = payload.get('rollback_hint') or queue_transition.get('rollback_hint')
+        execution_timeline = {
+            'schema_version': 'm5_execution_timeline_v1',
+            'item_id': item_id,
+            'latest_status': execution_status or 'planned',
+            'previous_status': recovered_from_execution_status or last_transition.get('from_execution_status'),
+            'statuses': [value for value in [recovered_from_execution_status or last_transition.get('from_execution_status'), execution_status or 'planned'] if value],
+            'attempt_count': 2 if (execution_status in {'error', 'recovered'} and (recovered_from_execution_status or last_transition.get('from_execution_status'))) else 1,
+            'retry_count': 1 if (execution_status in {'error', 'recovered'} and retryable) else 0,
+            'retryable': retryable,
+            'recovered': execution_status == 'recovered',
+            'recovered_from_status': recovered_from_execution_status or (last_transition.get('from_execution_status') if execution_status == 'recovered' else None),
+            'dispatch_route': dispatch_route,
+            'queue_status': queue_progression.get('status'),
+            'workflow_state': normalized_workflow,
+            'transition_rule': transition_rule,
+            'next_transition': next_transition,
+            'rollback_hint': rollback_hint,
+            'recovery_stage': 'recovered' if execution_status == 'recovered' else ('retry_pending' if execution_status == 'error' and retryable else 'manual_recovery_required' if execution_status == 'error' else 'blocked_pending_recovery' if execution_status in {'blocked', 'deferred'} else 'steady'),
+            'last_transition': last_transition,
+            'summary': f"{execution_status or 'planned'} via {dispatch_route or queue_progression.get('status') or normalized_workflow}",
+        }
+        recovery_policy = {
+            'schema_version': 'm5_recovery_policy_v1',
+            'item_id': item_id,
+            'policy': 'recovered_monitoring' if execution_status == 'recovered' else ('retry' if execution_status == 'error' and retryable else 'manual_recovery' if execution_status == 'error' else 'rollback_candidate' if normalized_workflow == 'rollback_pending' else 'blocked_recovery' if blocked_by else 'observe'),
+            'owner': 'operator' if normalized_workflow == 'rollback_pending' or (execution_status == 'error' and not retryable) else 'runtime',
+            'recommended_action': 'freeze_followup' if normalized_workflow == 'rollback_pending' else ('retry' if execution_status == 'error' and retryable else 'escalate' if execution_status == 'error' else 'review_schedule' if blocked_by else 'observe_only_followup'),
+            'retryable': retryable,
+            'recovered': execution_status == 'recovered',
+            'recovered_from_status': recovered_from_execution_status or (last_transition.get('from_execution_status') if execution_status == 'recovered' else None),
+            'rollback_candidate': rollback_candidate,
+            'rollback_hint': rollback_hint,
+            'blocked_by': blocked_by,
+            'dispatch_route': dispatch_route,
+            'next_transition': next_transition,
+            'workflow_state': normalized_workflow,
+            'execution_status': execution_status or 'planned',
+            'summary': f"{('recovered_monitoring' if execution_status == 'recovered' else ('retry' if execution_status == 'error' and retryable else 'manual_recovery' if execution_status == 'error' else 'rollback_candidate' if normalized_workflow == 'rollback_pending' else 'blocked_recovery' if blocked_by else 'observe'))} -> {('freeze_followup' if normalized_workflow == 'rollback_pending' else ('retry' if execution_status == 'error' and retryable else 'escalate' if execution_status == 'error' else 'review_schedule' if blocked_by else 'observe_only_followup'))}",
+        }
         payload['state_machine'] = {
             'schema_version': 'm5_unified_state_machine_v2',
             'item_id': item_id,
@@ -176,8 +218,10 @@ class Database:
             'blocked_by': blocked_by,
             'terminal': terminal,
             'retryable': retryable,
-            'rollback_candidate': bool(payload.get('rollback_hint') or queue_transition.get('rollback_hint') or payload.get('rollback_capable')),
-            'rollback_hint': payload.get('rollback_hint') or queue_transition.get('rollback_hint'),
+            'rollback_candidate': rollback_candidate,
+            'rollback_hint': rollback_hint,
+            'execution_timeline': execution_timeline,
+            'recovery_policy': recovery_policy,
             'operator_action_policy': {
                 'schema_version': 'm5_operator_action_policy_v1',
                 'item_id': item_id,
@@ -1991,7 +2035,14 @@ class Database:
             if stale_row:
                 stale = True
                 stale_minutes = stale_row.get('stale_minutes')
+        state_machine = ((state_row.get('details') or {}).get('state_machine') if isinstance(state_row.get('details'), dict) else {}) or {}
+        execution_timeline = (state_machine.get('execution_timeline') or {}) if isinstance(state_machine, dict) else {}
+        recovery_policy = (state_machine.get('recovery_policy') or {}) if isinstance(state_machine, dict) else {}
         summary_line = f"{state_row.get('approval_type') or first_event.get('approval_type')}::{state_row.get('target') or first_event.get('target') or '--'} | {state_row.get('state') or last_event.get('state')} | {len(timeline)} events"
+        if execution_timeline.get('latest_status'):
+            summary_line += f" | exec={execution_timeline.get('latest_status')}"
+        if recovery_policy.get('policy'):
+            summary_line += f" | recovery={recovery_policy.get('policy')}"
         if stale:
             summary_line += f" | stale {stale_minutes}m"
         return {
@@ -2012,6 +2063,8 @@ class Database:
             'timestamp_sources': timestamp_sources,
             'timestamp_phases': timestamp_phases,
             'decision_path': decision_path,
+            'execution_timeline': execution_timeline,
+            'recovery_policy': recovery_policy,
             'stale': stale,
             'stale_minutes': stale_minutes,
             'latest_reason': state_row.get('reason') or last_event.get('reason'),

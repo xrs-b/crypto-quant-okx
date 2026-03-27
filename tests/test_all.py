@@ -5753,7 +5753,7 @@ class TestExecutionObservability(unittest.TestCase):
             self.assertIn('recent_decisions', snapshot['summary'])
             self.assertTrue(snapshot['summary']['observe_only_banner'])
 
-from analytics.helper import build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, attach_auto_approval_policy, execute_controlled_rollout_layer, execute_controlled_auto_approval_layer, execute_rollout_executor, build_workflow_attention_view, build_workflow_operator_digest, build_dashboard_summary_cards, build_workbench_governance_view, build_workbench_governance_detail_view, build_workbench_merged_timeline, build_workbench_timeline_summary_aggregation
+from analytics.helper import build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, attach_auto_approval_policy, execute_controlled_rollout_layer, execute_controlled_auto_approval_layer, execute_rollout_executor, build_workflow_attention_view, build_workflow_operator_digest, build_dashboard_summary_cards, build_workbench_governance_view, build_workbench_governance_detail_view, build_workbench_merged_timeline, build_workbench_timeline_summary_aggregation, _build_state_machine_semantics
 
 
 class TestApprovalPersistence(unittest.TestCase):
@@ -6381,6 +6381,27 @@ class TestApprovalPersistence(unittest.TestCase):
         self.assertIn('blocked_follow_up', payload['filters']['bucket_ids'])
 
 
+    def test_state_machine_semantics_exposes_execution_timeline_and_recovery_policy(self):
+        semantics = _build_state_machine_semantics(
+            item_id='approval::recover',
+            approval_state='pending',
+            workflow_state='execution_failed',
+            queue_status='deferred',
+            dispatch_route='retry_queue',
+            next_transition='retry_after_blockers_clear',
+            blocked_by=['exchange_retry_window'],
+            retryable=True,
+            rollback_hint='restore_previous_state_from_approval_timeline',
+            execution_status='recovered',
+            last_transition={'from_execution_status': 'error', 'to_execution_status': 'recovered', 'rule': 'safe_apply_ready'},
+        )
+        self.assertEqual(semantics['execution_timeline']['latest_status'], 'recovered')
+        self.assertEqual(semantics['execution_timeline']['recovered_from_status'], 'error')
+        self.assertEqual(semantics['execution_timeline']['retry_count'], 1)
+        self.assertEqual(semantics['recovery_policy']['policy'], 'recovered_monitoring')
+        self.assertTrue(semantics['recovery_policy']['rollback_candidate'])
+        self.assertEqual(semantics['recovery_policy']['recommended_action'], 'observe_only_followup')
+
     def test_attach_auto_approval_policy_marks_low_risk_items_auto_approvable(self):
         payload = attach_auto_approval_policy({
             'workflow_state': {
@@ -6549,6 +6570,42 @@ class TestApprovalPersistence(unittest.TestCase):
         self.assertEqual(workflow_item['workflow_state'], 'ready')
         self.assertEqual(workflow_item['persisted_decision'], 'approved')
 
+    def test_database_timeline_summary_surfaces_execution_timeline_and_recovery_policy(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(str(Path(tmpdir) / 'approval_timeline_recovery.db'))
+            item_id = 'approval::recover'
+            db.upsert_approval_state(
+                item_id=item_id,
+                approval_type='workflow_approval',
+                target='playbook::recover',
+                title='Recoverable rollout item',
+                decision='pending',
+                state='pending',
+                workflow_state='retry_pending',
+                replay_source='unit-test',
+                details={
+                    'execution_status': 'recovered',
+                    'retryable': True,
+                    'rollback_hint': 'restore_previous_state_from_approval_timeline',
+                    'dispatch_route': 'retry_queue',
+                    'next_transition': 'retry_after_blockers_clear',
+                    'last_transition': {
+                        'from_execution_status': 'error',
+                        'to_execution_status': 'recovered',
+                        'rule': 'safe_apply_ready',
+                    },
+                    'recovered_from_execution_status': 'error',
+                },
+                event_type='rollout_executor_apply',
+            )
+            summary = db.get_approval_timeline_summary(item_id)
+            self.assertEqual(summary['execution_timeline']['latest_status'], 'recovered')
+            self.assertEqual(summary['execution_timeline']['recovered_from_status'], 'error')
+            self.assertEqual(summary['recovery_policy']['policy'], 'recovered_monitoring')
+            self.assertTrue(summary['recovery_policy']['rollback_candidate'])
+            self.assertIn('exec=recovered', summary['summary_line'])
+            self.assertIn('recovery=recovered_monitoring', summary['summary_line'])
+
     def test_stale_pending_cleanup_and_timeline_summary(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             db = Database(str(Path(tmpdir) / 'approval_cleanup.db'))
@@ -6668,6 +6725,47 @@ class TestApprovalPersistence(unittest.TestCase):
             self.assertEqual(state_row['workflow_state'], 'pending')
             self.assertTrue(executor['supported_action_map']['executable'])
             self.assertTrue(executor['supported_action_map']['queue_only'])
+
+    def test_approval_state_machine_api_exposes_recovery_policy_and_execution_timeline(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(str(Path(tmpdir) / 'approval_state_machine_api.db'))
+            item_id = 'approval::recover'
+            db.upsert_approval_state(
+                item_id=item_id,
+                approval_type='workflow_approval',
+                target='playbook::recover',
+                title='Recoverable rollout item',
+                decision='pending',
+                state='pending',
+                workflow_state='retry_pending',
+                replay_source='unit-test',
+                details={
+                    'execution_status': 'recovered',
+                    'retryable': True,
+                    'rollback_hint': 'restore_previous_state_from_approval_timeline',
+                    'dispatch_route': 'retry_queue',
+                    'last_transition': {'from_execution_status': 'error', 'to_execution_status': 'recovered'},
+                    'recovered_from_execution_status': 'error',
+                },
+                event_type='rollout_executor_apply',
+            )
+            old_db = app.config.get('db_instance')
+            app.config['db_instance'] = db
+            import dashboard.api as dashboard_api_module
+            old_module_db = dashboard_api_module.db
+            dashboard_api_module.db = db
+            try:
+                with app.test_client() as client:
+                    response = client.get('/api/approvals/state-machine')
+                    self.assertEqual(response.status_code, 200)
+                    payload = response.get_json()
+                    self.assertEqual(payload['data'][0]['execution_timeline']['latest_status'], 'recovered')
+                    self.assertEqual(payload['data'][0]['recovery_policy']['policy'], 'recovered_monitoring')
+                    self.assertEqual(payload['summary']['recovered_count'], 1)
+                    self.assertEqual(payload['summary']['recovery_policy_counts']['recovered_monitoring'], 1)
+            finally:
+                app.config['db_instance'] = old_db
+                dashboard_api_module.db = old_module_db
 
     def test_rollout_executor_skeleton_dry_run_plans_without_persisting(self):
         class StubConfig:

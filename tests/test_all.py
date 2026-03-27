@@ -7062,6 +7062,53 @@ class TestApprovalPersistence(unittest.TestCase):
             self.assertEqual(result['rollout_executor']['summary']['by_disposition']['blocked_by_approval'], 1)
             self.assertEqual(result['rollout_executor']['summary']['by_disposition']['deferred'], 1)
 
+
+    def test_rollout_executor_persists_recovered_execution_status_after_retryable_safe_apply(self):
+        class StubConfig:
+            def __init__(self, values=None):
+                self.values = values or {}
+            def get(self, key, default=None):
+                return self.values.get(key, default)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = StubConfig({
+                'governance.rollout_executor': {
+                    'enabled': True,
+                    'mode': 'controlled',
+                    'allowed_action_types': ['joint_observe'],
+                    'actor': 'system:test-rollout-executor',
+                    'source': 'unit_test_rollout_executor',
+                    'reason_prefix': 'unit-test rollout executor',
+                }
+            })
+            db = Database(str(Path(tmpdir) / 'rollout_executor_recovered.db'))
+            db.upsert_approval_state(
+                item_id='approval::observe',
+                approval_type='joint_observe',
+                target='playbook::observe',
+                title='Recoverable observe item',
+                decision='pending',
+                state='pending',
+                workflow_state='execution_failed',
+                details={'execution_status': 'error', 'transition_rule': 'retry_safe_apply'},
+                replay_source='seed',
+            )
+            payload = {
+                'workflow_state': {'item_states': [{
+                    'item_id': 'playbook::observe', 'title': 'Recoverable observe item', 'action_type': 'joint_observe', 'decision': 'expand', 'governance_mode': 'rollout', 'risk_level': 'low', 'approval_required': False,
+                    'blocking_reasons': [], 'preconditions': [], 'workflow_state': 'pending', 'confidence': 'high'}], 'summary': {}},
+                'approval_state': {'items': [{
+                    'approval_id': 'approval::observe', 'playbook_id': 'playbook::observe', 'title': 'Recoverable observe item', 'action_type': 'joint_observe', 'approval_state': 'pending', 'decision_state': 'pending',
+                    'risk_level': 'low', 'approval_required': False, 'blocked_by': [], 'auto_approval_decision': 'auto_approve', 'auto_approval_eligible': True, 'requires_manual': False}], 'summary': {}},
+            }
+            result = execute_rollout_executor(payload, db, config=config, replay_source='unit-test-replay')
+            state_row = db.get_approval_state('approval::observe')
+            executor_item = result['rollout_executor']['items'][0]
+            self.assertEqual(state_row['details']['execution_status'], 'recovered')
+            self.assertEqual(state_row['details']['recovered_from_execution_status'], 'error')
+            self.assertEqual(state_row['details']['last_transition']['to_execution_status'], 'applied')
+            self.assertEqual(executor_item['execution_status'], 'recovered')
+            self.assertEqual(result['approval_state']['items'][0]['state_machine']['execution_status'], 'recovered')
+
     def test_rollout_executor_skeleton_marks_idempotent_safe_apply_as_skip(self):
         class StubConfig:
             def __init__(self, values=None):
@@ -7886,6 +7933,8 @@ class TestUnifiedWorkflowStateMachine(unittest.TestCase):
             self.assertEqual(fetched['details']['state_machine']['dispatch_route'], 'stage_metadata_apply')
             self.assertTrue(fetched['details']['state_machine']['rollback_candidate'])
             self.assertEqual(fetched['details']['state_machine']['operator_action_policy']['action'], 'review_schedule')
+            self.assertEqual(fetched['details']['execution_status'], 'applied')
+            self.assertEqual(fetched['details']['state_machine']['execution_status'], 'applied')
 
     def test_approval_state_machine_api_returns_phase_summary(self):
         import dashboard.api as dashboard_api
@@ -7912,6 +7961,8 @@ class TestUnifiedWorkflowStateMachine(unittest.TestCase):
                 self.assertTrue(payload['success'])
                 self.assertEqual(payload['summary']['phase_counts']['queue'], 1)
                 self.assertEqual(payload['summary']['workflow_state_counts']['queued'], 1)
+                self.assertEqual(payload['summary']['execution_status_counts']['queued'], 1)
+                self.assertEqual(payload['data'][0]['execution_status'], 'queued')
                 self.assertEqual(payload['data'][0]['state_machine']['workflow_state'], 'queued')
             finally:
                 dashboard_api.db = old_db

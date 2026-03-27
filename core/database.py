@@ -78,13 +78,31 @@ class Database:
             return approval_value
         return 'pending'
 
+    def _normalize_action_execution_status(self, execution_status: Optional[str], workflow_state: Optional[str] = None, queue_status: Optional[str] = None, executor_status: Optional[str] = None) -> Optional[str]:
+        normalized = str(execution_status or '').strip().lower()
+        allowed = {'queued', 'dispatching', 'applied', 'skipped', 'blocked', 'deferred', 'error', 'recovered', 'disabled', 'dry_run', 'planned'}
+        if normalized in allowed:
+            return normalized
+        executor_value = str(executor_status or '').strip().lower()
+        if executor_value in allowed:
+            return executor_value
+        queue_value = str(queue_status or '').strip().lower()
+        queue_map = {'ready_to_queue': 'queued', 'queued': 'queued', 'blocked_by_approval': 'blocked', 'awaiting_approval': 'blocked', 'deferred': 'deferred'}
+        if queue_value in queue_map:
+            return queue_map[queue_value]
+        workflow_value = str(workflow_state or '').strip().lower()
+        workflow_map = {'queued': 'queued', 'executing': 'dispatching', 'ready': 'applied', 'blocked': 'blocked', 'blocked_by_approval': 'blocked', 'deferred': 'deferred', 'execution_failed': 'error', 'rolled_back': 'recovered'}
+        return workflow_map.get(workflow_value)
+
     def _build_state_machine_details(self, *, item_id: Optional[str], decision: Optional[str], state: Optional[str], workflow_state: Optional[str], details: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         payload = dict(details or {})
         queue_progression = self._safe_json_dict(payload.get('queue_progression'))
         queue_transition = self._safe_json_dict(payload.get('queue_transition'))
         stage_transition = self._safe_json_dict(payload.get('stage_transition'))
+        last_transition = self._safe_json_dict(payload.get('last_transition'))
         dispatch_route = payload.get('dispatch_route') or queue_progression.get('dispatch_route') or queue_transition.get('dispatch_route')
         next_transition = payload.get('next_transition') or queue_progression.get('next_transition') or queue_transition.get('next_transition')
+        transition_rule = payload.get('transition_rule') or last_transition.get('rule') or last_transition.get('transition_rule')
         rollout_stage = payload.get('rollout_stage') or payload.get('current_rollout_stage') or stage_transition.get('to') or stage_transition.get('from')
         target_rollout_stage = payload.get('target_rollout_stage') or stage_transition.get('to') or rollout_stage
         blocked_by = payload.get('blocked_by') or payload.get('blocking_reasons') or []
@@ -92,37 +110,56 @@ class Database:
             blocked_by = [str(blocked_by)] if blocked_by else []
         normalized_state = self._normalize_approval_state(state, decision)
         normalized_workflow = self._normalize_workflow_state(workflow_state, normalized_state)
+        execution_status = self._normalize_action_execution_status(
+            payload.get('execution_status') or payload.get('queue_result_action') or payload.get('result_action') or payload.get('execution_mode'),
+            workflow_state=normalized_workflow,
+            queue_status=queue_progression.get('status'),
+            executor_status=((payload.get('executor_result') or {}).get('status') if isinstance(payload.get('executor_result'), dict) else None),
+        )
         phase = 'proposal'
         if normalized_state in {'approved', 'rejected', 'deferred', 'expired'} or normalized_workflow in {'approved', 'rejected', 'deferred', 'expired'}:
             phase = 'terminal'
         elif normalized_workflow in {'queued', 'ready'}:
             phase = 'queue'
-        elif normalized_workflow in {'executing', 'execution_failed', 'retry_pending', 'rollback_pending', 'rolled_back'}:
+        elif normalized_workflow in {'executing', 'execution_failed', 'retry_pending', 'rollback_pending', 'rolled_back'} or execution_status in {'dispatching', 'applied', 'error', 'recovered'}:
             phase = 'execution'
         elif normalized_workflow in {'blocked', 'blocked_by_approval', 'review_pending'} or normalized_state in {'pending', 'ready', 'replayed'}:
             phase = 'approval'
         terminal = normalized_state in {'approved', 'rejected', 'deferred', 'expired'} or normalized_workflow in {'approved', 'rejected', 'deferred', 'expired'}
         retryable = bool(payload.get('retryable', queue_progression.get('retryable')))
+        if not last_transition:
+            last_transition = {
+                'from_workflow_state': payload.get('previous_workflow_state') or normalized_workflow,
+                'to_workflow_state': normalized_workflow,
+                'from_execution_status': payload.get('previous_execution_status'),
+                'to_execution_status': execution_status,
+                'rule': transition_rule,
+                'dispatch_route': dispatch_route,
+                'next_transition': next_transition,
+            }
         if terminal:
             action, route, follow_up = 'observe_only_followup', 'terminal_observe_only', 'observe_only'
-        elif normalized_workflow in {'execution_failed', 'retry_pending'}:
+        elif normalized_workflow in {'execution_failed', 'retry_pending'} or execution_status == 'error':
             action, route, follow_up = ('retry', 'retry_queue', 'retry_execution') if retryable else ('escalate', 'operator_escalation', 'escalate_execution')
         elif normalized_workflow == 'rollback_pending':
             action, route, follow_up = 'freeze_followup', 'freeze_followup_queue', 'freeze_and_review'
-        elif normalized_workflow in {'blocked', 'blocked_by_approval', 'review_pending'} or blocked_by:
+        elif normalized_workflow in {'blocked', 'blocked_by_approval', 'review_pending'} or blocked_by or execution_status == 'blocked':
             action, route, follow_up = 'review_schedule', 'manual_approval_queue' if normalized_workflow == 'blocked_by_approval' or normalized_state in {'pending', 'ready', 'replayed'} else 'operator_escalation', 'await_manual_approval' if normalized_workflow == 'blocked_by_approval' or normalized_state in {'pending', 'ready', 'replayed'} else 'escalate_blocked_state'
-        elif normalized_workflow == 'deferred':
+        elif normalized_workflow == 'deferred' or execution_status == 'deferred':
             action, route, follow_up = 'review_schedule', 'review_schedule_queue', 'scheduled_review'
         elif normalized_workflow == 'ready' and ((not rollout_stage and not target_rollout_stage) or rollout_stage == target_rollout_stage):
             action, route, follow_up = 'observe_only_followup', dispatch_route or 'observe_only_followup', 'observe_only_ready'
         elif normalized_workflow == 'ready':
             action, route, follow_up = 'review_schedule', dispatch_route or 'rollout_readiness_queue', 'review_ready_for_rollout'
-        elif normalized_workflow == 'queued':
+        elif normalized_workflow == 'queued' or execution_status == 'queued':
             action, route, follow_up = 'observe_only_followup', queue_progression.get('status') or dispatch_route or 'queue_observer', 'watch_queue_progression'
         else:
             action, route, follow_up = 'observe_only_followup', dispatch_route or 'observe_only_followup', 'observe_only'
+        payload['execution_status'] = execution_status
+        payload['transition_rule'] = transition_rule
+        payload['last_transition'] = last_transition
         payload['state_machine'] = {
-            'schema_version': 'm5_unified_state_machine_v1',
+            'schema_version': 'm5_unified_state_machine_v2',
             'item_id': item_id,
             'decision': str(decision or 'pending').strip().lower() or 'pending',
             'approval_state': normalized_state,
@@ -130,6 +167,9 @@ class Database:
             'queue_status': queue_progression.get('status'),
             'dispatch_route': dispatch_route,
             'next_transition': next_transition,
+            'transition_rule': transition_rule,
+            'last_transition': last_transition,
+            'execution_status': execution_status,
             'rollout_stage': rollout_stage,
             'target_rollout_stage': target_rollout_stage,
             'phase': phase,

@@ -274,6 +274,42 @@ def _normalize_workflow_state(value: Optional[str], *, approval_state: Optional[
     return 'pending'
 
 
+ACTION_EXECUTION_ALLOWED_STATUSES = {'queued', 'dispatching', 'applied', 'skipped', 'blocked', 'deferred', 'error', 'recovered', 'disabled', 'dry_run', 'planned'}
+ACTION_EXECUTION_TERMINAL_STATUSES = {'applied', 'skipped', 'error', 'recovered', 'disabled'}
+
+
+def _normalize_action_execution_status(value: Optional[str], *, workflow_state: Optional[str] = None, queue_status: Optional[str] = None, executor_status: Optional[str] = None) -> Optional[str]:
+    normalized = str(value or '').strip().lower()
+    if normalized in ACTION_EXECUTION_ALLOWED_STATUSES:
+        return normalized
+    normalized_executor = str(executor_status or '').strip().lower()
+    if normalized_executor in ACTION_EXECUTION_ALLOWED_STATUSES:
+        return normalized_executor
+    normalized_queue = str(queue_status or '').strip().lower()
+    queue_map = {
+        'ready_to_queue': 'queued',
+        'queued': 'queued',
+        'blocked_by_approval': 'blocked',
+        'deferred': 'deferred',
+        'awaiting_approval': 'blocked',
+    }
+    if normalized_queue in queue_map:
+        return queue_map[normalized_queue]
+    normalized_workflow = str(workflow_state or '').strip().lower()
+    workflow_map = {
+        'queued': 'queued',
+        'executing': 'dispatching',
+        'ready': 'applied',
+        'blocked': 'blocked',
+        'blocked_by_approval': 'blocked',
+        'deferred': 'deferred',
+        'execution_failed': 'error',
+        'retry_pending': 'deferred',
+        'rolled_back': 'recovered',
+    }
+    return workflow_map.get(normalized_workflow)
+
+
 def _build_operator_action_policy(*, item_id: Optional[str] = None, approval_state: Optional[str] = None, workflow_state: Optional[str] = None, queue_status: Optional[str] = None, dispatch_route: Optional[str] = None, next_transition: Optional[str] = None, blocked_by: Optional[List[str]] = None, retryable: Optional[bool] = None, rollout_stage: Optional[str] = None, target_rollout_stage: Optional[str] = None, terminal: bool = False) -> Dict[str, Any]:
     normalized_approval = str(approval_state or 'pending').strip().lower() or 'pending'
     normalized_workflow = str(workflow_state or 'pending').strip().lower() or 'pending'
@@ -410,27 +446,30 @@ def _build_operator_action_policy(*, item_id: Optional[str] = None, approval_sta
     }
 
 
-def _build_state_machine_semantics(*, item_id: Optional[str] = None, approval_state: Optional[str] = None, workflow_state: Optional[str] = None, decision_state: Optional[str] = None, queue_status: Optional[str] = None, dispatch_route: Optional[str] = None, next_transition: Optional[str] = None, executor_status: Optional[str] = None, rollout_stage: Optional[str] = None, target_rollout_stage: Optional[str] = None, blocked_by: Optional[List[str]] = None, retryable: Optional[bool] = None, rollback_hint: Optional[str] = None) -> Dict[str, Any]:
+def _build_state_machine_semantics(*, item_id: Optional[str] = None, approval_state: Optional[str] = None, workflow_state: Optional[str] = None, decision_state: Optional[str] = None, queue_status: Optional[str] = None, dispatch_route: Optional[str] = None, next_transition: Optional[str] = None, executor_status: Optional[str] = None, rollout_stage: Optional[str] = None, target_rollout_stage: Optional[str] = None, blocked_by: Optional[List[str]] = None, retryable: Optional[bool] = None, rollback_hint: Optional[str] = None, execution_status: Optional[str] = None, transition_rule: Optional[str] = None, last_transition: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     normalized_approval = str(approval_state or decision_state or 'pending').strip().lower() or 'pending'
     normalized_workflow = _normalize_workflow_state(workflow_state, approval_state=normalized_approval, queue_status=queue_status, executor_status=executor_status)
     normalized_queue = str(queue_status or '').strip().lower() or None
     blocked = _dedupe_strings(blocked_by or [])
-    terminal = normalized_approval in TERMINAL_APPROVAL_STATES or normalized_workflow in WORKFLOW_TERMINAL_STATES
+    normalized_execution = _normalize_action_execution_status(execution_status, workflow_state=normalized_workflow, queue_status=normalized_queue, executor_status=executor_status)
+    terminal = normalized_approval in TERMINAL_APPROVAL_STATES or normalized_workflow in WORKFLOW_TERMINAL_STATES or normalized_execution in ACTION_EXECUTION_TERMINAL_STATUSES
     phase = 'proposal'
     if normalized_approval in {'pending', 'ready', 'replayed'} and normalized_workflow in {'pending', 'blocked', 'blocked_by_approval', 'review_pending'}:
         phase = 'approval'
     elif normalized_workflow in {'queued', 'ready'}:
         phase = 'queue'
-    elif normalized_workflow in {'executing', 'execution_failed', 'retry_pending', 'rollback_pending', 'rolled_back'}:
+    elif normalized_workflow in {'executing', 'execution_failed', 'retry_pending', 'rollback_pending', 'rolled_back'} or normalized_execution in {'dispatching', 'applied', 'error', 'recovered'}:
         phase = 'execution'
     elif terminal:
         phase = 'terminal'
     lifecycle_path = [phase]
     if normalized_queue:
         lifecycle_path.append(f'queue:{normalized_queue}')
+    if normalized_execution:
+        lifecycle_path.append(f'execution:{normalized_execution}')
     if dispatch_route:
         lifecycle_path.append(f'route:{dispatch_route}')
-    if normalized_workflow not in {phase, normalized_queue}:
+    if normalized_workflow not in {phase, normalized_queue, normalized_execution}:
         lifecycle_path.append(f'workflow:{normalized_workflow}')
     operator_action_policy = _build_operator_action_policy(
         item_id=item_id,
@@ -446,7 +485,7 @@ def _build_state_machine_semantics(*, item_id: Optional[str] = None, approval_st
         terminal=terminal,
     )
     return {
-        'schema_version': 'm5_unified_state_machine_v1',
+        'schema_version': 'm5_unified_state_machine_v2',
         'item_id': item_id,
         'approval_state': normalized_approval,
         'workflow_state': normalized_workflow,
@@ -454,19 +493,23 @@ def _build_state_machine_semantics(*, item_id: Optional[str] = None, approval_st
         'queue_status': normalized_queue,
         'dispatch_route': dispatch_route,
         'next_transition': next_transition,
+        'transition_rule': str(transition_rule or '').strip().lower() or None,
+        'last_transition': dict(last_transition or {}) if isinstance(last_transition, dict) else {},
         'executor_status': str(executor_status or '').strip().lower() or None,
+        'execution_status': normalized_execution,
         'rollout_stage': str(rollout_stage or '').strip().lower() or None,
         'target_rollout_stage': str(target_rollout_stage or '').strip().lower() or (str(rollout_stage or '').strip().lower() or None),
         'phase': phase,
-        'blocked': bool(blocked or normalized_workflow in {'blocked', 'blocked_by_approval', 'deferred', 'execution_failed'}),
+        'blocked': bool(blocked or normalized_workflow in {'blocked', 'blocked_by_approval', 'deferred', 'execution_failed'} or normalized_execution in {'blocked', 'deferred', 'error'}),
         'blocked_by': blocked,
         'terminal': terminal,
-        'retryable': bool(retryable) if retryable is not None else normalized_workflow in {'queued', 'deferred', 'execution_failed', 'retry_pending'},
-        'rollback_candidate': bool(rollback_hint or normalized_workflow in {'ready', 'queued', 'execution_failed', 'rollback_pending'}),
+        'retryable': bool(retryable) if retryable is not None else normalized_workflow in {'queued', 'deferred', 'execution_failed', 'retry_pending'} or normalized_execution in {'queued', 'deferred', 'error'},
+        'rollback_candidate': bool(rollback_hint or normalized_workflow in {'ready', 'queued', 'execution_failed', 'rollback_pending'} or normalized_execution in {'applied', 'queued', 'error', 'recovered'}),
         'rollback_hint': rollback_hint,
         'lifecycle_path': lifecycle_path,
         'operator_action_policy': operator_action_policy,
     }
+
 
 
 def _normalize_auto_approval_decision(value: Optional[str]) -> str:
@@ -884,6 +927,10 @@ def merge_persisted_approval_state(payload: Dict, persisted_rows: Optional[List[
         if persisted_details.get('auto_approval_eligible') is not None:
             row['auto_approval_eligible'] = persisted_details.get('auto_approval_eligible')
         row['blocked_by'] = persisted_details.get('blocked_by') or row.get('blocked_by') or []
+        row['execution_status'] = persisted_details.get('execution_status') or ((persisted_details.get('state_machine') or {}).get('execution_status') if isinstance(persisted_details.get('state_machine'), dict) else None) or row.get('execution_status')
+        row['transition_rule'] = persisted_details.get('transition_rule') or ((persisted_details.get('state_machine') or {}).get('transition_rule') if isinstance(persisted_details.get('state_machine'), dict) else None) or row.get('transition_rule')
+        row['next_transition'] = persisted_details.get('next_transition') or ((persisted_details.get('state_machine') or {}).get('next_transition') if isinstance(persisted_details.get('state_machine'), dict) else None) or row.get('next_transition')
+        row['last_transition'] = persisted_details.get('last_transition') or ((persisted_details.get('state_machine') or {}).get('last_transition') if isinstance(persisted_details.get('state_machine'), dict) else None) or row.get('last_transition') or {}
         if persisted.get('state') in TERMINAL_APPROVAL_STATES:
             row['approval_state'] = persisted.get('state')
             row['decision_state'] = persisted.get('state')
@@ -901,6 +948,10 @@ def merge_persisted_approval_state(payload: Dict, persisted_rows: Optional[List[
         row['persisted_approval_state'] = approval_row.get('persisted_state')
         row['persisted_decision'] = approval_row.get('persisted_decision')
         row['persisted_workflow_state'] = approval_row.get('persisted_workflow_state')
+        row['execution_status'] = approval_row.get('execution_status') or row.get('execution_status')
+        row['transition_rule'] = approval_row.get('transition_rule') or row.get('transition_rule')
+        row['next_transition'] = approval_row.get('next_transition') or row.get('next_transition')
+        row['last_transition'] = approval_row.get('last_transition') or row.get('last_transition') or {}
         if approval_row.get('persisted_workflow_state'):
             row['workflow_state'] = _normalize_workflow_state(approval_row.get('persisted_workflow_state'), approval_state=approval_row.get('approval_state'))
         elif row.get('approval_required') and approval_row.get('approval_state') == 'approved' and row.get('workflow_state') == 'pending':
@@ -928,6 +979,9 @@ def merge_persisted_approval_state(payload: Dict, persisted_rows: Optional[List[
             rollout_stage=row.get('rollout_stage') or row.get('current_rollout_stage'),
             target_rollout_stage=row.get('target_rollout_stage'),
             blocked_by=row.get('blocked_by') or [],
+            execution_status=row.get('execution_status') or persisted_details.get('execution_status') if 'persisted_details' in locals() else row.get('execution_status'),
+            transition_rule=row.get('transition_rule'),
+            last_transition=row.get('last_transition'),
         )
         row['state_machine'] = semantics
         row['workflow_state'] = semantics['workflow_state']
@@ -2005,6 +2059,7 @@ def execute_rollout_executor(payload: Dict, db: Any, *, config: Any = None, sett
             'rollout_stage': transition_rule.get('rollout_stage'),
             'target_rollout_stage': transition_rule.get('target_rollout_stage'),
             'readiness': transition_rule.get('readiness'),
+            'execution_status': _normalize_action_execution_status(None, workflow_state=current_workflow_state, queue_status=((workflow_item.get('queue_progression') or {}).get('status') if isinstance(workflow_item.get('queue_progression'), dict) else None)),
         }
 
         audit = {
@@ -2042,6 +2097,8 @@ def execute_rollout_executor(payload: Dict, db: Any, *, config: Any = None, sett
             'apply': _build_rollout_apply_envelope(idempotency_key=idempotency_key),
             'result': _build_rollout_result_envelope(disposition='skipped', status='planned', transition_rule=transition_rule.get('transition_rule'), dispatch_route=transition_rule.get('dispatch_route'), next_transition=transition_rule.get('next_transition'), retryable=bool(transition_rule.get('retryable', True)), rollback_hint=transition_rule.get('rollback_hint')),
             'audit': audit,
+            'execution_status': plan.get('execution_status'),
+            'last_transition': {},
         }
         result['summary']['planned_count'] += 1
 
@@ -2130,11 +2187,15 @@ def execute_rollout_executor(payload: Dict, db: Any, *, config: Any = None, sett
                     result_row['apply'] = _build_rollout_apply_envelope(attempted=True, persisted=True, status=apply_status, operation='queue_plan_consume', idempotency_key=idempotency_key, effect_applied=True)
                     result_row['result'] = _build_rollout_result_envelope(disposition=disposition, status=item_status, reason=dispatch_reason, code=dispatch_code, state=(queue_consumed_row or {}).get('state'), workflow_state=(queue_consumed_row or {}).get('workflow_state'), transition_rule=transition_rule.get('transition_rule'), dispatch_route=transition_rule.get('dispatch_route'), next_transition=transition_rule.get('next_transition'), retryable=bool(transition_rule.get('retryable', True)), rollback_hint=transition_rule.get('rollback_hint'))
                     result_row['status'] = item_status
+                    result_row['execution_status'] = 'blocked' if item_status == 'blocked_by_approval' else ('deferred' if item_status == 'deferred' else 'queued')
+                    result_row['last_transition'] = {'rule': transition_rule.get('transition_rule'), 'to_execution_status': result_row['execution_status'], 'to_workflow_state': item_status, 'dispatch_route': transition_rule.get('dispatch_route'), 'next_transition': transition_rule.get('next_transition')}
                     bump(disposition, item_status)
                 except Exception as exc:
                     result_row['apply'] = _build_rollout_apply_envelope(attempted=True, persisted=False, status='error', operation='queue_plan_consume', idempotency_key=idempotency_key)
                     result_row['result'] = _build_rollout_result_envelope(disposition='error', status='error', reason=str(exc), code='QUEUE_CONSUME_EXCEPTION', transition_rule=transition_rule.get('transition_rule'), dispatch_route=transition_rule.get('dispatch_route'), next_transition=transition_rule.get('next_transition'), retryable=bool(transition_rule.get('retryable', True)), rollback_hint=transition_rule.get('rollback_hint'))
                     result_row['status'] = 'error'
+                    result_row['execution_status'] = 'error'
+                    result_row['last_transition'] = {'rule': transition_rule.get('transition_rule'), 'to_execution_status': 'error', 'to_workflow_state': current_workflow_state, 'dispatch_route': transition_rule.get('dispatch_route'), 'next_transition': transition_rule.get('next_transition')}
                     result['summary']['error_count'] += 1
                     bump('error', 'error')
             result['items'].append(result_row)
@@ -2161,12 +2222,14 @@ def execute_rollout_executor(payload: Dict, db: Any, *, config: Any = None, sett
             result_row['dispatch']['code'] = skip_code
             result_row['result'] = _build_rollout_result_envelope(disposition='skipped', status='skipped', reason=skip_reason, code=skip_code, transition_rule=transition_rule.get('transition_rule'), dispatch_route=transition_rule.get('dispatch_route'), next_transition=transition_rule.get('next_transition'), retryable=bool(transition_rule.get('retryable', True)), rollback_hint=transition_rule.get('rollback_hint'))
             result_row['status'] = 'skipped'
+            result_row['execution_status'] = 'skipped'
+            result_row['last_transition'] = {'rule': transition_rule.get('transition_rule'), 'to_execution_status': 'skipped', 'to_workflow_state': current_workflow_state, 'dispatch_route': transition_rule.get('dispatch_route'), 'next_transition': transition_rule.get('next_transition')}
             result['summary']['skipped_count'] += 1
             result['items'].append(result_row)
             bump('skipped', 'skipped')
             continue
 
-        result_row['dispatch'] = _build_rollout_dispatch_envelope(mode=dispatch_mode, executor_class=executor_class, handler_key=handler_key, allowed=True, status='dispatch_ready', reason='safe_apply_candidate', code='SAFE_APPLY_CANDIDATE', dispatch_route=transition_rule.get('dispatch_route'), transition_rule=transition_rule.get('transition_rule'), next_transition=transition_rule.get('next_transition'), retryable=bool(transition_rule.get('retryable', True)), rollback_hint=transition_rule.get('rollback_hint'))
+        result_row['dispatch'] = _build_rollout_dispatch_envelope(mode=dispatch_mode, executor_class=executor_class, handler_key=handler_key, allowed=True, status='dispatching', reason='safe_apply_candidate', code='SAFE_APPLY_CANDIDATE', dispatch_route=transition_rule.get('dispatch_route'), transition_rule=transition_rule.get('transition_rule'), next_transition=transition_rule.get('next_transition'), retryable=bool(transition_rule.get('retryable', True)), rollback_hint=transition_rule.get('rollback_hint'))
         reason = f"{execution_settings['reason_prefix']}: {row.get('reason') or 'safe rollout executor action'}"
         details = {
             'item_id': approval_id,
@@ -2208,11 +2271,21 @@ def execute_rollout_executor(payload: Dict, db: Any, *, config: Any = None, sett
             'readiness': transition_rule.get('readiness'),
             'real_trade_execution': False,
             'dangerous_live_parameter_change': False,
+            'execution_status': 'dispatching',
+            'previous_execution_status': persisted_details.get('execution_status'),
         }
         details.update(_build_controlled_rollout_action_details(action_type, row, workflow_item, spec, execution_settings))
+        details['last_transition'] = {'rule': transition_rule.get('transition_rule'), 'from_execution_status': persisted_details.get('execution_status'), 'to_execution_status': 'applied', 'from_workflow_state': current_workflow_state, 'to_workflow_state': spec.get('workflow_state'), 'dispatch_route': transition_rule.get('dispatch_route'), 'next_transition': transition_rule.get('next_transition')}
+        if persisted_details.get('execution_status') in {'error', 'blocked', 'deferred'}:
+            details['execution_status'] = 'recovered'
+            details['recovered_from_execution_status'] = persisted_details.get('execution_status')
+        else:
+            details['execution_status'] = 'applied'
         result_row['apply'] = _build_rollout_apply_envelope(attempted=True, persisted=False, status='applying', operation='upsert_approval_state', idempotency_key=idempotency_key)
         if result['dry_run']:
             result_row['apply']['status'] = 'dry_run'
+            result_row['execution_status'] = 'dry_run'
+            result_row['last_transition'] = {'rule': transition_rule.get('transition_rule'), 'to_execution_status': 'dry_run', 'to_workflow_state': spec.get('workflow_state'), 'dispatch_route': transition_rule.get('dispatch_route'), 'next_transition': transition_rule.get('next_transition')}
             result_row['result'] = _build_rollout_result_envelope(disposition='dry_run', status='dry_run', reason=reason, code='DRY_RUN_ONLY', state=spec.get('state'), workflow_state=spec.get('workflow_state'), transition_rule=transition_rule.get('transition_rule'), dispatch_route=transition_rule.get('dispatch_route'), next_transition=transition_rule.get('next_transition'), retryable=bool(transition_rule.get('retryable', True)), rollback_hint=transition_rule.get('rollback_hint'))
             result_row['status'] = 'dry_run'
             result['summary']['applied_count'] += 1
@@ -2242,6 +2315,8 @@ def execute_rollout_executor(payload: Dict, db: Any, *, config: Any = None, sett
             result_row['apply'] = _build_rollout_apply_envelope(attempted=True, persisted=True, status='applied', operation='upsert_approval_state', idempotency_key=idempotency_key, effect_applied=True)
             result_row['result'] = _build_rollout_result_envelope(disposition='applied', status='applied', reason=reason, code='SAFE_APPLIED', state=spec.get('state'), workflow_state=spec.get('workflow_state'), transition_rule=transition_rule.get('transition_rule'), dispatch_route=transition_rule.get('dispatch_route'), next_transition=transition_rule.get('next_transition'), retryable=bool(transition_rule.get('retryable', True)), rollback_hint=transition_rule.get('rollback_hint'))
             result_row['status'] = 'applied'
+            result_row['execution_status'] = details.get('execution_status') or 'applied'
+            result_row['last_transition'] = details.get('last_transition') or {}
             result['summary']['applied_count'] += 1
             result['items'].append(result_row)
             bump('applied', 'applied')
@@ -2249,6 +2324,8 @@ def execute_rollout_executor(payload: Dict, db: Any, *, config: Any = None, sett
             result_row['apply'] = _build_rollout_apply_envelope(attempted=True, persisted=False, status='error', operation='upsert_approval_state', idempotency_key=idempotency_key)
             result_row['result'] = _build_rollout_result_envelope(disposition='error', status='error', reason=str(exc), code='APPLY_EXCEPTION', transition_rule=transition_rule.get('transition_rule'), dispatch_route=transition_rule.get('dispatch_route'), next_transition=transition_rule.get('next_transition'), retryable=bool(transition_rule.get('retryable', True)), rollback_hint=transition_rule.get('rollback_hint'))
             result_row['status'] = 'error'
+            result_row['execution_status'] = 'error'
+            result_row['last_transition'] = {'rule': transition_rule.get('transition_rule'), 'to_execution_status': 'error', 'to_workflow_state': current_workflow_state, 'dispatch_route': transition_rule.get('dispatch_route'), 'next_transition': transition_rule.get('next_transition')}
             result['summary']['error_count'] += 1
             result['items'].append(result_row)
             bump('error', 'error')
@@ -3851,6 +3928,8 @@ def build_workbench_timeline_summary_aggregation(payload: Optional[Dict] = None,
             'operator_action': row.get('operator_action'),
             'operator_route': row.get('operator_route'),
             'operator_follow_up': row.get('operator_follow_up'),
+            'execution_status': row.get('execution_status') or ((row.get('state_machine') or {}).get('execution_status') if isinstance(row.get('state_machine'), dict) else None),
+            'last_transition': row.get('last_transition') or ((row.get('state_machine') or {}).get('last_transition') if isinstance(row.get('state_machine'), dict) else None) or {},
             'timeline': {
                 'current_status': timeline.get('current_status'),
                 'workflow_state': timeline.get('workflow_state'),

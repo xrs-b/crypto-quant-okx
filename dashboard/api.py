@@ -2884,6 +2884,7 @@ def get_approval_state_machine_list():
         semantics = ((row.get('details') or {}).get('state_machine') or {})
         phase = semantics.get('phase') or 'unknown'
         workflow_state = semantics.get('workflow_state') or row.get('workflow_state') or 'pending'
+        execution_status = semantics.get('execution_status') or ((row.get('details') or {}).get('execution_status') if isinstance(row.get('details'), dict) else None) or 'unknown'
         phase_counts[phase] = phase_counts.get(phase, 0) + 1
         workflow_counts[workflow_state] = workflow_counts.get(workflow_state, 0) + 1
         items.append({
@@ -2897,12 +2898,14 @@ def get_approval_state_machine_list():
             'updated_at': row.get('updated_at'),
             'reason': row.get('reason'),
             'actor': row.get('actor'),
+            'execution_status': execution_status,
             'state_machine': semantics,
         })
     return jsonify({'success': True, 'data': items, 'summary': {
         'count': len(items),
         'phase_counts': phase_counts,
         'workflow_state_counts': workflow_counts,
+        'execution_status_counts': {status: sum(1 for row in items if row.get('execution_status') == status) for status in sorted({row.get('execution_status') for row in items if row.get('execution_status')})},
         'rollback_candidate_count': sum(1 for row in items if (row.get('state_machine') or {}).get('rollback_candidate')),
         'retryable_count': sum(1 for row in items if (row.get('state_machine') or {}).get('retryable')),
         'terminal_count': sum(1 for row in items if (row.get('state_machine') or {}).get('terminal')),

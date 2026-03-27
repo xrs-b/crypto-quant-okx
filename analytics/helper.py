@@ -1790,7 +1790,131 @@ def execute_rollout_executor(payload: Dict, db: Any, *, config: Any = None, sett
         result['status'] = 'error'
     elif not result['dry_run'] and (result['summary']['applied_count'] or result['summary']['queued_count'] or result['summary']['by_status'].get('blocked_by_approval') or result['summary']['by_status'].get('deferred')):
         result['status'] = 'executed'
+    result['stage_progression'] = build_rollout_stage_progression(payload, result)
     return payload
+
+
+
+def build_rollout_stage_progression(payload: Optional[Dict] = None, executor: Optional[Dict] = None) -> Dict[str, Any]:
+    payload = payload or {}
+    executor = executor or (payload.get('rollout_executor') or {})
+    workflow_items = ((payload.get('workflow_state') or {}).get('item_states') or [])
+    approval_items = ((payload.get('approval_state') or {}).get('items') or [])
+    executor_items = executor.get('items') or []
+
+    workflow_lookup = {row.get('item_id'): row for row in workflow_items if row.get('item_id')}
+    approval_lookup = {row.get('approval_id') or row.get('item_id'): row for row in approval_items if row.get('approval_id') or row.get('item_id')}
+
+    stage_items = []
+    summary = {
+        'item_count': 0,
+        'applied_count': 0,
+        'queued_count': 0,
+        'blocked_count': 0,
+        'deferred_count': 0,
+        'ready_stage_count': 0,
+        'by_stage': {},
+        'by_next_transition': {},
+        'by_dispatch_route': {},
+        'by_status': {},
+    }
+
+    def bump(bucket: Dict[str, int], key: Optional[str]):
+        label = str(key or 'unknown')
+        bucket[label] = bucket.get(label, 0) + 1
+
+    for row in executor_items:
+        item_id = row.get('item_id')
+        workflow_item = workflow_lookup.get(row.get('playbook_id')) or {}
+        approval_item = approval_lookup.get(item_id) or {}
+        plan = row.get('plan') or {}
+        dispatch = row.get('dispatch') or {}
+        result = row.get('result') or {}
+        rollout_stage = plan.get('rollout_stage') or workflow_item.get('current_rollout_stage') or approval_item.get('rollout_stage') or 'pending'
+        target_rollout_stage = plan.get('target_rollout_stage') or workflow_item.get('target_rollout_stage') or approval_item.get('target_rollout_stage') or rollout_stage
+        next_transition = plan.get('next_transition') or result.get('next_transition') or dispatch.get('next_transition') or 'unknown'
+        dispatch_route = plan.get('dispatch_route') or result.get('dispatch_route') or dispatch.get('dispatch_route') or 'unknown'
+        status = row.get('status') or result.get('status') or dispatch.get('status') or 'planned'
+        stage_row = {
+            'item_id': item_id,
+            'playbook_id': row.get('playbook_id'),
+            'action_type': row.get('action_type'),
+            'status': status,
+            'disposition': result.get('disposition') or status,
+            'rollout_stage': rollout_stage,
+            'target_rollout_stage': target_rollout_stage,
+            'stage_progression': {
+                'current_stage': rollout_stage,
+                'target_stage': target_rollout_stage,
+                'dispatch_route': dispatch_route,
+                'next_transition': next_transition,
+                'transition_rule': plan.get('transition_rule') or result.get('transition_rule') or dispatch.get('transition_rule'),
+                'retryable': bool(plan.get('retryable', result.get('retryable', True))),
+                'rollback_hint': plan.get('rollback_hint') or result.get('rollback_hint') or dispatch.get('rollback_hint'),
+                'readiness': plan.get('readiness') or workflow_item.get('workflow_state') or approval_item.get('workflow_state') or 'pending',
+            },
+            'queue_plan': plan.get('queue_plan') or {},
+            'dispatch': dispatch,
+            'result': result,
+        }
+        stage_items.append(stage_row)
+        summary['item_count'] += 1
+        if status == 'applied':
+            summary['applied_count'] += 1
+        elif status == 'queued':
+            summary['queued_count'] += 1
+        elif status in {'blocked_by_approval', 'blocked'}:
+            summary['blocked_count'] += 1
+        elif status == 'deferred':
+            summary['deferred_count'] += 1
+        if target_rollout_stage not in {None, '', 'pending'}:
+            summary['ready_stage_count'] += 1
+        bump(summary['by_stage'], f"{rollout_stage}->{target_rollout_stage}")
+        bump(summary['by_next_transition'], next_transition)
+        bump(summary['by_dispatch_route'], dispatch_route)
+        bump(summary['by_status'], status)
+
+    return {
+        'schema_version': 'm5_rollout_stage_progression_v1',
+        'summary': summary,
+        'items': stage_items,
+    }
+
+
+def build_workflow_consumer_view(payload: Optional[Dict] = None) -> Dict[str, Any]:
+    payload = payload or {}
+    workflow_state = payload.get('workflow_state') or {}
+    approval_state = payload.get('approval_state') or {}
+    queues = payload.get('queues') or {}
+    rollout_executor = payload.get('rollout_executor') or {}
+    controlled_rollout = payload.get('controlled_rollout_execution') or {}
+    auto_approval = payload.get('auto_approval_execution') or {}
+    stage_progression = build_rollout_stage_progression(payload, rollout_executor)
+    approval_items = approval_state.get('items') or []
+    workflow_items = workflow_state.get('item_states') or []
+    view = {
+        'schema_version': 'm5_workflow_consumer_view_v1',
+        'summary': {
+            'workflow_item_count': len(workflow_items),
+            'approval_item_count': len(approval_items),
+            'pending_approval_count': sum(1 for row in approval_items if row.get('approval_state') == 'pending'),
+            'ready_workflow_count': sum(1 for row in workflow_items if row.get('workflow_state') == 'ready'),
+            'queue_count': sum(len(v or []) for v in queues.values() if isinstance(v, list)),
+            'rollout_executor_status': rollout_executor.get('status') or 'disabled',
+            'rollout_stage_progression': stage_progression.get('summary') or {},
+            'controlled_rollout_executed_count': controlled_rollout.get('executed_count', 0),
+            'auto_approval_executed_count': auto_approval.get('executed_count', 0),
+        },
+        'workflow_state': workflow_state,
+        'approval_state': approval_state,
+        'queues': queues,
+        'rollout_executor': rollout_executor,
+        'rollout_stage_progression': stage_progression,
+        'controlled_rollout_execution': controlled_rollout,
+        'auto_approval_execution': auto_approval,
+    }
+    payload['consumer_view'] = view
+    return view
 
 def build_approval_audit_overview(*, stale_rows: Optional[List[Dict]] = None,
                                   decision_diffs: Optional[List[Dict]] = None,

@@ -52,7 +52,7 @@ from signals.validator import SignalValidator
 from bot.run import execute_exchange_smoke, reconcile_exchange_positions, load_runtime_state
 from ml.engine import MLEngine
 from core.regime import RegimeDetector, detect_regime, Regime
-from analytics import StrategyBacktester, SignalQualityAnalyzer, ParameterOptimizer, GovernanceEngine, build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, attach_auto_approval_policy, execute_controlled_rollout_layer, execute_controlled_auto_approval_layer, execute_rollout_executor
+from analytics import StrategyBacktester, SignalQualityAnalyzer, ParameterOptimizer, GovernanceEngine, build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, attach_auto_approval_policy, execute_controlled_rollout_layer, execute_controlled_auto_approval_layer, execute_rollout_executor, build_workflow_consumer_view
 from analytics.backtest import export_calibration_payload
 from analytics.mfe_mae import MFEAnalyzer, get_mfe_mae_analysis
 from core.regime_policy import summarize_observe_only_collection
@@ -107,7 +107,9 @@ def _persist_workflow_approval_payload(payload: Dict[str, Any], replay_source: s
     payload = execute_controlled_rollout_layer(payload, db, config=config, replay_source=replay_source)
     payload = attach_auto_approval_policy(payload)
     payload = execute_controlled_auto_approval_layer(payload, db, config=config, replay_source=replay_source)
-    return attach_auto_approval_policy(payload)
+    payload = attach_auto_approval_policy(payload)
+    build_workflow_consumer_view(payload)
+    return payload
 
 
 def _get_exchange_client():
@@ -2467,6 +2469,22 @@ def get_backtest_workflow_state():
         'view': 'workflow_state',
         'data': payload,
         'summary': payload.get('summary') or {},
+    })
+
+
+@app.route('/api/backtest/workflow-consumer-view')
+def get_backtest_workflow_consumer_view():
+    """返回适合 dashboard/API 消费的统一 workflow consumer view。"""
+    backtest_result = backtester.run_all(config.symbols)
+    calibration_report = backtest_result.get('calibration_report') or {}
+    payload = export_calibration_payload(calibration_report, view='workflow_ready')
+    payload = _persist_workflow_approval_payload(payload, replay_source='workflow_consumer_view_api')
+    consumer_view = payload.get('consumer_view') or build_workflow_consumer_view(payload)
+    return jsonify({
+        'success': True,
+        'view': 'workflow_consumer_view',
+        'data': consumer_view,
+        'summary': consumer_view.get('summary') or {},
     })
 
 

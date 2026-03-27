@@ -4819,6 +4819,48 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
             self.assertTrue(payload['data']['workflow_state']['item_states'])
             self.assertTrue(payload['data']['approval_state']['items'])
             self.assertEqual(payload['summary'], payload['data']['summary'])
+            self.assertEqual(payload['data']['consumer_view']['schema_version'], 'm5_workflow_consumer_view_v1')
+            self.assertIn('rollout_stage_progression', payload['data']['consumer_view'])
+        finally:
+            dashboard_api.backtester = old_backtester
+
+    def test_backtest_workflow_consumer_view_api_returns_unified_snapshot(self):
+        import dashboard.api as dashboard_api
+
+        report = build_regime_policy_calibration_report([
+            {
+                'symbol': 'BTC/USDT',
+                'all_trades': [
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 0.3},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 0.2},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 0.1},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v2', 'strategy_tags': ['Breakout'], 'return_pct': -1.4},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v2', 'strategy_tags': ['Breakout'], 'return_pct': -1.0},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v2', 'strategy_tags': ['Breakout'], 'return_pct': -0.8},
+                ],
+            }
+        ])
+
+        class StubBacktester:
+            def run_all(self, symbols):
+                return {
+                    'summary': {'symbols': len(symbols)},
+                    'symbols': [{'symbol': 'BTC/USDT'}],
+                    'calibration_report': report,
+                }
+
+        old_backtester = dashboard_api.backtester
+        dashboard_api.backtester = StubBacktester()
+        try:
+            client = app.test_client()
+            response = client.get('/api/backtest/workflow-consumer-view')
+            self.assertEqual(response.status_code, 200)
+            payload = response.get_json()
+            self.assertTrue(payload['success'])
+            self.assertEqual(payload['view'], 'workflow_consumer_view')
+            self.assertEqual(payload['data']['schema_version'], 'm5_workflow_consumer_view_v1')
+            self.assertIn('rollout_stage_progression', payload['data'])
+            self.assertEqual(payload['summary'], payload['data']['summary'])
         finally:
             dashboard_api.backtester = old_backtester
 
@@ -5561,6 +5603,8 @@ class TestApprovalPersistence(unittest.TestCase):
             self.assertEqual(state_row['details']['dispatch_route'], 'stage_metadata_apply')
             self.assertEqual(state_row['details']['execution_mode'], 'controlled')
             self.assertEqual(timeline[-1]['event_type'], 'controlled_rollout_stage_prepare')
+            self.assertEqual(result['rollout_executor']['stage_progression']['summary']['applied_count'], 1)
+            self.assertEqual(result['rollout_executor']['stage_progression']['items'][0]['stage_progression']['next_transition'], 'promote_to_target_stage')
 
     def test_rollout_executor_skeleton_exposes_handler_map_and_queue_plan(self):
         class StubConfig:

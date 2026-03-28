@@ -2229,6 +2229,11 @@ def execute_controlled_rollout_layer(payload: Dict, db: Any, *, config: Any = No
         result['skipped_count'] = len(approval_items)
         return payload
 
+    validation_gate = _build_validation_gate_snapshot(payload)
+    execution_gate = _build_validation_execution_gate(validation_gate, layer='controlled_rollout_state_apply')
+    result['validation_gate'] = execution_gate['validation_gate']
+    result['execution_gate'] = execution_gate
+
     allowed_action_types = set(execution_settings.get('allowed_action_types') or [])
     executed_rows = []
     for row in approval_items:
@@ -2280,6 +2285,8 @@ def execute_controlled_rollout_layer(payload: Dict, db: Any, *, config: Any = No
             skip_reason = f'risk_level:{risk_level or "unknown"}'
         elif blocked_by:
             skip_reason = 'blocked_by:' + ','.join(blocked_by)
+        elif execution_gate.get('blocked'):
+            skip_reason = execution_gate.get('primary_reason') or 'validation_gate_blocked'
 
         if skip_reason:
             result['items'].append({
@@ -2290,6 +2297,8 @@ def execute_controlled_rollout_layer(payload: Dict, db: Any, *, config: Any = No
                 'reason': skip_reason,
                 'state': current_state,
                 'workflow_state': current_workflow_state,
+                'validation_gate': execution_gate.get('validation_gate'),
+                'execution_gate': execution_gate,
             })
             result['skipped_count'] += 1
             continue
@@ -2318,6 +2327,8 @@ def execute_controlled_rollout_layer(payload: Dict, db: Any, *, config: Any = No
             'action_type': action_type,
             'execution_layer': 'controlled_rollout_state_apply',
             'execution_mode': execution_settings['mode'],
+            'validation_gate': execution_gate.get('validation_gate'),
+            'execution_gate': execution_gate,
         }
         details.update(_build_controlled_rollout_action_details(action_type, row, workflow_item, action_spec, execution_settings))
         db.upsert_approval_state(
@@ -2377,6 +2388,11 @@ def execute_controlled_auto_approval_layer(payload: Dict, db: Any, *, config: An
         result['skipped_count'] = len(approval_items)
         return payload
 
+    validation_gate = _build_validation_gate_snapshot(payload)
+    execution_gate = _build_validation_execution_gate(validation_gate, layer='controlled_auto_approval')
+    result['validation_gate'] = execution_gate['validation_gate']
+    result['execution_gate'] = execution_gate
+
     executed_rows = []
     for row in approval_items:
         approval_id = row.get('approval_id') or row.get('item_id') or row.get('playbook_id')
@@ -2407,6 +2423,8 @@ def execute_controlled_auto_approval_layer(payload: Dict, db: Any, *, config: An
             skip_reason = f'risk_level:{risk_level or "unknown"}'
         elif blocked_by:
             skip_reason = 'blocked_by:' + ','.join(blocked_by)
+        elif execution_gate.get('blocked'):
+            skip_reason = execution_gate.get('primary_reason') or 'validation_gate_blocked'
 
         if skip_reason:
             result['items'].append({
@@ -2415,6 +2433,8 @@ def execute_controlled_auto_approval_layer(payload: Dict, db: Any, *, config: An
                 'action': 'skipped',
                 'reason': skip_reason,
                 'state': current_state,
+                'validation_gate': execution_gate.get('validation_gate'),
+                'execution_gate': execution_gate,
             })
             result['skipped_count'] += 1
             continue
@@ -2442,6 +2462,8 @@ def execute_controlled_auto_approval_layer(payload: Dict, db: Any, *, config: An
             'risk_level': row.get('risk_level') or workflow_item.get('risk_level'),
             'execution_layer': 'controlled_auto_approval',
             'execution_mode': execution_settings['mode'],
+            'validation_gate': execution_gate.get('validation_gate'),
+            'execution_gate': execution_gate,
         }
         db.record_approval(row.get('action_type') or workflow_item.get('action_type') or 'workflow_approval', row.get('playbook_id'), 'approved', details)
         executed_rows.append(db.get_approval_state(approval_id))
@@ -2660,6 +2682,52 @@ def _build_validation_gate_snapshot(payload: Optional[Dict[str, Any]] = None) ->
         'validation_gate_frozen'
     )
     return snapshot
+
+
+def _build_validation_execution_gate(validation_gate: Optional[Dict[str, Any]] = None, *, layer: str = 'execution_apply') -> Dict[str, Any]:
+    gate = _build_validation_gate_snapshot({'validation_gate': validation_gate}) if validation_gate else _build_validation_gate_snapshot({})
+    missing = gate.get('missing_required_capabilities') or []
+    failing = gate.get('failing_required_capabilities') or []
+    failing_case_count = int(gate.get('failing_case_count') or 0)
+    regression = bool(gate.get('regression_detected'))
+    frozen = bool(gate.get('enabled')) and bool(gate.get('freeze_auto_advance'))
+    gap_only = frozen and not regression and bool(missing)
+    plain_freeze = frozen and not regression and not gap_only
+    reason_codes = []
+    if regression:
+        reason_codes.append('validation_gate_regression')
+    elif gap_only:
+        reason_codes.append('validation_gate_gap')
+    elif plain_freeze:
+        reason_codes.append('validation_gate_freeze')
+    reason_codes.extend([f'missing_required:{item}' for item in missing])
+    reason_codes.extend([f'failing_required:{item}' for item in failing])
+    if failing_case_count:
+        reason_codes.append(f'failing_cases:{failing_case_count}')
+    blocked = frozen
+    effect = 'allowed'
+    if regression:
+        effect = 'blocked_regression'
+    elif gap_only:
+        effect = 'blocked_gap'
+    elif plain_freeze:
+        effect = 'blocked_freeze'
+    explain = 'validation gate ready or disabled'
+    if regression:
+        explain = f'{layer} blocked by validation regression; rollback/review required before auto progression'
+    elif gap_only:
+        explain = f'{layer} blocked by validation capability gap; low-intervention auto progression frozen'
+    elif plain_freeze:
+        explain = f'{layer} blocked because validation gate is frozen and not ready'
+    return {
+        'layer': layer,
+        'blocked': blocked,
+        'effect': effect,
+        'reason_codes': reason_codes,
+        'primary_reason': reason_codes[0] if reason_codes else None,
+        'explain': explain,
+        'validation_gate': gate,
+    }
 
 
 def _collect_validation_gate_consumption(rows: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
@@ -3336,6 +3404,7 @@ def execute_rollout_executor(payload: Dict, db: Any, *, config: Any = None, sett
             persisted_details=persisted_details,
             validation_gate=_extract_validation_gate(payload),
         )
+        execution_gate = _build_validation_execution_gate((rollout_gates.get('auto_advance_gate') or {}).get('validation_gate') or validation_gate, layer='rollout_executor_apply')
         transition_policy_snapshot = _build_rollout_transition_policy_snapshot(spec, action_type)
 
         plan = {
@@ -3374,6 +3443,8 @@ def execute_rollout_executor(payload: Dict, db: Any, *, config: Any = None, sett
             'execution_status': _normalize_action_execution_status(None, workflow_state=current_workflow_state, queue_status=((workflow_item.get('queue_progression') or {}).get('status') if isinstance(workflow_item.get('queue_progression'), dict) else None)),
             'auto_advance_gate': rollout_gates.get('auto_advance_gate') or {},
             'rollback_gate': rollout_gates.get('rollback_gate') or {},
+            'validation_gate': execution_gate.get('validation_gate'),
+            'execution_gate': execution_gate,
             'stage_loop': _build_stage_loop_envelope(
                 stage_handler=transition_rule.get('stage_handler') or rollout_gates.get('stage_handler') or {},
                 auto_advance_gate=rollout_gates.get('auto_advance_gate') or {},
@@ -3412,6 +3483,8 @@ def execute_rollout_executor(payload: Dict, db: Any, *, config: Any = None, sett
             'transition_policy': transition_rule.get('transition_policy') or transition_policy_snapshot,
             'auto_advance_gate': rollout_gates.get('auto_advance_gate') or {},
             'rollback_gate': rollout_gates.get('rollback_gate') or {},
+            'validation_gate': execution_gate.get('validation_gate'),
+            'execution_gate': execution_gate,
             'stage_loop': _build_stage_loop_envelope(
                 stage_handler=transition_rule.get('stage_handler') or rollout_gates.get('stage_handler') or {},
                 auto_advance_gate=rollout_gates.get('auto_advance_gate') or {},
@@ -3552,6 +3625,9 @@ def execute_rollout_executor(payload: Dict, db: Any, *, config: Any = None, sett
             skip_reason, skip_code = f'risk_level:{risk_level or "unknown"}', 'RISK_NOT_LOW'
         elif blocked_by:
             skip_reason, skip_code = 'blocked_by:' + ','.join(blocked_by), 'BLOCKED_BY'
+        elif execution_gate.get('blocked'):
+            skip_reason = execution_gate.get('primary_reason') or 'validation_gate_blocked'
+            skip_code = 'VALIDATION_GATE_BLOCKED'
         elif already_applied:
             skip_reason, skip_code = 'already_applied', 'IDEMPOTENT_ALREADY_APPLIED'
             result_row['apply'] = _build_rollout_apply_envelope(status='idempotent_skip', operation='noop', idempotency_key=idempotency_key)
@@ -3618,6 +3694,8 @@ def execute_rollout_executor(payload: Dict, db: Any, *, config: Any = None, sett
             'previous_execution_status': persisted_details.get('execution_status'),
             'auto_advance_gate': rollout_gates.get('auto_advance_gate') or {},
             'rollback_gate': rollout_gates.get('rollback_gate') or {},
+            'validation_gate': execution_gate.get('validation_gate'),
+            'execution_gate': execution_gate,
             'stage_loop': _build_stage_loop_envelope(
                 stage_handler=transition_rule.get('stage_handler') or rollout_gates.get('stage_handler') or {},
                 auto_advance_gate=rollout_gates.get('auto_advance_gate') or {},

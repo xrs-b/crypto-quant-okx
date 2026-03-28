@@ -2806,6 +2806,129 @@ class TestHealthSummary(unittest.TestCase):
         if os.path.exists('data/test_runtime_adaptive_rollout.db'):
             os.remove('data/test_runtime_adaptive_rollout.db')
 
+
+    def test_maybe_run_adaptive_rollout_orchestration_respects_runtime_cooldown(self):
+        import bot.run as bot_run
+        cfg = Config()
+        cfg._config.setdefault('runtime', {}).setdefault('adaptive_rollout_orchestration', {}).update({
+            'enabled': True,
+            'use_cache': True,
+            'notify_on_activity': True,
+            'min_interval_seconds': 900,
+            'max_items': 3,
+        })
+        db = Database('data/test_runtime_adaptive_rollout_cooldown.db')
+        notifier = FakeHealthNotifier()
+        old_runtime_path = bot_run.RUNTIME_STATE_PATH
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bot_run.RUNTIME_STATE_PATH = Path(tmpdir) / 'runtime_state.json'
+            bot_run.RUNTIME_STATE_PATH.write_text(json.dumps({
+                'adaptive_rollout_orchestration': {
+                    'last_run_at': (datetime.now() - timedelta(seconds=120)).isoformat(),
+                }
+            }, ensure_ascii=False, indent=2))
+            original_strategy_backtester = bot_run.StrategyBacktester
+            try:
+                class ExplodingBacktester:
+                    def __init__(self, config):
+                        raise AssertionError('cooldown should skip backtester execution')
+                bot_run.StrategyBacktester = ExplodingBacktester
+                result = maybe_run_adaptive_rollout_orchestration(cfg, db, notifier)
+                self.assertFalse(result['ran'])
+                self.assertEqual(result['reason'], 'cooldown_active')
+                self.assertGreater(result['remaining_seconds'], 0)
+                state = json.loads(bot_run.RUNTIME_STATE_PATH.read_text())
+                cooldown = state['adaptive_rollout_orchestration']['cooldown']
+                self.assertTrue(cooldown['active'])
+                self.assertEqual(cooldown['min_interval_seconds'], 900)
+                self.assertEqual(state['adaptive_rollout_orchestration']['last_skip_reason'], 'cooldown_active')
+                self.assertEqual(notifier.calls, [])
+            finally:
+                bot_run.StrategyBacktester = original_strategy_backtester
+                bot_run.RUNTIME_STATE_PATH = old_runtime_path
+        if os.path.exists('data/test_runtime_adaptive_rollout_cooldown.db'):
+            os.remove('data/test_runtime_adaptive_rollout_cooldown.db')
+
+    def test_maybe_run_adaptive_rollout_orchestration_force_bypasses_runtime_cooldown(self):
+        import bot.run as bot_run
+        cfg = Config()
+        cfg._config.setdefault('runtime', {}).setdefault('adaptive_rollout_orchestration', {}).update({
+            'enabled': True,
+            'use_cache': True,
+            'notify_on_activity': True,
+            'min_interval_seconds': 900,
+            'max_items': 3,
+        })
+        db = Database('data/test_runtime_adaptive_rollout_force.db')
+        notifier = FakeHealthNotifier()
+        old_runtime_path = bot_run.RUNTIME_STATE_PATH
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bot_run.RUNTIME_STATE_PATH = Path(tmpdir) / 'runtime_state.json'
+            bot_run.RUNTIME_STATE_PATH.write_text(json.dumps({
+                'adaptive_rollout_orchestration': {
+                    'last_run_at': (datetime.now() - timedelta(seconds=120)).isoformat(),
+                }
+            }, ensure_ascii=False, indent=2))
+            original_strategy_backtester = bot_run.StrategyBacktester
+            original_export_calibration_payload = bot_run.export_calibration_payload
+            original_execute_adaptive_rollout_orchestration = bot_run.execute_adaptive_rollout_orchestration
+            original_build_runtime_orchestration_summary = bot_run.build_runtime_orchestration_summary
+            try:
+                class StubBacktester:
+                    def __init__(self, config):
+                        self.config = config
+                    def run_all(self, use_cache=True, **kwargs):
+                        return {'summary': {'symbols': 1}, 'delivery': {'workflow_ready': {'items': []}}}
+                bot_run.StrategyBacktester = StubBacktester
+                bot_run.export_calibration_payload = lambda report, view='workflow_ready': {
+                    'schema_version': 'm5_governance_workflow_ready_v2',
+                    'summary': {'item_count': 1},
+                    'approval_state': {'items': []},
+                    'workflow_state': {'item_states': []},
+                }
+                bot_run.execute_adaptive_rollout_orchestration = lambda payload, db, config=None, replay_source='workflow_ready': {
+                    **payload,
+                    'adaptive_rollout_orchestration': {
+                        'schema_version': 'm5_adaptive_rollout_orchestration_v2',
+                        'summary': {
+                            'pass_count': 1,
+                            'rerun_triggered': False,
+                            'rerun_reason': None,
+                            'gate_status': 'ready',
+                            'gate_blocked': False,
+                            'gate_blocking_issues': [],
+                            'auto_approval_executed_count': 1,
+                            'controlled_rollout_executed_count': 0,
+                            'review_queue_queued_count': 0,
+                            'recovery_retry_scheduled_count': 0,
+                            'recovery_rollback_queued_count': 0,
+                            'testnet_bridge_status': 'disabled',
+                            'testnet_bridge_follow_up_required': False,
+                        },
+                    },
+                }
+                bot_run.build_runtime_orchestration_summary = lambda payload, max_items=5, **kwargs: {
+                    'schema_version': 'm5_runtime_orchestration_summary_v1',
+                    'headline': {'text': 'runtime orchestration ok'},
+                    'summary': {'recent_progress_count': 1},
+                    'next_step': {'action': 'observe', 'summary': 'observe'},
+                    'stuck_points': [],
+                    'follow_ups': [],
+                }
+                result = maybe_run_adaptive_rollout_orchestration(cfg, db, notifier, force=True)
+                self.assertTrue(result['ran'])
+                state = json.loads(bot_run.RUNTIME_STATE_PATH.read_text())
+                self.assertFalse(state['adaptive_rollout_orchestration']['cooldown']['active'])
+                self.assertEqual(state['adaptive_rollout_orchestration']['cooldown']['min_interval_seconds'], 900)
+            finally:
+                bot_run.StrategyBacktester = original_strategy_backtester
+                bot_run.export_calibration_payload = original_export_calibration_payload
+                bot_run.execute_adaptive_rollout_orchestration = original_execute_adaptive_rollout_orchestration
+                bot_run.build_runtime_orchestration_summary = original_build_runtime_orchestration_summary
+                bot_run.RUNTIME_STATE_PATH = old_runtime_path
+        if os.path.exists('data/test_runtime_adaptive_rollout_force.db'):
+            os.remove('data/test_runtime_adaptive_rollout_force.db')
+
     def test_maybe_send_daily_health_summary_force_sends(self):
         import bot.run as bot_run
         cfg = Config()

@@ -14,7 +14,7 @@ import argparse
 import json
 import time
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from core.config import Config
@@ -253,12 +253,14 @@ def maybe_run_adaptive_rollout_orchestration(cfg: Config, db: Database, notifier
     notify_on_activity = bool(orchestrator_cfg.get('notify_on_activity', True))
     max_items = max(1, min(int(orchestrator_cfg.get('max_items', 5) or 5), 20))
     actor = str(orchestrator_cfg.get('actor') or 'system:runtime-adaptive-rollout-orchestration')
+    min_interval_seconds = max(0, int(orchestrator_cfg.get('min_interval_seconds', 0) or 0))
 
     result = {
         'enabled': enabled,
         'force': bool(force),
         'use_cache': use_cache,
         'max_items': max_items,
+        'min_interval_seconds': min_interval_seconds,
         'ran': False,
         'summary': None,
         'workflow_ready': None,
@@ -268,6 +270,42 @@ def maybe_run_adaptive_rollout_orchestration(cfg: Config, db: Database, notifier
     if not enabled and not force:
         result['reason'] = 'disabled'
         return result
+
+    orchestration_runtime = runtime.get('adaptive_rollout_orchestration', {}) if isinstance(runtime.get('adaptive_rollout_orchestration'), dict) else {}
+    last_run_at_raw = orchestration_runtime.get('last_run_at')
+    now = datetime.now()
+    last_run_at = None
+    if last_run_at_raw:
+        try:
+            last_run_at = datetime.fromisoformat(str(last_run_at_raw))
+        except ValueError:
+            last_run_at = None
+    if min_interval_seconds > 0 and not force and last_run_at is not None:
+        elapsed_seconds = max(0, int((now - last_run_at).total_seconds()))
+        remaining_seconds = max(0, min_interval_seconds - elapsed_seconds)
+        if elapsed_seconds < min_interval_seconds:
+            result.update({
+                'reason': 'cooldown_active',
+                'last_run_at': last_run_at.isoformat(),
+                'elapsed_seconds': elapsed_seconds,
+                'remaining_seconds': remaining_seconds,
+                'next_eligible_run_at': (last_run_at + timedelta(seconds=min_interval_seconds)).isoformat(),
+            })
+            runtime['adaptive_rollout_orchestration'] = {
+                **orchestration_runtime,
+                'last_skip_at': now.isoformat(),
+                'last_skip_reason': 'cooldown_active',
+                'cooldown': {
+                    'active': True,
+                    'min_interval_seconds': min_interval_seconds,
+                    'elapsed_seconds': elapsed_seconds,
+                    'remaining_seconds': remaining_seconds,
+                    'next_eligible_run_at': result['next_eligible_run_at'],
+                    'last_run_at': last_run_at.isoformat(),
+                },
+            }
+            save_runtime_state(runtime)
+            return result
 
     backtester = StrategyBacktester(cfg)
     report = backtester.run_all(use_cache=use_cache)
@@ -287,9 +325,19 @@ def maybe_run_adaptive_rollout_orchestration(cfg: Config, db: Database, notifier
 
     runtime['adaptive_rollout_orchestration'] = {
         'last_run_at': datetime.now().isoformat(),
+        'last_skip_at': None,
+        'last_skip_reason': None,
         'enabled': enabled,
         'use_cache': use_cache,
         'actor': actor,
+        'cooldown': {
+            'active': False,
+            'min_interval_seconds': min_interval_seconds,
+            'elapsed_seconds': None,
+            'remaining_seconds': 0,
+            'next_eligible_run_at': None,
+            'last_run_at': datetime.now().isoformat(),
+        },
         'summary': {
             'schema_version': orchestration.get('schema_version'),
             'pass_count': int(orchestration_summary.get('pass_count', 0) or 0),
@@ -370,6 +418,7 @@ def build_runtime_health_summary(cfg: Config, db: Database) -> dict:
     orchestration_enabled = bool(orchestration_cfg.get('enabled', False))
     orchestration_summary = orchestration_runtime.get('summary', {}) if isinstance(orchestration_runtime.get('summary'), dict) else {}
     orchestration_runtime_summary = orchestration_runtime.get('runtime_summary', {}) if isinstance(orchestration_runtime.get('runtime_summary'), dict) else {}
+    orchestration_cooldown = orchestration_runtime.get('cooldown', {}) if isinstance(orchestration_runtime.get('cooldown'), dict) else {}
     lines = [
         f'环境：{cfg.exchange_mode}',
         f'监听币种：{", ".join(cfg.symbols) or "--"}',
@@ -390,6 +439,7 @@ def build_runtime_health_summary(cfg: Config, db: Database) -> dict:
         '---',
         f'Adaptive Rollout Orchestration：enabled={"yes" if orchestration_enabled else "no"} ｜ gate={orchestration_summary.get("gate_status") or "--"} ｜ blocked={"yes" if orchestration_summary.get("gate_blocked") else "no"}',
         f'编排执行：auto-approval {orchestration_summary.get("auto_approval_executed_count", 0)} ｜ rollout {orchestration_summary.get("controlled_rollout_executed_count", 0)} ｜ review {orchestration_summary.get("review_queue_queued_count", 0)}',
+        f'编排节流：interval={orchestration_cooldown.get("min_interval_seconds", 0)}s ｜ cooldown={"active" if orchestration_cooldown.get("active") else "idle"} ｜ remaining={orchestration_cooldown.get("remaining_seconds", 0) or 0}s',
         f'上次编排：{orchestration_runtime.get("last_run_at") or "--"} ｜ next-step {((orchestration_runtime_summary.get("next_step") or {}).get("summary") or (orchestration_runtime_summary.get("next_step") or {}).get("action") or "--")}',
     ]
     if risk.get('loss_streak_locked'):

@@ -177,9 +177,10 @@ runtime:
     approval_type: ''
     actor: system:approval-hygiene
   adaptive_rollout_orchestration:
-    enabled: false   # 默认关闭；开启后 daemon 每轮会安全执行 workflow_ready -> adaptive rollout orchestration
+    enabled: false   # 默认关闭；开启后 daemon 会安全执行 workflow_ready -> adaptive rollout orchestration
     use_cache: true
     notify_on_activity: true
+    min_interval_seconds: 0   # 生产建议设 >0，避免每轮都重放同一套 orchestration pass；0 表示沿用旧行为
     max_items: 5
     actor: system:runtime-adaptive-rollout-orchestration
 

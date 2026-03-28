@@ -41,6 +41,7 @@
 
 ## 2026-03-28 已完成：runtime orchestration summary / low-intervention entrypoint
 - 已新增统一后端运行期入口 `m5_runtime_orchestration_summary_v1`，专门把 `adaptive_rollout_orchestration + workflow operator digest + workbench governance + unified workbench overview + recovery/review queues` 收口成一份更直接可巡检的 runtime summary。
+- 2026-03-29 runtime cadence closure：daemon 侧 `runtime.adaptive_rollout_orchestration` 现补 `min_interval_seconds` 节流门闸；当上次 orchestration 仍在 cooldown 窗口内，会稳定返回/持久化 `cooldown_active + remaining_seconds + next_eligible_run_at`，避免每轮重复重放 safe orchestration pass、重复噪音通知与 follow-up 队列抖动，同时 `force` 单次执行仍可显式绕过节流。
 - 调用方而家可以一眼见到：
   - 最近自动推进了什么（`recent_progress`）
   - 当前卡在哪里（`stuck_points`）

@@ -140,6 +140,10 @@
   - 每个 item 会固定回挂 `timeline` 与 `merged_timeline` 的稳定摘要；每个 group 会给出 `item_count / filters / timeline_summary / merged_timeline_summary`，方便 dashboard / agent / 人工巡检快速看某 bucket 或某类 item 的整体 timeline 状态，而不用逐个点 detail；
   - dashboard/API 新增 `GET /api/backtest/workbench-governance-timeline-summary`，支持沿用 lane/action/risk/stage/bucket/owner/q 过滤条件，并补 `max_groups / max_items_per_group` 控制输出体积；
   - 输出保持稳定、可序列化，不做前端绑定，优先服务后端消费与低干预巡检。
+- **2026-03-28 rollout gate consumption 补强**：把既有 `auto_advance_gate / rollback_gate` 从 rollout executor plan 继续推到低干预消费层：
+  - `workflow_operator_digest` summary/attention 现直接给出 `gate_consumption`、`rollback_candidates`，调用方可以直接看哪些 item 可 auto-advance、哪些已成 rollback candidate；
+  - `workbench_governance_view / workbench item catalog / timeline summary aggregation / unified_workbench_overview` 统一回挂 `auto_advance_gate / rollback_gate` 与聚合后的 blocker / trigger 统计，调用方无须再钻 `state_machine/details`;
+  - workbench bucket/filter 继续沿用稳定 JSON，只增量补 `auto_advance_allowed / rollback_candidate` bucket tag 与 gate summary，优先服务 dashboard/API/agent 消费，不做前端。
 - **2026-03-27 provenance / timestamp 口径统一补强**：为 `approval timeline / executor action timeline / merged timeline / timeline summary aggregation` 补统一事件元数据，继续保持后向兼容：
   - 单条 event 统一补 `normalized_event_type / provenance / timestamp_info`，优先回答“这个事件究竟来自 approval DB、executor、workflow replay，定系 synthetic summary”；
   - `provenance` 固定表达 `origin / source / family / phase / producer / replay_source / synthetic`，避免调用方再靠 `source` 字符串猜来源；

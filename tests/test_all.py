@@ -6058,6 +6058,8 @@ class TestApprovalPersistence(unittest.TestCase):
         self.assertEqual(payload['operator_action_policies'][0]['operator_action_policy']['action'], 'review_schedule')
         self.assertEqual(payload['group_summaries']['by_lane'][0]['group_id'], 'manual_approval')
         self.assertEqual(payload['group_summaries']['by_lane'][0]['summary']['status_overview']['manual'], 1)
+        self.assertIn('gate_consumption', payload['summary'])
+        self.assertIn('rollback_candidates', payload['attention'])
         self.assertEqual(payload['next_actions'][0]['summary']['dominant_route'], 'manual_approval_queue')
         self.assertEqual(payload['summary']['transition_count'], 2)
         self.assertEqual(payload['transition_journal']['latest']['workflow_transition'], 'pending->ready')
@@ -6129,6 +6131,8 @@ class TestApprovalPersistence(unittest.TestCase):
         self.assertEqual(payload['summary']['bridge_mode'], 'state_apply')
         self.assertEqual(payload['summary']['approval_roles'], ['operator'])
         self.assertEqual(payload['summary']['operator_action_counts']['review_schedule'], 1)
+        self.assertIn('gate_consumption', payload['summary'])
+        self.assertIn('rollback_candidate', payload['card_index']['workflow_overview']['metrics'])
         self.assertEqual(payload['card_index']['workflow_overview']['metrics']['manual'], 1)
         self.assertEqual(payload['card_index']['execution_status']['metrics']['bridge_executed'], 1)
         self.assertLessEqual(len(payload['card_index']['key_alerts']['items']), 2)
@@ -6285,6 +6289,8 @@ class TestApprovalPersistence(unittest.TestCase):
         })
         self.assertEqual(payload['schema_version'], 'm5_workbench_governance_view_v2')
         self.assertEqual(payload['summary']['auto_batch_count'], 2)
+        self.assertIn('gate_consumption', payload['summary'])
+        self.assertIn('rollback_candidate', payload['lanes'])
         self.assertEqual(payload['summary']['blocked_count'], 1)
         self.assertEqual(payload['summary']['queued_count'], 1)
         self.assertEqual(payload['summary']['ready_count'], 1)
@@ -6406,6 +6412,7 @@ class TestApprovalPersistence(unittest.TestCase):
         self.assertEqual(payload['headline']['status'], 'attention_required')
         self.assertEqual(payload['headline']['dominant_line'], 'approval')
         self.assertEqual(payload['summary']['line_states']['approval'], 'attention_required')
+        self.assertIn('gate_consumption', payload['summary'])
         self.assertEqual(payload['summary']['line_states']['rollout'], 'blocked')
         self.assertEqual(payload['summary']['line_states']['recovery'], 'recovery_required')
         self.assertEqual(payload['lines']['approval']['counts']['pending'], 2)
@@ -6418,6 +6425,72 @@ class TestApprovalPersistence(unittest.TestCase):
         self.assertEqual(payload['summary']['transition_count'], 2)
         self.assertEqual(payload['transition_journal']['latest']['workflow_transition'], 'execution_failed->blocked')
         self.assertEqual(payload['upstreams']['workflow_recovery_view']['summary']['manual_recovery_count'], 1)
+
+    def test_gate_consumption_flows_into_operator_digest_workbench_and_timeline_layers(self):
+        gate_payload = {
+            'workflow_state': {
+                'item_states': [
+                    {
+                        'item_id': 'playbook::auto',
+                        'title': 'Auto advance item',
+                        'action_type': 'joint_stage_prepare',
+                        'risk_level': 'low',
+                        'approval_required': False,
+                        'requires_manual': False,
+                        'workflow_state': 'ready',
+                        'blocking_reasons': [],
+                        'current_rollout_stage': 'observe',
+                        'target_rollout_stage': 'guarded_prepare',
+                        'state_machine': {
+                            'auto_advance_gate': {'allowed': True, 'readiness_score': 100, 'blockers': []},
+                            'rollback_gate': {'candidate': False, 'triggered': []},
+                        },
+                    },
+                    {
+                        'item_id': 'playbook::rollback',
+                        'title': 'Rollback candidate item',
+                        'action_type': 'joint_review_schedule',
+                        'risk_level': 'critical',
+                        'approval_required': False,
+                        'requires_manual': False,
+                        'workflow_state': 'execution_failed',
+                        'blocking_reasons': ['critical_risk'],
+                        'current_rollout_stage': 'guarded',
+                        'target_rollout_stage': 'rollback_prepare',
+                        'state_machine': {
+                            'auto_advance_gate': {'allowed': False, 'readiness_score': 10, 'blockers': ['risk_level:critical', 'blocked_by:critical_risk']},
+                            'rollback_gate': {'candidate': True, 'triggered': ['execution_error', 'critical_risk'], 'next_action': 'prepare_rollback_review'},
+                            'recovery_orchestration': {'queue_bucket': 'rollback_candidate'},
+                            'recovery_policy': {'rollback_candidate': True},
+                        },
+                    },
+                ],
+                'summary': {'item_count': 2},
+            },
+            'approval_state': {
+                'items': [
+                    {'approval_id': 'approval::auto', 'playbook_id': 'playbook::auto', 'title': 'Auto advance item', 'action_type': 'joint_stage_prepare', 'approval_state': 'pending', 'decision_state': 'ready', 'risk_level': 'low', 'approval_required': False, 'requires_manual': False, 'blocked_by': []},
+                    {'approval_id': 'approval::rollback', 'playbook_id': 'playbook::rollback', 'title': 'Rollback candidate item', 'action_type': 'joint_review_schedule', 'approval_state': 'pending', 'decision_state': 'pending', 'risk_level': 'critical', 'approval_required': False, 'requires_manual': False, 'blocked_by': ['critical_risk']},
+                ],
+                'summary': {'pending_count': 2},
+            },
+            'rollout_executor': {'status': 'controlled', 'summary': {}},
+        }
+        digest = build_workflow_operator_digest(gate_payload, max_items=5)
+        self.assertEqual(digest['summary']['gate_consumption']['auto_advance_allowed_count'], 1)
+        self.assertEqual(digest['summary']['gate_consumption']['rollback_candidate_count'], 1)
+        self.assertEqual(digest['summary']['gate_consumption']['dominant_auto_advance_blocker'], 'blocked_by:critical_risk')
+        self.assertEqual(digest['attention']['rollback_candidates'][0]['item_id'], 'playbook::rollback')
+        workbench = build_workbench_governance_view(gate_payload, max_items=5)
+        self.assertEqual(workbench['summary']['rollback_candidate_count'], 1)
+        self.assertEqual(workbench['summary']['gate_consumption']['dominant_rollback_trigger'], 'critical_risk')
+        self.assertIn('rollback_candidate', workbench['lanes'])
+        self.assertEqual(workbench['lanes']['rollback_candidate']['items'][0]['rollback_gate']['next_action'], 'prepare_rollback_review')
+        timeline = build_workbench_timeline_summary_aggregation(gate_payload, max_items_per_group=5)
+        self.assertEqual(timeline['summary']['gate_consumption']['auto_advance_allowed_count'], 1)
+        rollback_group = next(row for row in timeline['groups']['by_bucket'] if row['group_id'] == 'rollback_candidate')
+        self.assertEqual(rollback_group['gate_consumption']['rollback_candidate_count'], 1)
+        self.assertEqual(rollback_group['items'][0]['rollback_gate']['next_action'], 'prepare_rollback_review')
 
     def test_build_workbench_governance_detail_view_adds_queue_approval_rollout_drilldown(self):
         payload = {

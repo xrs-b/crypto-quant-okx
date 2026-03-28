@@ -714,7 +714,30 @@ def _normalize_action_execution_status(value: Optional[str], *, workflow_state: 
     return workflow_map.get(normalized_workflow)
 
 
-def _build_operator_action_policy(*, item_id: Optional[str] = None, approval_state: Optional[str] = None, workflow_state: Optional[str] = None, queue_status: Optional[str] = None, dispatch_route: Optional[str] = None, next_transition: Optional[str] = None, blocked_by: Optional[List[str]] = None, retryable: Optional[bool] = None, rollout_stage: Optional[str] = None, target_rollout_stage: Optional[str] = None, terminal: bool = False) -> Dict[str, Any]:
+def _resolve_validation_gate_context(*rows: Any) -> Dict[str, Any]:
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        gate = row.get('validation_gate')
+        if gate:
+            return _build_validation_gate_snapshot({'validation_gate': gate})
+        for key in ('auto_advance_gate', 'rollback_gate'):
+            nested = row.get(key) or {}
+            if isinstance(nested, dict) and nested.get('validation_gate'):
+                return _build_validation_gate_snapshot({'validation_gate': nested.get('validation_gate')})
+        state_machine = row.get('state_machine') or {}
+        if isinstance(state_machine, dict):
+            gate = state_machine.get('validation_gate')
+            if gate:
+                return _build_validation_gate_snapshot({'validation_gate': gate})
+            for key in ('auto_advance_gate', 'rollback_gate'):
+                nested = state_machine.get(key) or {}
+                if isinstance(nested, dict) and nested.get('validation_gate'):
+                    return _build_validation_gate_snapshot({'validation_gate': nested.get('validation_gate')})
+    return _build_validation_gate_snapshot({})
+
+
+def _build_operator_action_policy(*, item_id: Optional[str] = None, approval_state: Optional[str] = None, workflow_state: Optional[str] = None, queue_status: Optional[str] = None, dispatch_route: Optional[str] = None, next_transition: Optional[str] = None, blocked_by: Optional[List[str]] = None, retryable: Optional[bool] = None, rollout_stage: Optional[str] = None, target_rollout_stage: Optional[str] = None, terminal: bool = False, validation_gate: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     normalized_approval = str(approval_state or 'pending').strip().lower() or 'pending'
     normalized_workflow = str(workflow_state or 'pending').strip().lower() or 'pending'
     normalized_queue = str(queue_status or '').strip().lower() or None
@@ -722,6 +745,11 @@ def _build_operator_action_policy(*, item_id: Optional[str] = None, approval_sta
     target_stage = str(target_rollout_stage or '').strip().lower() or current_stage
     blockers = _dedupe_strings(blocked_by or [])
     retry_flag = bool(retryable) if retryable is not None else normalized_workflow in {'queued', 'deferred', 'execution_failed', 'retry_pending'}
+    validation = _build_validation_gate_snapshot({'validation_gate': validation_gate}) if validation_gate else _build_validation_gate_snapshot({})
+    validation_enabled = bool(validation.get('enabled'))
+    validation_freeze = bool(validation_enabled and validation.get('freeze_auto_advance'))
+    validation_regression = bool(validation.get('regression_detected'))
+    validation_gap = int(validation.get('gap_count') or 0)
 
     action = 'observe_only_followup'
     route = dispatch_route or 'observe_only_followup'
@@ -735,6 +763,13 @@ def _build_operator_action_policy(*, item_id: Optional[str] = None, approval_sta
         route = 'terminal_observe_only'
         follow_up = 'observe_only'
         rationale.append('terminal_state_locked')
+    elif validation_regression and normalized_workflow in {'ready', 'queued', 'review_pending', 'execution_failed', 'rollback_pending', 'rolled_back'}:
+        action = 'freeze_followup'
+        route = 'rollback_candidate_queue'
+        priority = 'high'
+        owner = 'operator'
+        follow_up = 'rollback_candidate_review'
+        rationale.extend(['validation_gate_regression', 'validation_gate_rollback_candidate'])
     elif normalized_workflow in {'execution_failed', 'retry_pending'}:
         action = 'retry' if retry_flag else 'escalate'
         route = 'retry_queue' if retry_flag else 'operator_escalation'
@@ -756,6 +791,13 @@ def _build_operator_action_policy(*, item_id: Optional[str] = None, approval_sta
         owner = 'operator'
         follow_up = 'post_rollback_review'
         rationale.append('rollback_completed_needs_review')
+    elif validation_freeze and normalized_workflow in {'ready', 'queued'}:
+        action = 'review_schedule'
+        route = 'review_schedule_queue'
+        priority = 'high'
+        owner = 'operator'
+        follow_up = 'review_validation_freeze'
+        rationale.extend(['validation_gate_freeze', 'validation_gate_gap_detected' if validation_gap else 'validation_gate_not_ready'])
     elif normalized_workflow in {'blocked', 'blocked_by_approval'} or blockers:
         high_risk_blockers = {'critical_risk', 'live_rollout_parameter_change_not_supported', 'freeze_apply_not_automated_in_executor', 'policy_switch_not_automated_in_executor', 'rollout_freeze_not_automated_in_executor'}
         if normalized_workflow == 'blocked_by_approval' or normalized_approval in {'pending', 'ready', 'replayed'}:
@@ -830,6 +872,9 @@ def _build_operator_action_policy(*, item_id: Optional[str] = None, approval_sta
         follow_up = 'retry_transition'
         rationale.append('next_transition_retry')
 
+    if validation_freeze and not validation_regression and 'validation_gate_freeze' in rationale:
+        route = 'validation_review_queue'
+    summary_reason = ' / '.join(rationale or ['steady_state_observe_only'])
     return {
         'schema_version': 'm5_operator_action_policy_v1',
         'item_id': item_id,
@@ -845,12 +890,17 @@ def _build_operator_action_policy(*, item_id: Optional[str] = None, approval_sta
         'retryable': retry_flag,
         'rollout_stage': current_stage,
         'target_rollout_stage': target_stage,
+        'validation_gate': validation,
+        'validation_status': validation.get('status'),
+        'validation_freeze': validation_freeze,
+        'validation_regression': validation_regression,
+        'validation_gap_count': validation_gap,
         'reason_codes': rationale or ['steady_state_observe_only'],
-        'summary': f"{action} via {route}",
+        'summary': f"{action} via {route} ({summary_reason})",
     }
 
 
-def _build_state_machine_semantics(*, item_id: Optional[str] = None, approval_state: Optional[str] = None, workflow_state: Optional[str] = None, decision_state: Optional[str] = None, queue_status: Optional[str] = None, dispatch_route: Optional[str] = None, next_transition: Optional[str] = None, executor_status: Optional[str] = None, rollout_stage: Optional[str] = None, target_rollout_stage: Optional[str] = None, blocked_by: Optional[List[str]] = None, retryable: Optional[bool] = None, rollback_hint: Optional[str] = None, execution_status: Optional[str] = None, transition_rule: Optional[str] = None, last_transition: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def _build_state_machine_semantics(*, item_id: Optional[str] = None, approval_state: Optional[str] = None, workflow_state: Optional[str] = None, decision_state: Optional[str] = None, queue_status: Optional[str] = None, dispatch_route: Optional[str] = None, next_transition: Optional[str] = None, executor_status: Optional[str] = None, rollout_stage: Optional[str] = None, target_rollout_stage: Optional[str] = None, blocked_by: Optional[List[str]] = None, retryable: Optional[bool] = None, rollback_hint: Optional[str] = None, execution_status: Optional[str] = None, transition_rule: Optional[str] = None, last_transition: Optional[Dict[str, Any]] = None, validation_gate: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     normalized_approval = str(approval_state or decision_state or 'pending').strip().lower() or 'pending'
     normalized_workflow = _normalize_workflow_state(workflow_state, approval_state=normalized_approval, queue_status=queue_status, executor_status=executor_status)
     normalized_queue = str(queue_status or '').strip().lower() or None
@@ -887,6 +937,7 @@ def _build_state_machine_semantics(*, item_id: Optional[str] = None, approval_st
         rollout_stage=rollout_stage,
         target_rollout_stage=target_rollout_stage,
         terminal=terminal,
+        validation_gate=validation_gate,
     )
     retry_flag = bool(retryable) if retryable is not None else normalized_workflow in {'queued', 'deferred', 'execution_failed', 'retry_pending'} or normalized_execution in {'queued', 'deferred', 'error'}
     rollback_flag = bool(rollback_hint or normalized_workflow in {'ready', 'queued', 'execution_failed', 'rollback_pending'} or normalized_execution in {'applied', 'queued', 'error', 'recovered'})
@@ -960,6 +1011,7 @@ def _build_state_machine_semantics(*, item_id: Optional[str] = None, approval_st
         'execution_timeline': execution_timeline,
         'recovery_policy': recovery_policy,
         'recovery_orchestration': recovery_orchestration,
+        'validation_gate': _build_validation_gate_snapshot({'validation_gate': validation_gate}) if validation_gate else _build_validation_gate_snapshot({}),
     }
 
 
@@ -1203,6 +1255,7 @@ def _resolve_lane_routing(*, workflow_item: Optional[Dict[str, Any]] = None, app
     gates = _extract_rollout_gate_snapshot(workflow_item, approval_item, row)
     auto_gate = gates.get('auto_advance_gate') or {}
     rollback_gate = gates.get('rollback_gate') or {}
+    validation_gate = _resolve_validation_gate_context(workflow_item, approval_item, row, auto_gate, rollback_gate, state_machine)
     stage_loop = dict(stage_loop or row.get('stage_loop') or _resolve_stage_loop_snapshot(workflow_item=workflow_item, approval_item=approval_item, row=row))
     operator_action_policy = dict(operator_action_policy or state_machine.get('operator_action_policy') or row.get('operator_action_policy') or _build_operator_action_policy(
         item_id=workflow_item.get('item_id') or approval_item.get('playbook_id') or row.get('item_id'),
@@ -1216,24 +1269,32 @@ def _resolve_lane_routing(*, workflow_item: Optional[Dict[str, Any]] = None, app
         rollout_stage=current_stage,
         target_rollout_stage=target_stage,
         terminal=bool(state_machine.get('terminal')),
+        validation_gate=validation_gate,
     ))
     dispatch_route = queue_progression.get('dispatch_route') or queue_plan.get('dispatch_route') or operator_action_policy.get('route') or state_machine.get('dispatch_route')
     next_transition = queue_progression.get('next_transition') or queue_plan.get('next_transition') or stage_loop.get('next_transition') or operator_action_policy.get('follow_up') or state_machine.get('next_transition')
     queue_status = str(queue_progression.get('status') or queue_plan.get('status') or workflow_state or 'pending').strip().lower() or 'pending'
     queue_name = queue_plan.get('queue_name') or queue_progression.get('queue_name') or dispatch_route or operator_action_policy.get('route') or 'observe_only_followup'
     route_family = str(dispatch_route or operator_action_policy.get('route') or queue_name or 'observe_only_followup').strip().lower() or 'observe_only_followup'
+    validation_freeze = bool((auto_gate.get('validation_gate') or {}).get('freeze_auto_advance') or validation_gate.get('freeze_auto_advance'))
+    validation_regression = bool((rollback_gate.get('validation_gate') or {}).get('regression_detected') or 'validation_gate_regressed' in (rollback_gate.get('triggered') or []))
+    if not validation_regression and validation_gate.get('regression_detected') and workflow_state in {'ready', 'queued', 'review_pending', 'execution_failed', 'rollback_pending', 'rolled_back'}:
+        validation_regression = True
     lane_id = 'ready'
     lane_reason = 'workflow_ready_default'
-    if rollback_gate.get('candidate') or stage_loop.get('loop_state') == 'rollback_prepare' or workflow_state in {'rollback_pending', 'execution_failed', 'rolled_back'}:
+    if rollback_gate.get('candidate') or validation_regression or stage_loop.get('loop_state') == 'rollback_prepare' or workflow_state in {'rollback_pending', 'execution_failed', 'rolled_back'}:
         lane_id = 'rollback_candidate'
-        lane_reason = 'rollback_gate_or_recovery_state'
-    elif requires_manual and approval_state == 'pending' or workflow_state == 'blocked_by_approval' or route_family == 'manual_approval_queue' or stage_loop.get('loop_state') == 'review_pending' and (approval_required or requires_manual):
+        lane_reason = 'validation_gate_regression_or_recovery_state' if validation_regression else 'rollback_gate_or_recovery_state'
+    elif (requires_manual and approval_state == 'pending') or workflow_state == 'blocked_by_approval' or route_family == 'manual_approval_queue' or (stage_loop.get('loop_state') == 'review_pending' and (approval_required or requires_manual)):
         lane_id = 'manual_approval'
         lane_reason = 'manual_gate_pending'
-    elif blocked_by or workflow_state in {'blocked', 'deferred', 'review_pending'} or route_family in {'operator_escalation', 'freeze_followup_queue', 'review_schedule_queue', 'deferred_review_queue', 'deferred_hold_queue'}:
+    elif validation_freeze and operator_action_policy.get('action') == 'review_schedule':
+        lane_id = 'blocked'
+        lane_reason = 'validation_gate_frozen_review_queue'
+    elif blocked_by or workflow_state in {'blocked', 'deferred', 'review_pending'} or route_family in {'operator_escalation', 'freeze_followup_queue', 'review_schedule_queue', 'validation_review_queue', 'deferred_review_queue', 'deferred_hold_queue'}:
         lane_id = 'blocked'
         lane_reason = 'blocked_or_review_followup'
-    elif auto_gate.get('allowed') or stage_loop.get('loop_state') == 'auto_advance' or (auto_decision == 'auto_approve' and not requires_manual and not blocked_by and workflow_state in {'ready', 'queued'}):
+    elif auto_gate.get('allowed') or stage_loop.get('loop_state') == 'auto_advance' or (auto_decision == 'auto_approve' and not requires_manual and not blocked_by and workflow_state in {'ready', 'queued'} and not validation_freeze):
         lane_id = 'auto_batch'
         lane_reason = 'gate_allows_auto_advance'
     elif workflow_state == 'queued' or queue_status in {'queued', 'ready_to_queue'} or route_family in {'queue_observer', 'stage_promotion_queue', 'operator_followup_queue'}:
@@ -1247,6 +1308,13 @@ def _resolve_lane_routing(*, workflow_item: Optional[Dict[str, Any]] = None, app
         'ready': 'ready',
         'manual_approval': 'manual approval',
     }
+    summary_bits = [f"{lane_id} via {route_family} ({queue_status})"]
+    if validation_regression:
+        summary_bits.append('validation_gate=rollback_candidate')
+    elif validation_freeze:
+        summary_bits.append('validation_gate=freeze')
+    elif validation_gate.get('enabled'):
+        summary_bits.append('validation_gate=ready')
     return {
         'schema_version': 'm5_lane_routing_v1',
         'item_id': workflow_item.get('item_id') or approval_item.get('playbook_id') or row.get('item_id'),
@@ -1264,14 +1332,18 @@ def _resolve_lane_routing(*, workflow_item: Optional[Dict[str, Any]] = None, app
         'target_rollout_stage': target_stage,
         'auto_approval_decision': auto_decision,
         'auto_advance_allowed': bool(auto_gate.get('allowed')),
-        'rollback_candidate': bool(rollback_gate.get('candidate')),
+        'rollback_candidate': bool(rollback_gate.get('candidate') or validation_regression),
         'blocked_by': blocked_by,
         'stage_loop_state': stage_loop.get('loop_state'),
+        'validation_gate': validation_gate,
+        'validation_status': validation_gate.get('status'),
+        'validation_freeze': validation_freeze,
+        'validation_regression': validation_regression,
         'recommended_action': stage_loop.get('recommended_action') or operator_action_policy.get('action'),
         'operator_action': operator_action_policy.get('action'),
         'operator_route': operator_action_policy.get('route'),
         'operator_follow_up': operator_action_policy.get('follow_up'),
-        'summary': f"{lane_id} via {route_family} ({queue_status})",
+        'summary': ' / '.join(summary_bits),
     }
 
 
@@ -1610,6 +1682,7 @@ def merge_persisted_approval_state(payload: Dict, persisted_rows: Optional[List[
             execution_status=row.get('execution_status') or persisted_details.get('execution_status') if 'persisted_details' in locals() else row.get('execution_status'),
             transition_rule=row.get('transition_rule'),
             last_transition=row.get('last_transition'),
+            validation_gate=row.get('validation_gate'),
         )
         row['state_machine'] = semantics
         row['workflow_state'] = semantics['workflow_state']
@@ -1625,6 +1698,7 @@ def merge_persisted_approval_state(payload: Dict, persisted_rows: Optional[List[
             rollout_stage=row.get('current_rollout_stage') or row.get('rollout_stage'),
             target_rollout_stage=row.get('target_rollout_stage'),
             blocked_by=(row.get('blocking_reasons') or []) + (row.get('blocked_by') or []),
+            validation_gate=row.get('validation_gate'),
         )
         row['state_machine'] = semantics
         row['workflow_state'] = semantics['workflow_state']
@@ -2519,22 +2593,24 @@ def _extract_validation_gate(payload: Optional[Dict[str, Any]] = None) -> Dict[s
     )
     readiness = dict(source.get('readiness') or {}) if isinstance(source, dict) else {}
     coverage = dict(source.get('coverage_matrix') or {}) if isinstance(source, dict) else {}
+    snapshot_like = isinstance(source, dict) and any(key in source for key in ('enabled', 'ready', 'freeze_auto_advance', 'rollback_on_regression', 'reasons', 'missing_required_capabilities', 'failing_required_capabilities', 'failing_case_count'))
     ready = bool(
-        readiness.get('low_intervention_gate_ready', coverage.get('ready_for_low_intervention_gate', False))
+        source.get('ready') if snapshot_like and source.get('ready') is not None else readiness.get('low_intervention_gate_ready', coverage.get('ready_for_low_intervention_gate', False))
     )
-    missing = _dedupe_strings(readiness.get('missing_required_capabilities') or coverage.get('missing_required') or [])
-    failing = _dedupe_strings(readiness.get('failing_required_capabilities') or coverage.get('failing_required') or [])
-    failing_case_count = int(readiness.get('failing_case_count') or source.get('fail_count') or 0)
+    missing = _dedupe_strings((source.get('missing_required_capabilities') if snapshot_like else None) or readiness.get('missing_required_capabilities') or coverage.get('missing_required') or [])
+    failing = _dedupe_strings((source.get('failing_required_capabilities') if snapshot_like else None) or readiness.get('failing_required_capabilities') or coverage.get('failing_required') or [])
+    failing_case_count = int((source.get('failing_case_count') if snapshot_like else None) or readiness.get('failing_case_count') or source.get('fail_count') or 0)
     reasons = []
     reasons.extend([f'missing_required:{item}' for item in missing])
     reasons.extend([f'failing_required:{item}' for item in failing])
     if failing_case_count:
         reasons.append(f'failing_cases:{failing_case_count}')
+    enabled = bool(source.get('enabled')) if snapshot_like else bool(source)
     summary = {
-        'enabled': bool(source),
+        'enabled': enabled,
         'ready': ready,
-        'freeze_auto_advance': bool(source) and not ready,
-        'rollback_on_regression': bool(source) and not ready,
+        'freeze_auto_advance': enabled and not ready,
+        'rollback_on_regression': enabled and not ready,
         'coverage_schema_version': coverage.get('schema_version'),
         'required_capability_count': coverage.get('required_capability_count'),
         'covered_required_count': coverage.get('covered_required_count'),
@@ -2571,7 +2647,7 @@ def _build_validation_gate_snapshot(payload: Optional[Dict[str, Any]] = None) ->
         'covered_required_count': gate.get('covered_required_count'),
         'passing_required_count': gate.get('passing_required_count'),
     }
-    snapshot['regression_detected'] = bool(snapshot['enabled']) and snapshot.get('ready') is False and bool(snapshot.get('rollback_on_regression'))
+    snapshot['regression_detected'] = bool(snapshot['enabled']) and snapshot.get('ready') is False and bool(snapshot.get('rollback_on_regression')) and bool((snapshot.get('failing_required_capabilities') or []) or int(snapshot.get('failing_case_count') or 0) > 0)
     snapshot['gap_count'] = len(snapshot.get('missing_required_capabilities') or []) + len(snapshot.get('failing_required_capabilities') or [])
     snapshot['status'] = (
         'disabled' if not snapshot['enabled'] else
@@ -2647,13 +2723,24 @@ def _build_stage_loop_envelope(*, stage_handler: Optional[Dict[str, Any]] = None
     owner = str(stage_handler.get('owner') or stage_handler.get('responsible_actor') or 'unknown')
     auto_allowed = bool(auto_advance_gate.get('allowed'))
     rollback_candidate = bool(rollback_gate.get('candidate'))
+    validation_gate = _resolve_validation_gate_context(auto_advance_gate, rollback_gate, stage_handler)
+    validation_freeze = bool((auto_advance_gate.get('validation_gate') or {}).get('freeze_auto_advance') or validation_gate.get('freeze_auto_advance'))
+    validation_regression = bool((rollback_gate.get('validation_gate') or {}).get('regression_detected') or 'validation_gate_regressed' in (rollback_gate.get('triggered') or []))
     review_pending = stage_key == 'review_pending' or dispatch_route == 'review_metadata_apply' or next_transition in {'await_manual_approval', 'await_review_checkpoint'}
-    if rollback_candidate or stage_key == 'rollback_prepare':
+    waiting_on = list(stage_handler.get('waiting_on') or [])
+    why_stopped = stage_handler.get('why_stopped')
+    if validation_freeze and 'validation_gate_frozen' not in waiting_on:
+        waiting_on.append('validation_gate_frozen')
+    if validation_regression and 'validation_gate_regressed' not in waiting_on:
+        waiting_on.append('validation_gate_regressed')
+    if rollback_candidate or validation_regression or stage_key == 'rollback_prepare':
         loop_state = 'rollback_prepare'
         recommended_action = 'rollback_prepare'
-    elif review_pending:
-        loop_state = 'review_pending'
-        recommended_action = 'review_pending'
+        why_stopped = why_stopped or ('validation_gate_regressed' if validation_regression else 'rollback_gate_open')
+    elif review_pending or validation_freeze:
+        loop_state = 'review_pending' if review_pending or validation_freeze else 'hold'
+        recommended_action = 'review_schedule' if validation_freeze else 'review_pending'
+        why_stopped = why_stopped or ('validation_gate_frozen' if validation_freeze else stage_handler.get('why_stopped'))
     elif auto_allowed and owner in {'system', 'unknown'}:
         loop_state = 'auto_advance'
         recommended_action = 'auto_advance'
@@ -2669,10 +2756,14 @@ def _build_stage_loop_envelope(*, stage_handler: Optional[Dict[str, Any]] = None
         'next_transition': next_transition,
         'result_status': result_status,
         'auto_advance_allowed': auto_allowed,
-        'review_pending': review_pending,
-        'rollback_candidate': rollback_candidate,
-        'waiting_on': list(stage_handler.get('waiting_on') or []),
-        'why_stopped': stage_handler.get('why_stopped'),
+        'review_pending': review_pending or validation_freeze,
+        'rollback_candidate': rollback_candidate or validation_regression,
+        'validation_gate': validation_gate,
+        'validation_status': validation_gate.get('status'),
+        'validation_freeze': validation_freeze,
+        'validation_regression': validation_regression,
+        'waiting_on': waiting_on,
+        'why_stopped': why_stopped,
         'safe_boundary': auto_advance_gate.get('safe_boundary') or rollback_gate.get('safe_boundary'),
     }
 
@@ -2712,12 +2803,21 @@ def _resolve_stage_loop_snapshot(*, workflow_item: Optional[Dict[str, Any]] = No
         rollback_gate = state_machine.get('rollback_gate') or rollback_gate
     workflow_state = str(workflow_item.get('workflow_state') or approval_item.get('workflow_state') or row.get('workflow_state') or '').strip().lower()
     approval_required = bool(workflow_item.get('approval_required', approval_item.get('approval_required', row.get('approval_required'))))
+    validation_gate = _resolve_validation_gate_context(workflow_item, approval_item, row, state_machine)
     if not auto_advance_gate:
         auto_decision = str(workflow_item.get('auto_approval_decision') or approval_item.get('auto_approval_decision') or row.get('auto_approval_decision') or '').strip().lower()
         requires_manual = bool(workflow_item.get('requires_manual', approval_item.get('requires_manual', row.get('requires_manual'))))
         blocked_by = list(workflow_item.get('blocking_reasons') or approval_item.get('blocked_by') or row.get('blocked_by') or [])
-        if auto_decision == 'auto_approve' and not requires_manual and not blocked_by and workflow_state in {'ready', 'queued'}:
-            auto_advance_gate = {'allowed': True}
+        if validation_gate.get('freeze_auto_advance'):
+            auto_advance_gate = {'allowed': False, 'validation_gate': validation_gate, 'blockers': ['validation_gate:not_ready']}
+        elif auto_decision == 'auto_approve' and not requires_manual and not blocked_by and workflow_state in {'ready', 'queued'}:
+            auto_advance_gate = {'allowed': True, 'validation_gate': validation_gate if validation_gate.get('enabled') else {}}
+    elif validation_gate.get('enabled') and not auto_advance_gate.get('validation_gate'):
+        auto_advance_gate = {**auto_advance_gate, 'validation_gate': validation_gate}
+    if not rollback_gate and validation_gate.get('regression_detected') and workflow_state in {'ready', 'queued', 'review_pending', 'execution_failed', 'rollback_pending'}:
+        rollback_gate = {'candidate': True, 'triggered': ['validation_gate_regressed'], 'validation_gate': validation_gate}
+    elif validation_gate.get('enabled') and rollback_gate and not rollback_gate.get('validation_gate'):
+        rollback_gate = {**rollback_gate, 'validation_gate': validation_gate}
     dispatch_route = queue_progression.get('dispatch_route') or row.get('dispatch_route') or (state_machine.get('dispatch_route') if isinstance(state_machine, dict) else None)
     next_transition = queue_progression.get('next_transition') or row.get('next_transition') or (state_machine.get('next_transition') if isinstance(state_machine, dict) else None)
     if not next_transition and approval_required and workflow_state in {'blocked_by_approval', 'review_pending'}:
@@ -3717,6 +3817,8 @@ def build_workflow_consumer_view(payload: Optional[Dict] = None) -> Dict[str, An
     approval_by_playbook = {row.get('playbook_id'): row for row in approval_items if row.get('playbook_id')}
     for workflow_item in workflow_items:
         approval_item = approval_by_playbook.get(workflow_item.get('item_id')) or {}
+        if validation_gate.get('enabled') and not workflow_item.get('validation_gate'):
+            workflow_item['validation_gate'] = dict(validation_gate)
         stage_loop = _resolve_stage_loop_snapshot(workflow_item=workflow_item, approval_item=approval_item, row=workflow_item)
         operator_action_policy = (workflow_item.get('state_machine') or {}).get('operator_action_policy') or _build_operator_action_policy(
             item_id=workflow_item.get('item_id'),
@@ -3730,6 +3832,7 @@ def build_workflow_consumer_view(payload: Optional[Dict] = None) -> Dict[str, An
             rollout_stage=workflow_item.get('current_rollout_stage'),
             target_rollout_stage=workflow_item.get('target_rollout_stage'),
             terminal=bool(((workflow_item.get('state_machine') or {}) if isinstance(workflow_item.get('state_machine'), dict) else {}).get('terminal')),
+            validation_gate=_resolve_validation_gate_context(workflow_item, approval_item, {'validation_gate': validation_gate}),
         )
         lane_routing = _resolve_lane_routing(workflow_item=workflow_item, approval_item=approval_item, row=workflow_item, operator_action_policy=operator_action_policy, stage_loop=stage_loop)
         workflow_item['stage_loop'] = stage_loop
@@ -3884,6 +3987,7 @@ def build_workflow_attention_view(payload: Optional[Dict] = None, *, max_items: 
             rollout_stage=workflow_item.get('current_rollout_stage'),
             target_rollout_stage=workflow_item.get('target_rollout_stage'),
             terminal=bool(state_machine.get('terminal')),
+            validation_gate=_resolve_validation_gate_context(workflow_item, approval_item, {'validation_gate': consumer_view.get('validation_gate')}),
         )
         item_rows.append({
             'item_id': item_id,
@@ -4111,6 +4215,7 @@ def build_workflow_operator_digest(payload: Optional[Dict] = None, *, max_items:
             rollout_stage=row.get('current_rollout_stage'),
             target_rollout_stage=row.get('target_rollout_stage'),
             terminal=bool((row.get('state_machine') or {}).get('terminal')),
+            validation_gate=_resolve_validation_gate_context(workflow_item, approval_item, row, {'validation_gate': validation_gate}),
         )
         row['lane_routing'] = _resolve_lane_routing(workflow_item=workflow_item, approval_item=approval_item, row=row, operator_action_policy=row['operator_action_policy'], stage_loop=row['stage_loop'])
         row['lane_id'] = row['lane_routing'].get('lane_id')
@@ -4160,6 +4265,7 @@ def build_workflow_operator_digest(payload: Optional[Dict] = None, *, max_items:
                 rollout_stage=row.get('current_rollout_stage') or row.get('rollout_stage'),
                 target_rollout_stage=row.get('target_rollout_stage'),
                 terminal=bool((row.get('state_machine') or {}).get('terminal')),
+                validation_gate=_resolve_validation_gate_context(row, approval_item, {'validation_gate': validation_gate}),
             )
         gates = _extract_rollout_gate_snapshot(row, approval_item)
         enriched = {
@@ -4548,6 +4654,7 @@ def _build_workbench_item_catalog(payload: Optional[Dict] = None) -> Dict[str, A
             rollout_stage=current_stage,
             target_rollout_stage=target_stage,
             terminal=bool(state_machine.get('terminal')),
+            validation_gate=_resolve_validation_gate_context(workflow_item, approval_item, row, {'validation_gate': consumer_view.get('validation_gate')}),
         ))
         stage_loop = _resolve_stage_loop_snapshot(workflow_item=workflow_item, approval_item=approval_item, row=row)
         lane_routing = _resolve_lane_routing(workflow_item=workflow_item, approval_item=approval_item, row=row, operator_action_policy=operator_action_policy, stage_loop=stage_loop)

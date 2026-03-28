@@ -6080,6 +6080,49 @@ class TestApprovalPersistence(unittest.TestCase):
         self.assertTrue(payload['summary']['validation_gate']['freeze_auto_advance'])
         self.assertIn('missing_required:testnet_bridge_controlled_execute', payload['summary']['validation_gate']['reasons'])
 
+    def test_validation_gate_freeze_reroutes_operator_policy_and_stage_loop(self):
+        consumer = build_workflow_consumer_view({
+            'workflow_state': {'item_states': [{'item_id': 'playbook::guarded', 'title': 'Guarded rollout candidate', 'action_type': 'joint_stage_prepare', 'risk_level': 'low', 'approval_required': False, 'requires_manual': False, 'workflow_state': 'ready', 'blocking_reasons': [], 'current_rollout_stage': 'observe', 'target_rollout_stage': 'guarded_prepare'}], 'summary': {}},
+            'approval_state': {'items': [{'approval_id': 'approval::guarded', 'playbook_id': 'playbook::guarded', 'title': 'Guarded rollout candidate', 'action_type': 'joint_stage_prepare', 'approval_state': 'pending', 'decision_state': 'ready', 'risk_level': 'low', 'approval_required': False, 'requires_manual': False, 'blocked_by': []}], 'summary': {}},
+            'validation_replay': {'summary': {'coverage_matrix': {'schema_version': 'm5_validation_coverage_matrix_v1', 'ready_for_low_intervention_gate': False, 'required_capability_count': 8, 'covered_required_count': 7, 'passing_required_count': 7, 'missing_required': ['testnet_bridge_controlled_execute'], 'failing_required': []}, 'readiness': {'low_intervention_gate_ready': False, 'missing_required_capabilities': ['testnet_bridge_controlled_execute'], 'failing_required_capabilities': [], 'failing_case_count': 0}}},
+        })
+        item = consumer['workflow_state']['item_states'][0]
+        self.assertEqual(item['operator_action_policy']['action'], 'review_schedule')
+        self.assertEqual(item['operator_action_policy']['route'], 'validation_review_queue')
+        self.assertEqual(item['operator_action_policy']['follow_up'], 'review_validation_freeze')
+        self.assertIn('validation_gate_freeze', item['operator_action_policy']['reason_codes'])
+        self.assertEqual(item['lane_routing']['lane_id'], 'blocked')
+        self.assertEqual(item['lane_routing']['lane_reason'], 'validation_gate_frozen_review_queue')
+        self.assertEqual(item['stage_loop']['loop_state'], 'review_pending')
+        self.assertEqual(item['stage_loop']['recommended_action'], 'review_schedule')
+        self.assertIn('validation_gate_frozen', item['stage_loop']['waiting_on'])
+
+    def test_validation_gate_regression_promotes_rollback_candidate_routing(self):
+        consumer = build_workflow_consumer_view({
+            'workflow_state': {'item_states': [{'item_id': 'playbook::regressed', 'title': 'Regressed rollout candidate', 'action_type': 'joint_stage_prepare', 'risk_level': 'low', 'approval_required': False, 'requires_manual': False, 'workflow_state': 'queued', 'blocking_reasons': [], 'current_rollout_stage': 'guarded_prepare', 'target_rollout_stage': 'controlled_apply'}], 'summary': {}},
+            'approval_state': {'items': [{'approval_id': 'approval::regressed', 'playbook_id': 'playbook::regressed', 'title': 'Regressed rollout candidate', 'action_type': 'joint_stage_prepare', 'approval_state': 'pending', 'decision_state': 'ready', 'risk_level': 'low', 'approval_required': False, 'requires_manual': False, 'blocked_by': []}], 'summary': {}},
+            'validation_replay': {'summary': {'coverage_matrix': {'schema_version': 'm5_validation_coverage_matrix_v1', 'ready_for_low_intervention_gate': False, 'required_capability_count': 8, 'covered_required_count': 8, 'passing_required_count': 7, 'missing_required': [], 'failing_required': ['transition_policy_contract']}, 'readiness': {'low_intervention_gate_ready': False, 'missing_required_capabilities': [], 'failing_required_capabilities': ['transition_policy_contract'], 'failing_case_count': 1}}},
+        })
+        item = consumer['workflow_state']['item_states'][0]
+        self.assertEqual(item['operator_action_policy']['action'], 'freeze_followup')
+        self.assertEqual(item['operator_action_policy']['route'], 'rollback_candidate_queue')
+        self.assertEqual(item['operator_action_policy']['follow_up'], 'rollback_candidate_review')
+        self.assertIn('validation_gate_regression', item['operator_action_policy']['reason_codes'])
+        self.assertEqual(item['lane_routing']['lane_id'], 'rollback_candidate')
+        self.assertTrue(item['lane_routing']['validation_regression'])
+        self.assertEqual(item['stage_loop']['loop_state'], 'rollback_prepare')
+        self.assertIn('validation_gate_regressed', item['stage_loop']['waiting_on'])
+        workbench = build_workbench_governance_view({
+            'consumer_view': consumer,
+            'workflow_state': consumer['workflow_state'],
+            'approval_state': consumer['approval_state'],
+            'validation_replay': {'summary': {'coverage_matrix': {'schema_version': 'm5_validation_coverage_matrix_v1', 'ready_for_low_intervention_gate': False, 'required_capability_count': 8, 'covered_required_count': 8, 'passing_required_count': 7, 'missing_required': [], 'failing_required': ['transition_policy_contract']}, 'readiness': {'low_intervention_gate_ready': False, 'missing_required_capabilities': [], 'failing_required_capabilities': ['transition_policy_contract'], 'failing_case_count': 1}}},
+        }, max_items=5)
+        rollback_lane = workbench['lanes']['rollback_candidate']
+        self.assertEqual(rollback_lane['items'][0]['operator_action'], 'freeze_followup')
+        self.assertEqual(rollback_lane['items'][0]['operator_follow_up'], 'rollback_candidate_review')
+        self.assertEqual(rollback_lane['stage_loop']['dominant_path'], 'rollback_prepare')
+
 
     def test_build_dashboard_summary_cards_aggregates_digest_attention_and_execution(self):
         payload = build_dashboard_summary_cards({
@@ -6142,11 +6185,13 @@ class TestApprovalPersistence(unittest.TestCase):
         }, max_items=2)
         self.assertEqual(payload['schema_version'], 'm5_dashboard_summary_cards_v1')
         self.assertEqual(payload['summary']['manual_approval_count'], 1)
-        self.assertEqual(payload['summary']['queued_count'], 1)
-        self.assertEqual(payload['summary']['ready_count'], 1)
+        self.assertEqual(payload['summary']['queued_count'], 0)
+        self.assertEqual(payload['summary']['ready_count'], 0)
+        self.assertEqual(payload['summary']['rollback_candidate_count'], 2)
         self.assertEqual(payload['summary']['bridge_mode'], 'state_apply')
         self.assertEqual(payload['summary']['approval_roles'], ['operator'])
         self.assertEqual(payload['summary']['operator_action_counts']['review_schedule'], 1)
+        self.assertEqual(payload['summary']['operator_action_counts']['freeze_followup'], 2)
         self.assertIn('gate_consumption', payload['summary'])
         self.assertIn('validation_gate', payload['summary'])
         self.assertIn('validation_gate_consumption', payload['summary'])
@@ -6451,8 +6496,9 @@ class TestApprovalPersistence(unittest.TestCase):
         self.assertTrue(payload['top_next_actions'])
         self.assertEqual(payload['summary']['transition_count'], 2)
         self.assertEqual(payload['summary']['stage_loop']['rollout']['path_counts']['review_pending'], 1)
-        self.assertEqual(payload['summary']['stage_loop']['rollout']['path_counts']['hold'], 1)
-        self.assertEqual(payload['lines']['rollout']['stage_loop']['dominant_path'], 'auto_advance')
+        self.assertEqual(payload['summary']['stage_loop']['rollout']['path_counts']['rollback_prepare'], 2)
+        self.assertEqual(payload['summary']['stage_loop']['rollout']['path_counts']['hold'], 0)
+        self.assertEqual(payload['lines']['rollout']['stage_loop']['dominant_path'], 'rollback_prepare')
         self.assertEqual(payload['transition_journal']['latest']['workflow_transition'], 'execution_failed->blocked')
         self.assertEqual(payload['upstreams']['workflow_recovery_view']['summary']['manual_recovery_count'], 1)
 

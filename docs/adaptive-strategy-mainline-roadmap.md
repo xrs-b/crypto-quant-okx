@@ -327,6 +327,7 @@
 #### F1. 生产门禁与运行策略固定化
 - 固定 rollout policy versioning、promotion gate、freeze/rollback playbook
 - 建立 operator-facing runbook
+- **2026-03-28 implementation update (production rollout readiness gate)**：新增统一 `production_rollout_readiness` 入口，把 `unified_workbench_overview + workflow_alert_digest + runtime_orchestration_summary + control_plane_readiness + validation_gate + review queues` 固定成一层生产前/低干预前巡检门禁。调用方而家可以直接判断 `production_ready / can_enable_low_intervention_runtime / blocking_issues / runbook_actions`，唔使再自己横向拼 approval backlog、critical alerts、contract drift、validation freeze 同 rollback review backlog，向真正 operator-facing runbook 再收口一步。
 
 #### F2. 观测与告警分层
 - 把 operator digest / workbench / transition journal 的优先级与告警级别做分层

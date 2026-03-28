@@ -62,7 +62,7 @@ from signals.validator import SignalValidator
 from bot.run import execute_exchange_smoke, reconcile_exchange_positions, load_runtime_state
 from ml.engine import MLEngine
 from core.regime import RegimeDetector, detect_regime, Regime
-from analytics import StrategyBacktester, SignalQualityAnalyzer, ParameterOptimizer, GovernanceEngine, build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, build_transition_journal_overview, attach_auto_approval_policy, execute_controlled_rollout_layer, execute_controlled_auto_approval_layer, execute_auto_promotion_review_queue_layer, execute_adaptive_rollout_orchestration, execute_rollout_executor, build_rollout_control_plane_manifest, build_control_plane_readiness_summary, build_workflow_consumer_view, build_workflow_recovery_view, build_workflow_attention_view, build_workflow_operator_digest, build_workflow_alert_digest, build_dashboard_summary_cards, build_runtime_orchestration_summary, build_workbench_governance_view, build_workbench_governance_filter_view, build_workbench_governance_detail_view, build_workbench_merged_timeline, build_workbench_timeline_summary_aggregation, build_unified_workbench_overview, build_auto_promotion_candidate_view, build_auto_promotion_review_queue_filter_view, build_auto_promotion_review_queue_detail_view
+from analytics import StrategyBacktester, SignalQualityAnalyzer, ParameterOptimizer, GovernanceEngine, build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, build_transition_journal_overview, attach_auto_approval_policy, execute_controlled_rollout_layer, execute_controlled_auto_approval_layer, execute_auto_promotion_review_queue_layer, execute_adaptive_rollout_orchestration, execute_rollout_executor, build_rollout_control_plane_manifest, build_control_plane_readiness_summary, build_workflow_consumer_view, build_workflow_recovery_view, build_workflow_attention_view, build_workflow_operator_digest, build_workflow_alert_digest, build_dashboard_summary_cards, build_runtime_orchestration_summary, build_production_rollout_readiness, build_workbench_governance_view, build_workbench_governance_filter_view, build_workbench_governance_detail_view, build_workbench_merged_timeline, build_workbench_timeline_summary_aggregation, build_unified_workbench_overview, build_auto_promotion_candidate_view, build_auto_promotion_review_queue_filter_view, build_auto_promotion_review_queue_detail_view
 from analytics.backtest import export_calibration_payload, build_governance_workflow_ready_payload
 from analytics.mfe_mae import MFEAnalyzer, get_mfe_mae_analysis
 from core.regime_policy import summarize_observe_only_collection
@@ -2466,17 +2466,17 @@ def _load_recent_transition_journal_overview(*, limit: int = 5, approval_type: s
 def get_backtest_calibration_report():
     """获取 M5 calibration 聚合输出，默认返回 report-ready payload。"""
     view = (request.args.get('view') or 'report_ready').strip().lower()
-    if view not in {'report_ready', 'delivery', 'governance_ready', 'workflow_ready', 'operator_digest', 'workflow_alert_digest', 'dashboard_summary_cards', 'runtime_orchestration_summary', 'workbench_governance_view', 'auto_promotion_candidate_view', 'unified_workbench_overview', 'full'}:
-        return jsonify({'success': False, 'error': 'view must be one of report_ready|delivery|governance_ready|workflow_ready|operator_digest|workflow_alert_digest|dashboard_summary_cards|runtime_orchestration_summary|workbench_governance_view|auto_promotion_candidate_view|unified_workbench_overview|full'}), 400
+    if view not in {'report_ready', 'delivery', 'governance_ready', 'workflow_ready', 'operator_digest', 'workflow_alert_digest', 'dashboard_summary_cards', 'runtime_orchestration_summary', 'production_rollout_readiness', 'workbench_governance_view', 'auto_promotion_candidate_view', 'unified_workbench_overview', 'full'}:
+        return jsonify({'success': False, 'error': 'view must be one of report_ready|delivery|governance_ready|workflow_ready|operator_digest|workflow_alert_digest|dashboard_summary_cards|runtime_orchestration_summary|production_rollout_readiness|workbench_governance_view|auto_promotion_candidate_view|unified_workbench_overview|full'}), 400
 
     backtest_result = backtester.run_all(config.symbols)
     calibration_report = backtest_result.get('calibration_report') or {}
     payload = export_calibration_payload(
         calibration_report,
-        view='full' if view == 'full' else ('workflow_ready' if view in {'operator_digest', 'workflow_alert_digest', 'dashboard_summary_cards', 'runtime_orchestration_summary', 'workbench_governance_view', 'unified_workbench_overview'} else view),
+        view='full' if view == 'full' else ('workflow_ready' if view in {'operator_digest', 'workflow_alert_digest', 'dashboard_summary_cards', 'runtime_orchestration_summary', 'production_rollout_readiness', 'workbench_governance_view', 'unified_workbench_overview'} else view),
     )
-    if view in {'workflow_ready', 'operator_digest', 'workflow_alert_digest', 'dashboard_summary_cards', 'runtime_orchestration_summary', 'workbench_governance_view', 'auto_promotion_candidate_view', 'unified_workbench_overview', 'full'}:
-        workflow_payload = payload if view in {'workflow_ready', 'operator_digest', 'workflow_alert_digest', 'dashboard_summary_cards', 'runtime_orchestration_summary', 'workbench_governance_view', 'auto_promotion_candidate_view', 'unified_workbench_overview'} else (payload.get('workflow_ready') or {})
+    if view in {'workflow_ready', 'operator_digest', 'workflow_alert_digest', 'dashboard_summary_cards', 'runtime_orchestration_summary', 'production_rollout_readiness', 'workbench_governance_view', 'auto_promotion_candidate_view', 'unified_workbench_overview', 'full'}:
+        workflow_payload = payload if view in {'workflow_ready', 'operator_digest', 'workflow_alert_digest', 'dashboard_summary_cards', 'runtime_orchestration_summary', 'production_rollout_readiness', 'workbench_governance_view', 'auto_promotion_candidate_view', 'unified_workbench_overview'} else (payload.get('workflow_ready') or {})
         payload_to_persist = dict(workflow_payload)
         if payload_to_persist:
             persisted_workflow = _persist_workflow_approval_payload(payload_to_persist, replay_source=f'calibration_report:{view}')
@@ -2492,6 +2492,8 @@ def get_backtest_calibration_report():
                 payload = build_dashboard_summary_cards(persisted_workflow)
             elif view == 'runtime_orchestration_summary':
                 payload = build_runtime_orchestration_summary(persisted_workflow, transition_journal_overview=transition_journal_overview)
+            elif view == 'production_rollout_readiness':
+                payload = build_production_rollout_readiness(persisted_workflow, transition_journal_overview=transition_journal_overview)
             elif view == 'workbench_governance_view':
                 payload = build_workbench_governance_view(persisted_workflow, transition_journal_overview=transition_journal_overview)
             elif view == 'auto_promotion_candidate_view':
@@ -2516,12 +2518,13 @@ def get_backtest_calibration_report():
                 payload['operator_digest'] = build_workflow_operator_digest(persisted_workflow, transition_journal_overview=transition_journal_overview)
                 payload['dashboard_summary_cards'] = build_dashboard_summary_cards(persisted_workflow)
                 payload['runtime_orchestration_summary'] = build_runtime_orchestration_summary(persisted_workflow, transition_journal_overview=transition_journal_overview)
+                payload['production_rollout_readiness'] = build_production_rollout_readiness(persisted_workflow, transition_journal_overview=transition_journal_overview)
                 payload['workbench_governance_view'] = build_workbench_governance_view(persisted_workflow, transition_journal_overview=transition_journal_overview)
                 payload['auto_promotion_candidate_view'] = build_auto_promotion_candidate_view(persisted_workflow)
                 payload['unified_workbench_overview'] = build_unified_workbench_overview(persisted_workflow, transition_journal_overview=transition_journal_overview)
     summary = calibration_report.get('summary') or {}
     governance_ready = payload if view == 'governance_ready' else (payload.get('governance_ready') or {})
-    workflow_ready = {} if view in {'operator_digest', 'workflow_alert_digest', 'dashboard_summary_cards', 'runtime_orchestration_summary', 'workbench_governance_view', 'auto_promotion_candidate_view', 'unified_workbench_overview'} else (payload if view == 'workflow_ready' else (payload.get('workflow_ready') or {}))
+    workflow_ready = {} if view in {'operator_digest', 'workflow_alert_digest', 'dashboard_summary_cards', 'runtime_orchestration_summary', 'production_rollout_readiness', 'workbench_governance_view', 'auto_promotion_candidate_view', 'unified_workbench_overview'} else (payload if view == 'workflow_ready' else (payload.get('workflow_ready') or {}))
     return jsonify({
         'success': True,
         'view': view,
@@ -2537,6 +2540,7 @@ def get_backtest_calibration_report():
             'workflow_alert_digest': payload.get('summary') or {} if view == 'workflow_alert_digest' else (payload.get('workflow_alert_digest') or {}).get('summary') or {},
             'dashboard_summary_cards': payload.get('summary') or {} if view == 'dashboard_summary_cards' else (payload.get('dashboard_summary_cards') or {}).get('summary') or {},
             'runtime_orchestration_summary': payload.get('summary') or {} if view == 'runtime_orchestration_summary' else (payload.get('runtime_orchestration_summary') or {}).get('summary') or {},
+            'production_rollout_readiness': payload.get('summary') or {} if view == 'production_rollout_readiness' else (payload.get('production_rollout_readiness') or {}).get('summary') or {},
             'workbench_governance_view': payload.get('summary') or {} if view == 'workbench_governance_view' else (payload.get('workbench_governance_view') or {}).get('summary') or {},
             'auto_promotion_candidate_view': payload.get('summary') or {} if view == 'auto_promotion_candidate_view' else (payload.get('auto_promotion_candidate_view') or {}).get('summary') or {},
             'unified_workbench_overview': payload.get('summary') or {} if view == 'unified_workbench_overview' else (payload.get('unified_workbench_overview') or {}).get('summary') or {},
@@ -2684,6 +2688,25 @@ def get_backtest_runtime_orchestration_summary():
         'data': summary,
         'summary': summary.get('summary') or {},
         'related_summary': summary.get('related_summary') or {},
+    })
+
+
+@app.route('/api/backtest/production-rollout-readiness')
+def get_backtest_production_rollout_readiness():
+    """返回面向低干预生产推进的统一 readiness gate，固定化上线前/自动推进前巡检口径。"""
+    max_items = max(1, min(int(request.args.get('max_items', 5)), 20))
+    backtest_result = backtester.run_all(config.symbols)
+    calibration_report = backtest_result.get('calibration_report') or {}
+    payload = export_calibration_payload(calibration_report, view='workflow_ready')
+    payload = _persist_workflow_approval_payload(payload, replay_source='production_rollout_readiness_api')
+    transition_journal_overview = _load_recent_transition_journal_overview(limit=max_items)
+    readiness = build_production_rollout_readiness(payload, max_items=max_items, transition_journal_overview=transition_journal_overview)
+    return jsonify({
+        'success': True,
+        'view': 'production_rollout_readiness',
+        'data': readiness,
+        'summary': readiness.get('summary') or {},
+        'related_summary': readiness.get('related_summary') or {},
     })
 
 

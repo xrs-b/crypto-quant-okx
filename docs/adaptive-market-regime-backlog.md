@@ -1,5 +1,18 @@
 # Adaptive Market Regime Backlog
 
+## 2026-03-28 已完成：production rollout readiness / operator-facing gate
+- 已新增统一后端生产门禁入口 `m5_production_rollout_readiness_v1`，把 `unified_workbench_overview + workflow_alert_digest + runtime_orchestration_summary + control_plane_readiness + validation_gate + auto-promotion review queues` 固定收口成一份更适合生产前/低干预前巡检的 readiness gate。
+- 调用方而家可以直接见到：
+  - 是否已经 `production_ready`
+  - 是否可 `can_enable_low_intervention_runtime`
+  - 当前 `blocking_issues`
+  - 建议先做咩 `runbook_actions`
+- 已落点到：
+  - `analytics/helper.build_production_rollout_readiness()`
+  - `dashboard/api:/api/backtest/production-rollout-readiness`
+  - `dashboard/api:/api/backtest/calibration-report?view=production_rollout_readiness`
+- 已补 helper + API + calibration-report view 测试覆盖，确保生产门禁输出与相关 summary 稳定存在。
+
 ## 2026-03-28 已完成：runtime orchestration summary / low-intervention entrypoint
 - 已新增统一后端运行期入口 `m5_runtime_orchestration_summary_v1`，专门把 `adaptive_rollout_orchestration + workflow operator digest + workbench governance + unified workbench overview + recovery/review queues` 收口成一份更直接可巡检的 runtime summary。
 - 调用方而家可以一眼见到：

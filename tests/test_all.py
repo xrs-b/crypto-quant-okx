@@ -5413,6 +5413,76 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
             dashboard_api_module.db.get_transition_journal_summary = original_get_transition_journal_summary
 
 
+    def test_backtest_production_rollout_readiness_api_returns_fixed_gate(self):
+        import dashboard.api as dashboard_api_module
+        original_run_all = dashboard_api_module.backtester.run_all
+        original_persist = dashboard_api_module._persist_workflow_approval_payload
+        original_export = dashboard_api_module.export_calibration_payload
+        original_get_recent_transition_journal = dashboard_api_module.db.get_recent_transition_journal
+        original_get_transition_journal_summary = dashboard_api_module.db.get_transition_journal_summary
+        try:
+            dashboard_api_module.backtester.run_all = lambda symbols: {'calibration_report': {'summary': {'trade_count': 1, 'calibration_ready': True}}}
+            dashboard_api_module.export_calibration_payload = lambda report, view='workflow_ready': {
+                'adaptive_rollout_orchestration': {'schema_version': 'm5_adaptive_rollout_orchestration_v1', 'passes': [], 'summary': {'pass_count': 0, 'rerun_triggered': False, 'rollout_executor_applied_count': 0, 'controlled_rollout_executed_count': 0, 'auto_approval_executed_count': 0, 'review_queue_queued_count': 1}},
+                'workflow_state': {'item_states': [{'item_id': 'playbook::manual', 'title': 'Manual gate item', 'action_type': 'joint_expand_guarded', 'risk_level': 'high', 'approval_required': True, 'requires_manual': True, 'workflow_state': 'blocked_by_approval', 'blocking_reasons': []}], 'summary': {'item_count': 1}},
+                'approval_state': {'items': [{'approval_id': 'approval::manual', 'playbook_id': 'playbook::manual', 'title': 'Manual gate item', 'action_type': 'joint_expand_guarded', 'approval_state': 'pending', 'decision_state': 'pending', 'risk_level': 'high', 'approval_required': True, 'requires_manual': True, 'blocked_by': []}], 'summary': {'pending_count': 1}},
+                'rollout_executor': {'status': 'controlled', 'summary': {'applied_count': 0}, 'items': []},
+                'controlled_rollout_execution': {'mode': 'state_apply', 'executed_count': 0, 'items': []},
+                'auto_approval_execution': {'mode': 'controlled', 'executed_count': 0, 'items': []},
+            }
+            dashboard_api_module._persist_workflow_approval_payload = lambda payload, replay_source='production_rollout_readiness_api': payload
+            dashboard_api_module.db.get_recent_transition_journal = lambda **kwargs: []
+            dashboard_api_module.db.get_transition_journal_summary = lambda **kwargs: {'count': 0, 'latest_timestamp': None, 'changed_only': True, 'changed_field_counts': {}, 'workflow_transition_counts': {}}
+            client = dashboard_api_module.app.test_client()
+            response = client.get('/api/backtest/production-rollout-readiness?max_items=2')
+            self.assertEqual(response.status_code, 200)
+            payload = response.get_json()
+            self.assertEqual(payload['view'], 'production_rollout_readiness')
+            self.assertEqual(payload['data']['schema_version'], 'm5_production_rollout_readiness_v1')
+            self.assertIn('runbook_actions', payload['data'])
+            self.assertIn('control_plane_readiness', payload['related_summary'])
+            self.assertEqual(payload['summary'], payload['data']['summary'])
+        finally:
+            dashboard_api_module.backtester.run_all = original_run_all
+            dashboard_api_module._persist_workflow_approval_payload = original_persist
+            dashboard_api_module.export_calibration_payload = original_export
+            dashboard_api_module.db.get_recent_transition_journal = original_get_recent_transition_journal
+            dashboard_api_module.db.get_transition_journal_summary = original_get_transition_journal_summary
+
+    def test_backtest_calibration_report_api_supports_production_rollout_readiness_view(self):
+        import dashboard.api as dashboard_api_module
+        original_run_all = dashboard_api_module.backtester.run_all
+        original_persist = dashboard_api_module._persist_workflow_approval_payload
+        original_export = dashboard_api_module.export_calibration_payload
+        original_get_recent_transition_journal = dashboard_api_module.db.get_recent_transition_journal
+        original_get_transition_journal_summary = dashboard_api_module.db.get_transition_journal_summary
+        try:
+            dashboard_api_module.backtester.run_all = lambda symbols: {'symbols': ['BTC-USDT'], 'calibration_report': {'summary': {'trade_count': 1, 'calibration_ready': True}}}
+            dashboard_api_module.export_calibration_payload = lambda report, view='workflow_ready': {
+                'adaptive_rollout_orchestration': {'schema_version': 'm5_adaptive_rollout_orchestration_v1', 'passes': [], 'summary': {'pass_count': 0, 'rerun_triggered': False, 'rollout_executor_applied_count': 0, 'controlled_rollout_executed_count': 0, 'auto_approval_executed_count': 0, 'review_queue_queued_count': 0}},
+                'workflow_state': {'item_states': [], 'summary': {}},
+                'approval_state': {'items': [], 'summary': {}},
+                'rollout_executor': {'status': 'disabled', 'summary': {}},
+                'controlled_rollout_execution': {'mode': 'disabled', 'items': []},
+                'auto_approval_execution': {'mode': 'disabled', 'items': []},
+            }
+            dashboard_api_module._persist_workflow_approval_payload = lambda payload, replay_source='calibration_report:production_rollout_readiness': payload
+            dashboard_api_module.db.get_recent_transition_journal = lambda **kwargs: []
+            dashboard_api_module.db.get_transition_journal_summary = lambda **kwargs: {'count': 0, 'latest_timestamp': None, 'changed_only': True, 'changed_field_counts': {}, 'workflow_transition_counts': {}}
+            client = dashboard_api_module.app.test_client()
+            response = client.get('/api/backtest/calibration-report?view=production_rollout_readiness')
+            self.assertEqual(response.status_code, 200)
+            payload = response.get_json()
+            self.assertEqual(payload['view'], 'production_rollout_readiness')
+            self.assertEqual(payload['data']['schema_version'], 'm5_production_rollout_readiness_v1')
+            self.assertEqual(payload['summary']['production_rollout_readiness'], payload['data']['summary'])
+        finally:
+            dashboard_api_module.backtester.run_all = original_run_all
+            dashboard_api_module._persist_workflow_approval_payload = original_persist
+            dashboard_api_module.export_calibration_payload = original_export
+            dashboard_api_module.db.get_recent_transition_journal = original_get_recent_transition_journal
+            dashboard_api_module.db.get_transition_journal_summary = original_get_transition_journal_summary
+
     def test_backtest_workbench_governance_view_api_returns_low_intervention_snapshot(self):
         import dashboard.api as dashboard_api
 
@@ -6287,7 +6357,7 @@ class TestExecutionObservability(unittest.TestCase):
             self.assertIn('recent_decisions', snapshot['summary'])
             self.assertTrue(snapshot['summary']['observe_only_banner'])
 
-from analytics.helper import build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, attach_auto_approval_policy, execute_controlled_rollout_layer, execute_controlled_auto_approval_layer, execute_auto_promotion_review_queue_layer, execute_adaptive_rollout_orchestration, execute_rollout_executor, build_rollout_control_plane_manifest, build_control_plane_readiness_summary, build_workflow_consumer_view, build_workflow_recovery_view, build_workflow_attention_view, build_workflow_operator_digest, build_workflow_alert_digest, build_dashboard_summary_cards, build_runtime_orchestration_summary, build_workbench_governance_view, build_workbench_governance_detail_view, build_workbench_merged_timeline, build_workbench_timeline_summary_aggregation, build_unified_workbench_overview, build_auto_promotion_candidate_view, build_auto_promotion_execution_summary, build_auto_promotion_review_queue_consumption, build_auto_promotion_review_queue_filter_view, build_auto_promotion_review_queue_detail_view, _build_state_machine_semantics, _build_safe_rollout_action_registry
+from analytics.helper import build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, attach_auto_approval_policy, execute_controlled_rollout_layer, execute_controlled_auto_approval_layer, execute_auto_promotion_review_queue_layer, execute_adaptive_rollout_orchestration, execute_rollout_executor, build_rollout_control_plane_manifest, build_control_plane_readiness_summary, build_workflow_consumer_view, build_workflow_recovery_view, build_workflow_attention_view, build_workflow_operator_digest, build_workflow_alert_digest, build_dashboard_summary_cards, build_runtime_orchestration_summary, build_production_rollout_readiness, build_workbench_governance_view, build_workbench_governance_detail_view, build_workbench_merged_timeline, build_workbench_timeline_summary_aggregation, build_unified_workbench_overview, build_auto_promotion_candidate_view, build_auto_promotion_execution_summary, build_auto_promotion_review_queue_consumption, build_auto_promotion_review_queue_filter_view, build_auto_promotion_review_queue_detail_view, _build_state_machine_semantics, _build_safe_rollout_action_registry
 
 
 class TestApprovalPersistence(unittest.TestCase):
@@ -6879,6 +6949,68 @@ class TestApprovalPersistence(unittest.TestCase):
         self.assertIn('auto_promotion_candidate_queue', payload['lines']['rollout'])
         self.assertEqual(payload['transition_journal']['latest']['workflow_transition'], 'execution_failed->blocked')
         self.assertEqual(payload['upstreams']['workflow_recovery_view']['summary']['manual_recovery_count'], 1)
+
+    def test_build_production_rollout_readiness_surfaces_fixed_gate_and_runbook_actions(self):
+        payload = build_production_rollout_readiness({
+            'adaptive_rollout_orchestration': {
+                'schema_version': 'm5_adaptive_rollout_orchestration_v1',
+                'passes': [],
+                'summary': {'pass_count': 0, 'rerun_triggered': False, 'rollout_executor_applied_count': 0, 'controlled_rollout_executed_count': 0, 'auto_approval_executed_count': 0, 'review_queue_queued_count': 1},
+            },
+            'workflow_state': {
+                'item_states': [
+                    {
+                        'item_id': 'playbook::manual',
+                        'title': 'Manual gate item',
+                        'action_type': 'joint_expand_guarded',
+                        'risk_level': 'high',
+                        'approval_required': True,
+                        'requires_manual': True,
+                        'workflow_state': 'blocked_by_approval',
+                        'blocking_reasons': [],
+                        'state_machine': _build_state_machine_semantics(item_id='approval::manual', approval_state='pending', workflow_state='blocked_by_approval', dispatch_route='manual_review_queue', next_transition='await_manual_approval'),
+                    },
+                    {
+                        'item_id': 'playbook::rollback',
+                        'title': 'Rollback review item',
+                        'action_type': 'joint_stage_prepare',
+                        'risk_level': 'critical',
+                        'approval_required': False,
+                        'requires_manual': False,
+                        'workflow_state': 'execution_failed',
+                        'blocking_reasons': ['drawdown_guard'],
+                        'rollback_gate': {'candidate': True, 'triggered': ['drawdown_guard']},
+                        'state_machine': _build_state_machine_semantics(item_id='approval::rollback', approval_state='pending', workflow_state='execution_failed', execution_status='error', retryable=False, blocked_by=['drawdown_guard']),
+                    },
+                ],
+                'summary': {'item_count': 2},
+            },
+            'approval_state': {
+                'items': [
+                    {'approval_id': 'approval::manual', 'playbook_id': 'playbook::manual', 'title': 'Manual gate item', 'action_type': 'joint_expand_guarded', 'approval_state': 'pending', 'decision_state': 'pending', 'risk_level': 'high', 'approval_required': True, 'requires_manual': True, 'blocked_by': []},
+                    {'approval_id': 'approval::rollback', 'playbook_id': 'playbook::rollback', 'title': 'Rollback review item', 'action_type': 'joint_stage_prepare', 'approval_state': 'pending', 'decision_state': 'pending', 'risk_level': 'critical', 'approval_required': False, 'requires_manual': False, 'blocked_by': ['drawdown_guard']},
+                ],
+                'summary': {'pending_count': 2},
+            },
+            'auto_promotion_review_execution': {
+                'summary': {'rollback_review_queue_count': 1, 'review_due_count': 1},
+                'items': [{'item_id': 'playbook::rollback', 'queue_kind': 'rollback_review_queue'}],
+            },
+            'rollout_executor': {'status': 'controlled', 'summary': {'applied_count': 0}, 'items': []},
+            'controlled_rollout_execution': {'mode': 'state_apply', 'executed_count': 0, 'items': []},
+            'auto_approval_execution': {'mode': 'controlled', 'executed_count': 0, 'items': []},
+            'validation_replay': {'summary': {'coverage_matrix': {'schema_version': 'm5_validation_coverage_matrix_v1', 'ready_for_low_intervention_gate': False, 'required_capability_count': 8, 'covered_required_count': 7, 'passing_required_count': 6, 'missing_required': ['testnet_bridge_controlled_execute'], 'failing_required': []}, 'readiness': {'low_intervention_gate_ready': False, 'missing_required_capabilities': ['testnet_bridge_controlled_execute'], 'failing_required_capabilities': [], 'failing_case_count': 0}}},
+        }, transition_journal_overview={'schema_version': 'm5_transition_journal_overview_v1', 'summary': {'count': 0, 'latest_timestamp': None, 'changed_only': True, 'changed_field_counts': {}, 'workflow_transition_counts': {}}, 'recent_transitions': [], 'breakdown': {}})
+        self.assertEqual(payload['schema_version'], 'm5_production_rollout_readiness_v1')
+        self.assertFalse(payload['production_ready'])
+        self.assertEqual(payload['status'], 'blocked')
+        self.assertIn('manual_approval_backlog', payload['blocking_issues'])
+        self.assertIn('rollback_review_backlog', payload['blocking_issues'])
+        self.assertIn('validation_gate_not_ready', payload['blocking_issues'])
+        self.assertTrue(payload['runbook_actions'])
+        self.assertEqual(payload['runbook_actions'][0]['kind'], 'manual_approval_clearance')
+        self.assertIn('control_plane_readiness', payload['related_summary'])
+        self.assertIn('workflow_alert_digest', payload['upstreams'])
 
     def test_build_runtime_orchestration_summary_surfaces_recent_progress_stuck_points_and_followups(self):
         payload = build_runtime_orchestration_summary({

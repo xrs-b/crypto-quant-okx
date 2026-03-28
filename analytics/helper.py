@@ -8678,6 +8678,137 @@ def build_unified_workbench_overview(payload: Optional[Dict] = None, *, max_item
     payload['unified_workbench_overview'] = overview
     return overview
 
+
+def build_production_rollout_readiness(payload: Optional[Dict[str, Any]] = None, *, max_items: int = 10,
+                                       transition_journal_overview: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    payload = payload or {}
+    unified_overview = payload.get('unified_workbench_overview') or build_unified_workbench_overview(
+        payload,
+        max_items=max_items,
+        transition_journal_overview=transition_journal_overview,
+    )
+    operator_digest = payload.get('operator_digest') or build_workflow_operator_digest(
+        payload,
+        max_items=max_items,
+        transition_journal_overview=transition_journal_overview,
+    )
+    alert_digest = payload.get('workflow_alert_digest') or build_workflow_alert_digest(payload, max_items=max_items)
+    runtime_summary = payload.get('runtime_orchestration_summary') or build_runtime_orchestration_summary(
+        payload,
+        max_items=max_items,
+        transition_journal_overview=transition_journal_overview,
+    )
+
+    summary = unified_overview.get('summary') or {}
+    lines = unified_overview.get('lines') or {}
+    rollout_line = lines.get('rollout') or {}
+    approval_line = lines.get('approval') or {}
+    recovery_line = lines.get('recovery') or {}
+    control_plane_readiness = unified_overview.get('control_plane_readiness') or summary.get('control_plane_readiness') or {}
+    validation_gate = summary.get('validation_gate') or rollout_line.get('validation_gate') or {}
+    contract_drift = unified_overview.get('control_plane_contract_drift') or summary.get('control_plane_contract_drift') or {}
+    review_queues = (rollout_line.get('auto_promotion_review_queues') or summary.get('auto_promotion_review_queues') or {})
+    review_queue_summary = (review_queues.get('summary') or {}) if isinstance(review_queues, dict) else {}
+    alert_summary = alert_digest.get('summary') or {}
+    severity_counts = alert_summary.get('severity_counts') or {}
+    runtime_followups = runtime_summary.get('follow_ups') or {}
+    approval_counts = approval_line.get('counts') or summary.get('approval') or {}
+    rollout_counts = rollout_line.get('counts') or summary.get('rollout') or {}
+    recovery_counts = recovery_line.get('counts') or summary.get('recovery') or {}
+
+    blocking_issues = []
+    blocking_issues.extend(control_plane_readiness.get('blocking_issues') or [])
+    if severity_counts.get('critical', 0):
+        blocking_issues.append('critical_alerts_present')
+    if approval_counts.get('manual_approval', 0) or approval_counts.get('pending', 0):
+        blocking_issues.append('manual_approval_backlog')
+    if recovery_counts.get('rollback_candidates', 0) or review_queue_summary.get('rollback_review_queue_count', 0):
+        blocking_issues.append('rollback_review_backlog')
+    if review_queue_summary.get('review_due_count', 0):
+        blocking_issues.append('post_promotion_review_due')
+    if contract_drift.get('review_required_count', 0):
+        blocking_issues.append('control_plane_contract_review_required')
+    if validation_gate.get('enabled') and not validation_gate.get('ready'):
+        blocking_issues.append('validation_gate_not_ready')
+    blocking_issues = _dedupe_strings(blocking_issues)
+
+    gate_ready = bool(control_plane_readiness.get('can_continue_auto_promotion'))
+    rollout_clean = not any([
+        rollout_counts.get('blocked', 0),
+        recovery_counts.get('manual_recovery', 0),
+        recovery_counts.get('rollback_candidates', 0),
+        review_queue_summary.get('rollback_review_queue_count', 0),
+        review_queue_summary.get('review_due_count', 0),
+    ])
+    approval_clear = not any([approval_counts.get('manual_approval', 0), approval_counts.get('pending', 0)])
+    alert_clear = severity_counts.get('critical', 0) == 0 and severity_counts.get('high', 0) == 0
+    production_ready = gate_ready and rollout_clean and approval_clear and alert_clear
+
+    status = 'ready' if production_ready else ('blocked' if severity_counts.get('critical', 0) or review_queue_summary.get('rollback_review_queue_count', 0) or not gate_ready else 'review_required')
+    headline = {
+        'status': status,
+        'message': 'production rollout gate ready' if production_ready else ('critical blockers require manual intervention' if status == 'blocked' else 'guarded production review required'),
+        'production_ready': production_ready,
+    }
+
+    runbook_actions = []
+    if approval_counts.get('manual_approval', 0):
+        runbook_actions.append({'kind': 'manual_approval_clearance', 'priority': 'high', 'count': approval_counts.get('manual_approval', 0), 'message': f"{approval_counts.get('manual_approval', 0)} manual approval item(s) still waiting", 'route': 'manual_approval_queue', 'follow_up': 'await_manual_approval'})
+    if validation_gate.get('enabled') and not validation_gate.get('ready'):
+        runbook_actions.append({'kind': 'validation_gate_review', 'priority': 'critical' if validation_gate.get('regression_detected') else 'high', 'count': validation_gate.get('gap_count', 0), 'message': validation_gate.get('headline') or 'validation gate needs review', 'route': 'validation_review_queue' if validation_gate.get('freeze_auto_advance') else 'rollback_candidate_queue', 'follow_up': 'review_validation_freeze' if validation_gate.get('freeze_auto_advance') else 'rollback_candidate_review'})
+    if contract_drift.get('review_required_count', 0):
+        runbook_actions.append({'kind': 'control_plane_contract_review', 'priority': 'high', 'count': contract_drift.get('review_required_count', 0), 'message': f"{contract_drift.get('review_required_count', 0)} item(s) frozen by control-plane drift", 'route': 'control_plane_review', 'follow_up': 'review_control_plane_contract'})
+    if review_queue_summary.get('rollback_review_queue_count', 0):
+        runbook_actions.append({'kind': 'rollback_review_queue', 'priority': 'critical', 'count': review_queue_summary.get('rollback_review_queue_count', 0), 'message': f"{review_queue_summary.get('rollback_review_queue_count', 0)} rollback review item(s) require follow-up", 'route': 'rollback_candidate_queue', 'follow_up': 'freeze_and_review'})
+    if review_queue_summary.get('review_due_count', 0):
+        runbook_actions.append({'kind': 'post_promotion_review_due', 'priority': 'medium', 'count': review_queue_summary.get('review_due_count', 0), 'message': f"{review_queue_summary.get('review_due_count', 0)} post-promotion review item(s) are due", 'route': 'review_schedule_queue', 'follow_up': 'complete_post_promotion_review'})
+    if not runbook_actions and runtime_summary.get('next_actions'):
+        runbook_actions.extend((runtime_summary.get('next_actions') or [])[:max_items])
+
+    response = {
+        'schema_version': 'm5_production_rollout_readiness_v1',
+        'headline': headline,
+        'status': status,
+        'production_ready': production_ready,
+        'can_enable_low_intervention_runtime': production_ready,
+        'blocking_issues': blocking_issues,
+        'summary': {
+            'production_ready': production_ready,
+            'status': status,
+            'manual_approval_count': approval_counts.get('manual_approval', 0),
+            'pending_approval_count': approval_counts.get('pending', 0),
+            'critical_alert_count': severity_counts.get('critical', 0),
+            'high_alert_count': severity_counts.get('high', 0),
+            'blocked_rollout_count': rollout_counts.get('blocked', 0),
+            'rollback_candidate_count': recovery_counts.get('rollback_candidates', 0),
+            'review_due_count': review_queue_summary.get('review_due_count', 0),
+            'rollback_review_queue_count': review_queue_summary.get('rollback_review_queue_count', 0),
+            'control_plane_readiness': control_plane_readiness,
+            'validation_gate': validation_gate,
+            'control_plane_contract_drift': contract_drift,
+            'workflow_alert_digest': alert_summary,
+            'runtime_follow_ups': runtime_followups.get('summary') or runtime_followups,
+        },
+        'runbook_actions': runbook_actions[:max_items],
+        'top_alerts': (alert_digest.get('alerts') or [])[:max_items],
+        'top_next_actions': (unified_overview.get('top_next_actions') or [])[:max_items],
+        'related_summary': {
+            'control_plane_readiness': control_plane_readiness,
+            'validation_gate': validation_gate,
+            'workflow_alert_digest': alert_summary,
+            'runtime_orchestration_summary': runtime_summary.get('summary') or {},
+        },
+        'upstreams': {
+            'unified_workbench_overview': unified_overview,
+            'workflow_operator_digest': operator_digest,
+            'workflow_alert_digest': alert_digest,
+            'runtime_orchestration_summary': runtime_summary,
+        },
+    }
+    payload['production_rollout_readiness'] = response
+    return response
+
+
 def build_transition_journal_overview(*, transition_rows: Optional[List[Dict]] = None, summary: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     transition_rows = transition_rows or []
     changed_field_counts: Dict[str, int] = {}

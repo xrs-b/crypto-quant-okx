@@ -2276,6 +2276,7 @@ def _build_rollout_result_envelope(*, disposition: str, status: str, reason: Opt
 def _build_stage_loop_envelope(*, stage_handler: Optional[Dict[str, Any]] = None, auto_advance_gate: Optional[Dict[str, Any]] = None,
                                rollback_gate: Optional[Dict[str, Any]] = None, dispatch_route: Optional[str] = None,
                                next_transition: Optional[str] = None, result_status: Optional[str] = None) -> Dict[str, Any]:
+    # stable stage-loop consumer envelope for direct dashboard/api consumption
     stage_handler = dict(stage_handler or {})
     auto_advance_gate = dict(auto_advance_gate or {})
     rollback_gate = dict(rollback_gate or {})
@@ -2290,7 +2291,7 @@ def _build_stage_loop_envelope(*, stage_handler: Optional[Dict[str, Any]] = None
     elif review_pending:
         loop_state = 'review_pending'
         recommended_action = 'review_pending'
-    elif auto_allowed and owner == 'system':
+    elif auto_allowed and owner in {'system', 'unknown'}:
         loop_state = 'auto_advance'
         recommended_action = 'auto_advance'
     else:
@@ -2310,6 +2311,113 @@ def _build_stage_loop_envelope(*, stage_handler: Optional[Dict[str, Any]] = None
         'waiting_on': list(stage_handler.get('waiting_on') or []),
         'why_stopped': stage_handler.get('why_stopped'),
         'safe_boundary': auto_advance_gate.get('safe_boundary') or rollback_gate.get('safe_boundary'),
+    }
+
+
+def _resolve_stage_loop_snapshot(*, workflow_item: Optional[Dict[str, Any]] = None, approval_item: Optional[Dict[str, Any]] = None,
+                                 row: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    workflow_item = workflow_item or {}
+    approval_item = approval_item or {}
+    row = row or {}
+    stage_loop = (
+        (((workflow_item.get('result') or {}).get('stage_loop')) if isinstance(workflow_item.get('result'), dict) else None)
+        or (((workflow_item.get('plan') or {}).get('stage_loop')) if isinstance(workflow_item.get('plan'), dict) else None)
+        or workflow_item.get('stage_loop')
+        or (((approval_item.get('result') or {}).get('stage_loop')) if isinstance(approval_item.get('result'), dict) else None)
+        or (((approval_item.get('plan') or {}).get('stage_loop')) if isinstance(approval_item.get('plan'), dict) else None)
+        or approval_item.get('stage_loop')
+        or (((row.get('result') or {}).get('stage_loop')) if isinstance(row.get('result'), dict) else None)
+        or (((row.get('plan') or {}).get('stage_loop')) if isinstance(row.get('plan'), dict) else None)
+        or row.get('stage_loop')
+    )
+    if isinstance(stage_loop, dict) and stage_loop.get('loop_state'):
+        return dict(stage_loop)
+    stage_handler = (
+        (((workflow_item.get('plan') or {}).get('stage_handler')) if isinstance(workflow_item.get('plan'), dict) else None)
+        or workflow_item.get('stage_handler')
+        or approval_item.get('stage_handler')
+        or (((row.get('plan') or {}).get('stage_handler')) if isinstance(row.get('plan'), dict) else None)
+        or row.get('stage_handler')
+        or {}
+    )
+    auto_advance_gate = (workflow_item.get('auto_advance_gate') or approval_item.get('auto_advance_gate') or row.get('auto_advance_gate') or {})
+    rollback_gate = (workflow_item.get('rollback_gate') or approval_item.get('rollback_gate') or row.get('rollback_gate') or {})
+    state_machine = workflow_item.get('state_machine') or approval_item.get('state_machine') or row.get('state_machine') or {}
+    queue_progression = workflow_item.get('queue_progression') or approval_item.get('queue_progression') or row.get('queue_progression') or {}
+    if not auto_advance_gate and not rollback_gate and isinstance(state_machine, dict):
+        auto_advance_gate = state_machine.get('auto_advance_gate') or auto_advance_gate
+        rollback_gate = state_machine.get('rollback_gate') or rollback_gate
+    workflow_state = str(workflow_item.get('workflow_state') or approval_item.get('workflow_state') or row.get('workflow_state') or '').strip().lower()
+    approval_required = bool(workflow_item.get('approval_required', approval_item.get('approval_required', row.get('approval_required'))))
+    if not auto_advance_gate:
+        auto_decision = str(workflow_item.get('auto_approval_decision') or approval_item.get('auto_approval_decision') or row.get('auto_approval_decision') or '').strip().lower()
+        requires_manual = bool(workflow_item.get('requires_manual', approval_item.get('requires_manual', row.get('requires_manual'))))
+        blocked_by = list(workflow_item.get('blocking_reasons') or approval_item.get('blocked_by') or row.get('blocked_by') or [])
+        if auto_decision == 'auto_approve' and not requires_manual and not blocked_by and workflow_state in {'ready', 'queued'}:
+            auto_advance_gate = {'allowed': True}
+    dispatch_route = queue_progression.get('dispatch_route') or row.get('dispatch_route') or (state_machine.get('dispatch_route') if isinstance(state_machine, dict) else None)
+    next_transition = queue_progression.get('next_transition') or row.get('next_transition') or (state_machine.get('next_transition') if isinstance(state_machine, dict) else None)
+    if not next_transition and approval_required and workflow_state in {'blocked_by_approval', 'review_pending'}:
+        next_transition = 'await_manual_approval'
+    if not dispatch_route and workflow_state == 'review_pending':
+        dispatch_route = 'review_metadata_apply'
+    result_status = (
+        (((workflow_item.get('result') or {}).get('status')) if isinstance(workflow_item.get('result'), dict) else None)
+        or (((approval_item.get('result') or {}).get('status')) if isinstance(approval_item.get('result'), dict) else None)
+        or (((row.get('result') or {}).get('status')) if isinstance(row.get('result'), dict) else None)
+        or row.get('status')
+    )
+    return _build_stage_loop_envelope(
+        stage_handler=stage_handler,
+        auto_advance_gate=auto_advance_gate,
+        rollback_gate=rollback_gate,
+        dispatch_route=dispatch_route,
+        next_transition=next_transition,
+        result_status=result_status,
+    )
+
+
+def _summarize_stage_loop_rows(rows: Optional[List[Dict[str, Any]]] = None, *, label: Optional[str] = None,
+                               max_items: int = 5) -> Dict[str, Any]:
+    rows = list(rows or [])
+    loop_counts: Dict[str, int] = {}
+    action_counts: Dict[str, int] = {}
+    waiting_on_counts: Dict[str, int] = {}
+    stage_key_counts: Dict[str, int] = {}
+    items_by_state = {'auto_advance': [], 'review_pending': [], 'rollback_prepare': [], 'hold': []}
+    for row in rows:
+        stage_loop = row.get('stage_loop') or _resolve_stage_loop_snapshot(workflow_item=row, approval_item=row, row=row)
+        state = str(stage_loop.get('loop_state') or 'hold')
+        action = str(stage_loop.get('recommended_action') or state or 'hold')
+        loop_counts[state] = loop_counts.get(state, 0) + 1
+        action_counts[action] = action_counts.get(action, 0) + 1
+        if state in items_by_state:
+            items_by_state[state].append(row)
+        stage_key = stage_loop.get('stage_key')
+        if stage_key:
+            stage_key_counts[str(stage_key)] = stage_key_counts.get(str(stage_key), 0) + 1
+        for waiting in stage_loop.get('waiting_on') or []:
+            if waiting:
+                waiting_on_counts[str(waiting)] = waiting_on_counts.get(str(waiting), 0) + 1
+    dominant_loop_state = sorted(loop_counts.items(), key=lambda item: (-item[1], item[0]))[0][0] if loop_counts else None
+    dominant_action = sorted(action_counts.items(), key=lambda item: (-item[1], item[0]))[0][0] if action_counts else dominant_loop_state
+    path_counts = {
+        'auto_advance': loop_counts.get('auto_advance', 0),
+        'review_pending': loop_counts.get('review_pending', 0),
+        'rollback_prepare': loop_counts.get('rollback_prepare', 0),
+        'hold': loop_counts.get('hold', 0),
+    }
+    return {
+        'label': label,
+        'item_count': len(rows),
+        'loop_state_counts': loop_counts,
+        'recommended_action_counts': action_counts,
+        'dominant_loop_state': dominant_loop_state,
+        'dominant_path': dominant_action,
+        'path_counts': path_counts,
+        'stage_key_counts': stage_key_counts,
+        'waiting_on_counts': waiting_on_counts,
+        'items': {key: value[:max_items] for key, value in items_by_state.items() if value},
     }
 
 
@@ -3428,6 +3536,7 @@ def build_workflow_attention_view(payload: Optional[Dict] = None, *, max_items: 
                 'action_types': sorted({row.get('action_type') or 'unknown' for row in items}),
             },
             'operator_action_policy_summary': _summarize_operator_action_policies(items),
+            'stage_loop': _summarize_stage_loop_rows(items, label=bucket_id, max_items=max_items),
         }
 
     manual_items = [row for row in item_rows if row.get('in_manual_approval_bucket')]
@@ -3593,6 +3702,7 @@ def build_workflow_operator_digest(payload: Optional[Dict] = None, *, max_items:
         gates = _extract_rollout_gate_snapshot(workflow_item, approval_item, row.get('state_machine') or {})
         row['auto_advance_gate'] = gates.get('auto_advance_gate') or {}
         row['rollback_gate'] = gates.get('rollback_gate') or {}
+        row['stage_loop'] = _resolve_stage_loop_snapshot(workflow_item=workflow_item, approval_item=approval_item, row=row)
         row['operator_action_policy'] = (row.get('state_machine') or {}).get('operator_action_policy') or _build_operator_action_policy(
             item_id=item_id,
             approval_state=row.get('approval_state'),
@@ -3662,6 +3772,7 @@ def build_workflow_operator_digest(payload: Optional[Dict] = None, *, max_items:
             'operator_action_policy': policy,
             'auto_advance_gate': gates.get('auto_advance_gate') or {},
             'rollback_gate': gates.get('rollback_gate') or {},
+            'stage_loop': row.get('stage_loop') or _resolve_stage_loop_snapshot(workflow_item=row, approval_item=approval_item, row=row),
         }
         policy_rows.append(enriched)
 
@@ -3741,6 +3852,7 @@ def build_workflow_operator_digest(payload: Optional[Dict] = None, *, max_items:
             'deferred_count': len(deferred_items),
             'auto_advance_candidate_count': len(auto_advance_items),
             'rollback_candidate_count': len(rollback_candidate_items),
+            'stage_loop': _summarize_stage_loop_rows(policy_rows, label='workflow_operator_digest', max_items=max_items),
             'rollout_executor_status': rollout_executor.get('status') or 'disabled',
             'auto_approval_executed_count': auto_approval.get('executed_count', 0),
             'controlled_rollout_executed_count': controlled_rollout.get('executed_count', 0),
@@ -3777,6 +3889,7 @@ def build_workflow_operator_digest(payload: Optional[Dict] = None, *, max_items:
             'summary': (consumer_view.get('rollout_stage_progression') or {}).get('summary') or {},
             'items': stage_items[:max_items],
         },
+        'stage_loop': _summarize_stage_loop_rows(policy_rows, label='workflow_operator_digest', max_items=max_items),
         'transition_journal': transition_journal,
     }
     payload['operator_digest'] = digest
@@ -4004,6 +4117,7 @@ def _build_workbench_item_catalog(payload: Optional[Dict] = None) -> Dict[str, A
             target_rollout_stage=target_stage,
             terminal=bool(state_machine.get('terminal')),
         ))
+        stage_loop = _resolve_stage_loop_snapshot(workflow_item=workflow_item, approval_item=approval_item, row=row)
         bucket_tags = sorted(attention_map.get(item_id) or set())
         if lane_id == 'blocked' and 'blocked' not in bucket_tags:
             bucket_tags.append('blocked')
@@ -4055,6 +4169,7 @@ def _build_workbench_item_catalog(payload: Optional[Dict] = None) -> Dict[str, A
             'scheduled_review': workflow_item.get('scheduled_review') or approval_item.get('scheduled_review') or row.get('scheduled_review') or {},
             'auto_advance_gate': auto_advance_gate,
             'rollback_gate': rollback_gate,
+            'stage_loop': stage_loop,
             'lane_id': lane_id,
             'lane_title': lane_id.replace('_', ' '),
             'bucket_tags': sorted(set(bucket_tags)),
@@ -4911,6 +5026,7 @@ def build_workbench_timeline_summary_aggregation(payload: Optional[Dict] = None,
                 'timestamp_sources': timeline.get('timestamp_sources') or [],
                 'timestamp_phases': timeline.get('timestamp_phases') or [],
             },
+            'stage_loop': row.get('stage_loop') or _resolve_stage_loop_snapshot(workflow_item=row, approval_item=row, row=row),
             'merged_timeline': {
                 'event_count': merged_timeline.get('event_count', 0),
                 'approval_event_count': merged_timeline.get('approval_event_count', 0),
@@ -4982,6 +5098,7 @@ def build_workbench_timeline_summary_aggregation(payload: Optional[Dict] = None,
             },
             'operator_action_policy_summary': operator_policy_summary,
             'gate_consumption': gate_consumption,
+            'stage_loop': _summarize_stage_loop_rows(rows, label=group_id, max_items=max_items_per_group),
             'merged_timeline_summary': {
                 'event_count_total': merged_event_total,
                 'approval_event_count_total': approval_event_total,
@@ -5041,6 +5158,7 @@ def build_workbench_timeline_summary_aggregation(payload: Optional[Dict] = None,
             'executor_event_count_total': sum(int(row.get('merged_timeline', {}).get('executor_event_count') or 0) for row in item_summaries),
             'operator_action_policy_summary': operator_policy_summary,
             'gate_consumption': gate_consumption,
+            'stage_loop': _summarize_stage_loop_rows(item_summaries, label='timeline_summary_aggregation', max_items=max_items_per_group),
         },
         'applied_filters': {
             'lane_ids': _normalize_filter_values(lane_ids),
@@ -5103,6 +5221,14 @@ def build_workbench_governance_view(payload: Optional[Dict] = None, *, max_items
 
     filtered_view = build_workbench_governance_filter_view(payload, limit=10000, **(filters or {})) if filters else None
     active_items = (filtered_view or {}).get('items') or catalog.get('items') or []
+    unique_active_items = []
+    seen_active_item_keys = set()
+    for row in active_items:
+        key = row.get('item_id') or row.get('approval_id')
+        if key in seen_active_item_keys:
+            continue
+        seen_active_item_keys.add(key)
+        unique_active_items.append(row)
 
     lane_titles = {
         'auto_batch': 'Auto-batch candidates',
@@ -5127,6 +5253,7 @@ def build_workbench_governance_view(payload: Optional[Dict] = None, *, max_items
                 'bucket_tags': sorted({tag for row in items for tag in (row.get('bucket_tags') or [])}),
             },
             'operator_action_policy_summary': _summarize_operator_action_policies(items),
+            'stage_loop': _summarize_stage_loop_rows(items, label=bucket_id, max_items=max_items),
         }
 
     lanes = {}
@@ -5144,12 +5271,14 @@ def build_workbench_governance_view(payload: Optional[Dict] = None, *, max_items
             if not sorted_items:
                 continue
             summary = _build_low_intervention_group_summary(sorted_items, label=group_id)
+            stage_loop = _summarize_stage_loop_rows(sorted_items, label=group_id, max_items=max_items)
             summaries.append({
                 'group_type': group_type,
                 'group_id': group_id,
                 'item_count': len(sorted_items),
                 'headline': summary.get('headline'),
                 'summary': summary,
+                'stage_loop': stage_loop,
                 'items': sorted_items[:max_items],
             })
         return summaries
@@ -5226,6 +5355,7 @@ def build_workbench_governance_view(payload: Optional[Dict] = None, *, max_items
             'stage_progression': stage_summary,
             'group_summaries': {key: len(value) for key, value in group_summaries.items()},
             'gate_consumption': gate_consumption,
+            'stage_loop': _summarize_stage_loop_rows(unique_active_items, label='workbench_governance_view', max_items=max_items),
             'transition_count': (transition_journal.get('summary') or {}).get('count', 0),
             'latest_transition_at': (transition_journal.get('summary') or {}).get('latest_timestamp'),
         },
@@ -5237,6 +5367,7 @@ def build_workbench_governance_view(payload: Optional[Dict] = None, *, max_items
             'summary': stage_summary,
             'frontier': stage_frontier,
             'items': (stage_progression.get('items') or [])[:max_items],
+            'stage_loop': _summarize_stage_loop_rows((stage_progression.get('items') or []), label='rollout_stage_progression', max_items=max_items),
         },
         'recent_adjustments': recent_adjustments[:max_adjustments],
         'transition_journal': transition_journal,
@@ -5309,6 +5440,7 @@ def build_unified_workbench_overview(payload: Optional[Dict] = None, *, max_item
     queued_items = _take(((operator_digest.get('attention') or {}).get('queued') or []))
     recent_adjustments = _take(workbench_view.get('recent_adjustments') or [])
     gate_consumption = ((workbench_summary.get('gate_consumption') or (operator_digest.get('summary') or {}).get('gate_consumption')) or {})
+    workbench_stage_loop = (workbench_summary.get('stage_loop') or workbench_view.get('rollout', {}).get('stage_loop') or _summarize_stage_loop_rows(workbench_view.get('upstreams', {}).get('workflow_operator_digest', {}).get('operator_action_policies') or [], label='unified_workbench_rollout', max_items=max_items))
     retry_queue = _take(((recovery_view.get('queues') or {}).get('retry_queue') or []))
     rollback_candidates = _take(((recovery_view.get('queues') or {}).get('rollback_candidates') or []))
     manual_recovery = _take(((recovery_view.get('queues') or {}).get('manual_recovery') or []))
@@ -5395,10 +5527,12 @@ def build_unified_workbench_overview(payload: Optional[Dict] = None, *, max_item
                 'auto_advance_allowed': gate_consumption.get('auto_advance_allowed_count', 0),
                 'recent_adjustments': workbench_summary.get('recent_adjustment_count', 0),
                 'stage_paths': len((workbench_view.get('rollout') or {}).get('frontier') or []),
+                'stage_loop': workbench_stage_loop.get('path_counts') or {},
             },
             'headline_stage_frontier': _take((workbench_view.get('rollout') or {}).get('frontier') or []),
             'key_alerts': _take(approval_blocked_items + queued_items + ready_items),
             'next_actions': _take(rollout_next_actions),
+            'stage_loop': workbench_stage_loop,
         },
         'recovery': {
             'current_state': recovery_state,
@@ -5433,6 +5567,11 @@ def build_unified_workbench_overview(payload: Optional[Dict] = None, *, max_item
             'approval': lines['approval']['counts'],
             'rollout': lines['rollout']['counts'],
             'recovery': lines['recovery']['counts'],
+            'stage_loop': {
+                'approval': _summarize_stage_loop_rows(approval_manual_items + approval_blocked_items, label='approval_line', max_items=max_items),
+                'rollout': workbench_stage_loop,
+                'recovery': _summarize_stage_loop_rows(manual_recovery + rollback_candidates + retry_queue, label='recovery_line', max_items=max_items),
+            },
             'operator_action_policy_summary': (operator_digest.get('summary') or {}).get('group_summaries') or {},
             'gate_consumption': gate_consumption,
             'timeline_group_counts': {

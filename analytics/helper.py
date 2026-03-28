@@ -174,6 +174,63 @@ CONTROLLED_ROLLOUT_ACTION_SPECS = {
     },
 }
 
+ROLLOUT_STAGE_HANDLER_SPECS = {
+    'observe': {
+        'owner': 'system',
+        'auto_progression': True,
+        'enter_conditions': ['item_created', 'baseline_capture_ready'],
+        'stay_conditions': ['monitor_samples', 'collect_observability'],
+        'exit_conditions': ['readiness:ready', 'risk:low', 'auto_approval:auto_approve'],
+        'review_due_strategy': 'promote_when_ready',
+        'rollback_stage': 'observe',
+    },
+    'candidate': {
+        'owner': 'system',
+        'auto_progression': True,
+        'enter_conditions': ['candidate_selected', 'sample_window_open'],
+        'stay_conditions': ['await_more_samples', 'track_blockers'],
+        'exit_conditions': ['queue_promoted', 'no_blockers'],
+        'review_due_strategy': 'stay_candidate_until_review_ready',
+        'rollback_stage': 'observe',
+    },
+    'guarded_prepare': {
+        'owner': 'system',
+        'auto_progression': True,
+        'enter_conditions': ['stage_prepare_safe', 'metadata_apply_ready'],
+        'stay_conditions': ['await_controlled_apply_window', 'preserve_idempotency'],
+        'exit_conditions': ['controlled_apply_authorized', 'review_window_open'],
+        'review_due_strategy': 'hold_until_controlled_apply_or_review',
+        'rollback_stage': 'observe',
+    },
+    'controlled_apply': {
+        'owner': 'system',
+        'auto_progression': True,
+        'enter_conditions': ['controlled_apply_started', 'safe_boundary_confirmed'],
+        'stay_conditions': ['collect_post_apply_samples', 'watch_transition_journal'],
+        'exit_conditions': ['review_checkpoint_scheduled', 'samples_collected'],
+        'review_due_strategy': 'move_to_review_pending',
+        'rollback_stage': 'guarded_prepare',
+    },
+    'review_pending': {
+        'owner': 'operator',
+        'auto_progression': False,
+        'enter_conditions': ['review_scheduled'],
+        'stay_conditions': ['await_review_checkpoint', 'compare_post_apply_metrics'],
+        'exit_conditions': ['review_passed', 'manual_ack_or_policy_refresh'],
+        'review_due_strategy': 'manual_review_required',
+        'rollback_stage': 'rollback_prepare',
+    },
+    'rollback_prepare': {
+        'owner': 'operator',
+        'auto_progression': False,
+        'enter_conditions': ['rollback_candidate', 'rollback_gate_triggered'],
+        'stay_conditions': ['freeze_further_progression', 'prepare_recovery_context'],
+        'exit_conditions': ['rollback_executed', 'manual_recovery_complete'],
+        'review_due_strategy': 'immediate_manual_escalation',
+        'rollback_stage': 'observe',
+    },
+}
+
 ROLLOUT_EXECUTOR_ACTION_SPECS = {
     'joint_observe': {
         **CONTROLLED_ROLLOUT_ACTION_SPECS['joint_observe'],
@@ -1431,6 +1488,78 @@ def _resolve_safe_rollout_handler(spec: Optional[Dict[str, Any]] = None, action_
     return fallback
 
 
+def _resolve_rollout_stage_handler(*, current_stage: Optional[str], target_stage: Optional[str], action_type: Optional[str],
+                                  workflow_state: Optional[str], blocked_by: Optional[List[str]] = None,
+                                  review_due_at: Optional[str] = None, rollback_candidate: bool = False) -> Dict[str, Any]:
+    blocked = _dedupe_strings(blocked_by or [])
+    normalized_current = str(current_stage or '').strip().lower() or 'observe'
+    normalized_target = str(target_stage or '').strip().lower() or normalized_current
+    stage_key = normalized_target if normalized_target in ROLLOUT_STAGE_HANDLER_SPECS else normalized_current
+    spec = dict(ROLLOUT_STAGE_HANDLER_SPECS.get(stage_key) or ROLLOUT_STAGE_HANDLER_SPECS['observe'])
+    owner = spec.get('owner') or ('operator' if rollback_candidate else 'system')
+    review_overdue = False
+    if review_due_at:
+        try:
+            due_dt = datetime.fromisoformat(str(review_due_at).replace('Z', '+00:00'))
+            review_overdue = due_dt <= datetime.now(timezone.utc)
+        except Exception:
+            review_overdue = False
+    waiting_on = []
+    if blocked:
+        waiting_on.extend([f'blocked_by:{code}' for code in blocked])
+    normalized_workflow_state = str(workflow_state or '').strip().lower()
+    if normalized_workflow_state in {'blocked', 'blocked_by_approval', 'execution_failed', 'rollback_pending'}:
+        waiting_on.append(f'workflow_state:{normalized_workflow_state}')
+    if review_overdue:
+        waiting_on.append('review_overdue')
+    if rollback_candidate and 'rollback_gate_triggered' not in waiting_on:
+        waiting_on.append('rollback_gate_triggered')
+    why_stopped = 'ready_for_progression'
+    if review_overdue:
+        why_stopped = 'review_checkpoint_overdue'
+    elif rollback_candidate:
+        why_stopped = 'rollback_gate_open'
+    elif blocked:
+        why_stopped = 'stage_blocked_by_preconditions'
+    elif normalized_workflow_state in {'blocked_by_approval', 'execution_failed'}:
+        why_stopped = f'workflow_state:{normalized_workflow_state}'
+    next_transition = 'continue_monitoring'
+    if rollback_candidate:
+        next_transition = 'prepare_rollback_review'
+    elif stage_key == 'observe':
+        next_transition = 'promote_candidate' if not waiting_on else 'continue_observe'
+    elif stage_key == 'candidate':
+        next_transition = 'queue_safe_promotion' if not waiting_on else 'wait_for_candidate_readiness'
+    elif stage_key == 'guarded_prepare':
+        next_transition = 'promote_to_controlled_apply' if not waiting_on else 'hold_guarded_prepare'
+    elif stage_key == 'controlled_apply':
+        next_transition = 'move_to_review_pending' if not waiting_on else 'collect_post_apply_samples'
+    elif stage_key == 'review_pending':
+        next_transition = 'complete_review_checkpoint' if not waiting_on and not review_overdue else 'await_review_checkpoint'
+    elif stage_key == 'rollback_prepare':
+        next_transition = 'execute_or_queue_rollback'
+    return {
+        'stage_key': stage_key,
+        'current_stage': normalized_current,
+        'target_stage': normalized_target,
+        'owner': owner,
+        'auto_progression': bool(spec.get('auto_progression', False) and owner == 'system' and not rollback_candidate),
+        'enter_conditions': spec.get('enter_conditions') or [],
+        'stay_conditions': spec.get('stay_conditions') or [],
+        'exit_conditions': spec.get('exit_conditions') or [],
+        'review_due_strategy': spec.get('review_due_strategy'),
+        'rollback_stage': spec.get('rollback_stage') or 'observe',
+        'rollback_candidate': bool(rollback_candidate),
+        'review_due_at': review_due_at,
+        'review_overdue': review_overdue,
+        'waiting_on': waiting_on,
+        'why_stopped': why_stopped,
+        'next_transition': next_transition,
+        'responsible_actor': owner,
+        'action_type': str(action_type or '').strip().lower() or None,
+    }
+
+
 def _build_rollout_gate_policy(spec: Optional[Dict[str, Any]], handler: Optional[Dict[str, Any]], *, allowlisted: bool) -> Dict[str, Any]:
     spec = dict(spec or {})
     handler = dict(handler or {})
@@ -1536,6 +1665,15 @@ def _evaluate_rollout_gates(*, action_type: str, row: Dict[str, Any], workflow_i
     if review_overdue:
         rollback_triggers.append('review_overdue')
     rollback_candidate = bool(spec.get('rollback_capable', False) and rollback_triggers)
+    stage_handler = _resolve_rollout_stage_handler(
+        current_stage=transition_rule.get('rollout_stage') or row.get('current_rollout_stage') or workflow_item.get('current_rollout_stage'),
+        target_stage=transition_rule.get('target_rollout_stage') or row.get('target_rollout_stage') or workflow_item.get('target_rollout_stage'),
+        action_type=action_type,
+        workflow_state=current_workflow_state,
+        blocked_by=blocked,
+        review_due_at=review_due_at,
+        rollback_candidate=rollback_candidate,
+    )
     return {
         'auto_advance_gate': {
             'allowed': auto_allowed,
@@ -1565,6 +1703,7 @@ def _evaluate_rollout_gates(*, action_type: str, row: Dict[str, Any], workflow_i
             'rollback_hint': transition_rule.get('rollback_hint') or 'restore_previous_state_from_approval_timeline',
             'explain': 'rollback opens on execution error, rollback pending, critical risk, blocked transition, or overdue review',
         },
+        'stage_handler': stage_handler,
     }
 
 
@@ -1659,8 +1798,13 @@ def _build_controlled_rollout_action_details(action_type: str, row: Dict, workfl
             'stage_model': workflow_item.get('stage_model') or row.get('stage_model') or {},
             'queue_progression': workflow_item.get('queue_progression') or row.get('queue_progression') or {},
             'stage_handler': {
-                'current_stage': previous_stage,
-                'target_stage': target_stage,
+                **_resolve_rollout_stage_handler(
+                    current_stage=previous_stage,
+                    target_stage=target_stage,
+                    action_type=action_type,
+                    workflow_state=workflow_item.get('workflow_state') or row.get('workflow_state') or 'pending',
+                    blocked_by=row.get('blocked_by') or workflow_item.get('blocked_by') or workflow_item.get('blocking_reasons') or [],
+                ),
                 'disposition': handler.get('disposition'),
                 'route': handler.get('route'),
             },
@@ -2211,6 +2355,13 @@ def _resolve_rollout_transition_rule(*, action_type: str, row: Dict[str, Any], w
             'readiness': readiness,
         }
     if action_type == 'joint_stage_prepare':
+        stage_handler = _resolve_rollout_stage_handler(
+            current_stage=rollout_stage,
+            target_stage=target_rollout_stage,
+            action_type=action_type,
+            workflow_state=current_workflow_state,
+            blocked_by=blocked,
+        )
         return {
             'transition_rule': 'stage_prepare_ready_for_safe_apply',
             'dispatch_route': 'stage_metadata_apply',
@@ -2220,28 +2371,47 @@ def _resolve_rollout_transition_rule(*, action_type: str, row: Dict[str, Any], w
             'rollout_stage': rollout_stage,
             'target_rollout_stage': target_rollout_stage,
             'readiness': readiness,
+            'stage_handler': stage_handler,
         }
     if action_type == 'joint_queue_promote_safe':
+        stage_handler = _resolve_rollout_stage_handler(
+            current_stage=rollout_stage,
+            target_stage=target_rollout_stage or 'candidate',
+            action_type=action_type,
+            workflow_state=current_workflow_state,
+            blocked_by=blocked,
+        )
         return {
             'transition_rule': 'queue_promotion_ready_for_safe_apply',
             'dispatch_route': 'queue_metadata_apply',
-            'next_transition': 'mark_queue_promoted_and_wait_review',
+            'next_transition': stage_handler.get('next_transition') or 'mark_queue_promoted_and_wait_review',
             'retryable': True,
             'rollback_hint': 'demote_queue_priority_and_restore_previous_progression',
             'rollout_stage': rollout_stage,
             'target_rollout_stage': target_rollout_stage,
             'readiness': readiness,
+            'stage_handler': stage_handler,
         }
     if action_type == 'joint_review_schedule':
+        review_due_at = row.get('review_due_at') or workflow_item.get('review_due_at')
+        stage_handler = _resolve_rollout_stage_handler(
+            current_stage=rollout_stage,
+            target_stage=target_rollout_stage or 'review_pending',
+            action_type=action_type,
+            workflow_state=current_workflow_state,
+            blocked_by=blocked,
+            review_due_at=review_due_at,
+        )
         return {
             'transition_rule': 'schedule_review_checkpoint',
             'dispatch_route': 'review_metadata_apply',
-            'next_transition': 'wait_for_review_checkpoint',
+            'next_transition': stage_handler.get('next_transition') or 'wait_for_review_checkpoint',
             'retryable': True,
             'rollback_hint': 'clear_scheduled_review_and_return_to_previous_stage',
             'rollout_stage': rollout_stage,
             'target_rollout_stage': target_rollout_stage,
             'readiness': readiness,
+            'stage_handler': stage_handler,
         }
     return {
         'transition_rule': 'safe_apply_ready',
@@ -2586,6 +2756,7 @@ def execute_rollout_executor(payload: Dict, db: Any, *, config: Any = None, sett
             'rollout_stage': transition_rule.get('rollout_stage'),
             'target_rollout_stage': transition_rule.get('target_rollout_stage'),
             'readiness': transition_rule.get('readiness'),
+            'stage_handler': transition_rule.get('stage_handler') or rollout_gates.get('stage_handler') or {},
             'execution_status': _normalize_action_execution_status(None, workflow_state=current_workflow_state, queue_status=((workflow_item.get('queue_progression') or {}).get('status') if isinstance(workflow_item.get('queue_progression'), dict) else None)),
             'auto_advance_gate': rollout_gates.get('auto_advance_gate') or {},
             'rollback_gate': rollout_gates.get('rollback_gate') or {},
@@ -2614,6 +2785,7 @@ def execute_rollout_executor(payload: Dict, db: Any, *, config: Any = None, sett
             'next_transition': transition_rule.get('next_transition'),
             'retryable': bool(transition_rule.get('retryable', True)),
             'rollback_hint': transition_rule.get('rollback_hint'),
+            'stage_handler': transition_rule.get('stage_handler') or rollout_gates.get('stage_handler') or {},
             'auto_advance_gate': rollout_gates.get('auto_advance_gate') or {},
             'rollback_gate': rollout_gates.get('rollback_gate') or {},
         }
@@ -2931,6 +3103,7 @@ def build_rollout_stage_progression(payload: Optional[Dict] = None, executor: Op
                 'retryable': bool(plan.get('retryable', result.get('retryable', True))),
                 'rollback_hint': plan.get('rollback_hint') or result.get('rollback_hint') or dispatch.get('rollback_hint'),
                 'readiness': plan.get('readiness') or workflow_item.get('workflow_state') or approval_item.get('workflow_state') or 'pending',
+                'stage_handler': plan.get('stage_handler') or {},
             },
             'queue_plan': plan.get('queue_plan') or {},
             'dispatch': dispatch,
@@ -4122,6 +4295,7 @@ def _build_workbench_rollout_handler_drilldown(item: Dict[str, Any], workflow_it
             'target_stage': target_stage,
             'readiness': plan.get('readiness') or workflow_item.get('workflow_state') or approval_item.get('workflow_state') or 'pending',
             'retryable': bool(plan.get('retryable', result.get('retryable', dispatch.get('retryable', True)))),
+            'stage_handler': plan.get('stage_handler') or {},
         },
     }
 

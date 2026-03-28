@@ -60,6 +60,7 @@
 - **M5.2 已完成**：approval persistence / replay、workbench / digest / attention / timeline / transition journal 等消费层主入口已经成形
 - **M5.3 进行中 / 待继续**：从“可治理、可汇总、可安全 state-apply”进一步推进到“**safe rollout action executor registry + richer stage handlers + 更明确的自动推进边界**”
 - **2026-03-28 implementation update**：rollout executor 现已把 `auto_advance_gate / rollback_gate` 作为稳定结构接入 `action_registry + executor plan/audit/details`，统一输出 `readiness_score / blockers / manual_required / review_window_open / rollback triggers / idempotency_rule`，令 safe handler 不止知道“可做什么”，仲知道“几时可以自动推、几时应该停或准备回滚”。
+- **2026-03-28 implementation update (stage handlers)**：新增 richer rollout stage handler 语义，覆盖 `observe / candidate / guarded_prepare / controlled_apply / review_pending / rollback_prepare`；executor plan / stage progression / persisted details 现在会统一暴露 `owner / auto_progression / waiting_on / why_stopped / next_transition / rollback_stage`，令系统可以更明确回答“当前卡在哪里、谁负责推进、下一步系继续推进、等 review，定准备 rollback”。
 
 换句话说：
 

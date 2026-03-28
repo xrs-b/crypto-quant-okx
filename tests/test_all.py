@@ -7936,6 +7936,71 @@ class TestApprovalPersistence(unittest.TestCase):
             self.assertFalse(blocked_gate['allowed'])
             self.assertIn('risk_level:critical', blocked_gate['blockers'])
 
+    def test_rollout_executor_stage_handlers_expose_owner_waiting_points_and_next_transition(self):
+        class StubConfig:
+            def __init__(self, values=None):
+                self.values = values or {}
+
+            def get(self, key, default=None):
+                return self.values.get(key, default)
+
+        config = StubConfig({
+            'governance.rollout_executor': {
+                'enabled': True,
+                'mode': 'controlled',
+                'allowed_action_types': ['joint_stage_prepare', 'joint_review_schedule'],
+            }
+        })
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(str(Path(tmpdir) / 'rollout_stage_handlers.db'))
+            payload = {
+                'workflow_state': {'item_states': [
+                    {
+                        'item_id': 'playbook::stage', 'title': 'Stage prepare item', 'action_type': 'joint_stage_prepare',
+                        'decision': 'expand', 'governance_mode': 'rollout', 'risk_level': 'low', 'approval_required': False,
+                        'blocking_reasons': [], 'preconditions': [], 'workflow_state': 'pending', 'confidence': 'high',
+                        'current_rollout_stage': 'observe', 'target_rollout_stage': 'guarded_prepare'
+                    },
+                    {
+                        'item_id': 'playbook::review', 'title': 'Review item', 'action_type': 'joint_review_schedule',
+                        'decision': 'expand', 'governance_mode': 'rollout', 'risk_level': 'critical', 'approval_required': False,
+                        'blocking_reasons': [], 'preconditions': [], 'workflow_state': 'execution_failed', 'confidence': 'high',
+                        'current_rollout_stage': 'controlled_apply', 'target_rollout_stage': 'review_pending', 'review_due_at': '2020-01-01T00:00:00Z'
+                    },
+                ], 'summary': {}},
+                'approval_state': {'items': [
+                    {
+                        'approval_id': 'approval::stage', 'playbook_id': 'playbook::stage', 'title': 'Stage prepare item',
+                        'action_type': 'joint_stage_prepare', 'approval_state': 'pending', 'decision_state': 'pending',
+                        'risk_level': 'low', 'approval_required': False, 'blocked_by': []
+                    },
+                    {
+                        'approval_id': 'approval::review', 'playbook_id': 'playbook::review', 'title': 'Review item',
+                        'action_type': 'joint_review_schedule', 'approval_state': 'pending', 'decision_state': 'pending',
+                        'risk_level': 'critical', 'approval_required': False, 'blocked_by': [], 'review_due_at': '2020-01-01T00:00:00Z'
+                    },
+                ], 'summary': {}},
+            }
+            payload = attach_auto_approval_policy(payload)
+            db.sync_approval_items(build_workflow_approval_records(payload), replay_source='unit-test')
+            result = execute_rollout_executor(payload, db, config=config, replay_source='unit-test-replay')
+            items = {row['item_id']: row for row in result['rollout_executor']['items']}
+            stage_handler = items['approval::stage']['plan']['stage_handler']
+            self.assertEqual(stage_handler['stage_key'], 'guarded_prepare')
+            self.assertEqual(stage_handler['owner'], 'system')
+            self.assertTrue(stage_handler['auto_progression'])
+            self.assertEqual(stage_handler['next_transition'], 'promote_to_controlled_apply')
+            review_handler = items['approval::review']['plan']['stage_handler']
+            self.assertEqual(review_handler['stage_key'], 'review_pending')
+            self.assertEqual(review_handler['owner'], 'operator')
+            self.assertTrue(review_handler['rollback_candidate'])
+            self.assertIn('review_overdue', review_handler['waiting_on'])
+            self.assertIn('rollback_gate_triggered', review_handler['waiting_on'])
+            self.assertEqual(review_handler['why_stopped'], 'review_checkpoint_overdue')
+            self.assertEqual(items['approval::review']['plan']['rollback_gate']['next_action'], 'prepare_rollback_review')
+            stage_progression = result['rollout_executor']['stage_progression']['items'][1]['stage_progression']
+            self.assertEqual(stage_progression['stage_handler']['responsible_actor'], 'operator')
+
     def test_rollout_executor_marks_unknown_actions_as_unsupported_with_fallback_handler(self):
         class StubConfig:
             def __init__(self, values=None):

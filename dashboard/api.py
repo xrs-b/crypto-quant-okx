@@ -103,7 +103,9 @@ def _persist_workflow_approval_payload(payload: Dict[str, Any], replay_source: s
     persisted_rows = [row for row in persisted_rows if row]
     payload = attach_auto_approval_policy(merge_persisted_approval_state(payload, persisted_rows))
     payload = execute_rollout_executor(payload, db, config=config, replay_source=replay_source)
-    payload = attach_auto_approval_policy(payload)
+    refreshed_rows = [db.get_approval_state(row.get('item_id')) for row in approval_records if row.get('item_id')]
+    refreshed_rows = [row for row in refreshed_rows if row]
+    payload = attach_auto_approval_policy(merge_persisted_approval_state(payload, refreshed_rows))
     payload = execute_controlled_rollout_layer(payload, db, config=config, replay_source=replay_source)
     payload = attach_auto_approval_policy(payload)
     payload = execute_controlled_auto_approval_layer(payload, db, config=config, replay_source=replay_source)
@@ -2962,11 +2964,30 @@ def get_approval_state_machine_list():
     items = []
     phase_counts = {}
     workflow_counts = {}
+    validation_status_counts = {}
+    validation_freeze_reason_counts = {}
+    rollback_trigger_counts = {}
     for row in rows:
         semantics = ((row.get('details') or {}).get('state_machine') or {})
         phase = semantics.get('phase') or 'unknown'
         workflow_state = semantics.get('workflow_state') or row.get('workflow_state') or 'pending'
         execution_status = semantics.get('execution_status') or ((row.get('details') or {}).get('execution_status') if isinstance(row.get('details'), dict) else None) or 'unknown'
+        validation_gate = (
+            ((row.get('details') or {}).get('validation_gate') if isinstance(row.get('details'), dict) else None)
+            or (((row.get('details') or {}).get('auto_advance_gate') or {}).get('validation_gate') if isinstance((row.get('details') or {}).get('auto_advance_gate'), dict) else None)
+            or (((row.get('details') or {}).get('rollback_gate') or {}).get('validation_gate') if isinstance((row.get('details') or {}).get('rollback_gate'), dict) else None)
+            or (semantics.get('validation_gate') if isinstance(semantics, dict) else None)
+            or {}
+        )
+        validation_status = 'disabled'
+        if validation_gate:
+            validation_status = 'ready' if validation_gate.get('ready') else 'frozen'
+        validation_status_counts[validation_status] = validation_status_counts.get(validation_status, 0) + 1
+        for reason in (validation_gate.get('reasons') or []):
+            validation_freeze_reason_counts[str(reason)] = validation_freeze_reason_counts.get(str(reason), 0) + 1
+        rollback_gate = ((row.get('details') or {}).get('rollback_gate') if isinstance(row.get('details'), dict) else None) or (semantics.get('rollback_gate') if isinstance(semantics, dict) else None) or {}
+        for trigger in (rollback_gate.get('triggered') or []):
+            rollback_trigger_counts[str(trigger)] = rollback_trigger_counts.get(str(trigger), 0) + 1
         phase_counts[phase] = phase_counts.get(phase, 0) + 1
         workflow_counts[workflow_state] = workflow_counts.get(workflow_state, 0) + 1
         items.append({
@@ -2983,6 +3004,8 @@ def get_approval_state_machine_list():
             'execution_status': execution_status,
             'execution_timeline': (semantics.get('execution_timeline') or {}),
             'recovery_policy': (semantics.get('recovery_policy') or {}),
+            'validation_gate': validation_gate,
+            'rollback_gate': rollback_gate,
             'state_machine': semantics,
         })
     recovery_policy_counts = {policy: sum(1 for row in items if ((row.get('recovery_policy') or {}).get('policy') or 'observe') == policy) for policy in sorted({((row.get('recovery_policy') or {}).get('policy') or 'observe') for row in items})}
@@ -2991,6 +3014,9 @@ def get_approval_state_machine_list():
         'phase_counts': phase_counts,
         'workflow_state_counts': workflow_counts,
         'execution_status_counts': {status: sum(1 for row in items if row.get('execution_status') == status) for status in sorted({row.get('execution_status') for row in items if row.get('execution_status')})},
+        'validation_status_counts': validation_status_counts,
+        'validation_freeze_reason_counts': validation_freeze_reason_counts,
+        'rollback_trigger_counts': rollback_trigger_counts,
         'recovery_policy_counts': recovery_policy_counts,
         'recovered_count': sum(1 for row in items if (row.get('execution_timeline') or {}).get('recovered')),
         'rollback_candidate_count': sum(1 for row in items if (row.get('state_machine') or {}).get('rollback_candidate')),

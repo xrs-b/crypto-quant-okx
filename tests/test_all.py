@@ -6138,6 +6138,7 @@ class TestApprovalPersistence(unittest.TestCase):
             'rollout_executor': {'status': 'controlled', 'summary': {'by_disposition': {'queued': 1}}},
             'controlled_rollout_execution': {'mode': 'state_apply', 'executed_count': 1, 'skipped_count': 2},
             'auto_approval_execution': {'mode': 'dry_run', 'executed_count': 0, 'skipped_count': 1},
+            'validation_replay': {'summary': {'coverage_matrix': {'schema_version': 'm5_validation_coverage_matrix_v1', 'ready_for_low_intervention_gate': False, 'required_capability_count': 8, 'covered_required_count': 7, 'passing_required_count': 6, 'missing_required': ['testnet_bridge_controlled_execute'], 'failing_required': ['transition_policy_contract']}, 'readiness': {'low_intervention_gate_ready': False, 'missing_required_capabilities': ['testnet_bridge_controlled_execute'], 'failing_required_capabilities': ['transition_policy_contract'], 'failing_case_count': 1}}},
         }, max_items=2)
         self.assertEqual(payload['schema_version'], 'm5_dashboard_summary_cards_v1')
         self.assertEqual(payload['summary']['manual_approval_count'], 1)
@@ -6147,7 +6148,10 @@ class TestApprovalPersistence(unittest.TestCase):
         self.assertEqual(payload['summary']['approval_roles'], ['operator'])
         self.assertEqual(payload['summary']['operator_action_counts']['review_schedule'], 1)
         self.assertIn('gate_consumption', payload['summary'])
+        self.assertIn('validation_gate', payload['summary'])
+        self.assertIn('validation_gate_consumption', payload['summary'])
         self.assertIn('rollback_candidate', payload['card_index']['workflow_overview']['metrics'])
+        self.assertIn('validation_gate', payload['card_index'])
         self.assertEqual(payload['card_index']['workflow_overview']['metrics']['manual'], 1)
         self.assertEqual(payload['card_index']['execution_status']['metrics']['bridge_executed'], 1)
         self.assertLessEqual(len(payload['card_index']['key_alerts']['items']), 2)
@@ -6400,6 +6404,7 @@ class TestApprovalPersistence(unittest.TestCase):
             'rollout_executor': {'status': 'controlled', 'summary': {'by_status': {'queued': 1}}},
             'controlled_rollout_execution': {'mode': 'state_apply', 'executed_count': 1, 'items': []},
             'auto_approval_execution': {'mode': 'controlled', 'executed_count': 1, 'items': []},
+            'validation_replay': {'summary': {'coverage_matrix': {'schema_version': 'm5_validation_coverage_matrix_v1', 'ready_for_low_intervention_gate': False, 'required_capability_count': 8, 'covered_required_count': 7, 'passing_required_count': 6, 'missing_required': ['testnet_bridge_controlled_execute'], 'failing_required': ['transition_policy_contract']}, 'readiness': {'low_intervention_gate_ready': False, 'missing_required_capabilities': ['testnet_bridge_controlled_execute'], 'failing_required_capabilities': ['transition_policy_contract'], 'failing_case_count': 1}}},
         }, max_items=2, transition_journal_overview={
             'schema_version': 'm5_transition_journal_overview_v1',
             'summary': {
@@ -6432,10 +6437,13 @@ class TestApprovalPersistence(unittest.TestCase):
         self.assertEqual(payload['headline']['dominant_line'], 'approval')
         self.assertEqual(payload['summary']['line_states']['approval'], 'attention_required')
         self.assertIn('gate_consumption', payload['summary'])
-        self.assertEqual(payload['summary']['line_states']['rollout'], 'steady')
+        self.assertEqual(payload['summary']['line_states']['rollout'], 'blocked')
         self.assertEqual(payload['summary']['line_states']['recovery'], 'recovery_required')
+        self.assertFalse(payload['summary']['validation_gate']['ready'])
+        self.assertIn('missing_required:testnet_bridge_controlled_execute', payload['summary']['validation_gate']['reasons'])
         self.assertEqual(payload['lines']['approval']['counts']['pending'], 2)
         self.assertEqual(payload['lines']['rollout']['counts']['queued'], 0)
+        self.assertEqual(payload['lines']['rollout']['counts']['validation_gap_count'], 2)
         self.assertEqual(payload['lines']['recovery']['counts']['manual_recovery'], 1)
         self.assertEqual(payload['lines']['approval']['next_actions'][0]['kind'], 'review_schedule')
         self.assertEqual(payload['lines']['recovery']['next_actions'][0]['kind'], 'manual_recovery')
@@ -8928,6 +8936,71 @@ class TestUnifiedWorkflowStateMachine(unittest.TestCase):
         self.assertEqual(merged['workflow_state']['summary']['state_machine']['rollback_candidate_count'], 1)
         self.assertEqual(merged['workflow_state']['summary']['state_machine']['operator_action_counts']['observe_only_followup'], 1)
 
+
+    def test_merge_persisted_approval_state_replays_validation_gate_into_workflow_summary(self):
+        payload = {
+            'workflow_state': {
+                'item_states': [{
+                    'item_id': 'playbook::stage',
+                    'title': 'Stage item',
+                    'action_type': 'joint_stage_prepare',
+                    'workflow_state': 'ready',
+                    'blocking_reasons': [],
+                }],
+                'summary': {},
+            },
+            'approval_state': {
+                'items': [{
+                    'approval_id': 'approval::stage',
+                    'playbook_id': 'playbook::stage',
+                    'title': 'Stage item',
+                    'action_type': 'joint_stage_prepare',
+                    'approval_state': 'pending',
+                    'decision_state': 'ready',
+                    'blocked_by': [],
+                }],
+                'summary': {},
+            },
+        }
+        merged = merge_persisted_approval_state(payload, [{
+            'item_id': 'approval::stage',
+            'state': 'pending',
+            'decision': 'pending',
+            'workflow_state': 'ready',
+            'updated_at': '2026-03-28 12:00:00',
+            'details': {
+                'execution_status': 'blocked',
+                'auto_advance_gate': {
+                    'allowed': False,
+                    'blockers': ['validation_gate:not_ready'],
+                    'validation_gate': {
+                        'enabled': True,
+                        'ready': False,
+                        'freeze_auto_advance': True,
+                        'rollback_on_regression': True,
+                        'reasons': ['missing_required:testnet_bridge_controlled_execute'],
+                    },
+                },
+                'rollback_gate': {
+                    'candidate': True,
+                    'triggered': ['validation_gate_regressed'],
+                    'validation_gate': {
+                        'enabled': True,
+                        'ready': False,
+                        'freeze_auto_advance': True,
+                        'rollback_on_regression': True,
+                        'reasons': ['missing_required:testnet_bridge_controlled_execute'],
+                    },
+                },
+                'stage_loop': {'loop_state': 'rollback_prepare', 'recommended_action': 'rollback_prepare'},
+            },
+        }])
+        approval_item = merged['approval_state']['items'][0]
+        workflow_item = merged['workflow_state']['item_states'][0]
+        self.assertFalse(approval_item['validation_gate']['ready'])
+        self.assertTrue(workflow_item['rollback_gate']['candidate'])
+        self.assertEqual(workflow_item['stage_loop']['loop_state'], 'rollback_prepare')
+
     def test_database_get_approval_state_includes_state_machine_details(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             db = Database(str(Path(tmpdir) / 'state_machine.db'))
@@ -8993,7 +9066,7 @@ class TestUnifiedWorkflowStateMachine(unittest.TestCase):
                     decision='pending',
                     state='pending',
                     workflow_state='queued',
-                    details={'queue_progression': {'status': 'ready_to_queue', 'dispatch_route': 'manual_review_queue'}},
+                    details={'queue_progression': {'status': 'ready_to_queue', 'dispatch_route': 'manual_review_queue'}, 'auto_advance_gate': {'validation_gate': {'enabled': True, 'ready': False, 'freeze_auto_advance': True, 'rollback_on_regression': True, 'reasons': ['missing_required:testnet_bridge_controlled_execute']}}, 'rollback_gate': {'candidate': True, 'triggered': ['validation_gate_regressed'], 'validation_gate': {'enabled': True, 'ready': False, 'freeze_auto_advance': True, 'rollback_on_regression': True, 'reasons': ['missing_required:testnet_bridge_controlled_execute']}}},
                     replay_source='unit-test',
                 )
                 client = app.test_client()
@@ -9004,7 +9077,11 @@ class TestUnifiedWorkflowStateMachine(unittest.TestCase):
                 self.assertEqual(payload['summary']['phase_counts']['queue'], 1)
                 self.assertEqual(payload['summary']['workflow_state_counts']['queued'], 1)
                 self.assertEqual(payload['summary']['execution_status_counts']['queued'], 1)
+                self.assertEqual(payload['summary']['validation_status_counts']['frozen'], 1)
+                self.assertEqual(payload['summary']['validation_freeze_reason_counts']['missing_required:testnet_bridge_controlled_execute'], 1)
+                self.assertEqual(payload['summary']['rollback_trigger_counts']['validation_gate_regressed'], 1)
                 self.assertEqual(payload['data'][0]['execution_status'], 'queued')
+                self.assertFalse(payload['data'][0]['validation_gate']['ready'])
                 self.assertEqual(payload['data'][0]['state_machine']['workflow_state'], 'queued')
             finally:
                 dashboard_api.db = old_db

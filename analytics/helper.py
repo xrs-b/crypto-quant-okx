@@ -1545,10 +1545,16 @@ def merge_persisted_approval_state(payload: Dict, persisted_rows: Optional[List[
         if persisted_details.get('auto_approval_eligible') is not None:
             row['auto_approval_eligible'] = persisted_details.get('auto_approval_eligible')
         row['blocked_by'] = persisted_details.get('blocked_by') or row.get('blocked_by') or []
+        row['queue_progression'] = persisted_details.get('queue_progression') or row.get('queue_progression') or {}
+        row['stage_model'] = persisted_details.get('stage_model') or row.get('stage_model') or {}
         row['execution_status'] = persisted_details.get('execution_status') or ((persisted_details.get('state_machine') or {}).get('execution_status') if isinstance(persisted_details.get('state_machine'), dict) else None) or row.get('execution_status')
         row['transition_rule'] = persisted_details.get('transition_rule') or ((persisted_details.get('state_machine') or {}).get('transition_rule') if isinstance(persisted_details.get('state_machine'), dict) else None) or row.get('transition_rule')
         row['next_transition'] = persisted_details.get('next_transition') or ((persisted_details.get('state_machine') or {}).get('next_transition') if isinstance(persisted_details.get('state_machine'), dict) else None) or row.get('next_transition')
         row['last_transition'] = persisted_details.get('last_transition') or ((persisted_details.get('state_machine') or {}).get('last_transition') if isinstance(persisted_details.get('state_machine'), dict) else None) or row.get('last_transition') or {}
+        row['auto_advance_gate'] = persisted_details.get('auto_advance_gate') or ((persisted_details.get('state_machine') or {}).get('auto_advance_gate') if isinstance(persisted_details.get('state_machine'), dict) else None) or row.get('auto_advance_gate') or {}
+        row['rollback_gate'] = persisted_details.get('rollback_gate') or ((persisted_details.get('state_machine') or {}).get('rollback_gate') if isinstance(persisted_details.get('state_machine'), dict) else None) or row.get('rollback_gate') or {}
+        row['validation_gate'] = persisted_details.get('validation_gate') or (row.get('auto_advance_gate') or {}).get('validation_gate') or (row.get('rollback_gate') or {}).get('validation_gate') or row.get('validation_gate') or {}
+        row['stage_loop'] = persisted_details.get('stage_loop') or ((persisted_details.get('state_machine') or {}).get('stage_loop') if isinstance(persisted_details.get('state_machine'), dict) else None) or row.get('stage_loop') or {}
         if persisted.get('state') in TERMINAL_APPROVAL_STATES:
             row['approval_state'] = persisted.get('state')
             row['decision_state'] = persisted.get('state')
@@ -1570,6 +1576,10 @@ def merge_persisted_approval_state(payload: Dict, persisted_rows: Optional[List[
         row['transition_rule'] = approval_row.get('transition_rule') or row.get('transition_rule')
         row['next_transition'] = approval_row.get('next_transition') or row.get('next_transition')
         row['last_transition'] = approval_row.get('last_transition') or row.get('last_transition') or {}
+        row['auto_advance_gate'] = approval_row.get('auto_advance_gate') or row.get('auto_advance_gate') or {}
+        row['rollback_gate'] = approval_row.get('rollback_gate') or row.get('rollback_gate') or {}
+        row['validation_gate'] = approval_row.get('validation_gate') or row.get('validation_gate') or {}
+        row['stage_loop'] = approval_row.get('stage_loop') or row.get('stage_loop') or {}
         if approval_row.get('persisted_workflow_state'):
             row['workflow_state'] = _normalize_workflow_state(approval_row.get('persisted_workflow_state'), approval_state=approval_row.get('approval_state'))
         elif row.get('approval_required') and approval_row.get('approval_state') == 'approved' and row.get('workflow_state') == 'pending':
@@ -2547,7 +2557,7 @@ def _extract_validation_gate(payload: Optional[Dict[str, Any]] = None) -> Dict[s
 
 def _build_validation_gate_snapshot(payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     gate = _extract_validation_gate(payload)
-    return {
+    snapshot = {
         'enabled': gate.get('enabled', False),
         'ready': gate.get('ready'),
         'freeze_auto_advance': gate.get('freeze_auto_advance', False),
@@ -2560,6 +2570,69 @@ def _build_validation_gate_snapshot(payload: Optional[Dict[str, Any]] = None) ->
         'required_capability_count': gate.get('required_capability_count'),
         'covered_required_count': gate.get('covered_required_count'),
         'passing_required_count': gate.get('passing_required_count'),
+    }
+    snapshot['regression_detected'] = bool(snapshot['enabled']) and snapshot.get('ready') is False and bool(snapshot.get('rollback_on_regression'))
+    snapshot['gap_count'] = len(snapshot.get('missing_required_capabilities') or []) + len(snapshot.get('failing_required_capabilities') or [])
+    snapshot['status'] = (
+        'disabled' if not snapshot['enabled'] else
+        'ready' if snapshot.get('ready') else
+        'frozen'
+    )
+    snapshot['headline'] = (
+        'validation_gate_disabled' if not snapshot['enabled'] else
+        'validation_gate_ready' if snapshot.get('ready') else
+        'validation_gate_frozen'
+    )
+    return snapshot
+
+
+def _collect_validation_gate_consumption(rows: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+    rows = list(rows or [])
+    freeze_reasons: Dict[str, int] = {}
+    rollback_triggers: Dict[str, int] = {}
+    statuses: Dict[str, int] = {}
+    item_ids = set()
+    last_gate = None
+    for row in rows:
+        state_machine = row.get('state_machine') or {}
+        auto_gate = row.get('auto_advance_gate') or (state_machine.get('auto_advance_gate') if isinstance(state_machine, dict) else {}) or {}
+        rollback_gate = row.get('rollback_gate') or (state_machine.get('rollback_gate') if isinstance(state_machine, dict) else {}) or {}
+        validation_gate = (
+            row.get('validation_gate')
+            or auto_gate.get('validation_gate')
+            or rollback_gate.get('validation_gate')
+            or (state_machine.get('validation_gate') if isinstance(state_machine, dict) else None)
+            or {}
+        )
+        if validation_gate:
+            last_gate = _build_validation_gate_snapshot({'validation_gate': validation_gate})
+            statuses[last_gate.get('status') or 'disabled'] = statuses.get(last_gate.get('status') or 'disabled', 0) + 1
+        reasons = []
+        if auto_gate.get('validation_gate'):
+            reasons.extend((auto_gate.get('validation_gate') or {}).get('reasons') or [])
+        if rollback_gate.get('validation_gate'):
+            reasons.extend((rollback_gate.get('validation_gate') or {}).get('reasons') or [])
+        if validation_gate and not reasons:
+            reasons.extend((validation_gate.get('reasons') or []))
+        for reason in reasons:
+            freeze_reasons[str(reason)] = freeze_reasons.get(str(reason), 0) + 1
+        triggered = list(rollback_gate.get('triggered') or [])
+        for trigger in triggered:
+            rollback_triggers[str(trigger)] = rollback_triggers.get(str(trigger), 0) + 1
+        if auto_gate.get('validation_gate') and ((auto_gate.get('validation_gate') or {}).get('freeze_auto_advance') or 'validation_gate:not_ready' in (auto_gate.get('blockers') or [])):
+            item_ids.add(row.get('item_id') or row.get('approval_id') or row.get('playbook_id'))
+        if 'validation_gate_regressed' in triggered:
+            item_ids.add(row.get('item_id') or row.get('approval_id') or row.get('playbook_id'))
+    dominant_freeze_reason = sorted(freeze_reasons.items(), key=lambda item: (-item[1], item[0]))[0][0] if freeze_reasons else None
+    dominant_rollback_trigger = sorted(rollback_triggers.items(), key=lambda item: (-item[1], item[0]))[0][0] if rollback_triggers else None
+    return {
+        'item_count': len([item for item in item_ids if item]),
+        'freeze_reason_counts': freeze_reasons,
+        'rollback_trigger_counts': rollback_triggers,
+        'validation_status_counts': statuses,
+        'dominant_freeze_reason': dominant_freeze_reason,
+        'dominant_rollback_trigger': dominant_rollback_trigger,
+        'latest_validation_gate': last_gate or _build_validation_gate_snapshot({}),
     }
 
 
@@ -4241,6 +4314,8 @@ def build_dashboard_summary_cards(payload: Optional[Dict] = None, *, max_items: 
     controlled_rollout = consumer_view.get('controlled_rollout_execution') or {}
     digest_summary = operator_digest.get('summary') or {}
     attention_summary = attention_view.get('summary') or {}
+    validation_gate = consumer_view.get('validation_gate') or digest_summary.get('validation_gate') or _build_validation_gate_snapshot(payload)
+    validation_consumption = _collect_validation_gate_consumption((consumer_view.get('workflow_state') or {}).get('item_states') or [])
 
     cards = [
         {
@@ -4286,6 +4361,29 @@ def build_dashboard_summary_cards(payload: Optional[Dict] = None, *, max_items: 
                 'top_priority_count': sum(1 for row in (operator_digest.get('next_actions') or []) if row.get('priority') == 'high'),
             },
             'items': operator_digest.get('next_actions') or [],
+        },
+        {
+            'card_id': 'validation_gate',
+            'title': 'Validation gate',
+            'status': 'attention_required' if validation_gate.get('enabled') and not validation_gate.get('ready') else ('steady' if validation_gate.get('enabled') else 'disabled'),
+            'headline': validation_gate.get('headline') or 'validation_gate_disabled',
+            'metrics': {
+                'gap_count': validation_gate.get('gap_count', 0),
+                'failing_cases': validation_gate.get('failing_case_count', 0),
+                'freeze_items': validation_consumption.get('item_count', 0),
+                'regression_detected': 1 if validation_gate.get('regression_detected') else 0,
+            },
+            'details': {
+                'validation_gate': validation_gate,
+                'consumption': validation_consumption,
+            },
+            'items': [
+                {'kind': 'freeze_reason', 'value': key, 'count': value}
+                for key, value in sorted((validation_consumption.get('freeze_reason_counts') or {}).items(), key=lambda item: (-item[1], item[0]))[:max_items]
+            ] + [
+                {'kind': 'rollback_trigger', 'value': key, 'count': value}
+                for key, value in sorted((validation_consumption.get('rollback_trigger_counts') or {}).items(), key=lambda item: (-item[1], item[0]))[:max_items]
+            ],
         },
         {
             'card_id': 'execution_status',
@@ -4344,6 +4442,8 @@ def build_dashboard_summary_cards(payload: Optional[Dict] = None, *, max_items: 
             'auto_advance_candidate_count': digest_summary.get('auto_advance_candidate_count', 0),
             'rollback_candidate_count': digest_summary.get('rollback_candidate_count', 0),
             'gate_consumption': digest_summary.get('gate_consumption') or {},
+            'validation_gate': validation_gate,
+            'validation_gate_consumption': validation_consumption,
             'executor_status': rollout_executor.get('status') or 'disabled',
             'bridge_mode': controlled_rollout.get('mode') or 'disabled',
             'auto_approval_mode': auto_approval.get('mode') or 'disabled',
@@ -5806,13 +5906,15 @@ def build_unified_workbench_overview(payload: Optional[Dict] = None, *, max_item
     queued_items = _take(((operator_digest.get('attention') or {}).get('queued') or []))
     recent_adjustments = _take(workbench_view.get('recent_adjustments') or [])
     gate_consumption = ((workbench_summary.get('gate_consumption') or (operator_digest.get('summary') or {}).get('gate_consumption')) or {})
+    validation_gate = consumer_view.get('validation_gate') or (operator_digest.get('summary') or {}).get('validation_gate') or _build_validation_gate_snapshot(payload)
+    validation_consumption = _collect_validation_gate_consumption((consumer_view.get('workflow_state') or {}).get('item_states') or [])
     workbench_stage_loop = (workbench_summary.get('stage_loop') or workbench_view.get('rollout', {}).get('stage_loop') or _summarize_stage_loop_rows(workbench_view.get('upstreams', {}).get('workflow_operator_digest', {}).get('operator_action_policies') or [], label='unified_workbench_rollout', max_items=max_items))
     retry_queue = _take(((recovery_view.get('queues') or {}).get('retry_queue') or []))
     rollback_candidates = _take(((recovery_view.get('queues') or {}).get('rollback_candidates') or []))
     manual_recovery = _take(((recovery_view.get('queues') or {}).get('manual_recovery') or []))
 
     approval_state = 'attention_required' if approval_summary.get('pending_count', 0) or workbench_summary.get('manual_approval_count', 0) else 'steady'
-    rollout_state = 'blocked' if workbench_summary.get('blocked_count', 0) else ('active' if workbench_summary.get('queued_count', 0) or workbench_summary.get('ready_count', 0) or workbench_summary.get('recent_adjustment_count', 0) else 'steady')
+    rollout_state = 'blocked' if (workbench_summary.get('blocked_count', 0) or (validation_gate.get('enabled') and not validation_gate.get('ready'))) else ('active' if workbench_summary.get('queued_count', 0) or workbench_summary.get('ready_count', 0) or workbench_summary.get('recent_adjustment_count', 0) else 'steady')
     recovery_state = 'recovery_required' if any(recovery_summary.get(key, 0) for key in ('retry_queue_count', 'rollback_candidate_count', 'manual_recovery_count')) else 'steady'
 
     line_states = {'approval': approval_state, 'rollout': rollout_state, 'recovery': recovery_state}
@@ -5882,7 +5984,7 @@ def build_unified_workbench_overview(payload: Optional[Dict] = None, *, max_item
             'current_state': rollout_state,
             'headline': {
                 'status': rollout_state,
-                'message': f"{workbench_summary.get('blocked_count', 0)} blocked / {workbench_summary.get('queued_count', 0)} queued / {workbench_summary.get('ready_count', 0)} ready / {workbench_summary.get('auto_batch_count', 0)} auto-batch / {gate_consumption.get('auto_advance_allowed_count', 0)} auto-advance",
+                'message': f"{workbench_summary.get('blocked_count', 0)} blocked / {workbench_summary.get('queued_count', 0)} queued / {workbench_summary.get('ready_count', 0)} ready / {workbench_summary.get('auto_batch_count', 0)} auto-batch / {gate_consumption.get('auto_advance_allowed_count', 0)} auto-advance / validation={validation_gate.get('status')}",
             },
             'counts': {
                 'total': workflow_summary.get('item_count', workbench_summary.get('filtered_item_count', 0)),
@@ -5894,7 +5996,12 @@ def build_unified_workbench_overview(payload: Optional[Dict] = None, *, max_item
                 'recent_adjustments': workbench_summary.get('recent_adjustment_count', 0),
                 'stage_paths': len((workbench_view.get('rollout') or {}).get('frontier') or []),
                 'stage_loop': workbench_stage_loop.get('path_counts') or {},
+                'validation_freeze_items': validation_consumption.get('item_count', 0),
+                'validation_gap_count': validation_gate.get('gap_count', 0),
+                'validation_regression': 1 if validation_gate.get('regression_detected') else 0,
             },
+            'validation_gate': validation_gate,
+            'validation_consumption': validation_consumption,
             'headline_stage_frontier': _take((workbench_view.get('rollout') or {}).get('frontier') or []),
             'key_alerts': _take(approval_blocked_items + queued_items + ready_items),
             'next_actions': _take(rollout_next_actions),
@@ -5940,6 +6047,8 @@ def build_unified_workbench_overview(payload: Optional[Dict] = None, *, max_item
             },
             'operator_action_policy_summary': (operator_digest.get('summary') or {}).get('group_summaries') or {},
             'gate_consumption': gate_consumption,
+            'validation_gate': validation_gate,
+            'validation_gate_consumption': validation_consumption,
             'timeline_group_counts': {
                 'bucket': len(timeline_groups.get('by_bucket') or []),
                 'action_type': len(timeline_groups.get('by_action_type') or []),

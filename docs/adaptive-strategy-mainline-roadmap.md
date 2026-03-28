@@ -230,6 +230,7 @@
 - 区分 `plan-only / dry-run / controlled-apply / forbidden`
 - 每类 action 固定 `preconditions / blockers / rollback_hint / idempotency rule`
 
+- **2026-03-28 implementation update (validation-gate consumer/persistence)**：validation gate 进一步接通 persisted approval/workflow state、dashboard summary card、unified workbench overview 同 `/api/approvals/state-machine`；freeze / regression / rollback trigger 而家会随 replay/state merge 稳定回灌，调用方可以直接睇到 gate 当前 ready/frozen 状态、最近缺口/失败 capability、主导 freeze reason，以及 `validation_gate_regressed` 等 rollback 触发线索，同时继续维持 metadata/review-only 安全边界，不触发危险真实交易执行。
 完成标志：
 - 新动作接入不再靠散落 if/else
 - workbench / digest / timeline 能稳定引用同一 registry 元数据
@@ -252,6 +253,7 @@
 - 每个阶段明确 `enter / stay / exit / rollback / review_due` 条件
 - queue promotion 与 scheduled review 有独立 handler，而不是揉成单一 apply
 
+- **2026-03-28 implementation update (validation-gate consumer/persistence)**：validation gate 进一步接通 persisted approval/workflow state、dashboard summary card、unified workbench overview 同 `/api/approvals/state-machine`；freeze / regression / rollback trigger 而家会随 replay/state merge 稳定回灌，调用方可以直接睇到 gate 当前 ready/frozen 状态、最近缺口/失败 capability、主导 freeze reason，以及 `validation_gate_regressed` 等 rollback 触发线索，同时继续维持 metadata/review-only 安全边界，不触发危险真实交易执行。
 完成标志：
 - 系统能回答“当前为何停在此阶段、谁能推动、自动推进条件是否满足”
 - 同一 item 的 next step 可由 stage handler 稳定推导
@@ -273,6 +275,7 @@
 - auto-advance 只能命中 very-safe + low-risk + no blocker + approval-eligible 项
 - rollback gate 明确触发因子：异常 transition、review 失败、样本不足、风险升高
 
+- **2026-03-28 implementation update (validation-gate consumer/persistence)**：validation gate 进一步接通 persisted approval/workflow state、dashboard summary card、unified workbench overview 同 `/api/approvals/state-machine`；freeze / regression / rollback trigger 而家会随 replay/state merge 稳定回灌，调用方可以直接睇到 gate 当前 ready/frozen 状态、最近缺口/失败 capability、主导 freeze reason，以及 `validation_gate_regressed` 等 rollback 触发线索，同时继续维持 metadata/review-only 安全边界，不触发危险真实交易执行。
 完成标志：
 - 自动推进不是靠零散 heuristics，而是统一 gate 决定
 - agent / dashboard / operator 对“为什么自动推/为什么没推”有统一解释
@@ -295,6 +298,7 @@
 - **2026-03-28 implementation update**：validation replay summary 现已补 `coverage_matrix + readiness`，会稳定回答 approval replay / rollout executor dry-run / transition policy contract / testnet bridge（plan-only、controlled execute、blocked guard、cleanup recovery）是否都有 fixture 覆盖，及是否达到 `low_intervention_gate_ready`。后续新增 safe action / stage handler 时，可以直接用同一 summary 检查“主线验证矩阵有无缺口”，减少只看单 case pass 的错觉。
 - **2026-03-28 implementation update (validation-gated rollout)**：validation replay readiness 已正式接入 rollout executor gate：当 `low_intervention_gate_ready=false` 时，very-safe apply 路径会统一冻结 `auto_advance_gate`，并在已进入 active/review path 的 stage item 上打开 `validation_gate_regressed` rollback trigger；同时 consumer/operator digest 会直出 `validation_gate` 摘要，令系统不止知道“动作本身安不安全”，仲知道“整条低干预验证矩阵是否仲够资格继续自动推进”。
 
+- **2026-03-28 implementation update (validation-gate consumer/persistence)**：validation gate 进一步接通 persisted approval/workflow state、dashboard summary card、unified workbench overview 同 `/api/approvals/state-machine`；freeze / regression / rollback trigger 而家会随 replay/state merge 稳定回灌，调用方可以直接睇到 gate 当前 ready/frozen 状态、最近缺口/失败 capability、主导 freeze reason，以及 `validation_gate_regressed` 等 rollback 触发线索，同时继续维持 metadata/review-only 安全边界，不触发危险真实交易执行。
 完成标志：
 - 新 handler/新 action 可以在非自然开单条件下被验证
 

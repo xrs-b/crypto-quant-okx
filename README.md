@@ -19,6 +19,7 @@
 
 相关文档：
 
+- **主线第一入口**：[`docs/adaptive-strategy-mainline-roadmap.md`](docs/adaptive-strategy-mainline-roadmap.md)
 - [`docs/PUBLIC-MAINLINE-WORKFLOW.md`](docs/PUBLIC-MAINLINE-WORKFLOW.md)
 - [`docs/GITHUB-PUBLIC-REPO-COPY.md`](docs/GITHUB-PUBLIC-REPO-COPY.md)
 - [`docs/adaptive-market-regime-framework-plan.md`](docs/adaptive-market-regime-framework-plan.md)

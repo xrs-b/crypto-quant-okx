@@ -1,5 +1,7 @@
 # Adaptive Market Regime Backlog
 
+> **主线第一入口 / 总纲**：[`docs/adaptive-strategy-mainline-roadmap.md`](./adaptive-strategy-mainline-roadmap.md)
+>
 > 配套主计划：[`docs/adaptive-market-regime-framework-plan.md`](./adaptive-market-regime-framework-plan.md)
 >
 > M3 边界方案：[`docs/adaptive-market-regime-m3-boundary-plan.md`](./adaptive-market-regime-m3-boundary-plan.md)

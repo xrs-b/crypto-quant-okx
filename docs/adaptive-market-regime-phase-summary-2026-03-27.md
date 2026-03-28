@@ -1,5 +1,7 @@
 # Adaptive Market Regime 阶段总结（2026-03-27）
 
+> **主线第一入口 / 总纲**：[`docs/adaptive-strategy-mainline-roadmap.md`](./adaptive-strategy-mainline-roadmap.md)
+>
 > 2026-03-27 晚补记：在 testnet bridge 阶段性完成后，消费层继续补了一层 `workflow operator digest` 摘要 API（`/api/backtest/workflow-operator-digest` 与 `calibration-report?view=operator_digest`），把 `workflow_state / approval_state / rollout_stage_progression / rollout_executor` 汇成低干预巡检入口，方便 dashboard / agent / 人工治理直接消费。
 >
 > 同轮继续补了 `approval / rollout workbench governance view`（`/api/backtest/workbench-governance-view` 与 `calibration-report?view=workbench_governance_view`），把 `workflow-consumer-view / attention-view / operator-digest / rollout executor` 再往上聚成一个更适合工作台的一眼式入口：直接回答 auto-batch、blocked、queued/ready、rollout frontier，以及最近系统自动调整了什么。

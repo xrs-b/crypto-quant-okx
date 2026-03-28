@@ -97,6 +97,8 @@
 
 ### AR-M5-04｜approval decision persistence / replay state layer
 
+- 2026-03-28：validation replay / workflow runner 已进一步接入 rollout transition policy observability，fixture-driven case 可以稳定输出并断言 `transition_policy snapshot / materialized_rule / next_transition / dispatch_route / target_stage`，减少后续 safe action / transition policy 验收对自然开单的依赖。
+
 - **阶段 / 优先级**：M5 / P0
 - **生效范围**：仅持久化、恢复、审计；**不触发真实自动执行**
 - **目标**：把 dashboard / workflow-ready 输出里的 approval queue 从即时计算结果，推进到 `item_id` 级别的持久化状态台账，支持 `pending -> approved/rejected/deferred` 闭环，以及后续 replay / 恢复 / 审计。

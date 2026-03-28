@@ -47,3 +47,16 @@ expect:
   approval_replay_synced: true
   executor_planned_count: 1
   executor_dry_run_count: 1
+  transition_policy_enabled: true
+  transition_policy_rule: manual_gate_before_dispatch
+  transition_policy_route: manual_review_queue
+  transition_policy_next_transition: await_manual_approval
+  transition_policy_target_stage: pending
+  transition_policy_schema_version: m5_rollout_transition_policy_v1
+  transition_policy_snapshot_rule: queue_only_followup_required
+  transition_policy_snapshot_route: stage_promotion_queue
+  transition_policy_snapshot_next_transition: queue_for_followup_execution
+  transition_policy_materialized_rule: manual_gate_before_dispatch
+  transition_policy_materialized_route: manual_review_queue
+  transition_policy_materialized_next_transition: await_manual_approval
+  transition_policy_consistent: true

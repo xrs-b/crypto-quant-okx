@@ -2824,6 +2824,8 @@ def _build_rollout_queue_plan(action_type: str, row: Dict[str, Any], workflow_it
     transition = dict(transition_rule or {})
     queue_status = hook.get('status') or 'ready_to_queue'
     queue_priority = row.get('queue_priority') or workflow_item.get('queue_priority') or ('approval_blocked' if queue_status == 'blocked_by_approval' else 'deferred_review' if queue_status == 'deferred' else 'needs_human_review')
+    queue_dispatch_route = 'deferred_review_queue' if queue_status == 'deferred' else 'manual_review_queue'
+    queue_next_transition = 'retry_after_blockers_clear' if queue_status == 'deferred' else 'await_manual_approval'
     queue_progression = {
         'status': queue_status,
         'approval_state': hook.get('approval_state'),
@@ -2831,8 +2833,8 @@ def _build_rollout_queue_plan(action_type: str, row: Dict[str, Any], workflow_it
         'decision': hook.get('decision'),
         'gate_reason': hook.get('gate_reason') or spec.get('blocked_reason'),
         'next_action': hook.get('next_action') or action_type,
-        'dispatch_route': transition.get('dispatch_route'),
-        'next_transition': transition.get('next_transition'),
+        'dispatch_route': queue_dispatch_route,
+        'next_transition': queue_next_transition,
         'retryable': bool(transition.get('retryable', True)),
     }
     return {
@@ -2844,8 +2846,8 @@ def _build_rollout_queue_plan(action_type: str, row: Dict[str, Any], workflow_it
         'requires_approval': bool(spec.get('requires_approval', False)),
         'approval_hook': hook,
         'transition_rule': transition.get('transition_rule'),
-        'dispatch_route': transition.get('dispatch_route'),
-        'next_transition': transition.get('next_transition'),
+        'dispatch_route': queue_dispatch_route,
+        'next_transition': queue_next_transition,
         'retryable': bool(transition.get('retryable', True)),
         'rollback_hint': transition.get('rollback_hint'),
         'queue_transition': {
@@ -2854,8 +2856,8 @@ def _build_rollout_queue_plan(action_type: str, row: Dict[str, Any], workflow_it
             'to_queue_status': queue_status,
             'transition_reason': queue_progression['gate_reason'],
             'transition_rule': transition.get('transition_rule'),
-            'dispatch_route': transition.get('dispatch_route'),
-            'next_transition': transition.get('next_transition'),
+            'dispatch_route': queue_dispatch_route,
+            'next_transition': queue_next_transition,
             'retryable': bool(transition.get('retryable', True)),
             'rollback_hint': transition.get('rollback_hint'),
         },
@@ -2923,8 +2925,8 @@ def _consume_rollout_queue_plan(*, db: Any, row: Dict[str, Any], workflow_item: 
         'queue_transition': (queue_plan or {}).get('queue_transition') or {},
         'queue_progression': (queue_plan or {}).get('queue_progression') or {},
         'transition_rule': transition_rule.get('transition_rule'),
-        'dispatch_route': transition_rule.get('dispatch_route'),
-        'next_transition': transition_rule.get('next_transition'),
+        'dispatch_route': (queue_plan or {}).get('dispatch_route') or transition_rule.get('dispatch_route'),
+        'next_transition': (queue_plan or {}).get('next_transition') or transition_rule.get('next_transition'),
         'retryable': bool(transition_rule.get('retryable', True)),
         'rollback_hint': transition_rule.get('rollback_hint'),
         'queue_name': queue_plan.get('queue_name'),
@@ -2937,8 +2939,8 @@ def _consume_rollout_queue_plan(*, db: Any, row: Dict[str, Any], workflow_item: 
         'dangerous_live_parameter_change': False,
         'serialization_ready': True,
         'stage_loop': (queue_plan or {}).get('stage_loop') or _build_stage_loop_envelope(
-            dispatch_route=transition_rule.get('dispatch_route'),
-            next_transition=transition_rule.get('next_transition'),
+            dispatch_route=(queue_plan or {}).get('dispatch_route') or transition_rule.get('dispatch_route'),
+            next_transition=(queue_plan or {}).get('next_transition') or transition_rule.get('next_transition'),
             result_status=result_action,
         ),
     }
@@ -3077,6 +3079,7 @@ def execute_rollout_executor(payload: Dict, db: Any, *, config: Any = None, sett
             transition_rule=transition_rule,
             persisted_details=persisted_details,
         )
+        transition_policy_snapshot = _build_rollout_transition_policy_snapshot(spec, action_type)
 
         plan = {
             'item_id': approval_id,
@@ -3109,7 +3112,8 @@ def execute_rollout_executor(payload: Dict, db: Any, *, config: Any = None, sett
             'target_rollout_stage': transition_rule.get('target_rollout_stage'),
             'readiness': transition_rule.get('readiness'),
             'stage_handler': transition_rule.get('stage_handler') or rollout_gates.get('stage_handler') or {},
-            'transition_policy': transition_rule.get('transition_policy') or _build_rollout_transition_policy_snapshot(spec, action_type),
+            'transition_policy_snapshot': transition_policy_snapshot,
+            'transition_policy': transition_rule.get('transition_policy') or transition_policy_snapshot,
             'execution_status': _normalize_action_execution_status(None, workflow_state=current_workflow_state, queue_status=((workflow_item.get('queue_progression') or {}).get('status') if isinstance(workflow_item.get('queue_progression'), dict) else None)),
             'auto_advance_gate': rollout_gates.get('auto_advance_gate') or {},
             'rollback_gate': rollout_gates.get('rollback_gate') or {},
@@ -3147,7 +3151,8 @@ def execute_rollout_executor(payload: Dict, db: Any, *, config: Any = None, sett
             'retryable': bool(transition_rule.get('retryable', True)),
             'rollback_hint': transition_rule.get('rollback_hint'),
             'stage_handler': transition_rule.get('stage_handler') or rollout_gates.get('stage_handler') or {},
-            'transition_policy': transition_rule.get('transition_policy') or _build_rollout_transition_policy_snapshot(spec, action_type),
+            'transition_policy_snapshot': transition_policy_snapshot,
+            'transition_policy': transition_rule.get('transition_policy') or transition_policy_snapshot,
             'auto_advance_gate': rollout_gates.get('auto_advance_gate') or {},
             'rollback_gate': rollout_gates.get('rollback_gate') or {},
             'stage_loop': _build_stage_loop_envelope(
@@ -3204,6 +3209,9 @@ def execute_rollout_executor(payload: Dict, db: Any, *, config: Any = None, sett
             )
             queue_plan = _build_rollout_queue_plan(action_type, row, workflow_item, spec, approval_hook=approval_hook, transition_rule=transition_rule)
             result_row['plan']['queue_plan'] = queue_plan
+            result_row['plan']['dispatch_route'] = queue_plan.get('dispatch_route')
+            result_row['plan']['next_transition'] = queue_plan.get('next_transition') or transition_rule.get('next_transition')
+            result_row['plan']['stage_loop'] = _build_stage_loop_envelope(stage_handler=plan.get('stage_handler') or {}, auto_advance_gate=plan.get('auto_advance_gate') or {}, rollback_gate=plan.get('rollback_gate') or {}, dispatch_route=queue_plan.get('dispatch_route'), next_transition=queue_plan.get('next_transition') or transition_rule.get('next_transition'), result_status='planned')
             queue_status = queue_plan['queue_progression']['status']
             dispatch_code = 'QUEUE_ONLY'
             dispatch_reason = spec.get('blocked_reason') or 'queue_only_action'
@@ -3227,11 +3235,11 @@ def execute_rollout_executor(payload: Dict, db: Any, *, config: Any = None, sett
                 disposition = 'deferred'
                 item_status = 'deferred'
                 result['summary']['skipped_count'] += 1
-            result_row['dispatch'] = _build_rollout_dispatch_envelope(mode=dispatch_mode, executor_class=executor_class, handler_key=handler_key, allowed=True, status=item_status, reason=dispatch_reason, code=dispatch_code, queue_name=queue_plan['queue_name'], dispatch_route=transition_rule.get('dispatch_route'), transition_rule=transition_rule.get('transition_rule'), next_transition=transition_rule.get('next_transition'), retryable=bool(transition_rule.get('retryable', True)), rollback_hint=transition_rule.get('rollback_hint'))
+            result_row['dispatch'] = _build_rollout_dispatch_envelope(mode=dispatch_mode, executor_class=executor_class, handler_key=handler_key, allowed=True, status=item_status, reason=dispatch_reason, code=dispatch_code, queue_name=queue_plan['queue_name'], dispatch_route=queue_plan.get('dispatch_route'), transition_rule=transition_rule.get('transition_rule'), next_transition=queue_plan.get('next_transition') or transition_rule.get('next_transition'), retryable=bool(transition_rule.get('retryable', True)), rollback_hint=transition_rule.get('rollback_hint'))
             if result['dry_run']:
                 result_row['apply'] = _build_rollout_apply_envelope(attempted=True, persisted=False, status='dry_run', operation='queue_plan_consume', idempotency_key=idempotency_key)
-                result_row['result'] = _build_rollout_result_envelope(disposition='dry_run' if queue_status == 'ready_to_queue' else disposition, status='dry_run', reason=dispatch_reason, code='DRY_RUN_ONLY', state=current_state, workflow_state=current_workflow_state, transition_rule=transition_rule.get('transition_rule'), dispatch_route=transition_rule.get('dispatch_route'), next_transition=transition_rule.get('next_transition'), retryable=bool(transition_rule.get('retryable', True)), rollback_hint=transition_rule.get('rollback_hint'))
-                result_row['result']['stage_loop'] = _build_stage_loop_envelope(stage_handler=plan.get('stage_handler') or {}, auto_advance_gate=plan.get('auto_advance_gate') or {}, rollback_gate=plan.get('rollback_gate') or {}, dispatch_route=transition_rule.get('dispatch_route'), next_transition=transition_rule.get('next_transition'), result_status='dry_run')
+                result_row['result'] = _build_rollout_result_envelope(disposition='dry_run' if queue_status == 'ready_to_queue' else disposition, status='dry_run', reason=dispatch_reason, code='DRY_RUN_ONLY', state=current_state, workflow_state=current_workflow_state, transition_rule=transition_rule.get('transition_rule'), dispatch_route=queue_plan.get('dispatch_route'), next_transition=queue_plan.get('next_transition') or transition_rule.get('next_transition'), retryable=bool(transition_rule.get('retryable', True)), rollback_hint=transition_rule.get('rollback_hint'))
+                result_row['result']['stage_loop'] = _build_stage_loop_envelope(stage_handler=plan.get('stage_handler') or {}, auto_advance_gate=plan.get('auto_advance_gate') or {}, rollback_gate=plan.get('rollback_gate') or {}, dispatch_route=queue_plan.get('dispatch_route'), next_transition=queue_plan.get('next_transition') or transition_rule.get('next_transition'), result_status='dry_run')
                 result_row['status'] = 'dry_run'
                 result['summary']['dry_run_count'] += 1
                 bump('dry_run', 'dry_run')
@@ -3259,18 +3267,18 @@ def execute_rollout_executor(payload: Dict, db: Any, *, config: Any = None, sett
                     if queue_consumed_row:
                         executed_rows.append(queue_consumed_row)
                     result_row['apply'] = _build_rollout_apply_envelope(attempted=True, persisted=True, status=apply_status, operation='queue_plan_consume', idempotency_key=idempotency_key, effect_applied=True)
-                    result_row['result'] = _build_rollout_result_envelope(disposition=disposition, status=item_status, reason=dispatch_reason, code=dispatch_code, state=(queue_consumed_row or {}).get('state'), workflow_state=(queue_consumed_row or {}).get('workflow_state'), transition_rule=transition_rule.get('transition_rule'), dispatch_route=transition_rule.get('dispatch_route'), next_transition=transition_rule.get('next_transition'), retryable=bool(transition_rule.get('retryable', True)), rollback_hint=transition_rule.get('rollback_hint'))
-                    result_row['result']['stage_loop'] = _build_stage_loop_envelope(stage_handler=plan.get('stage_handler') or {}, auto_advance_gate=plan.get('auto_advance_gate') or {}, rollback_gate=plan.get('rollback_gate') or {}, dispatch_route=transition_rule.get('dispatch_route'), next_transition=transition_rule.get('next_transition'), result_status=item_status)
+                    result_row['result'] = _build_rollout_result_envelope(disposition=disposition, status=item_status, reason=dispatch_reason, code=dispatch_code, state=(queue_consumed_row or {}).get('state'), workflow_state=(queue_consumed_row or {}).get('workflow_state'), transition_rule=transition_rule.get('transition_rule'), dispatch_route=queue_plan.get('dispatch_route'), next_transition=queue_plan.get('next_transition') or transition_rule.get('next_transition'), retryable=bool(transition_rule.get('retryable', True)), rollback_hint=transition_rule.get('rollback_hint'))
+                    result_row['result']['stage_loop'] = _build_stage_loop_envelope(stage_handler=plan.get('stage_handler') or {}, auto_advance_gate=plan.get('auto_advance_gate') or {}, rollback_gate=plan.get('rollback_gate') or {}, dispatch_route=queue_plan.get('dispatch_route'), next_transition=queue_plan.get('next_transition') or transition_rule.get('next_transition'), result_status=item_status)
                     result_row['status'] = item_status
                     result_row['execution_status'] = 'blocked' if item_status == 'blocked_by_approval' else ('deferred' if item_status == 'deferred' else 'queued')
-                    result_row['last_transition'] = {'rule': transition_rule.get('transition_rule'), 'to_execution_status': result_row['execution_status'], 'to_workflow_state': item_status, 'dispatch_route': transition_rule.get('dispatch_route'), 'next_transition': transition_rule.get('next_transition')}
+                    result_row['last_transition'] = {'rule': transition_rule.get('transition_rule'), 'to_execution_status': result_row['execution_status'], 'to_workflow_state': item_status, 'dispatch_route': queue_plan.get('dispatch_route'), 'next_transition': queue_plan.get('next_transition') or transition_rule.get('next_transition')}
                     bump(disposition, item_status)
                 except Exception as exc:
                     result_row['apply'] = _build_rollout_apply_envelope(attempted=True, persisted=False, status='error', operation='queue_plan_consume', idempotency_key=idempotency_key)
-                    result_row['result'] = _build_rollout_result_envelope(disposition='error', status='error', reason=str(exc), code='QUEUE_CONSUME_EXCEPTION', transition_rule=transition_rule.get('transition_rule'), dispatch_route=transition_rule.get('dispatch_route'), next_transition=transition_rule.get('next_transition'), retryable=bool(transition_rule.get('retryable', True)), rollback_hint=transition_rule.get('rollback_hint'))
+                    result_row['result'] = _build_rollout_result_envelope(disposition='error', status='error', reason=str(exc), code='QUEUE_CONSUME_EXCEPTION', transition_rule=transition_rule.get('transition_rule'), dispatch_route=queue_plan.get('dispatch_route'), next_transition=queue_plan.get('next_transition') or transition_rule.get('next_transition'), retryable=bool(transition_rule.get('retryable', True)), rollback_hint=transition_rule.get('rollback_hint'))
                     result_row['status'] = 'error'
                     result_row['execution_status'] = 'error'
-                    result_row['last_transition'] = {'rule': transition_rule.get('transition_rule'), 'to_execution_status': 'error', 'to_workflow_state': current_workflow_state, 'dispatch_route': transition_rule.get('dispatch_route'), 'next_transition': transition_rule.get('next_transition')}
+                    result_row['last_transition'] = {'rule': transition_rule.get('transition_rule'), 'to_execution_status': 'error', 'to_workflow_state': current_workflow_state, 'dispatch_route': queue_plan.get('dispatch_route'), 'next_transition': queue_plan.get('next_transition') or transition_rule.get('next_transition')}
                     result['summary']['error_count'] += 1
                     bump('error', 'error')
             result['items'].append(result_row)
@@ -3338,7 +3346,8 @@ def execute_rollout_executor(payload: Dict, db: Any, *, config: Any = None, sett
             'rollback_capable': bool(spec.get('rollback_capable', False)),
             'idempotency_key': idempotency_key,
             'transition_rule': transition_rule.get('transition_rule'),
-            'transition_policy': transition_rule.get('transition_policy') or _build_rollout_transition_policy_snapshot(spec, action_type),
+            'transition_policy_snapshot': transition_policy_snapshot,
+            'transition_policy': transition_rule.get('transition_policy') or transition_policy_snapshot,
             'dispatch_route': transition_rule.get('dispatch_route'),
             'next_transition': transition_rule.get('next_transition'),
             'retryable': bool(transition_rule.get('retryable', True)),

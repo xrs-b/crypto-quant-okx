@@ -1040,6 +1040,46 @@ workflow safe-apply 则应该同步建设，专门服务 governance / approval /
 
 它而家已经唔止系单条 shadow diff，而系一条可重复、可批量、可审计、可扩展到 workflow/queue 主线嘅 validation lane。
 
+## 22. 2026-03-28 / Workflow transition policy replay 接入
+
+本轮继续沿住 adaptive strategy 主线补 validation lane，重点唔系再等自然事件，而系直接把 rollout transition policy 拉进 shadow workflow / replay 验收链。
+
+### 本轮新增
+
+1. **workflow validation report 新增 transition policy diff**
+   - `diff.transition_policy` 统一输出：
+     - `snapshot`
+     - `materialized_rule`
+     - `transition_rule`
+     - `dispatch_route`
+     - `next_transition`
+     - `target_stage`
+     - `schema_version`
+     - `consistency`
+   - 让 rollout executor plan、consumer view stage progression、detail timeline summary 可以互相对照。
+
+2. **fixture-driven assertion 已支持 transition policy**
+   - workflow fixture 可直接断言：
+     - `transition_policy_enabled`
+     - `transition_policy_rule`
+     - `transition_policy_route`
+     - `transition_policy_next_transition`
+     - `transition_policy_target_stage`
+     - `transition_policy_schema_version`
+     - `transition_policy_consistent`
+   - 后续 safe action handler / transition policy 新增时，只需补 fixture 即可稳定回归。
+
+3. **validation replay summary / markdown 已聚合 transition policy**
+   - 批量 replay summary 新增 `summary.transition_policy`；
+   - 聚合 `rule_counts / route_counts / next_transition_counts / target_stage_counts / schema_versions`；
+   - markdown report 会直接展示 transition rule / route / next transition 分布，方便验收同排障。
+
+### 安全边界
+
+- 仍然保持 shadow / dry-run / controlled-safe 边界；
+- 本轮只扩 observability、replay、assertion 与报表；
+- **无新增真实交易执行路径**。
+
 ### 仍保留到后续阶段
 
 - 更深 execution guard 篮子（例如 direction lock / intent reset / layer gap）可继续追加 fixture；

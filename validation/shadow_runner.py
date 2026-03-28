@@ -523,10 +523,59 @@ def _aggregate_testnet_bridge_batch(results: List[Dict[str, Any]]) -> Dict[str, 
     }
 
 
+def _summarize_transition_policy_artifacts(results: List[Dict[str, Any]]) -> Dict[str, Any]:
+    cases = []
+    rule_counts: Dict[str, int] = {}
+    route_counts: Dict[str, int] = {}
+    next_transition_counts: Dict[str, int] = {}
+    target_stage_counts: Dict[str, int] = {}
+    schema_versions: Dict[str, int] = {}
+
+    def bump(bucket: Dict[str, int], key: Optional[str]):
+        label = str(key or 'unknown')
+        bucket[label] = bucket.get(label, 0) + 1
+
+    for row in results or []:
+        transition = copy.deepcopy((((row.get('diff') or {}).get('transition_policy')) or {}))
+        if not transition.get('enabled'):
+            continue
+        case_row = {
+            'case_id': row.get('case_id'),
+            'case_path': ((row.get('audit') or {}).get('case_path')),
+            'transition_rule': transition.get('transition_rule'),
+            'dispatch_route': transition.get('dispatch_route'),
+            'next_transition': transition.get('next_transition'),
+            'target_stage': transition.get('target_stage'),
+            'schema_version': transition.get('schema_version'),
+            'consistency': copy.deepcopy(transition.get('consistency') or {}),
+            'materialized_rule': copy.deepcopy(transition.get('materialized_rule') or {}),
+            'snapshot': copy.deepcopy(transition.get('snapshot') or {}),
+        }
+        cases.append(case_row)
+        bump(rule_counts, transition.get('transition_rule'))
+        bump(route_counts, transition.get('dispatch_route'))
+        bump(next_transition_counts, transition.get('next_transition'))
+        bump(target_stage_counts, transition.get('target_stage'))
+        bump(schema_versions, transition.get('schema_version'))
+
+    return {
+        'case_count': len(cases),
+        'enabled_case_count': len(cases),
+        'rule_counts': rule_counts,
+        'route_counts': route_counts,
+        'next_transition_counts': next_transition_counts,
+        'target_stage_counts': target_stage_counts,
+        'schema_versions': schema_versions,
+        'consistent_case_count': sum(1 for row in cases if (row.get('consistency') or {}).get('all_match')),
+        'cases': cases,
+    }
+
+
 def format_validation_report_markdown(report: Dict[str, Any]) -> str:
     if report.get('mode') == 'validation_replay':
         summary = report.get('summary') or {}
         bridge = summary.get('testnet_bridge') or {}
+        transition = summary.get('transition_policy') or {}
         lines = [
             '# Shadow Validation Replay Report',
             '',
@@ -534,6 +583,22 @@ def format_validation_report_markdown(report: Dict[str, Any]) -> str:
             f"- cases: {summary.get('case_count', 0)}",
             f"- pass: {summary.get('pass_count', 0)}",
             f"- fail: {summary.get('fail_count', 0)}",
+            '',
+            '## Transition Policy',
+            f"- enabled cases: {transition.get('case_count', 0)}",
+            f"- consistent cases: {transition.get('consistent_case_count', 0)}",
+            '',
+            '### Transition Rules',
+        ]
+        for key, value in sorted((transition.get('rule_counts') or {}).items()):
+            lines.append(f'- {key}: {value}')
+        lines.extend(['', '### Dispatch Routes'])
+        for key, value in sorted((transition.get('route_counts') or {}).items()):
+            lines.append(f'- {key}: {value}')
+        lines.extend(['', '### Next Transitions'])
+        for key, value in sorted((transition.get('next_transition_counts') or {}).items()):
+            lines.append(f'- {key}: {value}')
+        lines.extend([
             '',
             '## Testnet Bridge',
             f"- enabled cases: {bridge.get('case_count', 0)}",
@@ -544,7 +609,7 @@ def format_validation_report_markdown(report: Dict[str, Any]) -> str:
             f"- cleanup needed count: {bridge.get('cleanup_needed_count', 0)}",
             '',
             '### Status Counts',
-        ]
+        ])
         for key, value in sorted((bridge.get('status_counts') or {}).items()):
             lines.append(f'- {key}: {value}')
         if bridge.get('blocking_reason_counts'):
@@ -562,6 +627,7 @@ def format_validation_report_markdown(report: Dict[str, Any]) -> str:
         return '\n'.join(lines) + '\n'
 
     bridge = ((report.get('artifacts') or {}).get('testnet_bridge_summary')) or {}
+    transition = ((report.get('diff') or {}).get('transition_policy')) or {}
     lines = [
         '# Shadow Validation Report',
         '',
@@ -571,6 +637,17 @@ def format_validation_report_markdown(report: Dict[str, Any]) -> str:
         f"- mode: {report.get('mode')}",
         f"- status: {report.get('status')}",
     ]
+    if transition.get('enabled'):
+        lines.extend([
+            '',
+            '## Transition Policy',
+            f"- transition_rule: {transition.get('transition_rule')}",
+            f"- dispatch_route: {transition.get('dispatch_route')}",
+            f"- next_transition: {transition.get('next_transition')}",
+            f"- target_stage: {transition.get('target_stage')}",
+            f"- schema_version: {transition.get('schema_version')}",
+            f"- consistency_all_match: {(transition.get('consistency') or {}).get('all_match')}",
+        ])
     if bridge.get('enabled'):
         lines.extend([
             '',
@@ -593,7 +670,56 @@ def format_validation_report_markdown(report: Dict[str, Any]) -> str:
             lines.append(f"- error: {bridge.get('error')}")
     return '\n'.join(lines) + '\n'
 
-def _build_workflow_diff(workflow_ready: Dict[str, Any], replay_result: Dict[str, Any], executor_result: Optional[Dict[str, Any]] = None, bridge_result: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def _build_transition_policy_diff(executor_result: Optional[Dict[str, Any]] = None, consumer_view: Optional[Dict[str, Any]] = None,
+                                  detail_view: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    executed = (executor_result or {}).get('executed') or {}
+    executor_items = executed.get('items') or []
+    first_executor = executor_items[0] if executor_items else {}
+    plan = first_executor.get('plan') or {}
+    dispatch = first_executor.get('dispatch') or {}
+    result = first_executor.get('result') or {}
+    audit = first_executor.get('audit') or {}
+    stage_items = ((consumer_view or {}).get('rollout_stage_progression') or {}).get('items') or []
+    first_stage = stage_items[0] if stage_items else {}
+    stage_progression = first_stage.get('stage_progression') or {}
+    timeline_summary = (((detail_view or {}).get('drilldown') or {}).get('timeline') or {}).get('summary') or {}
+
+    snapshot = copy.deepcopy(plan.get('transition_policy_snapshot') or audit.get('transition_policy_snapshot') or plan.get('transition_policy') or audit.get('transition_policy') or stage_progression.get('transition_policy') or {})
+    materialized_rule = {
+        'transition_rule': plan.get('transition_rule') or result.get('transition_rule') or dispatch.get('transition_rule'),
+        'dispatch_route': plan.get('dispatch_route') or result.get('dispatch_route') or dispatch.get('dispatch_route'),
+        'next_transition': plan.get('next_transition') or result.get('next_transition') or dispatch.get('next_transition'),
+        'target_rollout_stage': plan.get('target_rollout_stage') or stage_progression.get('target_stage'),
+        'rollout_stage': plan.get('rollout_stage') or stage_progression.get('current_stage'),
+        'readiness': plan.get('readiness') or stage_progression.get('readiness'),
+        'retryable': bool(plan.get('retryable', result.get('retryable', True))),
+        'rollback_hint': plan.get('rollback_hint') or result.get('rollback_hint') or dispatch.get('rollback_hint'),
+    }
+    consistency = {
+        'plan_vs_stage_rule': (plan.get('transition_rule') or result.get('transition_rule')) == stage_progression.get('transition_rule') if stage_progression else False,
+        'plan_vs_stage_route': (plan.get('dispatch_route') or result.get('dispatch_route')) == stage_progression.get('dispatch_route') if stage_progression else False,
+        'plan_vs_stage_next_transition': (plan.get('next_transition') or result.get('next_transition')) == stage_progression.get('next_transition') if stage_progression else False,
+        'plan_vs_timeline_route': (plan.get('dispatch_route') or result.get('dispatch_route')) == timeline_summary.get('dispatch_route') if timeline_summary else False,
+        'stage_vs_timeline_route': stage_progression.get('dispatch_route') == timeline_summary.get('dispatch_route') if timeline_summary and stage_progression else False,
+    }
+    consistency['all_match'] = bool(stage_progression) and all(consistency.values())
+    return {
+        'enabled': bool(first_executor),
+        'item_count': len(executor_items),
+        'schema_version': snapshot.get('schema_version'),
+        'transition_rule': materialized_rule.get('transition_rule'),
+        'dispatch_route': materialized_rule.get('dispatch_route'),
+        'next_transition': materialized_rule.get('next_transition'),
+        'target_stage': materialized_rule.get('target_rollout_stage'),
+        'rollout_stage': materialized_rule.get('rollout_stage'),
+        'readiness': materialized_rule.get('readiness'),
+        'snapshot': snapshot,
+        'materialized_rule': materialized_rule,
+        'consistency': consistency,
+    }
+
+
+def _build_workflow_diff(workflow_ready: Dict[str, Any], replay_result: Dict[str, Any], executor_result: Optional[Dict[str, Any]] = None, bridge_result: Optional[Dict[str, Any]] = None, consumer_view: Optional[Dict[str, Any]] = None, detail_view: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     actions = workflow_ready.get('actions') or []
     approvals = (workflow_ready.get('approval_state') or {}).get('items') or []
     replay_states = replay_result.get('states') or []
@@ -614,6 +740,7 @@ def _build_workflow_diff(workflow_ready: Dict[str, Any], replay_result: Dict[str
         'workflow': {'action_count': len(actions), 'approval_count': len(approvals), 'pending_approval_count': sum(1 for row in approvals if row.get('approval_state') == 'pending'), 'blocked_count': sum(1 for row in (workflow_ready.get('workflow_state') or {}).get('item_states', []) if row.get('workflow_state') == 'blocked'), 'ready_count': sum(1 for row in (workflow_ready.get('workflow_state') or {}).get('item_states', []) if row.get('workflow_state') == 'ready')},
         'replay': {'synced_count': replay_result.get('synced_count', 0), 'timeline_events': len(replay_result.get('timeline') or []), 'replayed_state_count': len(replay_states), 'pending_state_count': sum(1 for row in replay_states if row.get('state') == 'pending')},
         'executor': {'enabled': bool((executor_result or {}).get('enabled')), 'mode': (executor_result or {}).get('mode') or 'disabled', 'planned_count': executor_summary.get('planned_count', 0), 'queued_count': executor_summary.get('queued_count', 0), 'dry_run_count': executor_summary.get('dry_run_count', 0), 'applied_count': executor_summary.get('applied_count', 0), 'error_count': executor_summary.get('error_count', 0), 'stage_ready_count': stage_progression.get('ready_stage_count', 0), 'blocked_count': stage_progression.get('blocked_count', 0), 'timeline_summary': timeline_summary},
+        'transition_policy': _build_transition_policy_diff(executor_result, consumer_view, detail_view),
         'testnet_bridge': {'enabled': bool(bridge_result.get('enabled')), 'mode': bridge_result.get('mode') or 'disabled', 'status': bridge_result.get('status') or ('disabled' if not bridge_result.get('enabled') else 'plan_only'), 'plan_only': bool(bridge_result.get('plan_only', True)), 'execute_ready': bool((bridge_result.get('plan') or {}).get('execute_ready', False)), 'pending_approval_count': (bridge_result.get('gating') or {}).get('workflow_pending_approvals', 0), 'executor_applied_count': (bridge_result.get('gating') or {}).get('executor_applied_count', 0), 'blocked': bool(bridge_result.get('status') == 'blocked'), 'cleanup_needed': bool(bridge_result.get('cleanup_needed', False)), 'residual_position_detected': bool(bridge_result.get('residual_position_detected', False)), 'open_status': bridge_result.get('open_status'), 'close_status': bridge_result.get('close_status'), 'failure_compensation_hint': bridge_result.get('failure_compensation_hint'), 'error': bridge_result.get('error')},
     }
 
@@ -652,6 +779,32 @@ def _evaluate_assertions(case_data: Dict[str, Any], adaptive: Optional[Dict[str,
             actual = diff.get('executor', {}).get('queued_count')
         elif key == 'executor_dry_run_count':
             actual = diff.get('executor', {}).get('dry_run_count')
+        elif key == 'transition_policy_enabled':
+            actual = diff.get('transition_policy', {}).get('enabled')
+        elif key == 'transition_policy_rule':
+            actual = diff.get('transition_policy', {}).get('transition_rule')
+        elif key == 'transition_policy_route':
+            actual = diff.get('transition_policy', {}).get('dispatch_route')
+        elif key == 'transition_policy_next_transition':
+            actual = diff.get('transition_policy', {}).get('next_transition')
+        elif key == 'transition_policy_target_stage':
+            actual = diff.get('transition_policy', {}).get('target_stage')
+        elif key == 'transition_policy_schema_version':
+            actual = diff.get('transition_policy', {}).get('schema_version')
+        elif key == 'transition_policy_snapshot_rule':
+            actual = (diff.get('transition_policy', {}).get('snapshot') or {}).get('transition_rule')
+        elif key == 'transition_policy_snapshot_route':
+            actual = (diff.get('transition_policy', {}).get('snapshot') or {}).get('dispatch_route')
+        elif key == 'transition_policy_snapshot_next_transition':
+            actual = (diff.get('transition_policy', {}).get('snapshot') or {}).get('next_transition')
+        elif key == 'transition_policy_materialized_rule':
+            actual = (diff.get('transition_policy', {}).get('materialized_rule') or {}).get('transition_rule')
+        elif key == 'transition_policy_materialized_route':
+            actual = (diff.get('transition_policy', {}).get('materialized_rule') or {}).get('dispatch_route')
+        elif key == 'transition_policy_materialized_next_transition':
+            actual = (diff.get('transition_policy', {}).get('materialized_rule') or {}).get('next_transition')
+        elif key == 'transition_policy_consistent':
+            actual = (diff.get('transition_policy', {}).get('consistency') or {}).get('all_match')
         elif key == 'testnet_bridge_enabled':
             actual = diff.get('testnet_bridge', {}).get('enabled')
         elif key == 'testnet_bridge_execute_ready':
@@ -706,7 +859,7 @@ def _run_workflow_case(case: ValidationCase, *, case_path: Optional[str] = None,
         'controlled_rollout_execution': {},
         'auto_approval_execution': {},
     }, item_id=((workflow_ready.get('actions') or [{}])[0]).get('item_id')) if (workflow_ready.get('actions') or []) else {'found': False}
-    diff = _build_workflow_diff(workflow_ready, replay_result, executor_result, bridge_result)
+    diff = _build_workflow_diff(workflow_ready, replay_result, executor_result, bridge_result, consumer_view, detail_view)
     passed, assertions = _evaluate_assertions(case.raw, None, diff, workflow_ready=workflow_ready, replay_result=replay_result)
     bridge_summary = _build_testnet_bridge_summary(bridge_result, case_id=case.case_id, case_path=str(case_path) if case_path else None)
     return {'case_id': case.case_id, 'case_type': case.case_type, 'mode': case.raw.get('mode') or 'workflow_dry_run', 'status': 'pass' if passed else 'fail', 'baseline': None, 'adaptive': None, 'diff': diff, 'assertions': assertions, 'artifacts': {'workflow_ready': workflow_ready, 'approval_replay': replay_result, 'rollout_executor': executor_result.get('executed'), 'workflow_consumer_view': consumer_view, 'workbench_governance_detail_view': detail_view, 'testnet_bridge': bridge_result, 'testnet_bridge_summary': bridge_summary}, 'audit': {'generated_at': datetime.now().isoformat(), 'real_trade_execution': bool((bridge_result.get('audit') or {}).get('real_trade_execution', False)), 'dangerous_live_parameter_change': False, 'exchange_mode': (bridge_result.get('audit') or {}).get('exchange_mode', 'shadow'), 'case_path': str(case_path) if case_path else None, 'replay_source': ((replay_result.get('states') or [{}])[0]).get('replay_source') if replay_result.get('states') else None}}
@@ -722,7 +875,7 @@ def build_validation_summary(results: List[Dict[str, Any]]) -> Dict[str, Any]:
     for row in results:
         case_types[row.get('case_type') or 'unknown'] = case_types.get(row.get('case_type') or 'unknown', 0) + 1
         statuses[row.get('status') or 'unknown'] = statuses.get(row.get('status') or 'unknown', 0) + 1
-    return {'case_count': len(results), 'pass_count': statuses.get('pass', 0), 'fail_count': statuses.get('fail', 0), 'case_types': case_types, 'statuses': statuses, 'failed_cases': [{'case_id': row.get('case_id'), 'case_type': row.get('case_type'), 'case_path': (row.get('audit') or {}).get('case_path'), 'failed_assertions': [item for item in (row.get('assertions') or []) if not item.get('passed')]} for row in results if row.get('status') != 'pass'], 'generated_at': datetime.now().isoformat(), 'real_trade_execution': False, 'exchange_mode': 'shadow', 'testnet_bridge': _aggregate_testnet_bridge_batch(results)}
+    return {'case_count': len(results), 'pass_count': statuses.get('pass', 0), 'fail_count': statuses.get('fail', 0), 'case_types': case_types, 'statuses': statuses, 'failed_cases': [{'case_id': row.get('case_id'), 'case_type': row.get('case_type'), 'case_path': (row.get('audit') or {}).get('case_path'), 'failed_assertions': [item for item in (row.get('assertions') or []) if not item.get('passed')]} for row in results if row.get('status') != 'pass'], 'generated_at': datetime.now().isoformat(), 'real_trade_execution': False, 'exchange_mode': 'shadow', 'transition_policy': _summarize_transition_policy_artifacts(results), 'testnet_bridge': _aggregate_testnet_bridge_batch(results)}
 
 def run_shadow_validation_replay(paths: Iterable[str], *, base_config: Optional[Config] = None) -> Dict[str, Any]:
     case_paths = collect_validation_case_paths(paths)

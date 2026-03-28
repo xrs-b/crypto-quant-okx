@@ -1809,7 +1809,8 @@ def _evaluate_rollout_gates(*, action_type: str, row: Dict[str, Any], workflow_i
                             handler: Dict[str, Any], allowlisted: bool, current_state: str, current_workflow_state: str,
                             auto_decision: str, eligible: bool, approval_required: bool, requires_manual: bool,
                             blocked_by: Optional[List[str]] = None, risk_level: Optional[str] = None,
-                            transition_rule: Optional[Dict[str, Any]] = None, persisted_details: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                            transition_rule: Optional[Dict[str, Any]] = None, persisted_details: Optional[Dict[str, Any]] = None,
+                            validation_gate: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     spec = dict(spec or {})
     handler = dict(handler or {})
     transition_rule = dict(transition_rule or {})
@@ -1830,18 +1831,24 @@ def _evaluate_rollout_gates(*, action_type: str, row: Dict[str, Any], workflow_i
         queue_status=((workflow_item.get('queue_progression') or {}).get('status') if isinstance(workflow_item.get('queue_progression'), dict) else None),
         executor_status=persisted_details.get('executor_status'),
     )
+    validation_gate = dict(validation_gate or {})
+    validation_gate_enabled = bool(validation_gate.get('enabled'))
+    validation_gate_ready = validation_gate.get('ready')
     manual_required = bool(approval_required or requires_manual or auto_decision == 'manual_review')
     low_risk = normalized_risk == 'low'
     auto_approve = auto_decision == 'auto_approve'
     dispatch_mode = spec.get('dispatch_mode') or handler.get('disposition') or 'unsupported'
     safe_boundary = handler.get('safe_boundary') or ('metadata_only' if dispatch_mode == 'apply' else 'queue_only')
+    validation_freeze = bool(validation_gate.get('freeze_auto_advance')) and dispatch_mode == 'apply'
+    validation_ready = (validation_gate_ready is not False) if validation_gate_enabled else True
     readiness_score = 0
-    readiness_score += 20 if allowlisted else 0
-    readiness_score += 20 if eligible else 0
-    readiness_score += 20 if auto_approve else 0
-    readiness_score += 20 if low_risk else 0
+    readiness_score += 15 if allowlisted else 0
+    readiness_score += 15 if eligible else 0
+    readiness_score += 15 if auto_approve else 0
+    readiness_score += 15 if low_risk else 0
     readiness_score += 10 if not blocked else 0
     readiness_score += 10 if not manual_required else 0
+    readiness_score += 20 if validation_ready else 0
     readiness_score = max(0, min(readiness_score, 100))
     blockers = []
     if not allowlisted:
@@ -1856,6 +1863,9 @@ def _evaluate_rollout_gates(*, action_type: str, row: Dict[str, Any], workflow_i
         blockers.extend([f'blocked_by:{code}' for code in blocked])
     if manual_required:
         blockers.append('manual_gate_required')
+    if validation_freeze:
+        blockers.append('validation_gate:not_ready')
+        blockers.extend([f'validation:{reason}' for reason in (validation_gate.get('reasons') or [])])
     if dispatch_mode != 'apply':
         blockers.append(f'dispatch_mode:{dispatch_mode}')
     if current_state in TERMINAL_APPROVAL_STATES:
@@ -1872,6 +1882,8 @@ def _evaluate_rollout_gates(*, action_type: str, row: Dict[str, Any], workflow_i
         rollback_triggers.append('blocked_transition')
     if review_overdue:
         rollback_triggers.append('review_overdue')
+    if validation_gate_enabled and validation_gate.get('rollback_on_regression') and dispatch_mode == 'apply' and current_workflow_state in {'ready', 'queued', 'review_pending', 'execution_failed', 'rollback_pending'}:
+        rollback_triggers.append('validation_gate_regressed')
     rollback_candidate = bool(spec.get('rollback_capable', False) and rollback_triggers)
     stage_handler = _resolve_rollout_stage_handler(
         current_stage=transition_rule.get('rollout_stage') or row.get('current_rollout_stage') or workflow_item.get('current_rollout_stage'),
@@ -1899,8 +1911,10 @@ def _evaluate_rollout_gates(*, action_type: str, row: Dict[str, Any], workflow_i
                 'low_risk': low_risk,
                 'no_blockers': not blocked,
                 'no_manual_gate': not manual_required,
+                'validation_gate_ready': validation_ready,
             },
-            'explain': 'auto advance requires very-safe apply + low risk + no blockers + approval-eligible + no manual gate',
+            'validation_gate': _build_validation_gate_snapshot({'validation_gate': validation_gate}) if validation_gate_enabled else {'enabled': False, 'ready': None, 'freeze_auto_advance': False, 'rollback_on_regression': False, 'reasons': []},
+            'explain': 'auto advance requires very-safe apply + low risk + no blockers + approval-eligible + no manual gate + validation gate ready',
         },
         'rollback_gate': {
             'candidate': rollback_candidate,
@@ -1909,7 +1923,8 @@ def _evaluate_rollout_gates(*, action_type: str, row: Dict[str, Any], workflow_i
             'triggered': rollback_triggers,
             'next_action': 'prepare_rollback_review' if rollback_candidate else None,
             'rollback_hint': transition_rule.get('rollback_hint') or 'restore_previous_state_from_approval_timeline',
-            'explain': 'rollback opens on execution error, rollback pending, critical risk, blocked transition, or overdue review',
+            'validation_gate': _build_validation_gate_snapshot({'validation_gate': validation_gate}) if validation_gate_enabled else {'enabled': False, 'ready': None, 'freeze_auto_advance': False, 'rollback_on_regression': False, 'reasons': []},
+            'explain': 'rollback opens on execution error, rollback pending, critical risk, blocked transition, overdue review, or validation gate regression',
         },
         'stage_handler': stage_handler,
     }
@@ -2483,6 +2498,71 @@ def _build_rollout_result_envelope(*, disposition: str, status: str, reason: Opt
     return result
 
 
+def _extract_validation_gate(payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    payload = payload or {}
+    source = (
+        payload.get('validation_gate')
+        or payload.get('validation_summary')
+        or ((payload.get('validation_replay') or {}).get('summary') if isinstance(payload.get('validation_replay'), dict) else None)
+        or ((payload.get('validation') or {}).get('summary') if isinstance(payload.get('validation'), dict) else None)
+        or {}
+    )
+    readiness = dict(source.get('readiness') or {}) if isinstance(source, dict) else {}
+    coverage = dict(source.get('coverage_matrix') or {}) if isinstance(source, dict) else {}
+    ready = bool(
+        readiness.get('low_intervention_gate_ready', coverage.get('ready_for_low_intervention_gate', False))
+    )
+    missing = _dedupe_strings(readiness.get('missing_required_capabilities') or coverage.get('missing_required') or [])
+    failing = _dedupe_strings(readiness.get('failing_required_capabilities') or coverage.get('failing_required') or [])
+    failing_case_count = int(readiness.get('failing_case_count') or source.get('fail_count') or 0)
+    reasons = []
+    reasons.extend([f'missing_required:{item}' for item in missing])
+    reasons.extend([f'failing_required:{item}' for item in failing])
+    if failing_case_count:
+        reasons.append(f'failing_cases:{failing_case_count}')
+    summary = {
+        'enabled': bool(source),
+        'ready': ready,
+        'freeze_auto_advance': bool(source) and not ready,
+        'rollback_on_regression': bool(source) and not ready,
+        'coverage_schema_version': coverage.get('schema_version'),
+        'required_capability_count': coverage.get('required_capability_count'),
+        'covered_required_count': coverage.get('covered_required_count'),
+        'passing_required_count': coverage.get('passing_required_count'),
+        'missing_required_capabilities': missing,
+        'failing_required_capabilities': failing,
+        'failing_case_count': failing_case_count,
+        'reasons': reasons,
+        'summary': source,
+    }
+    if not summary['enabled']:
+        summary.update({
+            'ready': None,
+            'freeze_auto_advance': False,
+            'rollback_on_regression': False,
+            'reasons': [],
+        })
+    return summary
+
+
+def _build_validation_gate_snapshot(payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    gate = _extract_validation_gate(payload)
+    return {
+        'enabled': gate.get('enabled', False),
+        'ready': gate.get('ready'),
+        'freeze_auto_advance': gate.get('freeze_auto_advance', False),
+        'rollback_on_regression': gate.get('rollback_on_regression', False),
+        'reasons': gate.get('reasons') or [],
+        'missing_required_capabilities': gate.get('missing_required_capabilities') or [],
+        'failing_required_capabilities': gate.get('failing_required_capabilities') or [],
+        'failing_case_count': gate.get('failing_case_count', 0),
+        'coverage_schema_version': gate.get('coverage_schema_version'),
+        'required_capability_count': gate.get('required_capability_count'),
+        'covered_required_count': gate.get('covered_required_count'),
+        'passing_required_count': gate.get('passing_required_count'),
+    }
+
+
 def _build_stage_loop_envelope(*, stage_handler: Optional[Dict[str, Any]] = None, auto_advance_gate: Optional[Dict[str, Any]] = None,
                                rollback_gate: Optional[Dict[str, Any]] = None, dispatch_route: Optional[str] = None,
                                next_transition: Optional[str] = None, result_status: Optional[str] = None) -> Dict[str, Any]:
@@ -2976,6 +3056,7 @@ def execute_rollout_executor(payload: Dict, db: Any, *, config: Any = None, sett
     catalog = _build_rollout_executor_catalog(execution_settings.get('allowed_action_types'))
     action_registry = _build_safe_rollout_action_registry(execution_settings.get('allowed_action_types'))
 
+    validation_gate = _build_validation_gate_snapshot(payload)
     result = {
         'schema_version': 'm5_rollout_executor_skeleton_v2',
         'enabled': execution_settings.get('enabled', False),
@@ -2985,6 +3066,7 @@ def execute_rollout_executor(payload: Dict, db: Any, *, config: Any = None, sett
         'source': execution_settings.get('source'),
         'replay_source': replay_source,
         'status': 'disabled',
+        'validation_gate': validation_gate,
         'summary': {
             'item_count': len(approval_items),
             'planned_count': 0,
@@ -2995,6 +3077,7 @@ def execute_rollout_executor(payload: Dict, db: Any, *, config: Any = None, sett
             'error_count': 0,
             'by_disposition': {},
             'by_status': {},
+            'validation_gate': validation_gate,
         },
         'supported_action_map': catalog,
         'action_registry': action_registry,
@@ -3078,6 +3161,7 @@ def execute_rollout_executor(payload: Dict, db: Any, *, config: Any = None, sett
             risk_level=risk_level,
             transition_rule=transition_rule,
             persisted_details=persisted_details,
+            validation_gate=_extract_validation_gate(payload),
         )
         transition_policy_snapshot = _build_rollout_transition_policy_snapshot(spec, action_type)
 
@@ -3554,6 +3638,7 @@ def build_workflow_consumer_view(payload: Optional[Dict] = None) -> Dict[str, An
     auto_approval = payload.get('auto_approval_execution') or {}
     stage_progression = build_rollout_stage_progression(payload, rollout_executor)
     recovery_view = payload.get('workflow_recovery_view') or build_workflow_recovery_view(payload)
+    validation_gate = _build_validation_gate_snapshot(payload)
     approval_items = approval_state.get('items') or []
     workflow_items = workflow_state.get('item_states') or []
     approval_by_playbook = {row.get('playbook_id'): row for row in approval_items if row.get('playbook_id')}
@@ -3595,6 +3680,7 @@ def build_workflow_consumer_view(payload: Optional[Dict] = None) -> Dict[str, An
             'recovery_queue_summary': recovery_view.get('summary') or {},
             'controlled_rollout_executed_count': controlled_rollout.get('executed_count', 0),
             'auto_approval_executed_count': auto_approval.get('executed_count', 0),
+            'validation_gate': validation_gate,
         },
         'workflow_state': workflow_state,
         'approval_state': approval_state,
@@ -3604,6 +3690,7 @@ def build_workflow_consumer_view(payload: Optional[Dict] = None) -> Dict[str, An
         'workflow_recovery_view': recovery_view,
         'controlled_rollout_execution': controlled_rollout,
         'auto_approval_execution': auto_approval,
+        'validation_gate': validation_gate,
     }
     payload['consumer_view'] = view
     return view
@@ -3879,6 +3966,7 @@ def build_workflow_operator_digest(payload: Optional[Dict] = None, *, max_items:
     rollout_executor = consumer_view.get('rollout_executor') or {}
     auto_approval = consumer_view.get('auto_approval_execution') or {}
     controlled_rollout = consumer_view.get('controlled_rollout_execution') or {}
+    validation_gate = consumer_view.get('validation_gate') or _build_validation_gate_snapshot(payload)
     transition_journal = _build_transition_journal_consumer_view(
         overview=transition_journal_overview or payload.get('transition_journal')
     ) if (transition_journal_overview or payload.get('transition_journal')) else {
@@ -4069,7 +4157,9 @@ def build_workflow_operator_digest(payload: Optional[Dict] = None, *, max_items:
     }
 
     headline_status = 'attention_required' if manual_approval_items or blocked_items else 'steady'
-    if ready_items and not manual_approval_items and not blocked_items:
+    if validation_gate.get('enabled') and validation_gate.get('freeze_auto_advance'):
+        headline_status = 'attention_required'
+    elif ready_items and not manual_approval_items and not blocked_items:
         headline_status = 'ready_to_consume'
 
     digest = {
@@ -4078,8 +4168,10 @@ def build_workflow_operator_digest(payload: Optional[Dict] = None, *, max_items:
             'status': headline_status,
             'message': (
                 f"{len(manual_approval_items)} manual approval / {len(blocked_items)} blocked / {len(ready_items)} ready / {len(queued_items)} queued / {len(auto_advance_items)} auto / {len(rollback_candidate_items)} rollback"
+                + (f" / validation={('ready' if validation_gate.get('ready') else 'freeze')}" if validation_gate.get('enabled') else '')
             ),
             'rollout_executor_status': rollout_executor.get('status') or 'disabled',
+            'validation_gate': validation_gate,
         },
         'summary': {
             'workflow_item_count': len(workflow_items),
@@ -4104,6 +4196,7 @@ def build_workflow_operator_digest(payload: Optional[Dict] = None, *, max_items:
             'transition_count': (transition_journal.get('summary') or {}).get('count', 0),
             'latest_transition_at': (transition_journal.get('summary') or {}).get('latest_timestamp'),
             'latest_transition': transition_journal.get('latest') or {},
+            'validation_gate': validation_gate,
         },
         'attention': {
             'manual_approval': manual_approval_items[:max_items],

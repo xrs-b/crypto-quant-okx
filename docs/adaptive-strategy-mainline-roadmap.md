@@ -293,6 +293,7 @@
 - action/stage 级 acceptance checklist
 - 每次新增 safe action 都有最小验证入口
 - **2026-03-28 implementation update**：validation replay summary 现已补 `coverage_matrix + readiness`，会稳定回答 approval replay / rollout executor dry-run / transition policy contract / testnet bridge（plan-only、controlled execute、blocked guard、cleanup recovery）是否都有 fixture 覆盖，及是否达到 `low_intervention_gate_ready`。后续新增 safe action / stage handler 时，可以直接用同一 summary 检查“主线验证矩阵有无缺口”，减少只看单 case pass 的错觉。
+- **2026-03-28 implementation update (validation-gated rollout)**：validation replay readiness 已正式接入 rollout executor gate：当 `low_intervention_gate_ready=false` 时，very-safe apply 路径会统一冻结 `auto_advance_gate`，并在已进入 active/review path 的 stage item 上打开 `validation_gate_regressed` rollback trigger；同时 consumer/operator digest 会直出 `validation_gate` 摘要，令系统不止知道“动作本身安不安全”，仲知道“整条低干预验证矩阵是否仲够资格继续自动推进”。
 
 完成标志：
 - 新 handler/新 action 可以在非自然开单条件下被验证

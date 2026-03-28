@@ -6068,6 +6068,19 @@ class TestApprovalPersistence(unittest.TestCase):
         self.assertEqual(payload['transition_journal']['recent_transitions'][0]['trigger'], 'state_transition')
         self.assertTrue(payload['next_actions'])
 
+    def test_build_workflow_operator_digest_surfaces_validation_gate_freeze(self):
+        payload = build_workflow_operator_digest({
+            'workflow_state': {'item_states': [{'item_id': 'playbook::ready', 'title': 'Ready observe item', 'action_type': 'joint_observe', 'risk_level': 'low', 'approval_required': False, 'requires_manual': False, 'workflow_state': 'ready', 'blocking_reasons': []}], 'summary': {}},
+            'approval_state': {'items': [{'approval_id': 'approval::ready', 'playbook_id': 'playbook::ready', 'title': 'Ready observe item', 'action_type': 'joint_observe', 'approval_state': 'pending', 'decision_state': 'ready', 'risk_level': 'low', 'approval_required': False, 'requires_manual': False, 'blocked_by': []}], 'summary': {}},
+            'rollout_executor': {'status': 'controlled', 'summary': {}},
+            'validation_replay': {'summary': {'coverage_matrix': {'schema_version': 'm5_validation_coverage_matrix_v1', 'ready_for_low_intervention_gate': False, 'required_capability_count': 8, 'covered_required_count': 7, 'passing_required_count': 6, 'missing_required': ['testnet_bridge_controlled_execute'], 'failing_required': ['transition_policy_contract']}, 'readiness': {'low_intervention_gate_ready': False, 'missing_required_capabilities': ['testnet_bridge_controlled_execute'], 'failing_required_capabilities': ['transition_policy_contract'], 'failing_case_count': 1}}},
+        })
+        self.assertEqual(payload['headline']['status'], 'attention_required')
+        self.assertFalse(payload['headline']['validation_gate']['ready'])
+        self.assertTrue(payload['summary']['validation_gate']['freeze_auto_advance'])
+        self.assertIn('missing_required:testnet_bridge_controlled_execute', payload['summary']['validation_gate']['reasons'])
+
+
     def test_build_dashboard_summary_cards_aggregates_digest_attention_and_execution(self):
         payload = build_dashboard_summary_cards({
             'workflow_state': {
@@ -8010,6 +8023,56 @@ class TestApprovalPersistence(unittest.TestCase):
             blocked_gate = items['approval::review']['plan']['auto_advance_gate']
             self.assertFalse(blocked_gate['allowed'])
             self.assertIn('risk_level:critical', blocked_gate['blockers'])
+
+    def test_rollout_executor_validation_gate_blocks_auto_advance_when_replay_not_ready(self):
+        class StubConfig:
+            def __init__(self, values=None):
+                self.values = values or {}
+            def get(self, key, default=None):
+                return self.values.get(key, default)
+
+        config = StubConfig({'governance.rollout_executor': {'enabled': True, 'mode': 'controlled', 'allowed_action_types': ['joint_stage_prepare']}})
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(str(Path(tmpdir) / 'rollout_executor_validation_gate.db'))
+            payload = {
+                'validation_replay': {'summary': {'coverage_matrix': {'schema_version': 'm5_validation_coverage_matrix_v1', 'ready_for_low_intervention_gate': False, 'required_capability_count': 8, 'covered_required_count': 7, 'passing_required_count': 7, 'missing_required': ['testnet_bridge_controlled_execute'], 'failing_required': []}, 'readiness': {'low_intervention_gate_ready': False, 'missing_required_capabilities': ['testnet_bridge_controlled_execute'], 'failing_required_capabilities': [], 'failing_case_count': 0}}},
+                'workflow_state': {'item_states': [{'item_id': 'playbook::stage', 'title': 'Stage prepare item', 'action_type': 'joint_stage_prepare', 'decision': 'expand', 'governance_mode': 'rollout', 'risk_level': 'low', 'approval_required': False, 'blocking_reasons': [], 'preconditions': [], 'workflow_state': 'pending', 'confidence': 'high', 'current_rollout_stage': 'observe', 'target_rollout_stage': 'guarded_prepare'}], 'summary': {}},
+                'approval_state': {'items': [{'approval_id': 'approval::stage', 'playbook_id': 'playbook::stage', 'title': 'Stage prepare item', 'action_type': 'joint_stage_prepare', 'approval_state': 'pending', 'decision_state': 'pending', 'risk_level': 'low', 'approval_required': False, 'blocked_by': []}], 'summary': {}},
+            }
+            payload = attach_auto_approval_policy(payload)
+            db.sync_approval_items(build_workflow_approval_records(payload), replay_source='unit-test')
+            result = execute_rollout_executor(payload, db, config=config, replay_source='unit-test-replay')
+            gate = result['rollout_executor']['items'][0]['plan']['auto_advance_gate']
+            self.assertFalse(gate['allowed'])
+            self.assertEqual(gate['readiness_score'], 80)
+            self.assertIn('validation_gate:not_ready', gate['blockers'])
+            self.assertIn('validation_gate_ready', gate['required_flags'])
+            self.assertFalse(gate['required_flags']['validation_gate_ready'])
+            self.assertFalse(result['rollout_executor']['validation_gate']['ready'])
+
+    def test_rollout_executor_validation_gate_regression_opens_rollback_candidate(self):
+        class StubConfig:
+            def __init__(self, values=None):
+                self.values = values or {}
+            def get(self, key, default=None):
+                return self.values.get(key, default)
+
+        config = StubConfig({'governance.rollout_executor': {'enabled': True, 'mode': 'controlled', 'allowed_action_types': ['joint_stage_prepare']}})
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(str(Path(tmpdir) / 'rollout_executor_validation_regression.db'))
+            payload = {
+                'validation_replay': {'summary': {'coverage_matrix': {'schema_version': 'm5_validation_coverage_matrix_v1', 'ready_for_low_intervention_gate': False, 'required_capability_count': 8, 'covered_required_count': 8, 'passing_required_count': 7, 'missing_required': [], 'failing_required': ['transition_policy_contract']}, 'readiness': {'low_intervention_gate_ready': False, 'missing_required_capabilities': [], 'failing_required_capabilities': ['transition_policy_contract'], 'failing_case_count': 1}}},
+                'workflow_state': {'item_states': [{'item_id': 'playbook::stage', 'title': 'Stage prepare item', 'action_type': 'joint_stage_prepare', 'decision': 'expand', 'governance_mode': 'rollout', 'risk_level': 'low', 'approval_required': False, 'blocking_reasons': [], 'preconditions': [], 'workflow_state': 'ready', 'confidence': 'high', 'current_rollout_stage': 'guarded_prepare', 'target_rollout_stage': 'controlled_apply'}], 'summary': {}},
+                'approval_state': {'items': [{'approval_id': 'approval::stage', 'playbook_id': 'playbook::stage', 'title': 'Stage prepare item', 'action_type': 'joint_stage_prepare', 'approval_state': 'pending', 'decision_state': 'ready', 'risk_level': 'low', 'approval_required': False, 'blocked_by': []}], 'summary': {}},
+            }
+            payload = attach_auto_approval_policy(payload)
+            db.sync_approval_items(build_workflow_approval_records(payload), replay_source='unit-test')
+            result = execute_rollout_executor(payload, db, config=config, replay_source='unit-test-replay')
+            rollback_gate = result['rollout_executor']['items'][0]['plan']['rollback_gate']
+            self.assertTrue(rollback_gate['candidate'])
+            self.assertIn('validation_gate_regressed', rollback_gate['triggered'])
+            self.assertFalse(rollback_gate['validation_gate']['ready'])
+
 
     def test_rollout_executor_stage_handlers_expose_owner_waiting_points_and_next_transition(self):
         class StubConfig:

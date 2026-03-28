@@ -10281,6 +10281,7 @@ class TestApprovalPersistence(unittest.TestCase):
             self.assertEqual(summary['summary']['stage_transition_counts']['guarded_prepare->controlled_apply'], 1)
             self.assertEqual(summary['summary']['rollback_review_candidate_count'], 1)
             self.assertEqual(summary['recent_executions'][0]['actor'], 'system:test-auto-promotion-summary')
+            self.assertTrue(summary['recent_executions'][0]['review_due_at'])
             self.assertEqual(summary['rollback_review_candidates'][0]['rollback_triggered'], ['review_overdue'])
 
     def test_database_auto_promotion_activity_summary_reads_controlled_rollout_events(self):
@@ -10295,6 +10296,10 @@ class TestApprovalPersistence(unittest.TestCase):
                 'actor': 'system:test-db-auto-promotion',
                 'source': 'unit_test_db_auto_promotion',
             })
+            persisted = db.get_approval_state('approval::promo')
+            self.assertTrue(persisted['details']['scheduled_review']['review_due_at'])
+            self.assertEqual(persisted['details']['scheduled_review']['queue_kind'], 'post_promotion_review_queue')
+            self.assertIn('post_apply_samples', persisted['details']['scheduled_review']['observation_targets'])
             summary = db.get_auto_promotion_activity_summary(limit=10)
             self.assertEqual(summary['event_count'], 1)
             self.assertEqual(summary['stage_transition_counts']['guarded_prepare->controlled_apply'], 1)
@@ -10319,11 +10324,12 @@ class TestApprovalPersistence(unittest.TestCase):
             })
             consumer = build_workflow_consumer_view(executed)
             workflow_item = consumer['workflow_state']['item_states'][0]
-            workflow_item['scheduled_review'] = {'review_due_at': '2026-03-29T00:00:00Z', 'review_after_hours': 24}
             summary = build_auto_promotion_execution_summary(executed, max_items=5)
             self.assertEqual(summary['summary']['post_promotion_review_queue_count'], 1)
-            self.assertEqual(summary['review_queues']['post_promotion_review_queue'][0]['review_due_at'], '2026-03-29T00:00:00Z')
+            self.assertTrue(summary['review_queues']['post_promotion_review_queue'][0]['review_due_at'])
             self.assertEqual(summary['review_queues']['post_promotion_review_queue'][0]['recommended_action'], 'run_scheduled_review')
+            self.assertEqual(summary['review_queues']['post_promotion_review_queue'][0]['queue_kind'], 'post_promotion_review_queue')
+            self.assertIn('post_apply_samples', summary['review_queues']['post_promotion_review_queue'][0]['observation_targets'])
             workflow_item['rollback_gate'] = {'candidate': True, 'triggered': ['review_overdue']}
             summary = build_auto_promotion_execution_summary(executed, max_items=5)
             self.assertEqual(summary['summary']['rollback_review_queue_count'], 1)
@@ -10344,7 +10350,7 @@ class TestApprovalPersistence(unittest.TestCase):
             })
             consumer = build_workflow_consumer_view(executed)
             workflow_item = consumer['workflow_state']['item_states'][0]
-            workflow_item['scheduled_review'] = {'review_due_at': '2026-03-29T00:00:00Z', 'review_after_hours': 24}
+            self.assertTrue(workflow_item['scheduled_review']['review_due_at'])
             workflow_item['rollback_gate'] = {'candidate': True, 'triggered': ['review_overdue']}
             review_queue_consumption = build_auto_promotion_review_queue_consumption(
                 build_auto_promotion_execution_summary(executed, max_items=5),

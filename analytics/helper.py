@@ -1975,6 +1975,9 @@ def merge_persisted_approval_state(payload: Dict, persisted_rows: Optional[List[
         row['rollback_gate'] = persisted_details.get('rollback_gate') or ((persisted_details.get('state_machine') or {}).get('rollback_gate') if isinstance(persisted_details.get('state_machine'), dict) else None) or row.get('rollback_gate') or {}
         row['validation_gate'] = persisted_details.get('validation_gate') or (row.get('auto_advance_gate') or {}).get('validation_gate') or (row.get('rollback_gate') or {}).get('validation_gate') or row.get('validation_gate') or {}
         row['stage_loop'] = persisted_details.get('stage_loop') or ((persisted_details.get('state_machine') or {}).get('stage_loop') if isinstance(persisted_details.get('state_machine'), dict) else None) or row.get('stage_loop') or {}
+        row['scheduled_review'] = persisted_details.get('scheduled_review') or row.get('scheduled_review') or {}
+        row['review_due_at'] = persisted_details.get('review_due_at') or row.get('review_due_at')
+        row['review_after_hours'] = persisted_details.get('review_after_hours') or row.get('review_after_hours')
         row['auto_promotion_execution'] = persisted_details.get('auto_promotion_execution') or row.get('auto_promotion_execution') or {}
         row['promotion_execution_status'] = (row.get('auto_promotion_execution') or {}).get('after', {}).get('workflow_state') or row.get('promotion_execution_status')
         if persisted.get('state') in TERMINAL_APPROVAL_STATES:
@@ -2002,6 +2005,10 @@ def merge_persisted_approval_state(payload: Dict, persisted_rows: Optional[List[
         row['rollback_gate'] = approval_row.get('rollback_gate') or row.get('rollback_gate') or {}
         row['validation_gate'] = approval_row.get('validation_gate') or row.get('validation_gate') or {}
         row['stage_loop'] = approval_row.get('stage_loop') or row.get('stage_loop') or {}
+        row['scheduled_review'] = approval_row.get('scheduled_review') or row.get('scheduled_review') or {}
+        row['review_due_at'] = approval_row.get('review_due_at') or row.get('review_due_at')
+        row['review_after_hours'] = approval_row.get('review_after_hours') or row.get('review_after_hours')
+        row['auto_promotion_execution'] = approval_row.get('auto_promotion_execution') or row.get('auto_promotion_execution') or {}
         if approval_row.get('persisted_workflow_state'):
             row['workflow_state'] = _normalize_workflow_state(approval_row.get('persisted_workflow_state'), approval_state=approval_row.get('approval_state'))
         elif row.get('approval_required') and approval_row.get('approval_state') == 'approved' and row.get('workflow_state') == 'pending':
@@ -2902,6 +2909,30 @@ def execute_controlled_rollout_layer(payload: Dict, db: Any, *, config: Any = No
         candidate_reasons = _dedupe_strings((candidate.get('why_promotable') or []) + (candidate.get('missing_requirements') or []))
         if fallback_candidate_ready and not candidate_reasons:
             candidate_reasons = ['auto_advance_allowed', 'derived_from_controlled_rollout_guardrails']
+        review_after_hours = int(
+            row.get('review_after_hours')
+            or workflow_item.get('review_after_hours')
+            or candidate.get('scheduled_review', {}).get('review_after_hours')
+            or execution_settings.get('default_review_after_hours')
+            or 24
+        )
+        review_after_hours = max(1, min(review_after_hours, 24 * 14))
+        review_due_at = (
+            row.get('review_due_at')
+            or workflow_item.get('review_due_at')
+            or candidate.get('review_due_at')
+            or (candidate.get('scheduled_review') or {}).get('review_due_at')
+        )
+        if not review_due_at:
+            review_due_at = (datetime.now(timezone.utc) + timedelta(hours=review_after_hours)).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
+        scheduled_review = dict(candidate.get('scheduled_review') or workflow_item.get('scheduled_review') or row.get('scheduled_review') or {})
+        scheduled_review.setdefault('type', 'post_promotion_review')
+        scheduled_review.setdefault('scheduled_at', _utc_now_iso())
+        scheduled_review['review_due_at'] = review_due_at
+        scheduled_review['review_after_hours'] = review_after_hours
+        scheduled_review.setdefault('observation_targets', ['post_apply_samples', 'post_apply_metrics', 'scheduled_review_checkpoint'])
+        scheduled_review.setdefault('next_step', 'run_scheduled_review')
+        scheduled_review.setdefault('queue_kind', 'post_promotion_review_queue')
         reason = f"{execution_settings['reason_prefix']}: {row.get('reason') or 'ready auto-promotion candidate passed strict safety boundary'}"
         details = {
             'item_id': approval_id,
@@ -2960,6 +2991,10 @@ def execute_controlled_rollout_layer(payload: Dict, db: Any, *, config: Any = No
                     'rollout_stage': after_stage,
                 },
                 'reason_codes': candidate_reasons or ['auto_advance_allowed'],
+                'review_due_at': review_due_at,
+                'review_after_hours': review_after_hours,
+                'review_queue_kind': 'post_promotion_review_queue',
+                'scheduled_review': scheduled_review,
                 'rollback_hint': candidate.get('rollback_gate', {}).get('rollback_hint') or 'revert_stage_metadata_to_previous_stage',
                 'event_log': [{
                     'event_type': event_type,
@@ -2973,6 +3008,7 @@ def execute_controlled_rollout_layer(payload: Dict, db: Any, *, config: Any = No
                     'before_workflow_state': current_workflow_state,
                     'after_workflow_state': target_workflow_state,
                     'reason_codes': candidate_reasons or ['auto_advance_allowed'],
+                    'review_due_at': review_due_at,
                     'created_at': _utc_now_iso(),
                 }],
             },
@@ -2982,6 +3018,9 @@ def execute_controlled_rollout_layer(payload: Dict, db: Any, *, config: Any = No
             'rollout_stage': after_stage,
             'target_rollout_stage': after_stage,
             'stage_transition': {'from': before_stage, 'to': after_stage},
+            'review_due_at': review_due_at,
+            'review_after_hours': review_after_hours,
+            'scheduled_review': scheduled_review,
             'rollback_hint': candidate.get('rollback_gate', {}).get('rollback_hint') or 'revert_stage_metadata_to_previous_stage',
             'last_transition': {
                 'rule': 'controlled_auto_promotion_execute',
@@ -3026,6 +3065,8 @@ def execute_controlled_rollout_layer(payload: Dict, db: Any, *, config: Any = No
             'reason': reason,
             'before_stage': before_stage,
             'after_stage': after_stage,
+            'review_due_at': review_due_at,
+            'review_after_hours': review_after_hours,
             'reason_codes': candidate_reasons or ['auto_advance_allowed'],
         })
         result['executed_count'] += 1
@@ -6459,6 +6500,8 @@ def build_auto_promotion_execution_summary(payload: Optional[Dict] = None, *, ma
             'current_rollout_stage': workflow_item.get('current_rollout_stage') or after.get('rollout_stage'),
             'target_rollout_stage': workflow_item.get('target_rollout_stage') or after.get('rollout_stage'),
             'scheduled_review': workflow_item.get('scheduled_review') or approval_item.get('scheduled_review') or {},
+            'review_due_at': execution.get('review_due_at') or ((workflow_item.get('scheduled_review') or approval_item.get('scheduled_review') or {}).get('review_due_at')),
+            'review_after_hours': execution.get('review_after_hours') or ((workflow_item.get('scheduled_review') or approval_item.get('scheduled_review') or {}).get('review_after_hours')),
             'before': before,
             'after': after,
             'reason_codes': execution.get('reason_codes') or [],
@@ -6510,6 +6553,8 @@ def build_auto_promotion_execution_summary(payload: Optional[Dict] = None, *, ma
             'current_rollout_stage': workflow_item.get('current_rollout_stage') or after.get('rollout_stage'),
             'target_rollout_stage': workflow_item.get('target_rollout_stage') or after.get('rollout_stage'),
             'scheduled_review': workflow_item.get('scheduled_review') or approval_item.get('scheduled_review') or {},
+            'review_due_at': execution.get('review_due_at') or ((workflow_item.get('scheduled_review') or approval_item.get('scheduled_review') or {}).get('review_due_at')),
+            'review_after_hours': execution.get('review_after_hours') or ((workflow_item.get('scheduled_review') or approval_item.get('scheduled_review') or {}).get('review_after_hours')),
             'before': before,
             'after': after,
             'reason_codes': execution.get('reason_codes') or [],

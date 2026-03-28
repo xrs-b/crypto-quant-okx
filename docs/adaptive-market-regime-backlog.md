@@ -83,6 +83,7 @@
 | AR-M5-09 | workflow operator digest / low-intervention governance summary API | M5 | P0 | 否（仅聚合已有 workflow/approval/executor 状态） | dashboard / API / low-touch consumption |
 | AR-M5-10 | workflow attention view / manual approval + blocked follow-up API | M5 | P0 | 否（仅聚合已有 workflow/approval/executor 状态） | dashboard / API / agent / low-touch巡检消费 |
 | AR-M5-11 | approval / rollout workbench governance aggregate view | M5 | P0 | 否（仅聚合已有 workflow/approval/executor 状态） | dashboard / API / agent / 人工巡检工作台消费 |
+| AR-M5-12 | unified transition journal / state-change audit trail | M5 | P0 | 否（仅记录与聚合状态迁移） | database / analytics / dashboard / agent / 人工巡检 |
 
 ---
 
@@ -142,6 +143,22 @@
   - `provenance` 固定表达 `origin / source / family / phase / producer / replay_source / synthetic`，避免调用方再靠 `source` 字符串猜来源；
   - `timestamp_info` 固定表达 `value / source / phase / field / fallback_fields / present`，把“时间取自 created_at、scheduled_review，定系纯 synthetic 顺序”讲清楚；
   - summary / aggregation 层同步补 `provenance_origins / provenance_sources / normalized_event_types / timestamp_sources / timestamp_phases`，方便上层直接做筛选、审计同聚合，而唔需要重新逐条扫 event。
+
+### AR-M5-12｜unified transition journal / state-change audit trail
+
+- **阶段 / 优先级**：M5 / P0
+- **生效范围**：仅记录 approval / rollout / recovery 的状态迁移与审计语义，**不触发真实交易执行**
+- **目标**：让系统不止保留 latest status / timeline summary，而系显式输出“最近发生了哪些状态迁移”：
+  1. 统一记录 `from -> to`；
+  2. 固定透出 `trigger / reason / actor / source / timestamp / changed_fields`；
+  3. 优先落在 `database -> analytics helper -> dashboard api`；
+  4. 让 dashboard / agent / 人工巡检可以直接消费 recent transitions，而唔使自己再逐条 diff event log。
+- **输出**：
+  - approval event details 回挂 `transition_journal`；
+  - database 暴露 `get_recent_transition_journal(...) / get_transition_journal_summary(...)`；
+  - analytics helper 暴露 `build_transition_journal_overview(...)`；
+  - dashboard/API 暴露 `GET /api/approvals/transition-journal`，并把 transition journal 回挂到 `audit-overview`。
+- **安全边界**：只做状态迁移账本与聚合，不改变真实执行边界。
 
 ### AR-M5-10｜workflow attention view / manual approval + blocked follow-up API
 

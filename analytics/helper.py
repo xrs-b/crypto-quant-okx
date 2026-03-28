@@ -4813,6 +4813,36 @@ def build_unified_workbench_overview(payload: Optional[Dict] = None, *, max_item
     payload['unified_workbench_overview'] = overview
     return overview
 
+def build_transition_journal_overview(*, transition_rows: Optional[List[Dict]] = None, summary: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    transition_rows = transition_rows or []
+    changed_field_counts: Dict[str, int] = {}
+    trigger_counts: Dict[str, int] = {}
+    actor_counts: Dict[str, int] = {}
+    source_counts: Dict[str, int] = {}
+    for row in transition_rows:
+        for field in row.get('changed_fields') or []:
+            changed_field_counts[field] = changed_field_counts.get(field, 0) + 1
+        trigger = str(row.get('trigger') or row.get('event_type') or 'unknown').strip() or 'unknown'
+        actor = str(row.get('actor') or 'unknown').strip() or 'unknown'
+        source = str(row.get('source') or 'unknown').strip() or 'unknown'
+        trigger_counts[trigger] = trigger_counts.get(trigger, 0) + 1
+        actor_counts[actor] = actor_counts.get(actor, 0) + 1
+        source_counts[source] = source_counts.get(source, 0) + 1
+    return {
+        'schema_version': 'm5_transition_journal_overview_v1',
+        'summary': summary or {
+            'count': len(transition_rows),
+            'changed_field_counts': changed_field_counts,
+        },
+        'recent_transitions': transition_rows,
+        'breakdown': {
+            'changed_field_counts': changed_field_counts,
+            'trigger_counts': trigger_counts,
+            'actor_counts': actor_counts,
+            'source_counts': source_counts,
+        },
+    }
+
 def build_approval_audit_overview(*, stale_rows: Optional[List[Dict]] = None,
                                   decision_diffs: Optional[List[Dict]] = None,
                                   timeline_summary: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:

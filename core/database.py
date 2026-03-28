@@ -1563,6 +1563,71 @@ class Database:
         except Exception:
             return {}
 
+    def _build_transition_journal_entry(self, *, item_id: str, approval_type: str, target: Optional[str] = None,
+                                        title: Optional[str] = None, event_type: Optional[str] = None,
+                                        previous_row: Optional[Dict[str, Any]] = None,
+                                        decision: Optional[str] = None, state: Optional[str] = None,
+                                        workflow_state: Optional[str] = None, reason: Optional[str] = None,
+                                        actor: Optional[str] = None, source: Optional[str] = None,
+                                        details: Optional[Dict[str, Any]] = None, created_at: Optional[str] = None) -> Dict[str, Any]:
+        payload = self._safe_json_dict(details)
+        previous = dict(previous_row or {})
+        previous_details = self._safe_json_dict(previous.get('details'))
+        normalized_decision = str(decision or 'pending').strip().lower() or 'pending'
+        normalized_state = self._normalize_approval_state(state, normalized_decision)
+        normalized_workflow = self._normalize_workflow_state(workflow_state, normalized_state) if workflow_state is not None else self._normalize_workflow_state(previous.get('workflow_state'), normalized_state)
+        current_machine = ((payload.get('state_machine') or {}) if isinstance(payload.get('state_machine'), dict) else {})
+        previous_machine = ((previous_details.get('state_machine') or {}) if isinstance(previous_details.get('state_machine'), dict) else {})
+        current_execution = payload.get('execution_status') or current_machine.get('execution_status')
+        previous_execution = previous_details.get('execution_status') or previous_machine.get('execution_status')
+        current_stage = payload.get('target_rollout_stage') or payload.get('rollout_stage') or payload.get('current_rollout_stage') or current_machine.get('target_rollout_stage') or current_machine.get('rollout_stage')
+        previous_stage = previous_details.get('target_rollout_stage') or previous_details.get('rollout_stage') or previous_details.get('current_rollout_stage') or previous_machine.get('target_rollout_stage') or previous_machine.get('rollout_stage')
+        current_transition = self._safe_json_dict(payload.get('last_transition'))
+        previous_transition = self._safe_json_dict(previous_details.get('last_transition'))
+        trigger = payload.get('next_transition') or payload.get('transition_rule') or current_transition.get('next_transition') or current_transition.get('rule') or event_type
+        changed_fields = []
+        for field, before, after in (
+            ('decision', previous.get('decision'), normalized_decision),
+            ('state', previous.get('state'), normalized_state),
+            ('workflow_state', previous.get('workflow_state'), normalized_workflow),
+            ('execution_status', previous_execution, current_execution),
+            ('rollout_stage', previous_stage, current_stage),
+        ):
+            if (before or None) != (after or None):
+                changed_fields.append(field)
+        return {
+            'schema_version': 'm5_transition_journal_v1',
+            'item_id': item_id,
+            'approval_type': approval_type,
+            'target': target,
+            'title': title,
+            'event_type': event_type,
+            'trigger': trigger,
+            'reason': reason,
+            'actor': actor,
+            'source': source,
+            'timestamp': created_at,
+            'changed': bool(changed_fields),
+            'changed_fields': changed_fields,
+            'from': {
+                'decision': previous.get('decision'),
+                'state': previous.get('state'),
+                'workflow_state': previous.get('workflow_state'),
+                'execution_status': previous_execution,
+                'rollout_stage': previous_stage,
+                'transition': previous_transition,
+            },
+            'to': {
+                'decision': normalized_decision,
+                'state': normalized_state,
+                'workflow_state': normalized_workflow,
+                'execution_status': current_execution,
+                'rollout_stage': current_stage,
+                'transition': current_transition,
+            },
+            'summary': f"{item_id}: {(previous.get('workflow_state') or previous.get('state') or 'new')} -> {(normalized_workflow or normalized_state)} ({event_type or 'transition'})",
+        }
+
     def _is_terminal_approval_state(self, state: Optional[str]) -> bool:
         return str(state or '').strip().lower() in {'approved', 'rejected', 'deferred', 'expired'}
 
@@ -1570,7 +1635,7 @@ class Database:
                               target: str = None, title: str = None, decision: str = 'pending',
                               state: str = None, workflow_state: str = None, reason: str = None,
                               actor: str = None, source: str = None, details: Dict = None,
-                              conn: sqlite3.Connection = None) -> Dict:
+                              conn: sqlite3.Connection = None, previous_row: Dict = None) -> Dict:
         normalized_decision = str(decision or 'pending').strip().lower()
         normalized_state = self._normalize_approval_state(state, normalized_decision)
         workflow_state = self._normalize_workflow_state(workflow_state, normalized_state) if workflow_state is not None else workflow_state
@@ -1578,6 +1643,12 @@ class Database:
         conn = conn or self._get_connection()
         cursor = conn.cursor()
         payload = dict(details or {})
+        transition_journal = self._build_transition_journal_entry(
+            item_id=item_id, approval_type=approval_type, target=target, title=title, event_type=event_type,
+            previous_row=previous_row, decision=normalized_decision, state=normalized_state, workflow_state=workflow_state,
+            reason=reason, actor=actor, source=source, details=payload, created_at=None,
+        )
+        payload['transition_journal'] = transition_journal
         cursor.execute(
             """
             INSERT INTO approval_events (item_id, approval_type, target, title, event_type, decision, state, workflow_state, reason, actor, source, details, created_at)
@@ -1593,6 +1664,10 @@ class Database:
         if owns_conn:
             conn.close()
         row['details'] = self._build_state_machine_details(item_id=row.get('item_id'), decision=row.get('decision'), state=row.get('state'), workflow_state=row.get('workflow_state'), details=self._safe_json_dict(row.get('details')))
+        journal = self._safe_json_dict((row.get('details') or {}).get('transition_journal'))
+        if journal:
+            journal['timestamp'] = row.get('created_at')
+            row['details']['transition_journal'] = journal
         return row
 
     def rebuild_approval_snapshot(self, item_id: str) -> Optional[Dict[str, Any]]:
@@ -1766,6 +1841,7 @@ class Database:
                 source=replay_source,
                 details=event_details,
                 conn=conn,
+                previous_row=existing_row,
             )
 
         conn.commit()
@@ -2000,6 +2076,43 @@ class Database:
         conn.commit()
         conn.close()
         return result
+
+    def get_recent_transition_journal(self, limit: int = 20, approval_type: str = None, item_id: str = None, target: str = None, changed_only: bool = True) -> List[Dict]:
+        timeline = self.get_approval_timeline(item_id=item_id, approval_type=approval_type, target=target, limit=max(20, int(limit or 20) * 10), ascending=False)
+        rows = []
+        for event in timeline:
+            journal = self._safe_json_dict((event.get('details') or {}).get('transition_journal'))
+            if not journal:
+                journal = self._build_transition_journal_entry(
+                    item_id=event.get('item_id'), approval_type=event.get('approval_type'), target=event.get('target'), title=event.get('title'),
+                    event_type=event.get('event_type'), previous_row=None, decision=event.get('decision'), state=event.get('state'),
+                    workflow_state=event.get('workflow_state'), reason=event.get('reason'), actor=event.get('actor'), source=event.get('source'),
+                    details=event.get('details') or {}, created_at=event.get('created_at'),
+                )
+            journal['timestamp'] = journal.get('timestamp') or event.get('created_at')
+            journal['event_id'] = event.get('id')
+            journal['normalized_event_type'] = event.get('normalized_event_type')
+            journal['provenance'] = event.get('provenance') or {}
+            journal['timestamp_info'] = event.get('timestamp_info') or {}
+            if changed_only and not journal.get('changed'):
+                continue
+            rows.append(journal)
+            if len(rows) >= int(limit or 20):
+                break
+        return rows
+
+    def get_transition_journal_summary(self, limit: int = 20, approval_type: str = None, item_id: str = None, target: str = None, changed_only: bool = True) -> Dict[str, Any]:
+        items = self.get_recent_transition_journal(limit=limit, approval_type=approval_type, item_id=item_id, target=target, changed_only=changed_only)
+        return {
+            'count': len(items),
+            'approval_type': approval_type,
+            'item_id': item_id,
+            'target': target,
+            'changed_only': bool(changed_only),
+            'latest_timestamp': items[0].get('timestamp') if items else None,
+            'changed_field_counts': {field: sum(1 for row in items if field in (row.get('changed_fields') or [])) for field in sorted({field for row in items for field in (row.get('changed_fields') or [])})},
+            'workflow_transition_counts': {f"{(row.get('from') or {}).get('workflow_state') or (row.get('from') or {}).get('state') or 'new'}->{(row.get('to') or {}).get('workflow_state') or (row.get('to') or {}).get('state') or 'unknown'}": sum(1 for item in items if f"{(item.get('from') or {}).get('workflow_state') or (item.get('from') or {}).get('state') or 'new'}->{(item.get('to') or {}).get('workflow_state') or (item.get('to') or {}).get('state') or 'unknown'}" == f"{(row.get('from') or {}).get('workflow_state') or (row.get('from') or {}).get('state') or 'new'}->{(row.get('to') or {}).get('workflow_state') or (row.get('to') or {}).get('state') or 'unknown'}") for row in items},
+        }
 
     def get_recent_approval_decision_diff(self, limit: int = 20, approval_type: str = None) -> List[Dict]:
         query_limit = max(20, int(limit or 20) * 10)

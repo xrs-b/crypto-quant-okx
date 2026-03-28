@@ -52,7 +52,7 @@ from signals.validator import SignalValidator
 from bot.run import execute_exchange_smoke, reconcile_exchange_positions, load_runtime_state
 from ml.engine import MLEngine
 from core.regime import RegimeDetector, detect_regime, Regime
-from analytics import StrategyBacktester, SignalQualityAnalyzer, ParameterOptimizer, GovernanceEngine, build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, attach_auto_approval_policy, execute_controlled_rollout_layer, execute_controlled_auto_approval_layer, execute_rollout_executor, build_workflow_consumer_view, build_workflow_recovery_view, build_workflow_attention_view, build_workflow_operator_digest, build_dashboard_summary_cards, build_workbench_governance_view, build_workbench_governance_filter_view, build_workbench_governance_detail_view, build_workbench_merged_timeline, build_workbench_timeline_summary_aggregation, build_unified_workbench_overview
+from analytics import StrategyBacktester, SignalQualityAnalyzer, ParameterOptimizer, GovernanceEngine, build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, build_transition_journal_overview, attach_auto_approval_policy, execute_controlled_rollout_layer, execute_controlled_auto_approval_layer, execute_rollout_executor, build_workflow_consumer_view, build_workflow_recovery_view, build_workflow_attention_view, build_workflow_operator_digest, build_dashboard_summary_cards, build_workbench_governance_view, build_workbench_governance_filter_view, build_workbench_governance_detail_view, build_workbench_merged_timeline, build_workbench_timeline_summary_aggregation, build_unified_workbench_overview
 from analytics.backtest import export_calibration_payload
 from analytics.mfe_mae import MFEAnalyzer, get_mfe_mae_analysis
 from core.regime_policy import summarize_observe_only_collection
@@ -3028,6 +3028,20 @@ def get_approval_decision_diff_api():
     }})
 
 
+@app.route('/api/approvals/transition-journal')
+def get_approval_transition_journal_api():
+    """返回最近 approval / rollout / recovery 状态迁移 journal。"""
+    limit = int(request.args.get('limit', 20))
+    approval_type = request.args.get('type')
+    item_id = request.args.get('item_id')
+    target = request.args.get('target')
+    changed_only = str(request.args.get('changed_only', 'true')).lower() not in ('0', 'false', 'no')
+    rows = db.get_recent_transition_journal(limit=limit, approval_type=approval_type, item_id=item_id, target=target, changed_only=changed_only)
+    summary = db.get_transition_journal_summary(limit=limit, approval_type=approval_type, item_id=item_id, target=target, changed_only=changed_only)
+    overview = build_transition_journal_overview(transition_rows=rows, summary=summary)
+    return jsonify({'success': True, 'data': overview, 'summary': overview.get('summary') or {}})
+
+
 @app.route('/api/approvals/stale')
 def get_stale_approvals_api():
     """列出 stale pending/ready approvals，方便低干预巡检。"""
@@ -3074,9 +3088,14 @@ def get_approval_audit_overview_api():
         decision_diffs=db.get_recent_approval_decision_diff(limit=limit, approval_type=approval_type),
         timeline_summary=db.get_approval_timeline_summary(item_id) if item_id else None,
     )
+    overview['transition_journal'] = build_transition_journal_overview(
+        transition_rows=db.get_recent_transition_journal(limit=limit, approval_type=approval_type, item_id=item_id),
+        summary=db.get_transition_journal_summary(limit=limit, approval_type=approval_type, item_id=item_id),
+    )
     return jsonify({'success': True, 'data': overview, 'summary': {
         'stale_count': overview['stale_pending']['count'],
         'decision_diff_count': overview['decision_diff']['count'],
+        'transition_count': (overview.get('transition_journal') or {}).get('summary', {}).get('count', 0),
         'has_timeline_summary': bool(overview.get('timeline_summary')),
     }})
 

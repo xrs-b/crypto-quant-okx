@@ -63,6 +63,7 @@
 - rollout executor skeleton 首版（新增 `supported_action_map`、`dispatch -> plan -> apply -> result` envelope、`disabled/dry_run/controlled` 模式、executor audit/status 摘要；当前只对白名单 very-safe action 做 controlled apply，敏感 action 仍只 queue/plan）
 - rollout executor skeleton+1（补齐统一 `handler_key`、标准化 `dispatch/apply/result.status+code`、safe apply `idempotency_key` / `idempotent_skip` 语义、queue-only `queue_plan`、`summary.by_disposition/by_status`；仍严格保持 `real_trade_execution=false` / `dangerous_live_parameter_change=false`）
 - recovery orchestration / retry queue policy 首版（把 `execution_timeline + recovery_policy` 继续推进到 `recovery_orchestration`：明确 item 应进 `retry_queue / rollback_candidate / manual_recovery / recovered_monitoring`，补 `retry_stage / retry_schedule / should_retry_at / manual fallback / rollback_route`，并新增 `/api/backtest/workflow-recovery-view` 方便 dashboard / agent / operator 直接回答“边个重试、边个回滚、边个转人工、几时再试”）
+- unified transition journal / state-change audit trail 首版（approval event details 回挂 `transition_journal`，数据库可直接拉最近 `from -> to / trigger / reason / actor / source / timestamp / changed_fields`，dashboard/API 提供独立 recent transition 入口，方便 workbench / agent / 人工巡检直接看“最近发生了哪些状态迁移”）
 
 ---
 
@@ -158,19 +159,3 @@
 - 强回滚边界
 
 而不是“一次性大爆改”。
-
-
-- 2026-03-27 dual-layer approval update：审批持久化从单层 latest state 扩展成 `approval_events`（immutable event log）+ `approval_state`（latest snapshot）双层模型；新增稳定事件字段 `item_id / event_type / decision / actor / reason / created_at / source / details`，并补齐 timeline 查询与基于 event log 的 snapshot recovery，仍保持 no-op，不触发真实自动 rollout / execution。
-
-- 2026-03-27 controlled auto-approval execution layer：在既有自动审批判断层之上，新增默认关闭的受控执行层；只会把 low-risk / 无 blocker / 无需人工审批 / judgement=auto_approve / 非终态 的审批项推进到真实 `approved + ready`，并写入完整 `reason / actor / source / replay_source / event log` 审计痕迹；仍保持 no-op，不触发真实策略执行。
-
-- 2026-03-27 workflow consumer/state batch：补齐 `consumer_view` 统一 API 消费层，把 `workflow_state / approval_state / queues / rollout_executor / rollout_stage_progression / controlled_rollout / auto_approval` 聚成单一对象，减少 dashboard/API 端手拼底层结构；同时 rollout executor 新增 `stage_progression` 摘要，显式暴露 `current_stage -> target_stage -> next_transition / dispatch_route / retryable / rollback_hint`，作为更接近自动 rollout 的下一层状态机。validation lane 的 testnet bridge 亦已从 plan-only 骨架推进到 controlled execute 第一层：默认 `allow_execute=false`，显式开启后只允许 `minimal_smoke`，并强制输出 `plan_only / controlled_execute / skipped / blocked / error` 状态、`blocking_reasons` 审计、`rollback_expected/cleanup_required` 边界；若 `exchange.mode != testnet` 或仍有 pending approvals，则直接 blocked，不会误落 real mode。
-- 2026-03-27 testnet bridge summary/export batch：继续把 bridge 推到更接近“阶段性完成”的验收口径。`shadow_workflow` 单 case 现稳定附带 `testnet_bridge_summary`（统一 summarise `status / execute_ready / exchange_mode / real_trade_execution / cleanup_needed / residual_position_detected / close_confirmed / blocking_reasons`）；`validation_replay` summary 新增 bridge 聚合视图（`status_counts / blocking_reason_counts / cleanup_needed_count / controlled_execute_success_count / case_ids_requiring_cleanup`），CLI `--validation-output` 亦支持 `.md` 导出人类可读 replay/bridge 报告，令受控 testnet 验证结果可回放、可归档、可阶段性签收，而不放宽任何真实盘边界。
-
-- 2026-03-27 夜补：继续把消费层往低干预 dashboard backend 收口，新增 `dashboard summary cards` 聚合入口（`/api/backtest/dashboard-summary-cards` 与 `calibration-report?view=dashboard_summary_cards`），把 workflow/attention/operator digest/executor/bridge/stage progression 汇成稳定卡片 payload，方便 dashboard/backend/agent 直接消费。
-
-- 2026-03-27 夜补（workflow / approval state machine closure）：把 rollout / approval 链路再往统一状态机方向收口一层；`approval_state.details` 现固定带 `state_machine` 摘要，统一表达 `approval_state / workflow_state / queue_status / dispatch_route / next_transition / rollout_stage / executor_result / phase / retryable / rollback_candidate / lifecycle_path`，helper 亦会把同一语义回挂到 `approval_state.items[*] / workflow_state.item_states[*]` 与 summary 聚合。咁样同一个 item 由建议 → 审批 → 排队 → 执行准备 → 结果 / 重试 / 回滚，就有一致、可持久化、可审计、可恢复的状态语义，而唔使 dashboard / agent 再自行猜字段。
-- 2026-03-27 夜补（dashboard state-machine API）：新增 `/api/approvals/state-machine`，把上述统一状态机直接汇总成 `phase_counts / workflow_state_counts / rollback_candidate_count / retryable_count / terminal_count`，方便低干预巡检与后续自动治理入口直接消费。
-
-- 2026-03-28 low-intervention group summary follow-up：继续把 workbench / operator digest 消费层往“唔使点开 detail 都睇到主流动作”推进一层；新增稳定 `low_intervention_summary` 结构，并挂到 `workflow_operator_digest.next_actions[*] / workflow_operator_digest.group_summaries / workbench_governance_view.lanes[*] / workbench_governance_view.group_summaries / workbench_timeline_summary_aggregation.groups[*]`。摘要现直接提供 `headline / dominant_action / dominant_route / dominant_follow_up / dominant_priority / priority_mix / status_overview(blocked/manual/ready/queued/deferred/auto_batch) / lane_mix / workflow_state_mix / approval_state_mix / risk_level_mix / bucket_mix`，调用方可直接按 `bucket / lane / operator_action / operator_route / follow_up` 看每组的主流治理方向与处理状态，减少逐 item / timeline drilldown 需要。
-- 2026-03-28 夜补（action execution status / transition engine）：rollout / approval 状态机现再往执行层语义收口一层；`approval_state.details`、helper merge、workbench aggregation、`/api/approvals/state-machine` 已统一补 `execution_status`（queued / dispatching / applied / skipped / blocked / deferred / error / recovered）以及 `transition_rule / next_transition / last_transition`。咁样同一个治理动作唔止知道 approval/workflow 卡喺边，还能明确表达“已经排队 / 正在派发 / 已安全落地 / 被跳过 / 被阻塞 / 延后 / 出错 / 已恢复”，更适合后续真正的 transition engine、重放与恢复。

@@ -8143,6 +8143,17 @@ class TestApprovalPersistence(unittest.TestCase):
                 decision_diff_payload = decision_diff_resp.get_json()
                 self.assertGreaterEqual(decision_diff_payload['summary']['count'], 1)
 
+                transition_journal_resp = client.get(f"/api/approvals/transition-journal?item_id={approval_item['approval_id']}&limit=5")
+                self.assertEqual(transition_journal_resp.status_code, 200)
+                transition_journal_payload = transition_journal_resp.get_json()
+                self.assertGreaterEqual(transition_journal_payload['summary']['count'], 1)
+                self.assertTrue(transition_journal_payload['data']['recent_transitions'])
+                first_transition = transition_journal_payload['data']['recent_transitions'][0]
+                self.assertIn('from', first_transition)
+                self.assertIn('to', first_transition)
+                self.assertIn('trigger', first_transition)
+                self.assertIn('actor', first_transition)
+
                 with sqlite3.connect(Path(tmpdir) / 'api_approval_state.db') as conn:
                     conn.execute("UPDATE approval_state SET created_at = datetime('now', '-180 minutes'), updated_at = datetime('now', '-180 minutes'), last_seen_at = datetime('now', '-180 minutes'), state = 'pending', decision = 'pending', workflow_state = 'pending' WHERE item_id = ?", (approval_item['approval_id'],))
                     conn.commit()
@@ -8166,6 +8177,8 @@ class TestApprovalPersistence(unittest.TestCase):
                 self.assertIn('stale_pending', audit_overview_payload['data'])
                 self.assertIn('decision_diff', audit_overview_payload['data'])
                 self.assertIn('timeline_summary', audit_overview_payload['data'])
+                self.assertIn('transition_journal', audit_overview_payload['data'])
+                self.assertIn('recent_transitions', audit_overview_payload['data']['transition_journal'])
 
                 with sqlite3.connect(Path(tmpdir) / 'api_approval_state.db') as conn:
                     conn.execute('DELETE FROM approval_state WHERE item_id = ?', (approval_item['approval_id'],))
@@ -8260,6 +8273,28 @@ class TestUnifiedWorkflowStateMachine(unittest.TestCase):
             self.assertEqual(fetched['details']['state_machine']['operator_action_policy']['action'], 'review_schedule')
             self.assertEqual(fetched['details']['execution_status'], 'applied')
             self.assertEqual(fetched['details']['state_machine']['execution_status'], 'applied')
+
+    def test_database_transition_journal_tracks_from_to_trigger_actor_source(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(str(Path(tmpdir) / 'transition_journal.db'))
+            db.upsert_approval_state(
+                item_id='approval::journal', approval_type='joint_stage_prepare', target='playbook::journal', title='Journal item',
+                decision='pending', state='pending', workflow_state='pending', details={'dispatch_route': 'manual_review_queue'}, replay_source='unit-test-bootstrap',
+            )
+            db.upsert_approval_state(
+                item_id='approval::journal', approval_type='joint_stage_prepare', target='playbook::journal', title='Journal item',
+                decision='pending', state='ready', workflow_state='ready', reason='stage prepared', actor='system:test', replay_source='unit-test-transition',
+                details={'dispatch_route': 'stage_metadata_apply', 'transition_rule': 'promote_to_target_stage', 'rollout_stage': 'observe', 'target_rollout_stage': 'guarded'},
+            )
+            rows = db.get_recent_transition_journal(item_id='approval::journal', limit=5)
+            self.assertTrue(rows)
+            latest = rows[0]
+            self.assertEqual(latest['from']['workflow_state'], 'pending')
+            self.assertEqual(latest['to']['workflow_state'], 'ready')
+            self.assertEqual(latest['trigger'], 'promote_to_target_stage')
+            self.assertEqual(latest['actor'], 'system:test')
+            self.assertEqual(latest['source'], 'unit-test-transition')
+            self.assertIn('workflow_state', latest['changed_fields'])
 
     def test_approval_state_machine_api_returns_phase_summary(self):
         import dashboard.api as dashboard_api

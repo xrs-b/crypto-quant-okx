@@ -2716,6 +2716,26 @@ def get_backtest_auto_promotion_summary():
     }})
 
 
+@app.route('/api/backtest/auto-promotion-review-queues')
+def get_backtest_auto_promotion_review_queues():
+    """返回自动推进后的 post-promotion review / rollback review queue，说明观察点、复核时间与升级路径。"""
+    limit = max(1, min(int(request.args.get('limit', 20)), 200))
+    summary = db.get_auto_promotion_activity_summary(limit=limit, item_id=request.args.get('item_id'))
+    return jsonify({'success': True, 'view': 'auto_promotion_review_queues', 'data': {
+        'schema_version': 'm5_auto_promotion_review_queues_v1',
+        'summary': {
+            'event_count': summary.get('event_count', 0),
+            'post_promotion_review_queue_count': summary.get('post_promotion_review_queue_count', 0),
+            'rollback_review_queue_count': summary.get('rollback_review_queue_count', 0),
+            'rollback_review_candidate_count': summary.get('rollback_review_candidate_count', 0),
+            'latest_created_at': summary.get('latest_created_at'),
+        },
+        'review_queues': summary.get('review_queues') or {'post_promotion_review_queue': [], 'rollback_review_queue': []},
+        'recent_items': summary.get('recent_items') or [],
+        'rollback_review_candidates': summary.get('rollback_review_candidates') or [],
+    }})
+
+
 @app.route('/api/backtest/auto-promotion-candidates')
 def get_backtest_auto_promotion_candidates():
     """返回可自动推进 candidate 清单，直接说明可推进原因、缺口、风险与人工兜底需求。"""

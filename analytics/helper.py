@@ -4842,6 +4842,69 @@ def _build_transition_journal_consumer_view(*, overview: Optional[Dict[str, Any]
 
 
 
+def _resolve_auto_promotion_observation_targets(*, row: Optional[Dict[str, Any]] = None, workflow_item: Optional[Dict[str, Any]] = None, approval_item: Optional[Dict[str, Any]] = None) -> List[str]:
+    row = row or {}
+    workflow_item = workflow_item or {}
+    approval_item = approval_item or {}
+    execution = (row.get('auto_promotion_execution') or workflow_item.get('auto_promotion_execution') or approval_item.get('auto_promotion_execution') or {})
+    after = execution.get('after') or {}
+    current_stage = str(after.get('rollout_stage') or workflow_item.get('current_rollout_stage') or approval_item.get('rollout_stage') or '').strip().lower()
+    validation_gate = _resolve_validation_gate_context(row, workflow_item, approval_item)
+    rollback_gate = workflow_item.get('rollback_gate') or approval_item.get('rollback_gate') or row.get('rollback_gate') or {}
+    targets = []
+    if current_stage == 'controlled_apply':
+        targets.extend(['post_apply_samples', 'validation_gate_health', 'transition_journal_drift'])
+    elif current_stage == 'review_pending':
+        targets.extend(['scheduled_review_checkpoint', 'post_apply_metrics', 'manual_review_outcome'])
+    else:
+        targets.extend(['workflow_progression', 'risk_regression_watch'])
+    if validation_gate.get('enabled'):
+        targets.append('validation_gate_regression_watch')
+    if rollback_gate.get('candidate'):
+        targets.append('rollback_trigger_confirmation')
+    for trigger in rollback_gate.get('triggered') or []:
+        targets.append(f'rollback_trigger:{trigger}')
+    return _dedupe_strings(targets)
+
+
+
+def _build_auto_promotion_review_queue_item(*, row: Optional[Dict[str, Any]] = None, workflow_item: Optional[Dict[str, Any]] = None,
+                                            approval_item: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    row = row or {}
+    workflow_item = workflow_item or {}
+    approval_item = approval_item or {}
+    execution = (row.get('auto_promotion_execution') or workflow_item.get('auto_promotion_execution') or approval_item.get('auto_promotion_execution') or {})
+    scheduled_review = workflow_item.get('scheduled_review') or approval_item.get('scheduled_review') or row.get('scheduled_review') or {}
+    rollback_gate = workflow_item.get('rollback_gate') or approval_item.get('rollback_gate') or row.get('rollback_gate') or {}
+    review_due_at = scheduled_review.get('review_due_at') or execution.get('review_due_at') or row.get('review_due_at')
+    rollback_candidate = bool(rollback_gate.get('candidate'))
+    queue_kind = 'rollback_review_queue' if rollback_candidate else 'post_promotion_review_queue'
+    queue_state = 'rollback_review' if rollback_candidate else ('review_due' if review_due_at else 'observe_window')
+    observation_targets = _resolve_auto_promotion_observation_targets(row=row, workflow_item=workflow_item, approval_item=approval_item)
+    rollback_triggered = _dedupe_strings(rollback_gate.get('triggered') or row.get('rollback_triggered') or [])
+    recommended_action = 'prepare_rollback_review' if rollback_candidate else ('run_scheduled_review' if review_due_at else 'monitor_post_promotion_window')
+    return {
+        'item_id': row.get('item_id') or workflow_item.get('item_id') or approval_item.get('playbook_id'),
+        'approval_id': row.get('approval_id') or approval_item.get('approval_id'),
+        'title': row.get('title') or workflow_item.get('title') or approval_item.get('title'),
+        'action_type': row.get('action_type') or workflow_item.get('action_type') or approval_item.get('action_type'),
+        'workflow_state': row.get('workflow_state') or workflow_item.get('workflow_state') or approval_item.get('workflow_state'),
+        'approval_state': row.get('approval_state') or approval_item.get('approval_state'),
+        'current_rollout_stage': (execution.get('after') or {}).get('rollout_stage') or workflow_item.get('current_rollout_stage') or approval_item.get('rollout_stage'),
+        'queue_kind': queue_kind,
+        'queue_state': queue_state,
+        'review_due_at': review_due_at,
+        'review_window_hours': scheduled_review.get('review_after_hours'),
+        'observation_targets': observation_targets,
+        'rollback_candidate': rollback_candidate,
+        'rollback_triggered': rollback_triggered,
+        'recommended_action': recommended_action,
+        'why': _dedupe_strings((execution.get('reason_codes') or []) + rollback_triggered + observation_targets),
+        'summary': f"{queue_kind} | action={recommended_action} | targets={len(observation_targets)}",
+    }
+
+
+
 def build_auto_promotion_execution_summary(payload: Optional[Dict] = None, *, max_items: int = 5) -> Dict[str, Any]:
     payload = payload or {}
     consumer_view = payload.get('consumer_view') or build_workflow_consumer_view(payload)
@@ -4853,6 +4916,7 @@ def build_auto_promotion_execution_summary(payload: Optional[Dict] = None, *, ma
 
     recent = []
     rollback_candidates = []
+    review_queue_items = []
     reason_code_counts: Dict[str, int] = {}
     stage_transition_counts: Dict[str, int] = {}
     target_stage_counts: Dict[str, int] = {}
@@ -4880,6 +4944,7 @@ def build_auto_promotion_execution_summary(payload: Optional[Dict] = None, *, ma
             'approval_state': approval_item.get('approval_state') or after.get('state'),
             'current_rollout_stage': workflow_item.get('current_rollout_stage') or after.get('rollout_stage'),
             'target_rollout_stage': workflow_item.get('target_rollout_stage') or after.get('rollout_stage'),
+            'scheduled_review': workflow_item.get('scheduled_review') or approval_item.get('scheduled_review') or {},
             'before': before,
             'after': after,
             'reason_codes': execution.get('reason_codes') or [],
@@ -4896,6 +4961,7 @@ def build_auto_promotion_execution_summary(payload: Optional[Dict] = None, *, ma
             'rollback_triggered': rollback_gate.get('triggered') or [],
         }
         recent.append(summary_row)
+        review_queue_items.append(_build_auto_promotion_review_queue_item(row=summary_row, workflow_item=workflow_item, approval_item=approval_item))
         transition_key = f"{before.get('rollout_stage') or 'unknown'}->{after.get('rollout_stage') or 'unknown'}"
         stage_transition_counts[transition_key] = stage_transition_counts.get(transition_key, 0) + 1
         target_key = str(after.get('rollout_stage') or workflow_item.get('target_rollout_stage') or 'unknown')
@@ -4929,6 +4995,7 @@ def build_auto_promotion_execution_summary(payload: Optional[Dict] = None, *, ma
             'approval_state': approval_item.get('approval_state') or after.get('state'),
             'current_rollout_stage': workflow_item.get('current_rollout_stage') or after.get('rollout_stage'),
             'target_rollout_stage': workflow_item.get('target_rollout_stage') or after.get('rollout_stage'),
+            'scheduled_review': workflow_item.get('scheduled_review') or approval_item.get('scheduled_review') or {},
             'before': before,
             'after': after,
             'reason_codes': execution.get('reason_codes') or [],
@@ -4945,6 +5012,7 @@ def build_auto_promotion_execution_summary(payload: Optional[Dict] = None, *, ma
             'rollback_triggered': rollback_gate.get('triggered') or [],
         }
         recent.append(summary_row)
+        review_queue_items.append(_build_auto_promotion_review_queue_item(row=summary_row, workflow_item=workflow_item, approval_item=approval_item))
         transition_key = f"{before.get('rollout_stage') or 'unknown'}->{after.get('rollout_stage') or 'unknown'}"
         stage_transition_counts[transition_key] = stage_transition_counts.get(transition_key, 0) + 1
         target_key = str(after.get('rollout_stage') or workflow_item.get('target_rollout_stage') or 'unknown')
@@ -4957,12 +5025,17 @@ def build_auto_promotion_execution_summary(payload: Optional[Dict] = None, *, ma
 
     recent.sort(key=lambda row: (str(row.get('created_at') or ''), str(row.get('item_id') or '')), reverse=True)
     rollback_candidates.sort(key=lambda row: (str(row.get('created_at') or ''), str(row.get('item_id') or '')), reverse=True)
+    review_queue_items.sort(key=lambda row: (0 if row.get('queue_kind') == 'rollback_review_queue' else 1, str(row.get('review_due_at') or ''), str(row.get('item_id') or '')))
+    post_promotion_review_queue = [row for row in review_queue_items if row.get('queue_kind') == 'post_promotion_review_queue']
+    rollback_review_queue = [row for row in review_queue_items if row.get('queue_kind') == 'rollback_review_queue']
     summary = {
         'event_count': len(recent),
         'executed_count': controlled_rollout.get('executed_count', len(recent)),
         'skipped_count': controlled_rollout.get('skipped_count', 0),
         'recent_execution_count': len(recent),
         'rollback_review_candidate_count': len(rollback_candidates),
+        'post_promotion_review_queue_count': len(post_promotion_review_queue),
+        'rollback_review_queue_count': len(rollback_review_queue),
         'latest_executed_at': recent[0].get('created_at') if recent else None,
         'stage_transition_counts': stage_transition_counts,
         'target_stage_counts': target_stage_counts,
@@ -4970,10 +5043,14 @@ def build_auto_promotion_execution_summary(payload: Optional[Dict] = None, *, ma
         'risk_label_counts': risk_label_counts,
     }
     return {
-        'schema_version': 'm5_auto_promotion_execution_summary_v1',
+        'schema_version': 'm5_auto_promotion_execution_summary_v2',
         'summary': summary,
         'recent_executions': recent[:max_items],
         'rollback_review_candidates': rollback_candidates[:max_items],
+        'review_queues': {
+            'post_promotion_review_queue': post_promotion_review_queue[:max_items],
+            'rollback_review_queue': rollback_review_queue[:max_items],
+        },
         'execution': controlled_rollout,
     }
 
@@ -5222,6 +5299,8 @@ def build_workflow_operator_digest(payload: Optional[Dict] = None, *, max_items:
             'gate_consumption': gate_consumption,
             'rollout_advisory': advisory_consumption,
             'auto_promotion_execution': auto_promotion_execution.get('summary') or {},
+            'post_promotion_review_queue_count': ((auto_promotion_execution.get('summary') or {}).get('post_promotion_review_queue_count') or 0),
+            'rollback_review_queue_count': ((auto_promotion_execution.get('summary') or {}).get('rollback_review_queue_count') or 0),
             'transition_count': (transition_journal.get('summary') or {}).get('count', 0),
             'latest_transition_at': (transition_journal.get('summary') or {}).get('latest_timestamp'),
             'latest_transition': transition_journal.get('latest') or {},
@@ -5236,7 +5315,9 @@ def build_workflow_operator_digest(payload: Optional[Dict] = None, *, max_items:
             'rollback_candidates': rollback_candidate_items[:max_items],
             'auto_promotion_candidates': advisory_consumption.get('auto_promotion_candidates') or [],
             'recent_auto_promotions': auto_promotion_execution.get('recent_executions') or [],
+            'auto_promotion_post_promotion_review_queue': ((auto_promotion_execution.get('review_queues') or {}).get('post_promotion_review_queue') or []),
             'auto_promotion_rollback_candidates': auto_promotion_execution.get('rollback_review_candidates') or [],
+            'auto_promotion_rollback_review_queue': ((auto_promotion_execution.get('review_queues') or {}).get('rollback_review_queue') or []),
         },
         'next_actions': next_actions,
         'group_summaries': group_summaries,

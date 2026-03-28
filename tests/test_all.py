@@ -9336,6 +9336,34 @@ class TestApprovalPersistence(unittest.TestCase):
             self.assertEqual(summary['target_stage_counts']['controlled_apply'], 1)
             self.assertIn('auto_advance_allowed', summary['reason_code_counts'])
             self.assertEqual(summary['recent_items'][0]['actor'], 'system:test-db-auto-promotion')
+            self.assertEqual(summary['post_promotion_review_queue_count'], 1)
+            self.assertEqual(summary['rollback_review_queue_count'], 0)
+            self.assertIn('post_apply_samples', summary['review_queues']['post_promotion_review_queue'][0]['observation_targets'])
+
+    def test_auto_promotion_execution_summary_builds_post_promotion_and_rollback_review_queues(self):
+        payload = self._make_controlled_auto_promotion_payload()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(str(Path(tmpdir) / 'auto_promotion_review_queues.db'))
+            executed = execute_controlled_rollout_layer(payload, db, settings={
+                'enabled': True,
+                'mode': 'state_apply',
+                'auto_promote_ready_candidates': True,
+                'allowed_action_types': ['joint_stage_prepare'],
+                'actor': 'system:test-auto-promotion-queues',
+                'source': 'unit_test_auto_promotion_queues',
+            })
+            consumer = build_workflow_consumer_view(executed)
+            workflow_item = consumer['workflow_state']['item_states'][0]
+            workflow_item['scheduled_review'] = {'review_due_at': '2026-03-29T00:00:00Z', 'review_after_hours': 24}
+            summary = build_auto_promotion_execution_summary(executed, max_items=5)
+            self.assertEqual(summary['summary']['post_promotion_review_queue_count'], 1)
+            self.assertEqual(summary['review_queues']['post_promotion_review_queue'][0]['review_due_at'], '2026-03-29T00:00:00Z')
+            self.assertEqual(summary['review_queues']['post_promotion_review_queue'][0]['recommended_action'], 'run_scheduled_review')
+            workflow_item['rollback_gate'] = {'candidate': True, 'triggered': ['review_overdue']}
+            summary = build_auto_promotion_execution_summary(executed, max_items=5)
+            self.assertEqual(summary['summary']['rollback_review_queue_count'], 1)
+            self.assertEqual(summary['review_queues']['rollback_review_queue'][0]['recommended_action'], 'prepare_rollback_review')
+            self.assertIn('rollback_trigger:review_overdue', summary['review_queues']['rollback_review_queue'][0]['observation_targets'])
 
     def test_controlled_rollout_execution_applies_ready_candidate_with_full_audit(self):
         class StubConfig:
@@ -9733,6 +9761,49 @@ class TestUnifiedWorkflowStateMachine(unittest.TestCase):
                     self.assertEqual(payload['data']['event_count'], 1)
                     self.assertEqual(payload['data']['rollback_review_candidate_count'], 1)
                     self.assertEqual(payload['data']['stage_transition_counts']['guarded_prepare->controlled_apply'], 1)
+            finally:
+                dashboard_api_module.db = old_db
+
+    def test_auto_promotion_review_queues_api_returns_post_promotion_and_rollback_review_views(self):
+        import dashboard.api as dashboard_api_module
+        with tempfile.TemporaryDirectory() as tmpdir:
+            test_db = Database(str(Path(tmpdir) / 'api_auto_promotion_review_queues.db'))
+            test_db.upsert_approval_state(
+                item_id='approval::promo',
+                approval_type='joint_stage_prepare',
+                target='playbook::promo',
+                title='Promotion item',
+                decision='pending',
+                state='approved',
+                workflow_state='ready',
+                reason='controlled auto promotion executed',
+                actor='system:test-api-auto-promotion-queues',
+                replay_source='unit_test_api_auto_promotion_queues',
+                details={
+                    'review_due_at': '2026-03-29T00:00:00Z',
+                    'auto_promotion_execution': {
+                        'before': {'state': 'pending', 'workflow_state': 'ready', 'rollout_stage': 'guarded_prepare'},
+                        'after': {'state': 'approved', 'workflow_state': 'ready', 'rollout_stage': 'controlled_apply'},
+                        'reason_codes': ['auto_advance_allowed'],
+                        'candidate_summary': {'risk_label': 'low'},
+                        'event_log': [{'event_type': 'controlled_rollout_state_apply', 'actor': 'system:test-api-auto-promotion-queues', 'source': 'unit_test_api_auto_promotion_queues', 'created_at': '2026-03-28T00:00:00Z'}],
+                        'rollback_hint': 'revert_stage_metadata_to_previous_stage',
+                    },
+                    'rollback_gate': {'candidate': True, 'triggered': ['review_overdue']},
+                },
+                event_type='controlled_rollout_state_apply',
+            )
+            old_db = dashboard_api_module.db
+            dashboard_api_module.db = test_db
+            try:
+                with dashboard_api_module.app.test_client() as client:
+                    response = client.get('/api/backtest/auto-promotion-review-queues?limit=5')
+                    self.assertEqual(response.status_code, 200)
+                    payload = response.get_json()
+                    self.assertEqual(payload['view'], 'auto_promotion_review_queues')
+                    self.assertEqual(payload['data']['summary']['post_promotion_review_queue_count'], 0)
+                    self.assertEqual(payload['data']['summary']['rollback_review_queue_count'], 1)
+                    self.assertEqual(payload['data']['review_queues']['rollback_review_queue'][0]['recommended_action'], 'prepare_rollback_review')
             finally:
                 dashboard_api_module.db = old_db
 

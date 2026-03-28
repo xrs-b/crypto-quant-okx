@@ -2190,6 +2190,30 @@ class Database:
                 reason_code_counts[str(code)] = reason_code_counts.get(str(code), 0) + 1
             for trigger in row.get('rollback_triggered') or []:
                 rollback_trigger_counts[str(trigger)] = rollback_trigger_counts.get(str(trigger), 0) + 1
+        post_promotion_review_queue = []
+        rollback_review_queue = []
+        for row in items:
+            review_due_at = ((row.get('details') or {}).get('review_due_at') if isinstance(row.get('details'), dict) else None) or row.get('review_due_at')
+            observation_targets = ['post_apply_samples', 'validation_gate_health', 'transition_journal_drift']
+            if row.get('rollback_candidate'):
+                observation_targets.append('rollback_trigger_confirmation')
+            queue_row = {
+                'item_id': row.get('item_id'),
+                'approval_type': row.get('approval_type'),
+                'target': row.get('target'),
+                'title': row.get('title'),
+                'event_type': row.get('event_type'),
+                'created_at': row.get('created_at'),
+                'review_due_at': review_due_at,
+                'observation_targets': observation_targets,
+                'rollback_candidate': bool(row.get('rollback_candidate')),
+                'rollback_triggered': row.get('rollback_triggered') or [],
+                'recommended_action': 'prepare_rollback_review' if row.get('rollback_candidate') else ('run_scheduled_review' if review_due_at else 'monitor_post_promotion_window'),
+            }
+            if row.get('rollback_candidate'):
+                rollback_review_queue.append({**queue_row, 'queue_kind': 'rollback_review_queue'})
+            else:
+                post_promotion_review_queue.append({**queue_row, 'queue_kind': 'post_promotion_review_queue'})
         rollback_candidates = [row for row in items if row.get('rollback_candidate')]
         return {
             'event_count': len(items),
@@ -2201,8 +2225,14 @@ class Database:
             'rollback_trigger_counts': rollback_trigger_counts,
             'risk_label_counts': risk_label_counts,
             'rollback_review_candidate_count': len(rollback_candidates),
+            'post_promotion_review_queue_count': len(post_promotion_review_queue),
+            'rollback_review_queue_count': len(rollback_review_queue),
             'recent_items': items,
             'rollback_review_candidates': rollback_candidates,
+            'review_queues': {
+                'post_promotion_review_queue': post_promotion_review_queue,
+                'rollback_review_queue': rollback_review_queue,
+            },
         }
 
     def get_recent_approval_decision_diff(self, limit: int = 20, approval_type: str = None) -> List[Dict]:

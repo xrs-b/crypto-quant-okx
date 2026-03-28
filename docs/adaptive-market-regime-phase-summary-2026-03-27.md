@@ -165,3 +165,4 @@
 而不是“一次性大爆改”。
 
 - 2026-03-28 auto-promotion closure follow-up：controlled auto-promotion 现已补上执行后摘要层；`auto_promotion_execution` 会随 persisted approval/workflow state 回灌，operator digest / workbench governance / unified workbench overview 会直接显示最近 promotion、stage transition、reason code 同 rollback review candidate。数据库/API 亦新增 auto-promotion activity summary（含 `/api/backtest/auto-promotion-summary` 与 state-machine summary 聚合），令低干预巡检可以直接答到“最近自动推进过乜、由 guarded_prepare 去咗边、边啲要准备 rollback review”。
+- 2026-03-28 review queue semantics follow-up：在 auto-promotion summary / database / dashboard API 上进一步补齐 `post_promotion_review_queue` 与 `rollback_review_queue`。系统而家不只知道“刚自动推进过”，仲会明确记录自动推进后下一步要观察嘅 observation targets（例如 post_apply_samples / validation_gate_health / transition_journal_drift）、何时 review_due_at，以及一旦 review_overdue / regression / rollback trigger 出现时应该直接转去 `prepare_rollback_review`。对应 API 新增 `/api/backtest/auto-promotion-review-queues`，方便 dashboard/workbench/agent 直接消费。

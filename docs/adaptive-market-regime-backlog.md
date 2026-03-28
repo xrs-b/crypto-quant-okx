@@ -1,5 +1,19 @@
 # Adaptive Market Regime Backlog
 
+## 2026-03-28 已完成：post-promotion / rollback review queue 语义补强
+- 已把 controlled auto-promotion 执行后的 follow-up 明确拆成两条队列：
+  - `post_promotion_review_queue`：自动推进后应该继续观察什么、何时复核；
+  - `rollback_review_queue`：一旦 review overdue / validation regression / rollback trigger 命中，就明确升级为 rollback review。
+- review queue item 现统一带出：
+  - `review_due_at` / `review_window_hours`
+  - `observation_targets`
+  - `recommended_action`
+  - `rollback_triggered`
+- 已落点到：
+  - analytics/helper：summary + operator/workbench attention 统一消费
+  - database：auto-promotion activity summary 可直接返回 review queue 视图
+  - dashboard/api：新增 `/api/backtest/auto-promotion-review-queues`
+- 已补测试覆盖：post-promotion review queue、rollback review queue、database summary、dashboard API。
 > **主线第一入口 / 总纲**：[`docs/adaptive-strategy-mainline-roadmap.md`](./adaptive-strategy-mainline-roadmap.md)
 >
 > 配套主计划：[`docs/adaptive-market-regime-framework-plan.md`](./adaptive-market-regime-framework-plan.md)

@@ -234,6 +234,7 @@
 
 - **2026-03-28 implementation update (validation-gate consumer/persistence)**：validation gate 进一步接通 persisted approval/workflow state、dashboard summary card、unified workbench overview 同 `/api/approvals/state-machine`；freeze / regression / rollback trigger 而家会随 replay/state merge 稳定回灌，调用方可以直接睇到 gate 当前 ready/frozen 状态、最近缺口/失败 capability、主导 freeze reason，以及 `validation_gate_regressed` 等 rollback 触发线索，同时继续维持 metadata/review-only 安全边界，不触发危险真实交易执行。
 - **2026-03-28 implementation update (control-plane contract drift guard)**：executor / queue consumer 现会把 `control_plane_contract` 快照同 approval details 一齐持久化，固定记录 action/handler/dispatch/transition contract 与 manifest generation/version；`build_control_plane_readiness_summary(...)` 会同步扫描 persisted contract，同当前 manifest 做 version / registry drift 检查。即使未来 registry / handler 升级，只要旧快照同现行 control plane 脱节，系统都会先转入 review-required/blocking，而唔会继续静默 auto-promotion。
+- **2026-03-28 implementation update (contract drift low-intervention consumption)**：persisted drift 现进一步收口成稳定 `m5_control_plane_contract_drift_summary_v1`，并正式挂到 `workflow_operator_digest / workbench_governance_view / workflow_alert_digest / unified_workbench_overview`。低干预调用方而家可以直接见到 `frozen_item_count / dominant_drift_type / requires_manual_review`，以及 item 级 `frozen_by_contract_drift / drift_types / issues`，唔使再手动钻 readiness 明细先知边个因 contract drift 被 freeze。
 完成标志：
 - 新动作接入不再靠散落 if/else
 - workbench / digest / timeline 能稳定引用同一 registry 元数据

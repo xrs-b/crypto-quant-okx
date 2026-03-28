@@ -2,6 +2,7 @@
 
 ## 2026-03-28 已完成：control-plane manifest 消费层接入
 - 已新增统一后端消费摘要 `m5_control_plane_readiness_summary_v1`，把 rollout control-plane manifest、validation gate readiness、replay-safe、upgrade-window、rollback-window 收敛成一个稳定、可序列化输出。
+- 继续把 persisted contract drift 收口成稳定 `m5_control_plane_contract_drift_summary_v1`，并回挂到 `workflow_operator_digest / workbench_governance_view / workflow_alert_digest / unified_workbench_overview`；调用方而家可直接见到：边啲 item 因契约漂移被冻结、主导 drift type（`registry/version/generation/missing_snapshot`）、以及 `requires_manual_review`。
 - 已落点到：
   - `analytics/helper.build_workflow_operator_digest()`
   - `analytics/helper.build_dashboard_summary_cards()`

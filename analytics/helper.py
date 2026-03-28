@@ -3187,6 +3187,104 @@ def _evaluate_control_plane_contract_snapshot(snapshot: Optional[Dict[str, Any]]
     }
 
 
+
+def _categorize_control_plane_drift_issue(issue: Any) -> str:
+    issue_text = str(issue or '').strip()
+    if not issue_text:
+        return 'unknown'
+    if issue_text == 'missing_snapshot':
+        return 'missing_snapshot'
+    if issue_text.startswith('version_mismatch:'):
+        return 'version_drift'
+    if issue_text.startswith('action_type_missing:') or issue_text.startswith('handler_key_missing:'):
+        return 'registry_drift'
+    if issue_text.startswith('generation_mismatch:'):
+        return 'generation_drift'
+    return 'unknown'
+
+
+def _summarize_control_plane_contract_drift_items(rows: Optional[List[Dict[str, Any]]] = None, *, max_items: int = 10) -> Dict[str, Any]:
+    drift_rows = []
+    drift_type_counts: Dict[str, int] = {}
+    for row in list(rows or []):
+        evaluation = dict(row.get('evaluation') or {})
+        issues = list((evaluation.get('issues') or row.get('issues') or []))
+        if issues and 'issues' not in evaluation:
+            evaluation['issues'] = issues
+        if 'requires_manual_review' not in evaluation and row.get('requires_manual_review') is not None:
+            evaluation['requires_manual_review'] = row.get('requires_manual_review')
+        if 'compatible' not in evaluation and row.get('frozen_by_contract_drift') is not None:
+            evaluation['compatible'] = not bool(row.get('frozen_by_contract_drift'))
+        if 'version_drift' not in evaluation:
+            evaluation['version_drift'] = 'version_drift' in (row.get('drift_types') or [])
+        if 'registry_drift' not in evaluation:
+            evaluation['registry_drift'] = 'registry_drift' in (row.get('drift_types') or [])
+        if 'missing_snapshot' not in evaluation:
+            evaluation['missing_snapshot'] = 'missing_snapshot' in (row.get('drift_types') or [])
+        drift_types = []
+        for issue in issues:
+            drift_type = _categorize_control_plane_drift_issue(issue)
+            drift_types.append(drift_type)
+            drift_type_counts[drift_type] = drift_type_counts.get(drift_type, 0) + 1
+        dominant_drift_type = None
+        for preferred in ('registry_drift', 'version_drift', 'generation_drift', 'missing_snapshot', 'unknown'):
+            if preferred in drift_types:
+                dominant_drift_type = preferred
+                break
+        drift_rows.append({
+            'item_id': row.get('item_id'),
+            'title': row.get('title') or row.get('item_id'),
+            'workflow_state': row.get('workflow_state'),
+            'approval_state': row.get('approval_state'),
+            'action_type': evaluation.get('action_type') or row.get('action_type'),
+            'handler_key': evaluation.get('handler_key'),
+            'frozen_by_contract_drift': not bool(evaluation.get('compatible')),
+            'requires_manual_review': bool(evaluation.get('requires_manual_review')),
+            'dominant_drift_type': dominant_drift_type,
+            'drift_types': [item for item in ('registry_drift', 'version_drift', 'generation_drift', 'missing_snapshot', 'unknown') if item in drift_types],
+            'issues': issues,
+            'evaluation': {
+                'status': evaluation.get('status'),
+                'compatible': bool(evaluation.get('compatible')),
+                'version_drift': bool(evaluation.get('version_drift')),
+                'registry_drift': bool(evaluation.get('registry_drift')),
+                'missing_snapshot': bool(evaluation.get('missing_snapshot')),
+                'generation': evaluation.get('generation'),
+            },
+        })
+
+    drift_rows.sort(key=lambda row: (
+        0 if row.get('frozen_by_contract_drift') else 1,
+        0 if row.get('requires_manual_review') else 1,
+        {'registry_drift': 0, 'version_drift': 1, 'generation_drift': 2, 'missing_snapshot': 3, 'unknown': 4}.get(str(row.get('dominant_drift_type') or 'unknown'), 9),
+        str(row.get('title') or row.get('item_id') or ''),
+    ))
+
+    dominant_drift_type = None
+    if drift_type_counts:
+        dominant_drift_type = sorted(drift_type_counts.items(), key=lambda item: (-item[1], {'registry_drift': 0, 'version_drift': 1, 'generation_drift': 2, 'missing_snapshot': 3, 'unknown': 4}.get(item[0], 9), item[0]))[0][0]
+
+    frozen_count = sum(1 for row in drift_rows if row.get('frozen_by_contract_drift'))
+    review_required_count = sum(1 for row in drift_rows if row.get('requires_manual_review'))
+
+    return {
+        'schema_version': 'm5_control_plane_contract_drift_summary_v1',
+        'status': 'review_required' if review_required_count else 'steady',
+        'headline': 'persisted_control_plane_contract_drift_detected' if review_required_count else 'no_persisted_control_plane_contract_drift',
+        'item_count': len(rows or []),
+        'review_required_count': review_required_count,
+        'frozen_item_count': frozen_count,
+        'version_drift_count': drift_type_counts.get('version_drift', 0),
+        'registry_drift_count': drift_type_counts.get('registry_drift', 0),
+        'generation_drift_count': drift_type_counts.get('generation_drift', 0),
+        'missing_snapshot_count': drift_type_counts.get('missing_snapshot', 0),
+        'drift_type_counts': {key: drift_type_counts[key] for key in ('registry_drift', 'version_drift', 'generation_drift', 'missing_snapshot', 'unknown') if drift_type_counts.get(key)},
+        'dominant_drift_type': dominant_drift_type,
+        'requires_manual_review': bool(review_required_count),
+        'items': drift_rows[:max_items],
+    }
+
+
 def build_rollout_control_plane_manifest(payload: Optional[Dict] = None, executor: Optional[Dict] = None,
                                         *, allowed_action_types: Optional[List[str]] = None) -> Dict[str, Any]:
     payload = payload or {}
@@ -3282,16 +3380,13 @@ def build_control_plane_readiness_summary(*, payload: Optional[Dict[str, Any]] =
         if contract:
             persisted_contract_rows.append({
                 'item_id': row.get('item_id') or row.get('approval_id') or row.get('playbook_id'),
+                'title': row.get('title') or row.get('item_id') or row.get('playbook_id') or row.get('approval_id'),
+                'workflow_state': row.get('workflow_state'),
+                'approval_state': row.get('approval_state'),
+                'action_type': row.get('action_type'),
                 'evaluation': _evaluate_control_plane_contract_snapshot(contract, manifest=manifest, action_registry=registry_snapshot),
             })
-    persisted_contract_summary = {
-        'item_count': len(persisted_contract_rows),
-        'review_required_count': sum(1 for row in persisted_contract_rows if not (row.get('evaluation') or {}).get('compatible')),
-        'version_drift_count': sum(1 for row in persisted_contract_rows if (row.get('evaluation') or {}).get('version_drift')),
-        'registry_drift_count': sum(1 for row in persisted_contract_rows if (row.get('evaluation') or {}).get('registry_drift')),
-        'missing_snapshot_count': sum(1 for row in persisted_contract_rows if (row.get('evaluation') or {}).get('missing_snapshot')),
-        'items': persisted_contract_rows[:10],
-    }
+    persisted_contract_summary = _summarize_control_plane_contract_drift_items(persisted_contract_rows, max_items=10)
     readiness = readiness or {}
     readiness_status = str(readiness.get('status') or '').strip() or None
     readiness_pct = readiness.get('readiness_pct')
@@ -5969,6 +6064,7 @@ def build_workflow_operator_digest(payload: Optional[Dict] = None, *, max_items:
         validation_gate=validation_gate,
         validation_consumption=gate_consumption.get('validation_gate_consumption') if isinstance(gate_consumption, dict) else None,
     )
+    contract_drift_summary = control_plane_readiness.get('persisted_control_plane_contracts') or {}
 
     group_summaries = {
         'by_lane': [
@@ -6041,6 +6137,7 @@ def build_workflow_operator_digest(payload: Optional[Dict] = None, *, max_items:
             'latest_transition': transition_journal.get('latest') or {},
             'validation_gate': validation_gate,
             'control_plane_readiness': control_plane_readiness,
+            'control_plane_contract_drift': contract_drift_summary,
         },
         'attention': {
             'manual_approval': manual_approval_items[:max_items],
@@ -6054,6 +6151,7 @@ def build_workflow_operator_digest(payload: Optional[Dict] = None, *, max_items:
             'auto_promotion_post_promotion_review_queue': ((auto_promotion_execution.get('review_queues') or {}).get('post_promotion_review_queue') or []),
             'auto_promotion_rollback_candidates': auto_promotion_execution.get('rollback_review_candidates') or [],
             'auto_promotion_rollback_review_queue': ((auto_promotion_execution.get('review_queues') or {}).get('rollback_review_queue') or []),
+            'control_plane_contract_drift': contract_drift_summary.get('items') or [],
         },
         'next_actions': next_actions,
         'group_summaries': group_summaries,
@@ -6076,10 +6174,12 @@ def build_workflow_operator_digest(payload: Optional[Dict] = None, *, max_items:
         'auto_promotion_execution': auto_promotion_execution,
         'control_plane_manifest': control_plane_manifest,
         'control_plane_readiness': control_plane_readiness,
+        'control_plane_contract_drift': contract_drift_summary,
         'related_summary': {
             'control_plane_readiness': control_plane_readiness,
             'validation_gate': validation_gate,
             'validation_gate_consumption': gate_consumption.get('validation_gate_consumption') if isinstance(gate_consumption, dict) else {},
+            'control_plane_contract_drift': contract_drift_summary,
         },
     }
     payload['operator_digest'] = digest
@@ -6145,7 +6245,9 @@ def build_workflow_alert_digest(payload: Optional[Dict] = None, *, max_items: in
             },
         )
 
-    if not control_plane_readiness.get('compatible', True) or not control_plane_readiness.get('can_continue_auto_promotion', True):
+    contract_drift_summary = control_plane_readiness.get('persisted_control_plane_contracts') or {}
+
+    if not control_plane_readiness.get('control_plane_compatible', True) or not control_plane_readiness.get('can_continue_auto_promotion', True):
         blocking_issues = control_plane_readiness.get('blocking_issues') or []
         _push_alert(
             kind='control_plane',
@@ -6156,6 +6258,21 @@ def build_workflow_alert_digest(payload: Optional[Dict] = None, *, max_items: in
             follow_up='review_control_plane_contract',
             sources=['control_plane_readiness'],
             details={'control_plane_readiness': control_plane_readiness},
+        )
+
+    for row in (contract_drift_summary.get('items') or []):
+        dominant_drift_type = row.get('dominant_drift_type') or 'unknown'
+        severity = 'critical' if dominant_drift_type in {'registry_drift', 'generation_drift'} else 'high'
+        _push_alert(
+            kind='control_plane_contract_drift',
+            severity=severity,
+            item_id=row.get('item_id'),
+            title=row.get('title') or row.get('item_id') or 'Persisted contract drift',
+            message=f"frozen by {dominant_drift_type} / review_required={str(bool(row.get('requires_manual_review'))).lower()}",
+            route='control_plane_review',
+            follow_up='review_control_plane_contract',
+            sources=['control_plane_readiness', 'workflow_operator_digest'],
+            details={'control_plane_contract_drift': row, 'control_plane_readiness': control_plane_readiness},
         )
 
     for row in (attention_view.get('items') or []):
@@ -6254,7 +6371,9 @@ def build_workflow_alert_digest(payload: Optional[Dict] = None, *, max_items: in
             'auto_advance_candidate_count': (operator_digest.get('summary') or {}).get('auto_advance_candidate_count', 0),
             'validation_gate': validation_gate,
             'control_plane_readiness': control_plane_readiness,
+            'control_plane_contract_drift': contract_drift_summary,
             'latest_transition_at': (transition_journal.get('summary') or {}).get('latest_timestamp'),
+            'control_plane_contract_drift': contract_drift_summary,
         },
         'alerts': alerts[:max_items],
         'alert_index': {
@@ -6432,6 +6551,7 @@ def build_dashboard_summary_cards(payload: Optional[Dict] = None, *, max_items: 
             'gate_consumption': digest_summary.get('gate_consumption') or {},
             'validation_gate': validation_gate,
             'control_plane_readiness': control_plane_readiness,
+            'control_plane_contract_drift': contract_drift_summary,
             'validation_gate_consumption': validation_consumption,
             'executor_status': rollout_executor.get('status') or 'disabled',
             'bridge_mode': controlled_rollout.get('mode') or 'disabled',
@@ -6472,6 +6592,7 @@ def build_dashboard_summary_cards(payload: Optional[Dict] = None, *, max_items: 
             'control_plane_readiness': control_plane_readiness,
             'validation_gate': validation_gate,
             'validation_gate_consumption': validation_consumption,
+            'control_plane_contract_drift': contract_drift_summary,
             'workflow_alert_digest': alert_digest.get('summary') or {},
         },
     }
@@ -7781,6 +7902,11 @@ def build_workbench_governance_view(payload: Optional[Dict] = None, *, max_items
 
     gate_consumption = ((operator_digest.get('summary') or {}).get('gate_consumption') or _build_gate_consumption_summary(active_items, label='workbench_governance_view', max_items=max_items))
     gate_consumption = _build_gate_consumption_summary(active_items, label='workbench_governance_view', max_items=max_items)
+    contract_drift_summary = ((operator_digest.get('control_plane_contract_drift') or (operator_digest.get('summary') or {}).get('control_plane_contract_drift')) or {})
+    contract_drift_by_item = {row.get('item_id'): row for row in (contract_drift_summary.get('items') or []) if row.get('item_id')}
+    for lane in lanes.values():
+        lane_drift_items = [contract_drift_by_item[row.get('item_id')] for row in (lane.get('items') or []) if row.get('item_id') in contract_drift_by_item]
+        lane['control_plane_contract_drift'] = _summarize_control_plane_contract_drift_items(lane_drift_items, max_items=max_items)
     view = {
         'schema_version': 'm5_workbench_governance_view_v2',
         'headline': {
@@ -7812,6 +7938,7 @@ def build_workbench_governance_view(payload: Optional[Dict] = None, *, max_items
             'stage_loop': _summarize_stage_loop_rows(unique_active_items, label='workbench_governance_view', max_items=max_items),
             'transition_count': (transition_journal.get('summary') or {}).get('count', 0),
             'latest_transition_at': (transition_journal.get('summary') or {}).get('latest_timestamp'),
+            'control_plane_contract_drift': contract_drift_summary,
         },
         'filters': catalog.get('filters') or {},
         'applied_filters': (filtered_view or {}).get('applied_filters') or {},
@@ -7830,6 +7957,7 @@ def build_workbench_governance_view(payload: Optional[Dict] = None, *, max_items
         },
         'recent_adjustments': recent_adjustments[:max_adjustments],
         'transition_journal': transition_journal,
+        'control_plane_contract_drift': contract_drift_summary,
         'upstreams': {
             'workflow_consumer_view': consumer_view,
             'workflow_attention_view': attention_view,
@@ -7943,6 +8071,7 @@ def build_unified_workbench_overview(payload: Optional[Dict] = None, *, max_item
         validation_gate=validation_gate,
         validation_consumption=validation_consumption,
     )
+    contract_drift_summary = control_plane_readiness.get('persisted_control_plane_contracts') or {}
     workbench_stage_loop = (workbench_summary.get('stage_loop') or workbench_view.get('rollout', {}).get('stage_loop') or _summarize_stage_loop_rows(workbench_view.get('upstreams', {}).get('workflow_operator_digest', {}).get('operator_action_policies') or [], label='unified_workbench_rollout', max_items=max_items))
     retry_queue = _take(((recovery_view.get('queues') or {}).get('retry_queue') or []))
     rollback_candidates = _take(((recovery_view.get('queues') or {}).get('rollback_candidates') or []))
@@ -8042,13 +8171,15 @@ def build_unified_workbench_overview(payload: Optional[Dict] = None, *, max_item
                 'post_promotion_review_queue': (auto_promotion_review_queues.get('summary') or {}).get('post_promotion_review_queue_count', 0),
                 'rollback_review_queue': (auto_promotion_review_queues.get('summary') or {}).get('rollback_review_queue_count', 0),
                 'promotion_review_due': (auto_promotion_review_queues.get('summary') or {}).get('review_due_count', 0),
+                'contract_drift_frozen': contract_drift_summary.get('frozen_item_count', 0),
+                'contract_drift_review_required': contract_drift_summary.get('review_required_count', 0),
             },
             'validation_gate': validation_gate,
             'control_plane_readiness': control_plane_readiness,
             'rollout_advisory': rollout_advisory,
             'validation_consumption': validation_consumption,
             'headline_stage_frontier': _take((workbench_view.get('rollout') or {}).get('frontier') or []),
-            'key_alerts': _take((auto_promotion_review_queues.get('items') or []) + approval_blocked_items + queued_items + ready_items),
+            'key_alerts': _take((contract_drift_summary.get('items') or []) + (auto_promotion_review_queues.get('items') or []) + approval_blocked_items + queued_items + ready_items),
             'next_actions': _take(rollout_next_actions),
             'stage_loop': workbench_stage_loop,
             'auto_promotion_candidate_queue': rollout_advisory.get('auto_promotion_candidates') or [],
@@ -8102,6 +8233,7 @@ def build_unified_workbench_overview(payload: Optional[Dict] = None, *, max_item
             'validation_gate': validation_gate,
             'control_plane_readiness': control_plane_readiness,
             'validation_gate_consumption': validation_consumption,
+            'control_plane_contract_drift': contract_drift_summary,
             'control_plane_manifest': {
                 'status': (control_plane_manifest.get('compatibility') or {}).get('status'),
                 'compatible': (control_plane_manifest.get('compatibility') or {}).get('compatible'),
@@ -8129,6 +8261,7 @@ def build_unified_workbench_overview(payload: Optional[Dict] = None, *, max_item
         'transition_journal': transition_journal,
         'control_plane_manifest': control_plane_manifest,
         'control_plane_readiness': control_plane_readiness,
+        'control_plane_contract_drift': contract_drift_summary,
         'workflow_alert_digest': alert_digest,
         'related_summary': {
             'control_plane_readiness': control_plane_readiness,

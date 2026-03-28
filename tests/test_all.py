@@ -9114,6 +9114,111 @@ class TestApprovalPersistence(unittest.TestCase):
         self.assertIn('persisted_control_plane_version_drift', summary['blocking_issues'])
         self.assertFalse(summary['can_continue_auto_promotion'])
 
+
+    def test_build_workflow_operator_digest_exposes_control_plane_contract_drift_summary(self):
+        payload = build_workflow_operator_digest({
+            'workflow_state': {'item_states': [{
+                'item_id': 'playbook::stale',
+                'title': 'Stale contract item',
+                'action_type': 'joint_stage_prepare',
+                'workflow_state': 'queued',
+                'approval_required': False,
+                'requires_manual': False,
+                'risk_level': 'medium',
+                'control_plane_contract': {
+                    'schema_version': 'm5_control_plane_contract_snapshot_v1',
+                    'generation': 'm5',
+                    'action_type': 'joint_stage_prepare',
+                    'handler_key': 'apply::stage_prepare_safe',
+                    'versions': {
+                        'action_registry': 'm5_safe_rollout_action_registry_v0',
+                        'stage_handler_registry': 'm5_rollout_stage_handler_registry_v1',
+                        'transition_policy': 'm5_rollout_transition_policy_v1',
+                        'gate_policy': 'm5_rollout_gate_policy_v1',
+                        'control_plane_manifest': 'm5_rollout_control_plane_manifest_v1',
+                    },
+                },
+            }], 'summary': {'item_count': 1}},
+            'approval_state': {'items': [], 'summary': {}},
+        }, max_items=3)
+        drift = payload['control_plane_contract_drift']
+        self.assertEqual(drift['schema_version'], 'm5_control_plane_contract_drift_summary_v1')
+        self.assertEqual(drift['review_required_count'], 1)
+        self.assertEqual(drift['frozen_item_count'], 1)
+        self.assertGreaterEqual(drift['version_drift_count'], 1)
+        self.assertEqual(drift['items'][0]['item_id'], 'playbook::stale')
+        self.assertTrue(drift['items'][0]['frozen_by_contract_drift'])
+        self.assertEqual(payload['summary']['control_plane_contract_drift']['review_required_count'], 1)
+        self.assertEqual(payload['attention']['control_plane_contract_drift'][0]['item_id'], 'playbook::stale')
+
+    def test_build_workbench_governance_view_surfaces_contract_drift_by_lane(self):
+        payload = build_workbench_governance_view({
+            'workflow_state': {'item_states': [{
+                'item_id': 'playbook::blocked',
+                'title': 'Blocked drift item',
+                'action_type': 'joint_stage_prepare',
+                'workflow_state': 'blocked',
+                'approval_required': False,
+                'requires_manual': False,
+                'risk_level': 'high',
+                'blocking_reasons': ['persisted_control_plane_contract_review_required'],
+                'control_plane_contract': {
+                    'schema_version': 'm5_control_plane_contract_snapshot_v1',
+                    'generation': 'm5',
+                    'action_type': 'joint_stage_prepare',
+                    'handler_key': 'apply::stage_prepare_safe',
+                    'versions': {
+                        'action_registry': 'm5_safe_rollout_action_registry_v0',
+                        'stage_handler_registry': 'm5_rollout_stage_handler_registry_v1',
+                        'transition_policy': 'm5_rollout_transition_policy_v1',
+                        'gate_policy': 'm5_rollout_gate_policy_v1',
+                        'control_plane_manifest': 'm5_rollout_control_plane_manifest_v1',
+                    },
+                },
+            }], 'summary': {'item_count': 1}},
+            'approval_state': {'items': [], 'summary': {}},
+        }, max_items=3)
+        self.assertEqual(payload['control_plane_contract_drift']['review_required_count'], 1)
+        self.assertEqual(payload['summary']['control_plane_contract_drift']['frozen_item_count'], 1)
+        self.assertEqual(payload['lanes']['blocked']['control_plane_contract_drift']['review_required_count'], 1)
+        self.assertIn(payload['lanes']['blocked']['control_plane_contract_drift']['items'][0]['dominant_drift_type'], {'registry_drift', 'version_drift'})
+
+    def test_workflow_alert_and_unified_workbench_surface_contract_drift_consumption(self):
+        base_payload = {
+            'workflow_state': {'item_states': [{
+                'item_id': 'playbook::drift',
+                'title': 'Drifted item',
+                'action_type': 'joint_stage_prepare',
+                'workflow_state': 'queued',
+                'approval_required': False,
+                'requires_manual': False,
+                'risk_level': 'medium',
+                'control_plane_contract': {
+                    'schema_version': 'm5_control_plane_contract_snapshot_v1',
+                    'generation': 'm5',
+                    'action_type': 'joint_stage_prepare',
+                    'handler_key': 'queue_only::missing_handler',
+                    'versions': {
+                        'action_registry': 'm5_safe_rollout_action_registry_v1',
+                        'stage_handler_registry': 'm5_rollout_stage_handler_registry_v1',
+                        'transition_policy': 'm5_rollout_transition_policy_v1',
+                        'gate_policy': 'm5_rollout_gate_policy_v1',
+                        'control_plane_manifest': 'm5_rollout_control_plane_manifest_v1',
+                    },
+                },
+            }], 'summary': {'item_count': 1}},
+            'approval_state': {'items': [], 'summary': {}},
+        }
+        alert_digest = build_workflow_alert_digest(dict(base_payload), max_items=5)
+        self.assertTrue(any(row['kind'] == 'control_plane_contract_drift' and row['item_id'] == 'playbook::drift' for row in alert_digest['alerts']))
+        self.assertEqual(alert_digest['summary']['control_plane_contract_drift']['dominant_drift_type'], 'registry_drift')
+
+        overview = build_unified_workbench_overview(dict(base_payload), max_items=5)
+        self.assertEqual(overview['control_plane_contract_drift']['review_required_count'], 1)
+        self.assertEqual(overview['summary']['control_plane_contract_drift']['dominant_drift_type'], 'registry_drift')
+        self.assertEqual(overview['lines']['rollout']['counts']['contract_drift_frozen'], 1)
+        self.assertEqual(overview['lines']['rollout']['key_alerts'][0]['item_id'], 'playbook::drift')
+
     def test_rollout_executor_plan_and_stage_progression_expose_transition_policy(self):
         class StubConfig:
             def __init__(self, values=None):

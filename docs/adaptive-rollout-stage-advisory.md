@@ -67,3 +67,4 @@ Validation freshness gate 已经能阻止 stale / regressed validation 继续 au
 - 后端 summary/related_summary 均保持稳定、可序列化
 - 调用方唔使再自行拼 manifest + validation gate，可直接消费 `control_plane_readiness`
 - 当 validation freeze / regression 或 control-plane incompatibility 出现时，可直接看到自动推进被边一层阻断
+- persisted contract drift 现亦会稳定收口成 `control_plane_contract_drift`，低干预入口会直接带出 frozen item、主导 drift type 同 review-required 标记，方便 operator / workbench / alert digest 一眼判断系咪要停手做 contract review

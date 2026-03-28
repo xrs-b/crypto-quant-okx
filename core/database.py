@@ -156,11 +156,23 @@ class Database:
             action, route, follow_up = 'observe_only_followup', queue_progression.get('status') or dispatch_route or 'queue_observer', 'watch_queue_progression'
         else:
             action, route, follow_up = 'observe_only_followup', dispatch_route or 'observe_only_followup', 'observe_only'
+        rollback_candidate = bool(payload.get('rollback_hint') or queue_transition.get('rollback_hint') or payload.get('rollback_capable'))
+        rollback_hint = payload.get('rollback_hint') or queue_transition.get('rollback_hint')
+        lane_id = 'ready'
+        lane_reason = 'workflow_ready_default'
+        if normalized_workflow in {'execution_failed', 'retry_pending', 'rollback_pending', 'rolled_back'} or rollback_candidate:
+            lane_id, lane_reason = 'rollback_candidate', 'rollback_gate_or_recovery_state'
+        elif normalized_workflow == 'blocked_by_approval' or route == 'manual_approval_queue' or follow_up == 'await_manual_approval':
+            lane_id, lane_reason = 'manual_approval', 'manual_gate_pending'
+        elif normalized_workflow in {'blocked', 'deferred', 'review_pending'} or blocked_by or route in {'operator_escalation', 'freeze_followup_queue', 'review_schedule_queue'}:
+            lane_id, lane_reason = 'blocked', 'blocked_or_review_followup'
+        elif execution_status == 'queued' or normalized_workflow == 'queued' or queue_progression.get('status') in {'queued', 'ready_to_queue'}:
+            lane_id, lane_reason = 'queued', 'queue_progression_active'
+        elif payload.get('auto_advance_gate', {}).get('allowed'):
+            lane_id, lane_reason = 'auto_batch', 'gate_allows_auto_advance'
         payload['execution_status'] = execution_status
         payload['transition_rule'] = transition_rule
         payload['last_transition'] = last_transition
-        rollback_candidate = bool(payload.get('rollback_hint') or queue_transition.get('rollback_hint') or payload.get('rollback_capable'))
-        rollback_hint = payload.get('rollback_hint') or queue_transition.get('rollback_hint')
         execution_timeline = {
             'schema_version': 'm5_execution_timeline_v1',
             'item_id': item_id,
@@ -292,6 +304,17 @@ class Database:
                 'retryable': retryable,
                 'blocked_by': blocked_by,
                 'summary': f"{action} via {route}",
+            },
+            'lane_routing': {
+                'schema_version': 'm5_lane_routing_v1',
+                'lane_id': lane_id,
+                'lane_reason': lane_reason,
+                'queue_name': queue_progression.get('queue_name') or dispatch_route or route,
+                'queue_status': queue_progression.get('status') or normalized_workflow,
+                'dispatch_route': dispatch_route or route,
+                'route_family': route,
+                'next_transition': next_transition or follow_up,
+                'summary': f"{lane_id} via {route}",
             },
             'executor_result': {
                 'status': payload.get('execution_mode') or payload.get('queue_result_action') or payload.get('result_action'),

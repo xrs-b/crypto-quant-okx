@@ -144,6 +144,12 @@
   - `workflow_operator_digest` summary/attention 现直接给出 `gate_consumption`、`rollback_candidates`，调用方可以直接看哪些 item 可 auto-advance、哪些已成 rollback candidate；
   - `workbench_governance_view / workbench item catalog / timeline summary aggregation / unified_workbench_overview` 统一回挂 `auto_advance_gate / rollback_gate` 与聚合后的 blocker / trigger 统计，调用方无须再钻 `state_machine/details`;
   - workbench bucket/filter 继续沿用稳定 JSON，只增量补 `auto_advance_allowed / rollback_candidate` bucket tag 与 gate summary，优先服务 dashboard/API/agent 消费，不做前端。
+- **2026-03-28 gate-driven lane / queue / route 收口**：继续把 `stage_loop + gate + operator_action_policy` 从“展示字段”推进成稳定的 lane routing 语义：
+  - helper 新增统一 `lane_routing` 归属逻辑，按 `auto_advance / review_pending / rollback_prepare / blocked / queued / ready` 语义统一判定 `lane_id / lane_reason / queue_name / dispatch_route / route_family / next_transition`；
+  - `workflow_consumer_view` 现会直接给每个 workflow item 回挂 `stage_loop / operator_action_policy / lane_routing / lane_id / queue_name / dispatch_route`，令 dashboard/API/workbench 后续复用同一套落位结果，而唔系各层各自猜 lane；
+  - `workflow_operator_digest / workbench item catalog / workbench_governance_view / rollout_stage_progression` 已切到同一判定口径，manual approval / rollback candidate / auto batch 的车道归属更一致，低干预工作台更易解释“点解会喺呢条 lane”；
+  - `core/database.py` 的统一 state machine details 亦开始持久化 `lane_routing` 摘要，令 approval persistence / replay / audit 层都能保留相同 lane/route 语义；
+  - 安全边界维持不变：本次只收口 queue routing / lane semantics / metadata，不新增危险真实交易执行。
 - **2026-03-27 provenance / timestamp 口径统一补强**：为 `approval timeline / executor action timeline / merged timeline / timeline summary aggregation` 补统一事件元数据，继续保持后向兼容：
   - 单条 event 统一补 `normalized_event_type / provenance / timestamp_info`，优先回答“这个事件究竟来自 approval DB、executor、workflow replay，定系 synthetic summary”；
   - `provenance` 固定表达 `origin / source / family / phase / producer / replay_source / synthetic`，避免调用方再靠 `source` 字符串猜来源；

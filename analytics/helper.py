@@ -1067,6 +1067,99 @@ def _build_low_intervention_group_summary(rows: Optional[List[Dict[str, Any]]], 
     }
 
 
+def _resolve_lane_routing(*, workflow_item: Optional[Dict[str, Any]] = None, approval_item: Optional[Dict[str, Any]] = None,
+                          row: Optional[Dict[str, Any]] = None, operator_action_policy: Optional[Dict[str, Any]] = None,
+                          stage_loop: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    workflow_item = workflow_item or {}
+    approval_item = approval_item or {}
+    row = row or {}
+    state_machine = workflow_item.get('state_machine') or approval_item.get('state_machine') or row.get('state_machine') or {}
+    queue_progression = workflow_item.get('queue_progression') or approval_item.get('queue_progression') or row.get('queue_progression') or {}
+    queue_plan = row.get('queue_plan') or workflow_item.get('queue_plan') or approval_item.get('queue_plan') or {}
+    stage_model = workflow_item.get('stage_model') or approval_item.get('stage_model') or row.get('stage_model') or {}
+    auto_decision = str(workflow_item.get('auto_approval_decision') or approval_item.get('auto_approval_decision') or row.get('auto_approval_decision') or 'manual_review').strip().lower() or 'manual_review'
+    workflow_state = str(workflow_item.get('workflow_state') or approval_item.get('workflow_state') or row.get('workflow_state') or 'pending').strip().lower() or 'pending'
+    approval_state = str(approval_item.get('approval_state') or row.get('approval_state') or 'not_required').strip().lower() or 'not_required'
+    current_stage = str(workflow_item.get('current_rollout_stage') or approval_item.get('rollout_stage') or row.get('current_rollout_stage') or row.get('rollout_stage') or stage_model.get('current_stage') or 'pending').strip().lower() or 'pending'
+    target_stage = str(workflow_item.get('target_rollout_stage') or approval_item.get('target_rollout_stage') or row.get('target_rollout_stage') or row.get('rollout_stage') or stage_model.get('target_stage') or current_stage).strip().lower() or current_stage
+    blocked_by = _dedupe_strings(list(workflow_item.get('blocking_reasons') or []) + list(approval_item.get('blocked_by') or []) + list(row.get('blocked_by') or []))
+    requires_manual = bool(workflow_item.get('requires_manual', approval_item.get('requires_manual', row.get('requires_manual'))))
+    approval_required = bool(workflow_item.get('approval_required', approval_item.get('approval_required', row.get('approval_required'))))
+    gates = _extract_rollout_gate_snapshot(workflow_item, approval_item, row)
+    auto_gate = gates.get('auto_advance_gate') or {}
+    rollback_gate = gates.get('rollback_gate') or {}
+    stage_loop = dict(stage_loop or row.get('stage_loop') or _resolve_stage_loop_snapshot(workflow_item=workflow_item, approval_item=approval_item, row=row))
+    operator_action_policy = dict(operator_action_policy or state_machine.get('operator_action_policy') or row.get('operator_action_policy') or _build_operator_action_policy(
+        item_id=workflow_item.get('item_id') or approval_item.get('playbook_id') or row.get('item_id'),
+        approval_state=approval_state,
+        workflow_state=workflow_state,
+        queue_status=queue_progression.get('status'),
+        dispatch_route=queue_progression.get('dispatch_route') or state_machine.get('dispatch_route'),
+        next_transition=queue_progression.get('next_transition') or state_machine.get('next_transition'),
+        blocked_by=blocked_by,
+        retryable=state_machine.get('retryable'),
+        rollout_stage=current_stage,
+        target_rollout_stage=target_stage,
+        terminal=bool(state_machine.get('terminal')),
+    ))
+    dispatch_route = queue_progression.get('dispatch_route') or queue_plan.get('dispatch_route') or operator_action_policy.get('route') or state_machine.get('dispatch_route')
+    next_transition = queue_progression.get('next_transition') or queue_plan.get('next_transition') or stage_loop.get('next_transition') or operator_action_policy.get('follow_up') or state_machine.get('next_transition')
+    queue_status = str(queue_progression.get('status') or queue_plan.get('status') or workflow_state or 'pending').strip().lower() or 'pending'
+    queue_name = queue_plan.get('queue_name') or queue_progression.get('queue_name') or dispatch_route or operator_action_policy.get('route') or 'observe_only_followup'
+    route_family = str(dispatch_route or operator_action_policy.get('route') or queue_name or 'observe_only_followup').strip().lower() or 'observe_only_followup'
+    lane_id = 'ready'
+    lane_reason = 'workflow_ready_default'
+    if rollback_gate.get('candidate') or stage_loop.get('loop_state') == 'rollback_prepare' or workflow_state in {'rollback_pending', 'execution_failed', 'rolled_back'}:
+        lane_id = 'rollback_candidate'
+        lane_reason = 'rollback_gate_or_recovery_state'
+    elif requires_manual and approval_state == 'pending' or workflow_state == 'blocked_by_approval' or route_family == 'manual_approval_queue' or stage_loop.get('loop_state') == 'review_pending' and (approval_required or requires_manual):
+        lane_id = 'manual_approval'
+        lane_reason = 'manual_gate_pending'
+    elif blocked_by or workflow_state in {'blocked', 'deferred', 'review_pending'} or route_family in {'operator_escalation', 'freeze_followup_queue', 'review_schedule_queue', 'deferred_review_queue', 'deferred_hold_queue'}:
+        lane_id = 'blocked'
+        lane_reason = 'blocked_or_review_followup'
+    elif auto_gate.get('allowed') or stage_loop.get('loop_state') == 'auto_advance' or (auto_decision == 'auto_approve' and not requires_manual and not blocked_by and workflow_state in {'ready', 'queued'}):
+        lane_id = 'auto_batch'
+        lane_reason = 'gate_allows_auto_advance'
+    elif workflow_state == 'queued' or queue_status in {'queued', 'ready_to_queue'} or route_family in {'queue_observer', 'stage_promotion_queue', 'operator_followup_queue'}:
+        lane_id = 'queued'
+        lane_reason = 'queue_progression_active'
+    lane_title_map = {
+        'auto_batch': 'auto batch',
+        'rollback_candidate': 'rollback candidate',
+        'blocked': 'blocked',
+        'queued': 'queued',
+        'ready': 'ready',
+        'manual_approval': 'manual approval',
+    }
+    return {
+        'schema_version': 'm5_lane_routing_v1',
+        'item_id': workflow_item.get('item_id') or approval_item.get('playbook_id') or row.get('item_id'),
+        'lane_id': lane_id,
+        'lane_title': lane_title_map.get(lane_id, lane_id.replace('_', ' ')),
+        'lane_reason': lane_reason,
+        'queue_name': queue_name,
+        'queue_status': queue_status,
+        'dispatch_route': dispatch_route,
+        'route_family': route_family,
+        'next_transition': next_transition,
+        'workflow_state': workflow_state,
+        'approval_state': approval_state,
+        'current_rollout_stage': current_stage,
+        'target_rollout_stage': target_stage,
+        'auto_approval_decision': auto_decision,
+        'auto_advance_allowed': bool(auto_gate.get('allowed')),
+        'rollback_candidate': bool(rollback_gate.get('candidate')),
+        'blocked_by': blocked_by,
+        'stage_loop_state': stage_loop.get('loop_state'),
+        'recommended_action': stage_loop.get('recommended_action') or operator_action_policy.get('action'),
+        'operator_action': operator_action_policy.get('action'),
+        'operator_route': operator_action_policy.get('route'),
+        'operator_follow_up': operator_action_policy.get('follow_up'),
+        'summary': f"{lane_id} via {route_family} ({queue_status})",
+    }
+
+
 def _extract_rollout_gate_snapshot(*rows: Any) -> Dict[str, Any]:
     auto_gate: Dict[str, Any] = {}
     rollback_gate: Dict[str, Any] = {}
@@ -3304,6 +3397,9 @@ def build_rollout_stage_progression(payload: Optional[Dict] = None, executor: Op
             'dispatch': dispatch,
             'result': result,
         }
+        stage_row['lane_routing'] = _resolve_lane_routing(workflow_item=workflow_item, approval_item=approval_item, row=stage_row, stage_loop=stage_loop)
+        stage_row['lane_id'] = stage_row['lane_routing'].get('lane_id')
+        stage_row['queue_name'] = stage_row['lane_routing'].get('queue_name')
         stage_items.append(stage_row)
         summary['item_count'] += 1
         if status == 'applied':
@@ -3347,6 +3443,32 @@ def build_workflow_consumer_view(payload: Optional[Dict] = None) -> Dict[str, An
     recovery_view = payload.get('workflow_recovery_view') or build_workflow_recovery_view(payload)
     approval_items = approval_state.get('items') or []
     workflow_items = workflow_state.get('item_states') or []
+    approval_by_playbook = {row.get('playbook_id'): row for row in approval_items if row.get('playbook_id')}
+    for workflow_item in workflow_items:
+        approval_item = approval_by_playbook.get(workflow_item.get('item_id')) or {}
+        stage_loop = _resolve_stage_loop_snapshot(workflow_item=workflow_item, approval_item=approval_item, row=workflow_item)
+        operator_action_policy = (workflow_item.get('state_machine') or {}).get('operator_action_policy') or _build_operator_action_policy(
+            item_id=workflow_item.get('item_id'),
+            approval_state=approval_item.get('approval_state') or workflow_item.get('approval_state'),
+            workflow_state=workflow_item.get('workflow_state'),
+            queue_status=((workflow_item.get('queue_progression') or {}).get('status') if isinstance(workflow_item.get('queue_progression'), dict) else None),
+            dispatch_route=((workflow_item.get('queue_progression') or {}).get('dispatch_route') if isinstance(workflow_item.get('queue_progression'), dict) else None),
+            next_transition=((workflow_item.get('queue_progression') or {}).get('next_transition') if isinstance(workflow_item.get('queue_progression'), dict) else None),
+            blocked_by=list(dict.fromkeys((workflow_item.get('blocking_reasons') or []) + (approval_item.get('blocked_by') or []))),
+            retryable=((workflow_item.get('state_machine') or {}).get('retryable') if isinstance(workflow_item.get('state_machine'), dict) else None),
+            rollout_stage=workflow_item.get('current_rollout_stage'),
+            target_rollout_stage=workflow_item.get('target_rollout_stage'),
+            terminal=bool(((workflow_item.get('state_machine') or {}) if isinstance(workflow_item.get('state_machine'), dict) else {}).get('terminal')),
+        )
+        lane_routing = _resolve_lane_routing(workflow_item=workflow_item, approval_item=approval_item, row=workflow_item, operator_action_policy=operator_action_policy, stage_loop=stage_loop)
+        workflow_item['stage_loop'] = stage_loop
+        workflow_item['operator_action_policy'] = operator_action_policy
+        workflow_item['lane_routing'] = lane_routing
+        workflow_item['lane_id'] = lane_routing.get('lane_id')
+        workflow_item['queue_name'] = lane_routing.get('queue_name')
+        workflow_item['dispatch_route'] = lane_routing.get('dispatch_route')
+        workflow_item['route_family'] = lane_routing.get('route_family')
+        workflow_item['next_transition'] = lane_routing.get('next_transition')
     view = {
         'schema_version': 'm5_workflow_consumer_view_v1',
         'summary': {
@@ -3716,21 +3838,25 @@ def build_workflow_operator_digest(payload: Optional[Dict] = None, *, max_items:
             target_rollout_stage=row.get('target_rollout_stage'),
             terminal=bool((row.get('state_machine') or {}).get('terminal')),
         )
-        if row['requires_manual'] and row['approval_state'] == 'pending':
+        row['lane_routing'] = _resolve_lane_routing(workflow_item=workflow_item, approval_item=approval_item, row=row, operator_action_policy=row['operator_action_policy'], stage_loop=row['stage_loop'])
+        row['lane_id'] = row['lane_routing'].get('lane_id')
+        row['queue_name'] = row['lane_routing'].get('queue_name')
+        row['dispatch_route'] = row['lane_routing'].get('dispatch_route')
+        row['route_family'] = row['lane_routing'].get('route_family')
+        row['next_transition'] = row['lane_routing'].get('next_transition')
+        if row['lane_id'] == 'manual_approval':
             manual_approval_items.append(row)
-        if workflow_state in {'blocked_by_approval', 'blocked', 'deferred'} or blocked_by:
+        if row['lane_id'] == 'blocked':
             blocked_items.append(row)
-        if workflow_state == 'ready':
+        if row['lane_id'] == 'ready':
             ready_items.append(row)
-        if workflow_state == 'queued':
+        if row['lane_id'] == 'queued':
             queued_items.append(row)
         if workflow_state == 'deferred':
             deferred_items.append(row)
-        auto_allowed = row.get('auto_advance_gate', {}).get('allowed')
-        if auto_allowed or (auto_allowed is None and row['auto_approval_decision'] == 'auto_approve' and not row['requires_manual'] and not blocked_by and workflow_state in {'ready', 'queued'}):
+        if row['lane_id'] == 'auto_batch':
             auto_advance_items.append(row)
-        rollback_candidate = row.get('rollback_gate', {}).get('candidate')
-        if rollback_candidate or (rollback_candidate is None and workflow_state in {'execution_failed', 'rollback_pending'} and str(row.get('risk_level') or '').lower() == 'critical'):
+        if row['lane_id'] == 'rollback_candidate':
             rollback_candidate_items.append(row)
 
     blocked_items.sort(key=_sort_key)
@@ -4118,6 +4244,8 @@ def _build_workbench_item_catalog(payload: Optional[Dict] = None) -> Dict[str, A
             terminal=bool(state_machine.get('terminal')),
         ))
         stage_loop = _resolve_stage_loop_snapshot(workflow_item=workflow_item, approval_item=approval_item, row=row)
+        lane_routing = _resolve_lane_routing(workflow_item=workflow_item, approval_item=approval_item, row=row, operator_action_policy=operator_action_policy, stage_loop=stage_loop)
+        lane_id = lane_routing.get('lane_id') or lane_id
         bucket_tags = sorted(attention_map.get(item_id) or set())
         if lane_id == 'blocked' and 'blocked' not in bucket_tags:
             bucket_tags.append('blocked')
@@ -4170,8 +4298,13 @@ def _build_workbench_item_catalog(payload: Optional[Dict] = None) -> Dict[str, A
             'auto_advance_gate': auto_advance_gate,
             'rollback_gate': rollback_gate,
             'stage_loop': stage_loop,
+            'lane_routing': lane_routing,
             'lane_id': lane_id,
-            'lane_title': lane_id.replace('_', ' '),
+            'lane_title': lane_routing.get('lane_title') or lane_id.replace('_', ' '),
+            'queue_name': lane_routing.get('queue_name'),
+            'dispatch_route': lane_routing.get('dispatch_route'),
+            'route_family': lane_routing.get('route_family'),
+            'next_transition': lane_routing.get('next_transition'),
             'bucket_tags': sorted(set(bucket_tags)),
             'operator_action_policy': operator_action_policy,
             'operator_action': operator_action_policy.get('action'),

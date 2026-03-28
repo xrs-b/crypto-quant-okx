@@ -62,6 +62,7 @@
 - **2026-03-28 implementation update**：rollout executor 现已把 `auto_advance_gate / rollback_gate` 作为稳定结构接入 `action_registry + executor plan/audit/details`，统一输出 `readiness_score / blockers / manual_required / review_window_open / rollback triggers / idempotency_rule`，令 safe handler 不止知道“可做什么”，仲知道“几时可以自动推、几时应该停或准备回滚”。
 - **2026-03-28 implementation update (stage handlers)**：新增 richer rollout stage handler 语义，覆盖 `observe / candidate / guarded_prepare / controlled_apply / review_pending / rollback_prepare`；executor plan / stage progression / persisted details 现在会统一暴露 `owner / auto_progression / waiting_on / why_stopped / next_transition / rollback_stage`，令系统可以更明确回答“当前卡在哪里、谁负责推进、下一步系继续推进、等 review，定准备 rollback”。
 - **2026-03-28 implementation update (stage-loop consumption)**：`stage_loop` 已继续上推到 low-intervention 消费层；operator digest、workbench governance、timeline aggregation、unified workbench overview 都会稳定回挂 `stage_loop` 摘要与主导路径，让 dashboard/API/agent 直接判断 auto-advance / review-pending / rollback-prepare 三条路径分布，而唔使再回到底层 executor `plan/result/details` 自己拼。
+- **2026-03-28 implementation update (gate-driven lane routing)**：`lane / queue / route` 归属已开始收口到统一 `lane_routing` 语义层；workflow consumer / operator digest / workbench catalog / workbench view / rollout stage progression 会共用同一套判定，稳定输出 `lane_id / lane_reason / queue_name / dispatch_route / route_family / next_transition`，令 `auto_batch / manual_approval / blocked / queued / rollback_candidate / ready` 的落位更一致、更可解释，且继续维持 queue-only / metadata-only 安全边界。
 
 换句话说：
 

@@ -5960,7 +5960,7 @@ class TestExecutionObservability(unittest.TestCase):
             self.assertIn('recent_decisions', snapshot['summary'])
             self.assertTrue(snapshot['summary']['observe_only_banner'])
 
-from analytics.helper import build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, attach_auto_approval_policy, execute_controlled_rollout_layer, execute_controlled_auto_approval_layer, execute_rollout_executor, build_workflow_recovery_view, build_workflow_attention_view, build_workflow_operator_digest, build_dashboard_summary_cards, build_workbench_governance_view, build_workbench_governance_detail_view, build_workbench_merged_timeline, build_workbench_timeline_summary_aggregation, build_unified_workbench_overview, _build_state_machine_semantics
+from analytics.helper import build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, attach_auto_approval_policy, execute_controlled_rollout_layer, execute_controlled_auto_approval_layer, execute_rollout_executor, build_workflow_consumer_view, build_workflow_recovery_view, build_workflow_attention_view, build_workflow_operator_digest, build_dashboard_summary_cards, build_workbench_governance_view, build_workbench_governance_detail_view, build_workbench_merged_timeline, build_workbench_timeline_summary_aggregation, build_unified_workbench_overview, _build_state_machine_semantics
 
 
 class TestApprovalPersistence(unittest.TestCase):
@@ -6293,11 +6293,11 @@ class TestApprovalPersistence(unittest.TestCase):
         self.assertEqual(payload['summary']['auto_batch_count'], 2)
         self.assertIn('gate_consumption', payload['summary'])
         self.assertIn('rollback_candidate', payload['lanes'])
-        self.assertEqual(payload['summary']['blocked_count'], 1)
-        self.assertEqual(payload['summary']['queued_count'], 1)
-        self.assertEqual(payload['summary']['ready_count'], 1)
+        self.assertEqual(payload['summary']['blocked_count'], 0)
+        self.assertEqual(payload['summary']['queued_count'], 0)
+        self.assertEqual(payload['summary']['ready_count'], 0)
         self.assertIn('playbook::ready', [row['item_id'] for row in payload['lanes']['auto_batch']['items']])
-        self.assertEqual(payload['lanes']['blocked']['items'][0]['item_id'], 'playbook::manual')
+        self.assertEqual(payload['lanes']['manual_approval']['items'][0]['item_id'], 'playbook::manual')
         self.assertTrue(payload['rollout']['frontier'])
         self.assertEqual(payload['recent_adjustments'][0]['source'], 'auto_approval_execution')
         self.assertGreaterEqual(payload['summary']['recent_adjustment_count'], 2)
@@ -6419,10 +6419,10 @@ class TestApprovalPersistence(unittest.TestCase):
         self.assertEqual(payload['headline']['dominant_line'], 'approval')
         self.assertEqual(payload['summary']['line_states']['approval'], 'attention_required')
         self.assertIn('gate_consumption', payload['summary'])
-        self.assertEqual(payload['summary']['line_states']['rollout'], 'blocked')
+        self.assertEqual(payload['summary']['line_states']['rollout'], 'steady')
         self.assertEqual(payload['summary']['line_states']['recovery'], 'recovery_required')
         self.assertEqual(payload['lines']['approval']['counts']['pending'], 2)
-        self.assertEqual(payload['lines']['rollout']['counts']['queued'], 1)
+        self.assertEqual(payload['lines']['rollout']['counts']['queued'], 0)
         self.assertEqual(payload['lines']['recovery']['counts']['manual_recovery'], 1)
         self.assertEqual(payload['lines']['approval']['next_actions'][0]['kind'], 'review_schedule')
         self.assertEqual(payload['lines']['recovery']['next_actions'][0]['kind'], 'manual_recovery')
@@ -6485,6 +6485,15 @@ class TestApprovalPersistence(unittest.TestCase):
             },
             'rollout_executor': {'status': 'controlled', 'summary': {}},
         }
+        consumer = build_workflow_consumer_view(gate_payload)
+        auto_item = next(row for row in consumer['workflow_state']['item_states'] if row['item_id'] == 'playbook::auto')
+        rollback_item = next(row for row in consumer['workflow_state']['item_states'] if row['item_id'] == 'playbook::rollback')
+        self.assertEqual(auto_item['lane_routing']['lane_id'], 'auto_batch')
+        self.assertEqual(auto_item['queue_name'], 'rollout_readiness_queue')
+        self.assertEqual(auto_item['dispatch_route'], 'rollout_readiness_queue')
+        self.assertEqual(auto_item['route_family'], 'rollout_readiness_queue')
+        self.assertEqual(rollback_item['lane_routing']['lane_id'], 'rollback_candidate')
+        self.assertEqual(rollback_item['lane_routing']['route_family'], 'retry_queue')
         digest = build_workflow_operator_digest(gate_payload, max_items=5)
         self.assertEqual(digest['summary']['gate_consumption']['auto_advance_allowed_count'], 1)
         self.assertEqual(digest['summary']['gate_consumption']['rollback_candidate_count'], 1)

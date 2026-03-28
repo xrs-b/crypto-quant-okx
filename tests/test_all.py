@@ -6090,7 +6090,7 @@ class TestExecutionObservability(unittest.TestCase):
             self.assertIn('recent_decisions', snapshot['summary'])
             self.assertTrue(snapshot['summary']['observe_only_banner'])
 
-from analytics.helper import build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, attach_auto_approval_policy, execute_controlled_rollout_layer, execute_controlled_auto_approval_layer, execute_rollout_executor, build_rollout_control_plane_manifest, build_control_plane_readiness_summary, build_workflow_consumer_view, build_workflow_recovery_view, build_workflow_attention_view, build_workflow_operator_digest, build_dashboard_summary_cards, build_workbench_governance_view, build_workbench_governance_detail_view, build_workbench_merged_timeline, build_workbench_timeline_summary_aggregation, build_unified_workbench_overview, build_auto_promotion_candidate_view, build_auto_promotion_execution_summary, build_auto_promotion_review_queue_consumption, build_auto_promotion_review_queue_filter_view, build_auto_promotion_review_queue_detail_view, _build_state_machine_semantics, _build_safe_rollout_action_registry
+from analytics.helper import build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, attach_auto_approval_policy, execute_controlled_rollout_layer, execute_controlled_auto_approval_layer, execute_auto_promotion_review_queue_layer, execute_rollout_executor, build_rollout_control_plane_manifest, build_control_plane_readiness_summary, build_workflow_consumer_view, build_workflow_recovery_view, build_workflow_attention_view, build_workflow_operator_digest, build_dashboard_summary_cards, build_workbench_governance_view, build_workbench_governance_detail_view, build_workbench_merged_timeline, build_workbench_timeline_summary_aggregation, build_unified_workbench_overview, build_auto_promotion_candidate_view, build_auto_promotion_execution_summary, build_auto_promotion_review_queue_consumption, build_auto_promotion_review_queue_filter_view, build_auto_promotion_review_queue_detail_view, _build_state_machine_semantics, _build_safe_rollout_action_registry
 
 
 class TestApprovalPersistence(unittest.TestCase):
@@ -6882,6 +6882,76 @@ class TestApprovalPersistence(unittest.TestCase):
         self.assertEqual(manual_only['summary']['candidate_count'], 1)
         self.assertEqual(manual_only['items'][0]['item_id'], 'playbook::manual')
         self.assertEqual(manual_only['applied_filters']['candidate_status'], None)
+
+    def test_execute_auto_promotion_review_queue_layer_queues_due_and_rollback_reviews(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(os.path.join(tmpdir, 'auto_promotion_review.db'))
+            payload = {
+                'workflow_state': {
+                    'item_states': [
+                        {
+                            'item_id': 'playbook::post', 'title': 'Post review item', 'action_type': 'joint_stage_prepare', 'workflow_state': 'ready', 'risk_level': 'low',
+                            'scheduled_review': {'review_due_at': '2024-03-28T08:00:00+00:00', 'review_after_hours': 24},
+                            'auto_promotion_execution': {'reason_codes': ['auto_advance_allowed'], 'after': {'rollout_stage': 'controlled_apply'}},
+                            'rollback_gate': {'candidate': False, 'triggered': []},
+                        },
+                        {
+                            'item_id': 'playbook::rollback', 'title': 'Rollback review item', 'action_type': 'joint_stage_prepare', 'workflow_state': 'queued', 'risk_level': 'low',
+                            'scheduled_review': {'review_due_at': '2026-03-29T08:00:00+00:00', 'review_after_hours': 24},
+                            'auto_promotion_execution': {'reason_codes': ['auto_advance_allowed'], 'after': {'rollout_stage': 'controlled_apply'}},
+                            'rollback_gate': {'candidate': True, 'triggered': ['validation_gate_regressed']},
+                        },
+                    ],
+                    'summary': {'item_count': 2},
+                },
+                'approval_state': {
+                    'items': [
+                        {'approval_id': 'approval::post', 'playbook_id': 'playbook::post', 'title': 'Post review item', 'action_type': 'joint_stage_prepare', 'approval_state': 'pending', 'decision_state': 'ready', 'risk_level': 'low', 'approval_required': False, 'requires_manual': False, 'blocked_by': []},
+                        {'approval_id': 'approval::rollback', 'playbook_id': 'playbook::rollback', 'title': 'Rollback review item', 'action_type': 'joint_stage_prepare', 'approval_state': 'pending', 'decision_state': 'queued', 'risk_level': 'low', 'approval_required': False, 'requires_manual': False, 'blocked_by': []},
+                    ],
+                    'summary': {'pending_count': 2},
+                },
+            }
+            db.sync_approval_items([
+                {'item_id': 'approval::post', 'approval_type': 'joint_stage_prepare', 'target': 'playbook::post', 'title': 'Post review item', 'approval_state': 'pending', 'workflow_state': 'ready'},
+                {'item_id': 'approval::rollback', 'approval_type': 'joint_stage_prepare', 'target': 'playbook::rollback', 'title': 'Rollback review item', 'approval_state': 'pending', 'workflow_state': 'queued'},
+            ], replay_source='unit-test')
+            executed = execute_auto_promotion_review_queue_layer(payload, db, settings={'enabled': True, 'mode': 'controlled'}, replay_source='unit-test')
+            summary = executed['auto_promotion_review_execution']['summary']
+            self.assertEqual(executed['auto_promotion_review_execution']['queued_count'], 2)
+            self.assertEqual(summary['queue_count'], 2)
+            post_state = db.get_approval_state('approval::post')
+            self.assertEqual(post_state['workflow_state'], 'review_pending')
+            self.assertEqual(post_state['details']['auto_promotion_review_execution']['review_status'], 'post_promotion_review_pending')
+            rollback_item = next(row for row in executed['auto_promotion_review_execution']['items'] if row['queue_kind'] == 'rollback_review_queue')
+            self.assertEqual(rollback_item['workflow_state'], 'rollback_prepare')
+
+    def test_auto_promotion_review_execution_api_returns_execution_summary(self):
+        import dashboard.api as dashboard_api
+
+        class StubBacktester:
+            def run_all(self, symbols):
+                return {'summary': {'symbols': len(symbols)}, 'symbols': [{'symbol': 'BTC/USDT'}], 'calibration_report': {'summary': {}, 'workflow_ready': {}}}
+
+        old_backtester = dashboard_api.backtester
+        old_export = dashboard_api.export_calibration_payload
+        old_persist = dashboard_api._persist_workflow_approval_payload
+        dashboard_api.backtester = StubBacktester()
+        dashboard_api.export_calibration_payload = lambda report, view='workflow_ready': {'workflow_state': {'item_states': []}, 'approval_state': {'items': []}}
+        dashboard_api._persist_workflow_approval_payload = lambda payload, replay_source='auto_promotion_review_execution_api': {**payload, 'auto_promotion_review_execution': {'enabled': True, 'mode': 'controlled', 'queued_count': 1, 'skipped_count': 0, 'summary': {'queue_count': 2, 'review_due_count': 1}, 'items': [{'item_id': 'playbook::post', 'queue_kind': 'post_promotion_review_queue', 'action': 'queued'}]}}
+        try:
+            client = app.test_client()
+            response = client.get('/api/backtest/auto-promotion-review-execution')
+            self.assertEqual(response.status_code, 200)
+            payload = response.get_json()
+            self.assertTrue(payload['success'])
+            self.assertEqual(payload['view'], 'auto_promotion_review_execution')
+            self.assertEqual(payload['summary']['queue_count'], 2)
+            self.assertEqual(payload['data']['queued_count'], 1)
+        finally:
+            dashboard_api.backtester = old_backtester
+            dashboard_api.export_calibration_payload = old_export
+            dashboard_api._persist_workflow_approval_payload = old_persist
 
     def test_gate_consumption_flows_into_operator_digest_workbench_and_timeline_layers(self):
         gate_payload = {

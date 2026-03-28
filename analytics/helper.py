@@ -5487,6 +5487,175 @@ def build_auto_promotion_review_queue_consumption(auto_promotion_execution: Opti
     }
 
 
+def _normalize_auto_promotion_review_execution_mode(value: Optional[str]) -> str:
+    normalized = str(value or '').strip().lower()
+    return normalized if normalized in {'disabled', 'dry_run', 'controlled'} else 'disabled'
+
+
+
+def _get_auto_promotion_review_execution_settings(config: Any = None, overrides: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    overrides = dict(overrides or {})
+    getter = getattr(config, 'get', None)
+    raw = getter('governance.auto_promotion_review_execution', {}) if callable(getter) else {}
+    raw = dict(raw or {}) if isinstance(raw, dict) else {}
+    settings = {
+        'enabled': bool(raw.get('enabled', False)),
+        'mode': _normalize_auto_promotion_review_execution_mode(raw.get('mode')),
+        'actor': str(raw.get('actor') or 'system:auto-promotion-review'),
+        'source': str(raw.get('source') or 'auto_promotion_review_execution'),
+        'reason_prefix': str(raw.get('reason_prefix') or 'auto-promotion follow-up review queued'),
+        'execute_due_post_promotion_reviews': bool(raw.get('execute_due_post_promotion_reviews', True)),
+        'escalate_rollback_review_queue': bool(raw.get('escalate_rollback_review_queue', True)),
+    }
+    settings.update({k: v for k, v in overrides.items() if v is not None})
+    settings['enabled'] = bool(settings.get('enabled', False))
+    settings['mode'] = _normalize_auto_promotion_review_execution_mode(settings.get('mode'))
+    settings['execute_due_post_promotion_reviews'] = bool(settings.get('execute_due_post_promotion_reviews', True))
+    settings['escalate_rollback_review_queue'] = bool(settings.get('escalate_rollback_review_queue', True))
+    return settings
+
+
+
+def execute_auto_promotion_review_queue_layer(payload: Dict[str, Any], db: Any, *, config: Any = None,
+                                              settings: Optional[Dict[str, Any]] = None,
+                                              replay_source: str = 'workflow_ready') -> Dict[str, Any]:
+    payload = payload or {}
+    execution_settings = _get_auto_promotion_review_execution_settings(config=config, overrides=settings)
+    queue_view = build_auto_promotion_review_queue_filter_view(payload, limit=10000)
+    queue_items = queue_view.get('items') or []
+    result = {
+        'enabled': execution_settings.get('enabled', False),
+        'mode': execution_settings.get('mode'),
+        'actor': execution_settings.get('actor'),
+        'source': execution_settings.get('source'),
+        'replay_source': replay_source,
+        'queued_count': 0,
+        'skipped_count': 0,
+        'items': [],
+        'summary': {
+            'queue_count': len(queue_items),
+            'post_promotion_review_queue_count': queue_view.get('summary', {}).get('post_promotion_review_queue_count', 0),
+            'rollback_review_queue_count': queue_view.get('summary', {}).get('rollback_review_queue_count', 0),
+            'review_due_count': queue_view.get('summary', {}).get('review_due_count', 0),
+        },
+    }
+    payload['auto_promotion_review_execution'] = result
+    if not result['enabled'] or result['mode'] not in {'controlled', 'dry_run'} or not queue_items:
+        result['skipped_count'] = len(queue_items)
+        return payload
+
+    workflow_lookup = {row.get('item_id'): row for row in ((payload.get('workflow_state') or {}).get('item_states') or []) if row.get('item_id')}
+    executed_rows = []
+    dry_run = result['mode'] == 'dry_run'
+    for item in queue_items:
+        item_id = item.get('item_id')
+        approval_id = item.get('approval_id') or item_id
+        if not approval_id:
+            result['skipped_count'] += 1
+            continue
+        queue_kind = str(item.get('queue_kind') or 'post_promotion_review_queue')
+        if queue_kind == 'rollback_review_queue' and not execution_settings.get('escalate_rollback_review_queue', True):
+            result['items'].append({'item_id': item_id, 'approval_id': approval_id, 'queue_kind': queue_kind, 'action': 'skipped', 'reason': 'rollback_review_queue_disabled'})
+            result['skipped_count'] += 1
+            continue
+        if queue_kind == 'post_promotion_review_queue' and (not item.get('is_due')) and execution_settings.get('execute_due_post_promotion_reviews', True):
+            result['items'].append({'item_id': item_id, 'approval_id': approval_id, 'queue_kind': queue_kind, 'action': 'skipped', 'reason': 'review_not_due'})
+            result['skipped_count'] += 1
+            continue
+        persisted_row = db.get_approval_state(approval_id)
+        workflow_item = workflow_lookup.get(item_id) or {}
+        persisted_details = dict((persisted_row or {}).get('details') or {})
+        existing_review = dict(persisted_details.get('auto_promotion_review_execution') or {})
+        desired_status = 'rollback_review_pending' if queue_kind == 'rollback_review_queue' else 'post_promotion_review_pending'
+        desired_workflow_state = 'rollback_prepare' if queue_kind == 'rollback_review_queue' else 'review_pending'
+        if existing_review.get('review_status') == desired_status:
+            result['items'].append({'item_id': item_id, 'approval_id': approval_id, 'queue_kind': queue_kind, 'action': 'skipped', 'reason': 'already_queued'})
+            result['skipped_count'] += 1
+            continue
+        reason_codes = _dedupe_strings((item.get('why_in_queue') or []) + (item.get('rollback_triggered') or []))
+        review_event = {
+            'event_type': 'auto_promotion_rollback_review_queued' if queue_kind == 'rollback_review_queue' else 'auto_promotion_post_review_queued',
+            'actor': execution_settings['actor'],
+            'source': execution_settings['source'],
+            'queue_kind': queue_kind,
+            'review_status': desired_status,
+            'reason_codes': reason_codes,
+            'created_at': _utc_now_iso(),
+        }
+        review_details = {
+            'queue_kind': queue_kind,
+            'review_status': desired_status,
+            'queue_reason': item.get('queue_reason'),
+            'why_in_queue': item.get('why_in_queue') or [],
+            'next_step': item.get('next_step'),
+            'review_due': item.get('review_due') or {},
+            'observation_targets': item.get('observation_targets') or [],
+            'rollback_triggered': item.get('rollback_triggered') or [],
+            'reason_codes': reason_codes,
+            'event_log': (existing_review.get('event_log') or []) + [review_event],
+        }
+        result_row = {
+            'item_id': item_id,
+            'approval_id': approval_id,
+            'queue_kind': queue_kind,
+            'action': 'queued' if not dry_run else 'dry_run',
+            'review_status': desired_status,
+            'workflow_state': desired_workflow_state,
+            'reason': item.get('queue_reason'),
+            'due_status': item.get('due_status'),
+        }
+        result['items'].append(result_row)
+        if dry_run:
+            result['skipped_count'] += 1
+            continue
+        new_details = dict(persisted_details)
+        new_details.update({
+            'item_id': approval_id,
+            'approval_id': approval_id,
+            'playbook_id': item_id,
+            'title': item.get('title') or workflow_item.get('title'),
+            'action_type': item.get('action_type') or workflow_item.get('action_type'),
+            'workflow_state': desired_workflow_state,
+            'reason': f"{execution_settings['reason_prefix']}: {item.get('queue_reason') or queue_kind}",
+            'actor': execution_settings['actor'],
+            'source': execution_settings['source'],
+            'replay_source': replay_source,
+            'real_trade_execution': False,
+            'dangerous_live_parameter_change': False,
+            'auto_promotion_review_execution': review_details,
+            'last_transition': {
+                'rule': 'auto_promotion_review_queue_execute',
+                'from_workflow_state': (persisted_row or {}).get('workflow_state') or workflow_item.get('workflow_state'),
+                'to_workflow_state': desired_workflow_state,
+                'queue_kind': queue_kind,
+                'next_transition': item.get('next_step'),
+            },
+            'execution_status': 'review_queued',
+        })
+        db.upsert_approval_state(
+            item_id=approval_id,
+            approval_type=item.get('action_type') or workflow_item.get('action_type') or (persisted_row or {}).get('approval_type') or 'workflow_approval',
+            target=item_id,
+            title=item.get('title') or workflow_item.get('title'),
+            decision=(persisted_row or {}).get('decision') or item.get('approval_state') or 'pending',
+            state=(persisted_row or {}).get('state') or item.get('approval_state') or 'pending',
+            workflow_state=desired_workflow_state,
+            reason=f"{execution_settings['reason_prefix']}: {item.get('queue_reason') or queue_kind}",
+            actor=execution_settings['actor'],
+            replay_source=replay_source,
+            details=new_details,
+            preserve_terminal=True,
+            event_type=review_event['event_type'],
+            append_event=True,
+        )
+        executed_rows.append(db.get_approval_state(approval_id))
+        result['queued_count'] += 1
+
+    if executed_rows:
+        merge_persisted_approval_state(payload, executed_rows)
+    return payload
+
+
 def build_workflow_operator_digest(payload: Optional[Dict] = None, *, max_items: int = 5,
                                   transition_journal_overview: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     payload = payload or {}

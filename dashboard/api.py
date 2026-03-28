@@ -62,7 +62,7 @@ from signals.validator import SignalValidator
 from bot.run import execute_exchange_smoke, reconcile_exchange_positions, load_runtime_state
 from ml.engine import MLEngine
 from core.regime import RegimeDetector, detect_regime, Regime
-from analytics import StrategyBacktester, SignalQualityAnalyzer, ParameterOptimizer, GovernanceEngine, build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, build_transition_journal_overview, attach_auto_approval_policy, execute_controlled_rollout_layer, execute_controlled_auto_approval_layer, execute_auto_promotion_review_queue_layer, execute_rollout_executor, build_rollout_control_plane_manifest, build_control_plane_readiness_summary, build_workflow_consumer_view, build_workflow_recovery_view, build_workflow_attention_view, build_workflow_operator_digest, build_workflow_alert_digest, build_dashboard_summary_cards, build_workbench_governance_view, build_workbench_governance_filter_view, build_workbench_governance_detail_view, build_workbench_merged_timeline, build_workbench_timeline_summary_aggregation, build_unified_workbench_overview, build_auto_promotion_candidate_view, build_auto_promotion_review_queue_filter_view, build_auto_promotion_review_queue_detail_view
+from analytics import StrategyBacktester, SignalQualityAnalyzer, ParameterOptimizer, GovernanceEngine, build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, build_transition_journal_overview, attach_auto_approval_policy, execute_controlled_rollout_layer, execute_controlled_auto_approval_layer, execute_auto_promotion_review_queue_layer, execute_adaptive_rollout_orchestration, execute_rollout_executor, build_rollout_control_plane_manifest, build_control_plane_readiness_summary, build_workflow_consumer_view, build_workflow_recovery_view, build_workflow_attention_view, build_workflow_operator_digest, build_workflow_alert_digest, build_dashboard_summary_cards, build_workbench_governance_view, build_workbench_governance_filter_view, build_workbench_governance_detail_view, build_workbench_merged_timeline, build_workbench_timeline_summary_aggregation, build_unified_workbench_overview, build_auto_promotion_candidate_view, build_auto_promotion_review_queue_filter_view, build_auto_promotion_review_queue_detail_view
 from analytics.backtest import export_calibration_payload, build_governance_workflow_ready_payload
 from analytics.mfe_mae import MFEAnalyzer, get_mfe_mae_analysis
 from core.regime_policy import summarize_observe_only_collection
@@ -112,15 +112,7 @@ def _persist_workflow_approval_payload(payload: Dict[str, Any], replay_source: s
     persisted_rows = [db.get_approval_state(row.get('item_id')) for row in approval_records if row.get('item_id')]
     persisted_rows = [row for row in persisted_rows if row]
     payload = attach_auto_approval_policy(merge_persisted_approval_state(payload, persisted_rows))
-    payload = execute_rollout_executor(payload, db, config=config, replay_source=replay_source)
-    refreshed_rows = [db.get_approval_state(row.get('item_id')) for row in approval_records if row.get('item_id')]
-    refreshed_rows = [row for row in refreshed_rows if row]
-    payload = attach_auto_approval_policy(merge_persisted_approval_state(payload, refreshed_rows))
-    payload = execute_controlled_rollout_layer(payload, db, config=config, replay_source=replay_source)
-    payload = attach_auto_approval_policy(payload)
-    payload = execute_controlled_auto_approval_layer(payload, db, config=config, replay_source=replay_source)
-    payload = attach_auto_approval_policy(payload)
-    payload = execute_auto_promotion_review_queue_layer(payload, db, config=config, replay_source=replay_source)
+    payload = execute_adaptive_rollout_orchestration(payload, db, config=config, replay_source=replay_source)
     payload = attach_auto_approval_policy(payload)
     build_workflow_consumer_view(payload)
     return payload

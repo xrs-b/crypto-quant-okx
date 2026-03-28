@@ -6211,7 +6211,7 @@ class TestExecutionObservability(unittest.TestCase):
             self.assertIn('recent_decisions', snapshot['summary'])
             self.assertTrue(snapshot['summary']['observe_only_banner'])
 
-from analytics.helper import build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, attach_auto_approval_policy, execute_controlled_rollout_layer, execute_controlled_auto_approval_layer, execute_auto_promotion_review_queue_layer, execute_rollout_executor, build_rollout_control_plane_manifest, build_control_plane_readiness_summary, build_workflow_consumer_view, build_workflow_recovery_view, build_workflow_attention_view, build_workflow_operator_digest, build_workflow_alert_digest, build_dashboard_summary_cards, build_workbench_governance_view, build_workbench_governance_detail_view, build_workbench_merged_timeline, build_workbench_timeline_summary_aggregation, build_unified_workbench_overview, build_auto_promotion_candidate_view, build_auto_promotion_execution_summary, build_auto_promotion_review_queue_consumption, build_auto_promotion_review_queue_filter_view, build_auto_promotion_review_queue_detail_view, _build_state_machine_semantics, _build_safe_rollout_action_registry
+from analytics.helper import build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, attach_auto_approval_policy, execute_controlled_rollout_layer, execute_controlled_auto_approval_layer, execute_auto_promotion_review_queue_layer, execute_adaptive_rollout_orchestration, execute_rollout_executor, build_rollout_control_plane_manifest, build_control_plane_readiness_summary, build_workflow_consumer_view, build_workflow_recovery_view, build_workflow_attention_view, build_workflow_operator_digest, build_workflow_alert_digest, build_dashboard_summary_cards, build_workbench_governance_view, build_workbench_governance_detail_view, build_workbench_merged_timeline, build_workbench_timeline_summary_aggregation, build_unified_workbench_overview, build_auto_promotion_candidate_view, build_auto_promotion_execution_summary, build_auto_promotion_review_queue_consumption, build_auto_promotion_review_queue_filter_view, build_auto_promotion_review_queue_detail_view, _build_state_machine_semantics, _build_safe_rollout_action_registry
 
 
 class TestApprovalPersistence(unittest.TestCase):
@@ -9757,6 +9757,61 @@ class TestApprovalPersistence(unittest.TestCase):
             self.assertEqual(deferred['state'], 'deferred')
             self.assertEqual(result['auto_approval_execution']['executed_count'], 1)
             self.assertGreaterEqual(result['auto_approval_execution']['skipped_count'], 3)
+
+    def test_adaptive_rollout_orchestration_closes_auto_approval_to_rollout_loop_in_same_cycle(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(str(Path(tmpdir) / 'adaptive_rollout_orchestration.db'))
+            payload = {
+                'workflow_state': {'item_states': [{
+                    'item_id': 'playbook::observe', 'title': 'Observe candidate', 'workflow_state': 'ready',
+                    'action_type': 'joint_observe', 'risk_level': 'low', 'approval_required': False,
+                    'blocked_by': [], 'lane_id': 'ready', 'current_rollout_stage': 'observe', 'target_rollout_stage': 'observe',
+                }], 'summary': {}},
+                'approval_state': {'items': [{
+                    'approval_id': 'approval::observe', 'playbook_id': 'playbook::observe', 'title': 'Observe candidate',
+                    'action_type': 'joint_observe', 'approval_state': 'pending', 'decision_state': 'pending',
+                    'risk_level': 'low', 'approval_required': False, 'requires_manual': False, 'blocked_by': [],
+                    'auto_approval_decision': 'auto_approve', 'auto_approval_eligible': True,
+                    'current_rollout_stage': 'observe', 'target_rollout_stage': 'observe',
+                }], 'summary': {}},
+            }
+
+            class StubConfig:
+                def get(self, key, default=None):
+                    mapping = {
+                        'governance.controlled_rollout_execution': {
+                            'enabled': True, 'mode': 'state_apply', 'auto_promote_ready_candidates': True,
+                            'allowed_action_types': ['joint_observe'], 'actor': 'system:controlled-rollout',
+                            'source': 'controlled_rollout_execution',
+                        },
+                        'governance.auto_approval_execution': {
+                            'enabled': True, 'mode': 'controlled', 'actor': 'system:auto-approval',
+                            'source': 'auto_approval_execution',
+                        },
+                        'governance.rollout_executor': {
+                            'enabled': True, 'mode': 'controlled', 'dry_run': False, 'allowed_action_types': ['joint_observe'],
+                            'actor': 'system:rollout-executor', 'source': 'rollout_executor',
+                        },
+                        'governance.auto_promotion_review_execution': {
+                            'enabled': True, 'mode': 'controlled', 'execute_due_post_promotion_reviews': True,
+                            'escalate_rollback_review_queue': True,
+                        },
+                    }
+                    return mapping.get(key, default)
+
+            result = execute_adaptive_rollout_orchestration(payload, db, config=StubConfig(), replay_source='unit-test-replay')
+
+            orchestration = result['adaptive_rollout_orchestration']
+            self.assertEqual(orchestration['summary']['pass_count'], 2)
+            self.assertTrue(orchestration['summary']['rerun_triggered'])
+            self.assertEqual(orchestration['summary']['rerun_reason'], 'auto_approval_promoted_ready_items')
+            self.assertEqual(orchestration['summary']['auto_approval_executed_count'], 1)
+            self.assertEqual(orchestration['summary']['controlled_rollout_executed_count'], 1)
+            self.assertEqual(result['controlled_rollout_execution']['executed_count'], 1)
+            state_row = db.get_approval_state('approval::observe')
+            self.assertEqual(state_row['state'], 'approved')
+            self.assertEqual(state_row['workflow_state'], 'ready')
+            self.assertEqual(state_row['details']['execution_layer'], 'controlled_rollout_state_apply')
 
     def test_controlled_auto_approval_execution_validation_gate_gap_blocks_auto_progression(self):
         class StubConfig:

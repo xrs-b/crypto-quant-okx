@@ -1604,6 +1604,7 @@ def _resolve_lane_routing(*, workflow_item: Optional[Dict[str, Any]] = None, app
     rollback_gate = gates.get('rollback_gate') or {}
     validation_gate = _resolve_validation_gate_context(workflow_item, approval_item, row, auto_gate, rollback_gate, state_machine)
     stage_loop = dict(stage_loop or row.get('stage_loop') or _resolve_stage_loop_snapshot(workflow_item=workflow_item, approval_item=approval_item, row=row))
+    rollout_terminal = bool(state_machine.get('terminal')) and approval_state != 'approved'
     operator_action_policy = dict(operator_action_policy or state_machine.get('operator_action_policy') or row.get('operator_action_policy') or _build_operator_action_policy(
         item_id=workflow_item.get('item_id') or approval_item.get('playbook_id') or row.get('item_id'),
         approval_state=approval_state,
@@ -1615,7 +1616,7 @@ def _resolve_lane_routing(*, workflow_item: Optional[Dict[str, Any]] = None, app
         retryable=state_machine.get('retryable'),
         rollout_stage=current_stage,
         target_rollout_stage=target_stage,
-        terminal=bool(state_machine.get('terminal')),
+        terminal=rollout_terminal,
         validation_gate=validation_gate,
     ))
     dispatch_route = queue_progression.get('dispatch_route') or queue_plan.get('dispatch_route') or operator_action_policy.get('route') or state_machine.get('dispatch_route')
@@ -2481,7 +2482,8 @@ def _evaluate_rollout_gates(*, action_type: str, row: Dict[str, Any], workflow_i
         blockers.extend([f'validation:{reason}' for reason in (validation_gate.get('reasons') or [])])
     if dispatch_mode != 'apply':
         blockers.append(f'dispatch_mode:{dispatch_mode}')
-    if current_state in TERMINAL_APPROVAL_STATES:
+    rollout_blocking_terminal_states = TERMINAL_APPROVAL_STATES - {'approved'}
+    if current_state in rollout_blocking_terminal_states:
         blockers.append(f'terminal_state:{current_state}')
     auto_allowed = not blockers
     rollback_triggers = []
@@ -2799,6 +2801,11 @@ def execute_controlled_rollout_layer(payload: Dict, db: Any, *, config: Any = No
         persisted_details = (persisted_row or {}).get('details') or {}
         action_type = str(row.get('action_type') or workflow_item.get('action_type') or (persisted_row or {}).get('approval_type') or '').strip().lower()
         action_spec = CONTROLLED_ROLLOUT_ACTION_SPECS.get(action_type)
+        handler = _resolve_safe_rollout_handler(action_spec or {}, action_type)
+        handler_key = handler.get('handler_key')
+        dispatch_mode = (action_spec or {}).get('dispatch_mode') or handler.get('disposition')
+        transition_policy_snapshot = _build_rollout_transition_policy_snapshot(action_spec or {}, action_type)
+        transition_rule = {'transition_policy': transition_policy_snapshot}
         current_state = str((persisted_row or {}).get('state') or row.get('approval_state') or row.get('persisted_state') or row.get('state') or 'pending').strip().lower()
         current_workflow_state = str((persisted_row or {}).get('workflow_state') or row.get('persisted_workflow_state') or workflow_item.get('workflow_state') or row.get('decision_state') or 'pending').strip().lower()
         auto_decision = _normalize_auto_approval_decision(row.get('auto_approval_decision') or candidate.get('auto_approval_decision'))
@@ -2844,7 +2851,8 @@ def execute_controlled_rollout_layer(payload: Dict, db: Any, *, config: Any = No
             and str(persisted_details.get('rollout_stage') or '') == after_stage
         )
 
-        if current_state in TERMINAL_APPROVAL_STATES:
+        rollout_blocking_terminal_states = TERMINAL_APPROVAL_STATES - {'approved'}
+        if current_state in rollout_blocking_terminal_states:
             skip_reason = f'terminal_state:{current_state}'
         elif stage_terminal:
             skip_reason = f'terminal_stage:{before_stage}'
@@ -4379,6 +4387,69 @@ def _consume_rollout_queue_plan(*, db: Any, row: Dict[str, Any], workflow_item: 
     return persisted_row or {}
 
 
+
+def execute_adaptive_rollout_orchestration(payload: Dict[str, Any], db: Any, *, config: Any = None,
+                                          replay_source: str = 'workflow_ready') -> Dict[str, Any]:
+    payload = payload or {}
+    orchestration = {
+        'schema_version': 'm5_adaptive_rollout_orchestration_v1',
+        'replay_source': replay_source,
+        'passes': [],
+        'summary': {
+            'pass_count': 0,
+            'rerun_triggered': False,
+            'rerun_reason': None,
+            'rollout_executor_applied_count': 0,
+            'controlled_rollout_executed_count': 0,
+            'auto_approval_executed_count': 0,
+            'review_queue_queued_count': 0,
+        },
+    }
+
+    def _refresh_payload_from_db(current_payload: Dict[str, Any]) -> Dict[str, Any]:
+        approval_records = build_workflow_approval_records(current_payload)
+        if not approval_records:
+            return attach_auto_approval_policy(current_payload)
+        persisted_rows = [db.get_approval_state(row.get('item_id')) for row in approval_records if row.get('item_id')]
+        persisted_rows = [row for row in persisted_rows if row]
+        return attach_auto_approval_policy(merge_persisted_approval_state(current_payload, persisted_rows))
+
+    def _run_executor(current_payload: Dict[str, Any], *, label: str, dry_run: Optional[bool] = None) -> Dict[str, Any]:
+        current_payload = _refresh_payload_from_db(current_payload)
+        executor_settings = {'dry_run': dry_run} if dry_run is not None else None
+        current_payload = execute_rollout_executor(current_payload, db, config=config, settings=executor_settings, replay_source=replay_source)
+        current_payload = _refresh_payload_from_db(current_payload)
+        orchestration['passes'].append({
+            'label': label,
+            'dry_run': bool(dry_run),
+            'rollout_executor_applied_count': int((((current_payload.get('rollout_executor') or {}).get('summary') or {}).get('applied_count', 0) or 0)),
+        })
+        return current_payload
+
+    payload = _run_executor(payload, label='pre_auto_approval', dry_run=True)
+    payload = execute_controlled_auto_approval_layer(payload, db, config=config, replay_source=replay_source)
+    payload = attach_auto_approval_policy(payload)
+
+    auto_approval_executed = int(((payload.get('auto_approval_execution') or {}).get('executed_count', 0) or 0))
+    if auto_approval_executed > 0:
+        orchestration['summary']['rerun_triggered'] = True
+        orchestration['summary']['rerun_reason'] = 'auto_approval_promoted_ready_items'
+        payload = _run_executor(payload, label='post_auto_approval')
+
+    payload = execute_controlled_rollout_layer(_refresh_payload_from_db(payload), db, config=config, replay_source=replay_source)
+    payload = attach_auto_approval_policy(payload)
+    payload = execute_auto_promotion_review_queue_layer(_refresh_payload_from_db(payload), db, config=config, replay_source=replay_source)
+    payload = attach_auto_approval_policy(payload)
+
+    orchestration['summary']['pass_count'] = len(orchestration['passes'])
+    orchestration['summary']['rollout_executor_applied_count'] = sum(row.get('rollout_executor_applied_count', 0) for row in orchestration['passes'])
+    orchestration['summary']['controlled_rollout_executed_count'] = int(((payload.get('controlled_rollout_execution') or {}).get('executed_count', 0) or 0))
+    orchestration['summary']['auto_approval_executed_count'] = auto_approval_executed
+    orchestration['summary']['review_queue_queued_count'] = int(((payload.get('auto_promotion_review_execution') or {}).get('queued_count', 0) or 0))
+    payload['adaptive_rollout_orchestration'] = orchestration
+    return payload
+
+
 def execute_rollout_executor(payload: Dict, db: Any, *, config: Any = None, settings: Optional[Dict[str, Any]] = None,
                              replay_source: str = 'workflow_ready') -> Dict:
     payload = payload or {}
@@ -4616,7 +4687,8 @@ def execute_rollout_executor(payload: Dict, db: Any, *, config: Any = None, sett
             and current_state == str((spec or {}).get('state') or current_state)
             and current_workflow_state == str((spec or {}).get('workflow_state') or current_workflow_state)
         )
-        if current_state in TERMINAL_APPROVAL_STATES:
+        rollout_blocking_terminal_states = TERMINAL_APPROVAL_STATES - {'approved'}
+        if current_state in rollout_blocking_terminal_states:
             skip_reason, skip_code = f'terminal_state:{current_state}', 'TERMINAL_STATE'
         elif not spec:
             skip_reason, skip_code = f'action_type_not_supported:{action_type or "unknown"}', 'ACTION_NOT_SUPPORTED'
@@ -6518,6 +6590,7 @@ def build_dashboard_summary_cards(payload: Optional[Dict] = None, *, max_items: 
         validation_gate=validation_gate,
         validation_consumption=validation_consumption,
     ))
+    contract_drift_summary = (control_plane_readiness.get('persisted_contract_drift') or {}) if isinstance(control_plane_readiness, dict) else {}
 
     cards = [
         {

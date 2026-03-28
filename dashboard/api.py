@@ -62,7 +62,7 @@ from signals.validator import SignalValidator
 from bot.run import execute_exchange_smoke, reconcile_exchange_positions, load_runtime_state
 from ml.engine import MLEngine
 from core.regime import RegimeDetector, detect_regime, Regime
-from analytics import StrategyBacktester, SignalQualityAnalyzer, ParameterOptimizer, GovernanceEngine, build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, build_transition_journal_overview, attach_auto_approval_policy, execute_controlled_rollout_layer, execute_controlled_auto_approval_layer, execute_rollout_executor, build_workflow_consumer_view, build_workflow_recovery_view, build_workflow_attention_view, build_workflow_operator_digest, build_dashboard_summary_cards, build_workbench_governance_view, build_workbench_governance_filter_view, build_workbench_governance_detail_view, build_workbench_merged_timeline, build_workbench_timeline_summary_aggregation, build_unified_workbench_overview, build_auto_promotion_candidate_view, build_auto_promotion_review_queue_filter_view, build_auto_promotion_review_queue_detail_view
+from analytics import StrategyBacktester, SignalQualityAnalyzer, ParameterOptimizer, GovernanceEngine, build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, build_transition_journal_overview, attach_auto_approval_policy, execute_controlled_rollout_layer, execute_controlled_auto_approval_layer, execute_rollout_executor, build_rollout_control_plane_manifest, build_workflow_consumer_view, build_workflow_recovery_view, build_workflow_attention_view, build_workflow_operator_digest, build_dashboard_summary_cards, build_workbench_governance_view, build_workbench_governance_filter_view, build_workbench_governance_detail_view, build_workbench_merged_timeline, build_workbench_timeline_summary_aggregation, build_unified_workbench_overview, build_auto_promotion_candidate_view, build_auto_promotion_review_queue_filter_view, build_auto_promotion_review_queue_detail_view
 from analytics.backtest import export_calibration_payload, build_governance_workflow_ready_payload
 from analytics.mfe_mae import MFEAnalyzer, get_mfe_mae_analysis
 from core.regime_policy import summarize_observe_only_collection
@@ -2780,6 +2780,17 @@ def get_backtest_auto_promotion_review_items():
         limit=limit,
     )
     return jsonify({'success': True, 'view': 'auto_promotion_review_queue_filter_view', 'data': filtered, 'summary': filtered.get('summary') or {}})
+
+
+@app.route('/api/backtest/rollout-control-plane')
+def get_backtest_rollout_control_plane():
+    """返回 rollout control plane version/compatibility manifest，方便低干预升级、审计同回滚前检查。"""
+    backtest_result = backtester.run_all(config.symbols)
+    calibration_report = backtest_result.get('calibration_report') or {}
+    payload = export_calibration_payload(calibration_report, view='workflow_ready')
+    payload = _persist_workflow_approval_payload(payload, replay_source='rollout_control_plane_manifest_api')
+    manifest = build_rollout_control_plane_manifest(payload)
+    return jsonify({'success': True, 'view': 'rollout_control_plane_manifest', 'data': manifest, 'summary': manifest.get('compatibility') or {}})
 
 
 @app.route('/api/backtest/auto-promotion-review-detail')

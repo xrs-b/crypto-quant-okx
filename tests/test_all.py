@@ -5578,6 +5578,40 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
         finally:
             dashboard_api.backtester = old_backtester
 
+    def test_backtest_rollout_control_plane_api_returns_manifest(self):
+        import dashboard.api as dashboard_api
+
+        report = build_regime_policy_calibration_report([{
+            'symbol': 'BTC/USDT',
+            'all_trades': [
+                {'regime_tag': 'panic', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 0.3},
+                {'regime_tag': 'panic', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 0.2},
+                {'regime_tag': 'panic', 'policy_tag': 'policy_v2', 'strategy_tags': ['Breakout'], 'return_pct': -0.8},
+            ],
+        }])
+
+        class StubBacktester:
+            def run_all(self, symbols):
+                return {
+                    'summary': {'symbols': len(symbols)},
+                    'symbols': [{'symbol': 'BTC/USDT'}],
+                    'calibration_report': report,
+                }
+
+        old_backtester = dashboard_api.backtester
+        dashboard_api.backtester = StubBacktester()
+        try:
+            client = app.test_client()
+            response = client.get('/api/backtest/rollout-control-plane')
+            self.assertEqual(response.status_code, 200)
+            payload = response.get_json()
+            self.assertEqual(payload['view'], 'rollout_control_plane_manifest')
+            self.assertEqual(payload['data']['schema_version'], 'm5_rollout_control_plane_manifest_v1')
+            self.assertTrue(payload['data']['compatibility']['compatible'])
+            self.assertIn('joint_review_schedule', payload['data']['registries']['action_types'])
+        finally:
+            dashboard_api.backtester = old_backtester
+
     def test_backtest_workbench_governance_detail_api_returns_why_and_next_step(self):
         import dashboard.api as dashboard_api
 
@@ -6028,7 +6062,7 @@ class TestExecutionObservability(unittest.TestCase):
             self.assertIn('recent_decisions', snapshot['summary'])
             self.assertTrue(snapshot['summary']['observe_only_banner'])
 
-from analytics.helper import build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, attach_auto_approval_policy, execute_controlled_rollout_layer, execute_controlled_auto_approval_layer, execute_rollout_executor, build_workflow_consumer_view, build_workflow_recovery_view, build_workflow_attention_view, build_workflow_operator_digest, build_dashboard_summary_cards, build_workbench_governance_view, build_workbench_governance_detail_view, build_workbench_merged_timeline, build_workbench_timeline_summary_aggregation, build_unified_workbench_overview, build_auto_promotion_candidate_view, build_auto_promotion_execution_summary, build_auto_promotion_review_queue_consumption, build_auto_promotion_review_queue_filter_view, build_auto_promotion_review_queue_detail_view, _build_state_machine_semantics, _build_safe_rollout_action_registry
+from analytics.helper import build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, attach_auto_approval_policy, execute_controlled_rollout_layer, execute_controlled_auto_approval_layer, execute_rollout_executor, build_rollout_control_plane_manifest, build_workflow_consumer_view, build_workflow_recovery_view, build_workflow_attention_view, build_workflow_operator_digest, build_dashboard_summary_cards, build_workbench_governance_view, build_workbench_governance_detail_view, build_workbench_merged_timeline, build_workbench_timeline_summary_aggregation, build_unified_workbench_overview, build_auto_promotion_candidate_view, build_auto_promotion_execution_summary, build_auto_promotion_review_queue_consumption, build_auto_promotion_review_queue_filter_view, build_auto_promotion_review_queue_detail_view, _build_state_machine_semantics, _build_safe_rollout_action_registry
 
 
 class TestApprovalPersistence(unittest.TestCase):
@@ -8649,6 +8683,15 @@ class TestApprovalPersistence(unittest.TestCase):
         self.assertTrue(review_entry['transition_policy']['use_stage_handler_next_transition'])
         self.assertEqual(queue_entry['transition_policy']['dispatch_route'], 'stage_promotion_queue')
         self.assertEqual(queue_entry['transition_policy']['transition_rule'], 'queue_only_followup_required')
+
+    def test_rollout_control_plane_manifest_exposes_versions_and_compatibility(self):
+        manifest = build_rollout_control_plane_manifest()
+        self.assertEqual(manifest['schema_version'], 'm5_rollout_control_plane_manifest_v1')
+        self.assertEqual(manifest['versions']['action_registry'], 'm5_safe_rollout_action_registry_v1')
+        self.assertEqual(manifest['versions']['stage_handler_registry'], 'm5_rollout_stage_handler_registry_v1')
+        self.assertTrue(manifest['compatibility']['compatible'])
+        self.assertIn('joint_stage_prepare', manifest['registries']['action_types'])
+        self.assertIn('review_schedule_safe', manifest['registries']['stage_handlers'])
 
     def test_rollout_executor_plan_and_stage_progression_expose_transition_policy(self):
         class StubConfig:

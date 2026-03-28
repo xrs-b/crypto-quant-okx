@@ -132,6 +132,10 @@ SAFE_ROLLOUT_STAGE_HANDLER_REGISTRY = {
 }
 
 ROLLOUT_TRANSITION_POLICY_VERSION = 'm5_rollout_transition_policy_v1'
+ROLLOUT_ACTION_REGISTRY_VERSION = 'm5_safe_rollout_action_registry_v1'
+ROLLOUT_STAGE_HANDLER_REGISTRY_VERSION = 'm5_rollout_stage_handler_registry_v1'
+ROLLOUT_GATE_POLICY_VERSION = 'm5_rollout_gate_policy_v1'
+ROLLOUT_CONTROL_PLANE_MANIFEST_VERSION = 'm5_rollout_control_plane_manifest_v1'
 
 ROLLOUT_TRANSITION_TEMPLATES = {
     'preserve_terminal_state': {
@@ -3099,6 +3103,72 @@ def _build_rollout_executor_catalog(allowed_action_types: Optional[List[str]] = 
     }
 
 
+def build_rollout_control_plane_manifest(payload: Optional[Dict] = None, executor: Optional[Dict] = None,
+                                        *, allowed_action_types: Optional[List[str]] = None) -> Dict[str, Any]:
+    payload = payload or {}
+    executor = executor or (payload.get('rollout_executor') or {})
+    registry = (executor.get('action_registry') if isinstance(executor, dict) else None) or _build_safe_rollout_action_registry(allowed_action_types)
+    catalog = (executor.get('supported_action_map') if isinstance(executor, dict) else None) or _build_rollout_executor_catalog(allowed_action_types)
+    action_entries = registry.get('actions') or {}
+    stage_handlers = registry.get('handlers') or {}
+    action_types = sorted(action_entries.keys())
+    stage_handler_keys = sorted(stage_handlers.keys())
+    generations = {
+        'action_registry': ROLLOUT_ACTION_REGISTRY_VERSION,
+        'stage_handler_registry': ROLLOUT_STAGE_HANDLER_REGISTRY_VERSION,
+        'transition_policy': ROLLOUT_TRANSITION_POLICY_VERSION,
+        'gate_policy': ROLLOUT_GATE_POLICY_VERSION,
+        'stage_loop': 'm5_stage_loop_v1',
+        'lane_routing': 'm5_lane_routing_v1',
+        'operator_action_policy': 'm5_operator_action_policy_v1',
+        'control_plane_manifest': ROLLOUT_CONTROL_PLANE_MANIFEST_VERSION,
+    }
+    version_rows = [{'component': key, 'version': value, 'generation': str(value).split('_', 1)[0]} for key, value in generations.items()]
+    blockers = []
+    if not action_types:
+        blockers.append('missing_action_registry')
+    if not stage_handler_keys:
+        blockers.append('missing_stage_handler_registry')
+    incompatible = [row['component'] for row in version_rows if row['generation'] != 'm5']
+    blockers.extend([f'incompatible_generation:{name}' for name in incompatible])
+    compatible = not blockers
+    return {
+        'schema_version': ROLLOUT_CONTROL_PLANE_MANIFEST_VERSION,
+        'generation': 'm5',
+        'headline': {
+            'status': 'compatible' if compatible else 'review_required',
+            'message': f"control-plane action_types={len(action_types)} / stage_handlers={len(stage_handler_keys)} / compatible={'yes' if compatible else 'no'}",
+        },
+        'versions': generations,
+        'version_rows': version_rows,
+        'registries': {
+            'action_types': action_types,
+            'stage_handlers': stage_handler_keys,
+            'executable_action_types': sorted({row.get('action_type') for row in (registry.get('executable') or []) if row.get('action_type')}),
+            'queue_only_action_types': sorted({row.get('action_type') for row in (registry.get('queue_only') or []) if row.get('action_type')}),
+            'unsupported_action_types': sorted({row.get('action_type') for row in (registry.get('unsupported') or []) if row.get('action_type')}),
+            'transition_routes': sorted({row.get('route') for row in action_entries.values() if row.get('route')}),
+            'fallback_handler': (registry.get('fallback_handler') or {}).get('handler_key'),
+            'action_count': len(action_types),
+            'stage_handler_count': len(stage_handler_keys),
+        },
+        'contracts': {
+            'supported_action_map_count': len(catalog.get('handlers') or {}),
+            'workflow_state_contract': 'approval/workflow state replay remains compatible within same generation',
+            'upgrade_window': 'same-generation manifest and registry changes are safe for replay-first rollout',
+            'rollback_window': 'persisted approval timeline can roll back control-plane metadata within same generation',
+            'execution_boundary': 'metadata_only_or_queue_only_never_real_trade_execution',
+        },
+        'compatibility': {
+            'compatible': compatible,
+            'status': 'compatible' if compatible else 'review_required',
+            'blocking_issues': blockers,
+            'replay_safe': compatible,
+            'requires_manual_review': not compatible,
+        },
+    }
+
+
 def _build_rollout_dispatch_envelope(*, mode: str, executor_class: str, handler_key: str, allowed: bool = False,
                                      status: str = 'pending', reason: Optional[str] = None, code: Optional[str] = None,
                                      queue_name: Optional[str] = None, dispatch_route: Optional[str] = None,
@@ -3946,6 +4016,7 @@ def execute_rollout_executor(payload: Dict, db: Any, *, config: Any = None, sett
         'action_registry': action_registry,
         'items': [],
     }
+    result['control_plane_manifest'] = build_rollout_control_plane_manifest(payload, result, allowed_action_types=execution_settings.get('allowed_action_types'))
     payload['rollout_executor'] = result
 
     def bump(disposition: str, status: str):
@@ -7244,6 +7315,7 @@ def build_unified_workbench_overview(payload: Optional[Dict] = None, *, max_item
     )
     validation_gate = consumer_view.get('validation_gate') or (operator_digest.get('summary') or {}).get('validation_gate') or _build_validation_gate_snapshot(payload)
     validation_consumption = _collect_validation_gate_consumption((consumer_view.get('workflow_state') or {}).get('item_states') or [])
+    control_plane_manifest = build_rollout_control_plane_manifest(payload)
     workbench_stage_loop = (workbench_summary.get('stage_loop') or workbench_view.get('rollout', {}).get('stage_loop') or _summarize_stage_loop_rows(workbench_view.get('upstreams', {}).get('workflow_operator_digest', {}).get('operator_action_policies') or [], label='unified_workbench_rollout', max_items=max_items))
     retry_queue = _take(((recovery_view.get('queues') or {}).get('retry_queue') or []))
     rollback_candidates = _take(((recovery_view.get('queues') or {}).get('rollback_candidates') or []))
@@ -7401,6 +7473,13 @@ def build_unified_workbench_overview(payload: Optional[Dict] = None, *, max_item
             'auto_promotion_review_queues': auto_promotion_review_queues.get('summary') or {},
             'validation_gate': validation_gate,
             'validation_gate_consumption': validation_consumption,
+            'control_plane_manifest': {
+                'status': (control_plane_manifest.get('compatibility') or {}).get('status'),
+                'compatible': (control_plane_manifest.get('compatibility') or {}).get('compatible'),
+                'action_count': ((control_plane_manifest.get('registries') or {}).get('action_count')),
+                'stage_handler_count': ((control_plane_manifest.get('registries') or {}).get('stage_handler_count')),
+                'blocking_issues': (control_plane_manifest.get('compatibility') or {}).get('blocking_issues') or [],
+            },
             'timeline_group_counts': {
                 'bucket': len(timeline_groups.get('by_bucket') or []),
                 'action_type': len(timeline_groups.get('by_action_type') or []),
@@ -7418,6 +7497,7 @@ def build_unified_workbench_overview(payload: Optional[Dict] = None, *, max_item
         'top_key_alerts': _take(lines['approval']['key_alerts'] + [row for row in lines['recovery']['key_alerts'] if row.get('item_id') not in {item.get('item_id') for item in lines['approval']['key_alerts']}] + [row for row in lines['rollout']['key_alerts'] if row.get('item_id') not in {item.get('item_id') for item in lines['approval']['key_alerts'] + lines['recovery']['key_alerts']}]),
         'top_next_actions': _take(lines['approval']['next_actions'] + lines['recovery']['next_actions'] + lines['rollout']['next_actions']),
         'transition_journal': transition_journal,
+        'control_plane_manifest': control_plane_manifest,
         'upstreams': {
             'workflow_consumer_view': consumer_view,
             'workflow_operator_digest': operator_digest,

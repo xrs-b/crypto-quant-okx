@@ -1780,9 +1780,97 @@ def _resolve_safe_rollout_handler(spec: Optional[Dict[str, Any]] = None, action_
     return fallback
 
 
+def _recommend_rollout_stage_advisory(*, stage_key: str, current_stage: str, target_stage: str, workflow_state: Optional[str],
+                                     waiting_on: Optional[List[str]] = None, rollback_candidate: bool = False,
+                                     review_overdue: bool = False, validation_gate: Optional[Dict[str, Any]] = None,
+                                     auto_advance_allowed: Optional[bool] = None, readiness_score: Optional[int] = None,
+                                     eligible: Optional[bool] = None, auto_approve: Optional[bool] = None,
+                                     low_risk: Optional[bool] = None, execution_status: Optional[str] = None) -> Dict[str, Any]:
+    waiting = _dedupe_strings(waiting_on or [])
+    normalized_workflow_state = str(workflow_state or '').strip().lower() or 'pending'
+    validation_gate = dict(validation_gate or {})
+    validation_enabled = bool(validation_gate.get('enabled'))
+    validation_ready = validation_gate.get('ready')
+    validation_stale = bool(validation_gate.get('stale'))
+    validation_regressed = bool(validation_gate.get('rollback_on_regression')) and validation_ready is False and not validation_stale
+    recommended_stage = target_stage or stage_key or current_stage or 'observe'
+    recommended_action = 'continue_observe'
+    urgency = 'low'
+    confidence = 0.55
+    reasons: List[str] = []
+
+    if rollback_candidate or normalized_workflow_state in {'execution_failed', 'rollback_pending'} or validation_regressed:
+        recommended_stage = 'rollback_prepare'
+        recommended_action = 'prepare_rollback_review'
+        urgency = 'critical'
+        confidence = 0.97
+        reasons.extend([reason for reason in waiting if reason.startswith('workflow_state:') or reason == 'rollback_gate_triggered'])
+        if validation_regressed:
+            reasons.append('validation_gate_regressed')
+        if execution_status == 'error':
+            reasons.append('execution_status:error')
+    elif review_overdue:
+        recommended_stage = 'review_pending'
+        recommended_action = 'manual_review_now'
+        urgency = 'high'
+        confidence = 0.92
+        reasons.append('review_overdue')
+    elif validation_enabled and validation_ready is False:
+        recommended_stage = current_stage or 'observe'
+        recommended_action = 'freeze_auto_advance'
+        urgency = 'high' if validation_stale else 'medium'
+        confidence = 0.9 if validation_stale else 0.86
+        reasons.extend(_dedupe_strings((validation_gate.get('reasons') or []) + (['validation_gate_not_ready'] if 'validation_gate_not_ready' not in (validation_gate.get('reasons') or []) else [])))
+    elif waiting:
+        recommended_stage = current_stage or stage_key or 'observe'
+        recommended_action = 'hold_until_blockers_clear'
+        urgency = 'medium'
+        confidence = 0.8
+        reasons.extend(waiting)
+    elif auto_advance_allowed:
+        recommended_action = {
+            'observe': 'promote_candidate',
+            'candidate': 'queue_safe_promotion',
+            'guarded_prepare': 'promote_to_controlled_apply',
+            'controlled_apply': 'move_to_review_pending',
+            'review_pending': 'complete_review_checkpoint',
+            'rollback_prepare': 'execute_or_queue_rollback',
+        }.get(stage_key, 'continue_monitoring')
+        urgency = 'medium' if stage_key in {'observe', 'candidate'} else 'high'
+        confidence = 0.88
+        if readiness_score is not None:
+            confidence = min(0.99, max(confidence, round(float(readiness_score) / 100.0, 4)))
+        reasons.extend([
+            'auto_advance_allowed',
+            f'eligible:{bool(eligible)}',
+            f'auto_approve:{bool(auto_approve)}',
+            f'low_risk:{bool(low_risk)}',
+        ])
+    else:
+        recommended_action = 'collect_more_signal'
+        urgency = 'low'
+        confidence = 0.6
+        if readiness_score is not None:
+            reasons.append(f'readiness_score:{readiness_score}')
+
+    reasons = _dedupe_strings(reasons)
+    return {
+        'recommended_stage': recommended_stage,
+        'recommended_action': recommended_action,
+        'urgency': urgency,
+        'confidence': round(confidence, 4),
+        'reasons': reasons,
+        'ready_for_live_promotion': bool(auto_advance_allowed and not waiting and not rollback_candidate and not review_overdue and (validation_ready is not False)),
+    }
+
+
 def _resolve_rollout_stage_handler(*, current_stage: Optional[str], target_stage: Optional[str], action_type: Optional[str],
                                   workflow_state: Optional[str], blocked_by: Optional[List[str]] = None,
-                                  review_due_at: Optional[str] = None, rollback_candidate: bool = False) -> Dict[str, Any]:
+                                  review_due_at: Optional[str] = None, rollback_candidate: bool = False,
+                                  validation_gate: Optional[Dict[str, Any]] = None, auto_advance_allowed: Optional[bool] = None,
+                                  readiness_score: Optional[int] = None, eligible: Optional[bool] = None,
+                                  auto_approve: Optional[bool] = None, low_risk: Optional[bool] = None,
+                                  execution_status: Optional[str] = None) -> Dict[str, Any]:
     blocked = _dedupe_strings(blocked_by or [])
     normalized_current = str(current_stage or '').strip().lower() or 'observe'
     normalized_target = str(target_stage or '').strip().lower() or normalized_current
@@ -1830,6 +1918,22 @@ def _resolve_rollout_stage_handler(*, current_stage: Optional[str], target_stage
         next_transition = 'complete_review_checkpoint' if not waiting_on and not review_overdue else 'await_review_checkpoint'
     elif stage_key == 'rollback_prepare':
         next_transition = 'execute_or_queue_rollback'
+    advisory = _recommend_rollout_stage_advisory(
+        stage_key=stage_key,
+        current_stage=normalized_current,
+        target_stage=normalized_target,
+        workflow_state=normalized_workflow_state,
+        waiting_on=waiting_on,
+        rollback_candidate=rollback_candidate,
+        review_overdue=review_overdue,
+        validation_gate=validation_gate,
+        auto_advance_allowed=auto_advance_allowed,
+        readiness_score=readiness_score,
+        eligible=eligible,
+        auto_approve=auto_approve,
+        low_risk=low_risk,
+        execution_status=execution_status,
+    )
     return {
         'stage_key': stage_key,
         'current_stage': normalized_current,
@@ -1849,6 +1953,7 @@ def _resolve_rollout_stage_handler(*, current_stage: Optional[str], target_stage
         'next_transition': next_transition,
         'responsible_actor': owner,
         'action_type': str(action_type or '').strip().lower() or None,
+        'advisory': advisory,
     }
 
 
@@ -1977,6 +2082,13 @@ def _evaluate_rollout_gates(*, action_type: str, row: Dict[str, Any], workflow_i
         blocked_by=blocked,
         review_due_at=review_due_at,
         rollback_candidate=rollback_candidate,
+        validation_gate=validation_gate,
+        auto_advance_allowed=auto_allowed,
+        readiness_score=readiness_score,
+        eligible=eligible,
+        auto_approve=auto_approve,
+        low_risk=low_risk,
+        execution_status=execution_status,
     )
     return {
         'auto_advance_gate': {
@@ -3504,7 +3616,7 @@ def execute_rollout_executor(payload: Dict, db: Any, *, config: Any = None, sett
             'rollout_stage': transition_rule.get('rollout_stage'),
             'target_rollout_stage': transition_rule.get('target_rollout_stage'),
             'readiness': transition_rule.get('readiness'),
-            'stage_handler': transition_rule.get('stage_handler') or rollout_gates.get('stage_handler') or {},
+            'stage_handler': rollout_gates.get('stage_handler') or transition_rule.get('stage_handler') or {},
             'transition_policy_snapshot': transition_policy_snapshot,
             'transition_policy': transition_rule.get('transition_policy') or transition_policy_snapshot,
             'execution_status': _normalize_action_execution_status(None, workflow_state=current_workflow_state, queue_status=((workflow_item.get('queue_progression') or {}).get('status') if isinstance(workflow_item.get('queue_progression'), dict) else None)),
@@ -3513,7 +3625,7 @@ def execute_rollout_executor(payload: Dict, db: Any, *, config: Any = None, sett
             'validation_gate': execution_gate.get('validation_gate'),
             'execution_gate': execution_gate,
             'stage_loop': _build_stage_loop_envelope(
-                stage_handler=transition_rule.get('stage_handler') or rollout_gates.get('stage_handler') or {},
+                stage_handler=rollout_gates.get('stage_handler') or transition_rule.get('stage_handler') or {},
                 auto_advance_gate=rollout_gates.get('auto_advance_gate') or {},
                 rollback_gate=rollout_gates.get('rollback_gate') or {},
                 dispatch_route=transition_rule.get('dispatch_route'),
@@ -3545,7 +3657,7 @@ def execute_rollout_executor(payload: Dict, db: Any, *, config: Any = None, sett
             'next_transition': transition_rule.get('next_transition'),
             'retryable': bool(transition_rule.get('retryable', True)),
             'rollback_hint': transition_rule.get('rollback_hint'),
-            'stage_handler': transition_rule.get('stage_handler') or rollout_gates.get('stage_handler') or {},
+            'stage_handler': rollout_gates.get('stage_handler') or transition_rule.get('stage_handler') or {},
             'transition_policy_snapshot': transition_policy_snapshot,
             'transition_policy': transition_rule.get('transition_policy') or transition_policy_snapshot,
             'auto_advance_gate': rollout_gates.get('auto_advance_gate') or {},
@@ -3553,7 +3665,7 @@ def execute_rollout_executor(payload: Dict, db: Any, *, config: Any = None, sett
             'validation_gate': execution_gate.get('validation_gate'),
             'execution_gate': execution_gate,
             'stage_loop': _build_stage_loop_envelope(
-                stage_handler=transition_rule.get('stage_handler') or rollout_gates.get('stage_handler') or {},
+                stage_handler=rollout_gates.get('stage_handler') or transition_rule.get('stage_handler') or {},
                 auto_advance_gate=rollout_gates.get('auto_advance_gate') or {},
                 rollback_gate=rollout_gates.get('rollback_gate') or {},
                 dispatch_route=transition_rule.get('dispatch_route'),
@@ -3764,7 +3876,7 @@ def execute_rollout_executor(payload: Dict, db: Any, *, config: Any = None, sett
             'validation_gate': execution_gate.get('validation_gate'),
             'execution_gate': execution_gate,
             'stage_loop': _build_stage_loop_envelope(
-                stage_handler=transition_rule.get('stage_handler') or rollout_gates.get('stage_handler') or {},
+                stage_handler=rollout_gates.get('stage_handler') or transition_rule.get('stage_handler') or {},
                 auto_advance_gate=rollout_gates.get('auto_advance_gate') or {},
                 rollback_gate=rollout_gates.get('rollback_gate') or {},
                 dispatch_route=transition_rule.get('dispatch_route'),
@@ -3868,6 +3980,9 @@ def build_rollout_stage_progression(payload: Optional[Dict] = None, executor: Op
         'by_dispatch_route': {},
         'by_status': {},
         'by_loop_state': {},
+        'by_advisory_action': {},
+        'by_advisory_stage': {},
+        'by_advisory_urgency': {},
     }
 
     def bump(bucket: Dict[str, int], key: Optional[str]):
@@ -3887,6 +4002,7 @@ def build_rollout_stage_progression(payload: Optional[Dict] = None, executor: Op
         dispatch_route = plan.get('dispatch_route') or result.get('dispatch_route') or dispatch.get('dispatch_route') or 'unknown'
         status = row.get('status') or result.get('status') or dispatch.get('status') or 'planned'
         stage_loop = result.get('stage_loop') or plan.get('stage_loop') or {}
+        advisory = ((plan.get('stage_handler') or {}).get('advisory') or {})
         stage_row = {
             'item_id': item_id,
             'playbook_id': row.get('playbook_id'),
@@ -3907,6 +4023,7 @@ def build_rollout_stage_progression(payload: Optional[Dict] = None, executor: Op
                 'readiness': plan.get('readiness') or workflow_item.get('workflow_state') or approval_item.get('workflow_state') or 'pending',
                 'stage_handler': plan.get('stage_handler') or {},
                 'stage_loop': stage_loop,
+                'advisory': advisory,
             },
             'queue_plan': plan.get('queue_plan') or {},
             'dispatch': dispatch,
@@ -3932,6 +4049,9 @@ def build_rollout_stage_progression(payload: Optional[Dict] = None, executor: Op
         bump(summary['by_dispatch_route'], dispatch_route)
         bump(summary['by_status'], status)
         bump(summary['by_loop_state'], stage_loop.get('loop_state'))
+        bump(summary['by_advisory_action'], advisory.get('recommended_action'))
+        bump(summary['by_advisory_stage'], advisory.get('recommended_stage'))
+        bump(summary['by_advisory_urgency'], advisory.get('urgency'))
         if stage_loop.get('loop_state') == 'auto_advance':
             summary['auto_advance_count'] += 1
         elif stage_loop.get('loop_state') == 'review_pending':

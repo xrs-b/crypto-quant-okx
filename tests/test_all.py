@@ -5338,6 +5338,52 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
         finally:
             dashboard_api.backtester = old_backtester
 
+    def test_backtest_adaptive_rollout_orchestration_api_runs_mainline_execution_entrypoint(self):
+        import dashboard.api as dashboard_api_module
+        original_run_all = dashboard_api_module.backtester.run_all
+        original_persist = dashboard_api_module._persist_workflow_approval_payload
+        original_export = dashboard_api_module.export_calibration_payload
+        original_execute = dashboard_api_module.execute_adaptive_rollout_orchestration
+        original_get_recent_transition_journal = dashboard_api_module.db.get_recent_transition_journal
+        original_get_transition_journal_summary = dashboard_api_module.db.get_transition_journal_summary
+        try:
+            dashboard_api_module.backtester.run_all = lambda symbols: {'calibration_report': {'summary': {'trade_count': 1, 'calibration_ready': True}}}
+            dashboard_api_module.export_calibration_payload = lambda report, view='workflow_ready': {
+                'workflow_state': {'item_states': [{'item_id': 'playbook::eligible', 'title': 'Eligible item', 'action_type': 'joint_observe', 'risk_level': 'low', 'approval_required': False, 'requires_manual': False, 'workflow_state': 'ready', 'blocking_reasons': []}], 'summary': {'item_count': 1}},
+                'approval_state': {'items': [{'approval_id': 'approval::eligible', 'playbook_id': 'playbook::eligible', 'title': 'Eligible item', 'action_type': 'joint_observe', 'approval_state': 'pending', 'decision_state': 'pending', 'risk_level': 'low', 'approval_required': False, 'requires_manual': False, 'blocked_by': []}], 'summary': {'pending_count': 1}},
+            }
+            dashboard_api_module._persist_workflow_approval_payload = lambda payload, replay_source='adaptive_rollout_orchestration_api': payload
+            dashboard_api_module.execute_adaptive_rollout_orchestration = lambda payload, db, config=None, replay_source='adaptive_rollout_orchestration_api': {
+                **payload,
+                'adaptive_rollout_orchestration': {
+                    'schema_version': 'm5_adaptive_rollout_orchestration_v2',
+                    'passes': [{'label': 'pre_auto_approval', 'dry_run': False, 'rollout_executor_applied_count': 1}],
+                    'summary': {'pass_count': 1, 'rerun_triggered': False, 'rollout_executor_applied_count': 1, 'controlled_rollout_executed_count': 1, 'auto_approval_executed_count': 1, 'review_queue_queued_count': 0, 'gate_status': 'ready'},
+                },
+                'rollout_executor': {'status': 'controlled', 'summary': {'applied_count': 1}, 'items': []},
+                'controlled_rollout_execution': {'mode': 'state_apply', 'executed_count': 1, 'items': []},
+                'auto_approval_execution': {'mode': 'controlled', 'executed_count': 1, 'items': []},
+            }
+            dashboard_api_module.db.get_recent_transition_journal = lambda **kwargs: []
+            dashboard_api_module.db.get_transition_journal_summary = lambda **kwargs: {'count': 0, 'latest_timestamp': None, 'changed_only': True, 'changed_field_counts': {}, 'workflow_transition_counts': {}}
+            client = dashboard_api_module.app.test_client()
+            response = client.get('/api/backtest/adaptive-rollout-orchestration?max_items=2')
+            self.assertEqual(response.status_code, 200)
+            payload = response.get_json()
+            self.assertEqual(payload['view'], 'adaptive_rollout_orchestration')
+            self.assertEqual(payload['data']['schema_version'], 'm5_adaptive_rollout_orchestration_v2')
+            self.assertEqual(payload['summary']['pass_count'], 1)
+            self.assertEqual(payload['summary']['max_items'], 2)
+            self.assertEqual(payload['runtime_orchestration_summary']['schema_version'], 'm5_runtime_orchestration_summary_v1')
+            self.assertIn('control_plane_readiness', payload['related_summary'])
+        finally:
+            dashboard_api_module.backtester.run_all = original_run_all
+            dashboard_api_module._persist_workflow_approval_payload = original_persist
+            dashboard_api_module.export_calibration_payload = original_export
+            dashboard_api_module.execute_adaptive_rollout_orchestration = original_execute
+            dashboard_api_module.db.get_recent_transition_journal = original_get_recent_transition_journal
+            dashboard_api_module.db.get_transition_journal_summary = original_get_transition_journal_summary
+
     def test_backtest_runtime_orchestration_summary_api_returns_runtime_entrypoint(self):
         import dashboard.api as dashboard_api_module
         original_run_all = dashboard_api_module.backtester.run_all
@@ -5378,6 +5424,40 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
             dashboard_api_module.export_calibration_payload = original_export
             dashboard_api_module.db.get_recent_transition_journal = original_get_recent_transition_journal
             dashboard_api_module.db.get_transition_journal_summary = original_get_transition_journal_summary
+
+    def test_backtest_calibration_report_api_supports_adaptive_rollout_orchestration_view(self):
+        import dashboard.api as dashboard_api_module
+        original_run_all = dashboard_api_module.backtester.run_all
+        original_persist = dashboard_api_module._persist_workflow_approval_payload
+        original_export = dashboard_api_module.export_calibration_payload
+        original_execute = dashboard_api_module.execute_adaptive_rollout_orchestration
+        try:
+            dashboard_api_module.backtester.run_all = lambda symbols: {'symbols': ['BTC-USDT'], 'calibration_report': {'summary': {'trade_count': 1, 'calibration_ready': True}}}
+            dashboard_api_module.export_calibration_payload = lambda report, view='workflow_ready': {
+                'workflow_state': {'item_states': [], 'summary': {}},
+                'approval_state': {'items': [], 'summary': {}},
+            }
+            dashboard_api_module._persist_workflow_approval_payload = lambda payload, replay_source='calibration_report:adaptive_rollout_orchestration': payload
+            dashboard_api_module.execute_adaptive_rollout_orchestration = lambda payload, db, config=None, replay_source='calibration_report:adaptive_rollout_orchestration': {
+                **payload,
+                'adaptive_rollout_orchestration': {
+                    'schema_version': 'm5_adaptive_rollout_orchestration_v2',
+                    'passes': [],
+                    'summary': {'pass_count': 0, 'rerun_triggered': False, 'rollout_executor_applied_count': 0, 'controlled_rollout_executed_count': 0, 'auto_approval_executed_count': 0, 'review_queue_queued_count': 0, 'gate_status': 'blocked'},
+                },
+            }
+            client = dashboard_api_module.app.test_client()
+            response = client.get('/api/backtest/calibration-report?view=adaptive_rollout_orchestration')
+            self.assertEqual(response.status_code, 200)
+            payload = response.get_json()
+            self.assertEqual(payload['view'], 'adaptive_rollout_orchestration')
+            self.assertEqual(payload['data']['adaptive_rollout_orchestration']['schema_version'], 'm5_adaptive_rollout_orchestration_v2')
+            self.assertEqual(payload['summary']['adaptive_rollout_orchestration'], payload['data']['adaptive_rollout_orchestration']['summary'])
+        finally:
+            dashboard_api_module.backtester.run_all = original_run_all
+            dashboard_api_module._persist_workflow_approval_payload = original_persist
+            dashboard_api_module.export_calibration_payload = original_export
+            dashboard_api_module.execute_adaptive_rollout_orchestration = original_execute
 
     def test_backtest_calibration_report_api_supports_runtime_orchestration_summary_view(self):
         import dashboard.api as dashboard_api_module

@@ -2466,17 +2466,17 @@ def _load_recent_transition_journal_overview(*, limit: int = 5, approval_type: s
 def get_backtest_calibration_report():
     """获取 M5 calibration 聚合输出，默认返回 report-ready payload。"""
     view = (request.args.get('view') or 'report_ready').strip().lower()
-    if view not in {'report_ready', 'delivery', 'governance_ready', 'workflow_ready', 'operator_digest', 'workflow_alert_digest', 'dashboard_summary_cards', 'runtime_orchestration_summary', 'production_rollout_readiness', 'workbench_governance_view', 'auto_promotion_candidate_view', 'unified_workbench_overview', 'full'}:
-        return jsonify({'success': False, 'error': 'view must be one of report_ready|delivery|governance_ready|workflow_ready|operator_digest|workflow_alert_digest|dashboard_summary_cards|runtime_orchestration_summary|production_rollout_readiness|workbench_governance_view|auto_promotion_candidate_view|unified_workbench_overview|full'}), 400
+    if view not in {'report_ready', 'delivery', 'governance_ready', 'workflow_ready', 'operator_digest', 'workflow_alert_digest', 'dashboard_summary_cards', 'adaptive_rollout_orchestration', 'runtime_orchestration_summary', 'production_rollout_readiness', 'workbench_governance_view', 'auto_promotion_candidate_view', 'unified_workbench_overview', 'full'}:
+        return jsonify({'success': False, 'error': 'view must be one of report_ready|delivery|governance_ready|workflow_ready|operator_digest|workflow_alert_digest|dashboard_summary_cards|adaptive_rollout_orchestration|runtime_orchestration_summary|production_rollout_readiness|workbench_governance_view|auto_promotion_candidate_view|unified_workbench_overview|full'}), 400
 
     backtest_result = backtester.run_all(config.symbols)
     calibration_report = backtest_result.get('calibration_report') or {}
     payload = export_calibration_payload(
         calibration_report,
-        view='full' if view == 'full' else ('workflow_ready' if view in {'operator_digest', 'workflow_alert_digest', 'dashboard_summary_cards', 'runtime_orchestration_summary', 'production_rollout_readiness', 'workbench_governance_view', 'unified_workbench_overview'} else view),
+        view='full' if view == 'full' else ('workflow_ready' if view in {'operator_digest', 'workflow_alert_digest', 'dashboard_summary_cards', 'adaptive_rollout_orchestration', 'runtime_orchestration_summary', 'production_rollout_readiness', 'workbench_governance_view', 'unified_workbench_overview'} else view),
     )
-    if view in {'workflow_ready', 'operator_digest', 'workflow_alert_digest', 'dashboard_summary_cards', 'runtime_orchestration_summary', 'production_rollout_readiness', 'workbench_governance_view', 'auto_promotion_candidate_view', 'unified_workbench_overview', 'full'}:
-        workflow_payload = payload if view in {'workflow_ready', 'operator_digest', 'workflow_alert_digest', 'dashboard_summary_cards', 'runtime_orchestration_summary', 'production_rollout_readiness', 'workbench_governance_view', 'auto_promotion_candidate_view', 'unified_workbench_overview'} else (payload.get('workflow_ready') or {})
+    if view in {'workflow_ready', 'operator_digest', 'workflow_alert_digest', 'dashboard_summary_cards', 'adaptive_rollout_orchestration', 'runtime_orchestration_summary', 'production_rollout_readiness', 'workbench_governance_view', 'auto_promotion_candidate_view', 'unified_workbench_overview', 'full'}:
+        workflow_payload = payload if view in {'workflow_ready', 'operator_digest', 'workflow_alert_digest', 'dashboard_summary_cards', 'adaptive_rollout_orchestration', 'runtime_orchestration_summary', 'production_rollout_readiness', 'workbench_governance_view', 'auto_promotion_candidate_view', 'unified_workbench_overview'} else (payload.get('workflow_ready') or {})
         payload_to_persist = dict(workflow_payload)
         if payload_to_persist:
             persisted_workflow = _persist_workflow_approval_payload(payload_to_persist, replay_source=f'calibration_report:{view}')
@@ -2490,6 +2490,13 @@ def get_backtest_calibration_report():
                 payload = build_workflow_alert_digest(persisted_workflow)
             elif view == 'dashboard_summary_cards':
                 payload = build_dashboard_summary_cards(persisted_workflow)
+            elif view == 'adaptive_rollout_orchestration':
+                payload = execute_adaptive_rollout_orchestration(
+                    persisted_workflow,
+                    db,
+                    config=config,
+                    replay_source='calibration_report:adaptive_rollout_orchestration',
+                )
             elif view == 'runtime_orchestration_summary':
                 payload = build_runtime_orchestration_summary(persisted_workflow, transition_journal_overview=transition_journal_overview)
             elif view == 'production_rollout_readiness':
@@ -2517,6 +2524,12 @@ def get_backtest_calibration_report():
                 payload['workflow_ready'] = persisted_workflow
                 payload['operator_digest'] = build_workflow_operator_digest(persisted_workflow, transition_journal_overview=transition_journal_overview)
                 payload['dashboard_summary_cards'] = build_dashboard_summary_cards(persisted_workflow)
+                payload['adaptive_rollout_orchestration'] = (execute_adaptive_rollout_orchestration(
+                    dict(persisted_workflow),
+                    db,
+                    config=config,
+                    replay_source='calibration_report:adaptive_rollout_orchestration:full',
+                ) or {}).get('adaptive_rollout_orchestration') or {}
                 payload['runtime_orchestration_summary'] = build_runtime_orchestration_summary(persisted_workflow, transition_journal_overview=transition_journal_overview)
                 payload['production_rollout_readiness'] = build_production_rollout_readiness(persisted_workflow, transition_journal_overview=transition_journal_overview)
                 payload['workbench_governance_view'] = build_workbench_governance_view(persisted_workflow, transition_journal_overview=transition_journal_overview)
@@ -2524,7 +2537,7 @@ def get_backtest_calibration_report():
                 payload['unified_workbench_overview'] = build_unified_workbench_overview(persisted_workflow, transition_journal_overview=transition_journal_overview)
     summary = calibration_report.get('summary') or {}
     governance_ready = payload if view == 'governance_ready' else (payload.get('governance_ready') or {})
-    workflow_ready = {} if view in {'operator_digest', 'workflow_alert_digest', 'dashboard_summary_cards', 'runtime_orchestration_summary', 'production_rollout_readiness', 'workbench_governance_view', 'auto_promotion_candidate_view', 'unified_workbench_overview'} else (payload if view == 'workflow_ready' else (payload.get('workflow_ready') or {}))
+    workflow_ready = {} if view in {'operator_digest', 'workflow_alert_digest', 'dashboard_summary_cards', 'adaptive_rollout_orchestration', 'runtime_orchestration_summary', 'production_rollout_readiness', 'workbench_governance_view', 'auto_promotion_candidate_view', 'unified_workbench_overview'} else (payload if view == 'workflow_ready' else (payload.get('workflow_ready') or {}))
     return jsonify({
         'success': True,
         'view': view,
@@ -2539,6 +2552,7 @@ def get_backtest_calibration_report():
             'operator_digest': payload.get('summary') or {} if view == 'operator_digest' else (payload.get('workflow_operator_digest') or payload.get('operator_digest') or {}).get('summary') or {},
             'workflow_alert_digest': payload.get('summary') or {} if view == 'workflow_alert_digest' else (payload.get('workflow_alert_digest') or {}).get('summary') or {},
             'dashboard_summary_cards': payload.get('summary') or {} if view == 'dashboard_summary_cards' else (payload.get('dashboard_summary_cards') or {}).get('summary') or {},
+            'adaptive_rollout_orchestration': ((payload.get('adaptive_rollout_orchestration') or {}).get('summary') or payload.get('summary') or {}) if view == 'adaptive_rollout_orchestration' else (payload.get('adaptive_rollout_orchestration') or {}).get('summary') or {},
             'runtime_orchestration_summary': payload.get('summary') or {} if view == 'runtime_orchestration_summary' else (payload.get('runtime_orchestration_summary') or {}).get('summary') or {},
             'production_rollout_readiness': payload.get('summary') or {} if view == 'production_rollout_readiness' else (payload.get('production_rollout_readiness') or {}).get('summary') or {},
             'workbench_governance_view': payload.get('summary') or {} if view == 'workbench_governance_view' else (payload.get('workbench_governance_view') or {}).get('summary') or {},
@@ -2688,6 +2702,29 @@ def get_backtest_dashboard_summary_cards():
         'view': 'dashboard_summary_cards',
         'data': cards,
         'summary': cards.get('summary') or {},
+    })
+
+
+@app.route('/api/backtest/adaptive-rollout-orchestration')
+def get_backtest_adaptive_rollout_orchestration():
+    """返回 adaptive rollout 主调度执行入口，直接跑完整 safe orchestration pass，并暴露 gate / pass / follow-up 摘要。"""
+    max_items = max(1, min(int(request.args.get('max_items', 5)), 20))
+    backtest_result = backtester.run_all(config.symbols)
+    calibration_report = backtest_result.get('calibration_report') or {}
+    payload = export_calibration_payload(calibration_report, view='workflow_ready')
+    payload = _persist_workflow_approval_payload(payload, replay_source='adaptive_rollout_orchestration_api')
+    payload = execute_adaptive_rollout_orchestration(payload, db, config=config, replay_source='adaptive_rollout_orchestration_api')
+    transition_journal_overview = _load_recent_transition_journal_overview(limit=max_items)
+    runtime_summary = build_runtime_orchestration_summary(payload, max_items=max_items, transition_journal_overview=transition_journal_overview)
+    orchestration = payload.get('adaptive_rollout_orchestration') or {}
+    orchestration['summary'] = {**(orchestration.get('summary') or {}), 'max_items': max_items}
+    return jsonify({
+        'success': True,
+        'view': 'adaptive_rollout_orchestration',
+        'data': orchestration,
+        'summary': orchestration.get('summary') or {},
+        'related_summary': runtime_summary.get('related_summary') or {},
+        'runtime_orchestration_summary': runtime_summary,
     })
 
 

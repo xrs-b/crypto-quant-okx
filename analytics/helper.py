@@ -4901,10 +4901,197 @@ def _build_auto_promotion_review_queue_item(*, row: Optional[Dict[str, Any]] = N
         'recommended_action': recommended_action,
         'why': _dedupe_strings((execution.get('reason_codes') or []) + rollback_triggered + observation_targets),
         'summary': f"{queue_kind} | action={recommended_action} | targets={len(observation_targets)}",
+        'why_in_queue': _dedupe_strings((execution.get('reason_codes') or []) + rollback_triggered + observation_targets),
+        'queue_reason': 'rollback review candidate' if rollback_candidate else 'post-promotion follow-up',
+        'next_step': recommended_action,
     }
 
 
 
+
+
+def _parse_review_timestamp(value: Any) -> Optional[datetime]:
+    if value in (None, ''):
+        return None
+    if isinstance(value, datetime):
+        return value
+    try:
+        return datetime.fromisoformat(str(value).replace('Z', '+00:00'))
+    except Exception:
+        return None
+
+
+def _build_auto_promotion_review_due_snapshot(review_due_at: Any, *, now: Optional[Any] = None) -> Dict[str, Any]:
+    due_at = _parse_review_timestamp(review_due_at)
+    ref = _parse_review_timestamp(now) if now is not None else datetime.now(timezone.utc)
+    if ref and ref.tzinfo is None:
+        ref = ref.replace(tzinfo=timezone.utc)
+    if due_at and due_at.tzinfo is None:
+        due_at = due_at.replace(tzinfo=timezone.utc)
+    snapshot = {
+        'review_due_at': review_due_at,
+        'due_status': 'unscheduled' if not due_at else 'pending',
+        'due_in_seconds': None,
+        'due_in_hours': None,
+        'is_due': False,
+        'is_overdue': False,
+    }
+    if not due_at or not ref:
+        return snapshot
+    delta_seconds = int((due_at - ref).total_seconds())
+    snapshot['due_in_seconds'] = delta_seconds
+    snapshot['due_in_hours'] = round(delta_seconds / 3600.0, 4)
+    if delta_seconds < 0:
+        snapshot['due_status'] = 'overdue'
+        snapshot['is_due'] = True
+        snapshot['is_overdue'] = True
+    elif delta_seconds == 0:
+        snapshot['due_status'] = 'due_now'
+        snapshot['is_due'] = True
+    else:
+        snapshot['due_status'] = 'scheduled'
+    return snapshot
+
+
+def _normalize_auto_promotion_review_queue_item(item: Dict[str, Any], *, now: Optional[Any] = None) -> Dict[str, Any]:
+    item = dict(item or {})
+    due = _build_auto_promotion_review_due_snapshot(item.get('review_due_at'), now=now)
+    queue_kind = item.get('queue_kind') or ('rollback_review_queue' if item.get('rollback_candidate') else 'post_promotion_review_queue')
+    rollback_triggered = _dedupe_strings(item.get('rollback_triggered') or [])
+    observation_targets = _dedupe_strings(item.get('observation_targets') or [])
+    why = _dedupe_strings(item.get('why') or [])
+    why_in_queue = []
+    if queue_kind == 'rollback_review_queue':
+        why_in_queue.append('rollback_candidate')
+    else:
+        why_in_queue.append('post_promotion_follow_up')
+    if due.get('due_status') and due.get('due_status') != 'unscheduled':
+        why_in_queue.append(f"due_status:{due.get('due_status')}")
+    why_in_queue.extend(rollback_triggered)
+    why_in_queue.extend(observation_targets)
+    why_in_queue.extend(why)
+    why_in_queue = _dedupe_strings(why_in_queue)
+    next_step = item.get('recommended_action') or ('prepare_rollback_review' if queue_kind == 'rollback_review_queue' else 'monitor_post_promotion_window')
+    queue_reason = 'rollback trigger observed; item escalated into rollback review queue' if queue_kind == 'rollback_review_queue' else 'auto-promotion completed; item remains in post-promotion review window'
+    if due.get('due_status') == 'overdue':
+        queue_reason += '; scheduled review is overdue'
+    elif due.get('due_status') in {'due_now', 'scheduled'}:
+        queue_reason += '; scheduled review is active'
+    item.update({
+        'queue_kind': queue_kind,
+        'queue_state': item.get('queue_state') or ('rollback_review' if queue_kind == 'rollback_review_queue' else due.get('due_status')),
+        'review_due': due,
+        'due_status': due.get('due_status'),
+        'due_in_hours': due.get('due_in_hours'),
+        'is_due': due.get('is_due'),
+        'is_overdue': due.get('is_overdue'),
+        'why': why_in_queue,
+        'why_in_queue': why_in_queue,
+        'queue_reason': queue_reason,
+        'next_step': next_step,
+        'next_action': next_step,
+        'what_to_do_next': next_step,
+    })
+    return item
+
+
+def build_auto_promotion_review_queue_detail_view(payload: Optional[Dict[str, Any]] = None, *, item_id: Optional[str] = None,
+                                                  approval_id: Optional[str] = None, queue_kind: Optional[str] = None,
+                                                  now: Optional[Any] = None) -> Dict[str, Any]:
+    payload = payload or {}
+    execution = build_auto_promotion_execution_summary(payload, max_items=10000)
+    candidates = []
+    for qk in ('rollback_review_queue', 'post_promotion_review_queue'):
+        if queue_kind and qk != queue_kind:
+            continue
+        for row in (execution.get('review_queues') or {}).get(qk) or []:
+            candidates.append(_normalize_auto_promotion_review_queue_item(row, now=now))
+    matched = [row for row in candidates if (item_id and row.get('item_id') == item_id) or (approval_id and row.get('approval_id') == approval_id)]
+    item = matched[0] if matched else None
+    detail = {
+        'schema_version': 'm5_auto_promotion_review_queue_detail_view_v1',
+        'found': bool(item),
+        'item': item,
+        'alternatives': matched[1:10] if len(matched) > 1 else [],
+        'summary': {
+            'item_id': (item or {}).get('item_id'),
+            'approval_id': (item or {}).get('approval_id'),
+            'queue_kind': (item or {}).get('queue_kind'),
+            'queue_state': (item or {}).get('queue_state'),
+            'why_in_queue': (item or {}).get('why_in_queue') or [],
+            'queue_reason': (item or {}).get('queue_reason'),
+            'next_step': (item or {}).get('next_step'),
+            'review_due_at': (item or {}).get('review_due_at'),
+            'due_status': (item or {}).get('due_status'),
+            'due_in_hours': (item or {}).get('due_in_hours'),
+            'observation_targets': (item or {}).get('observation_targets') or [],
+            'rollback_triggered': (item or {}).get('rollback_triggered') or [],
+        },
+    }
+    payload['auto_promotion_review_queue_detail_view'] = detail
+    return detail
+
+
+def build_auto_promotion_review_queue_filter_view(payload: Optional[Dict[str, Any]] = None, *, queue_kinds: Any = None,
+                                                  due_statuses: Any = None, observation_targets: Any = None,
+                                                  rollback_triggers: Any = None, q: Optional[str] = None,
+                                                  now: Optional[Any] = None, limit: int = 50) -> Dict[str, Any]:
+    payload = payload or {}
+    execution = build_auto_promotion_execution_summary(payload, max_items=10000)
+    items = []
+    for qk in ('rollback_review_queue', 'post_promotion_review_queue'):
+        for row in (execution.get('review_queues') or {}).get(qk) or []:
+            items.append(_normalize_auto_promotion_review_queue_item(row, now=now))
+    queue_kind_set = set(_normalize_filter_values(queue_kinds))
+    due_status_set = set(_normalize_filter_values(due_statuses))
+    observation_target_set = set(_normalize_filter_values(observation_targets))
+    rollback_trigger_set = set(_normalize_filter_values(rollback_triggers))
+    q_text = str(q or '').strip().lower()
+    filtered = []
+    for row in items:
+        if queue_kind_set and str(row.get('queue_kind') or '') not in queue_kind_set:
+            continue
+        if due_status_set and str(row.get('due_status') or '') not in due_status_set:
+            continue
+        row_targets = {str(v) for v in (row.get('observation_targets') or [])}
+        if observation_target_set and not (row_targets & observation_target_set):
+            continue
+        row_triggers = {str(v) for v in (row.get('rollback_triggered') or [])}
+        if rollback_trigger_set and not (row_triggers & rollback_trigger_set):
+            continue
+        if q_text:
+            hay = ' '.join(str(v) for v in [row.get('item_id'), row.get('approval_id'), row.get('title'), row.get('queue_reason'), row.get('next_step')] + (row.get('why_in_queue') or []) + (row.get('observation_targets') or []) + (row.get('rollback_triggered') or []))
+            if q_text not in hay.lower():
+                continue
+        filtered.append(row)
+    filtered.sort(key=lambda row: (0 if row.get('queue_kind') == 'rollback_review_queue' else 1, 0 if row.get('is_overdue') else (1 if row.get('is_due') else 2), str(row.get('review_due_at') or ''), str(row.get('item_id') or '')))
+    summary = {
+        'matched_count': len(filtered),
+        'returned_count': min(len(filtered), limit),
+        'queue_kind_counts': {k: sum(1 for row in filtered if row.get('queue_kind') == k) for k in sorted({row.get('queue_kind') for row in filtered if row.get('queue_kind')})},
+        'due_status_counts': {k: sum(1 for row in filtered if row.get('due_status') == k) for k in sorted({row.get('due_status') for row in filtered if row.get('due_status')})},
+        'observation_target_counts': {},
+        'rollback_trigger_counts': {},
+    }
+    for row in filtered:
+        for target in row.get('observation_targets') or []:
+            summary['observation_target_counts'][target] = summary['observation_target_counts'].get(target, 0) + 1
+        for trigger in row.get('rollback_triggered') or []:
+            summary['rollback_trigger_counts'][trigger] = summary['rollback_trigger_counts'].get(trigger, 0) + 1
+    response = {
+        'schema_version': 'm5_auto_promotion_review_queue_filter_view_v1',
+        'summary': summary,
+        'applied_filters': {
+            'queue_kinds': _normalize_filter_values(queue_kinds),
+            'due_statuses': _normalize_filter_values(due_statuses),
+            'observation_targets': _normalize_filter_values(observation_targets),
+            'rollback_triggers': _normalize_filter_values(rollback_triggers),
+            'q': str(q or '').strip(),
+        },
+        'items': filtered[:limit],
+    }
+    payload['auto_promotion_review_queue_filter_view'] = response
+    return response
 def build_auto_promotion_execution_summary(payload: Optional[Dict] = None, *, max_items: int = 5) -> Dict[str, Any]:
     payload = payload or {}
     consumer_view = payload.get('consumer_view') or build_workflow_consumer_view(payload)
@@ -5043,7 +5230,7 @@ def build_auto_promotion_execution_summary(payload: Optional[Dict] = None, *, ma
         'risk_label_counts': risk_label_counts,
     }
     return {
-        'schema_version': 'm5_auto_promotion_execution_summary_v2',
+        'schema_version': 'm5_auto_promotion_execution_summary_v3',
         'summary': summary,
         'recent_executions': recent[:max_items],
         'rollback_review_candidates': rollback_candidates[:max_items],
@@ -5109,7 +5296,7 @@ def build_auto_promotion_review_queue_consumption(auto_promotion_execution: Opti
             'items': post_queue[:max_items],
         })
     return {
-        'schema_version': 'm5_auto_promotion_review_queue_consumption_v1',
+        'schema_version': 'm5_auto_promotion_review_queue_consumption_v2',
         'label': label,
         'status': status,
         'headline': headline,

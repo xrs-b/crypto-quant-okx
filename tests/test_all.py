@@ -5138,6 +5138,124 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
             dashboard_api.db.get_recent_transition_journal = old_get_recent_transition_journal
             dashboard_api.db.get_transition_journal_summary = old_get_transition_journal_summary
 
+    def test_backtest_workflow_alert_digest_api_returns_severity_layered_summary(self):
+        import dashboard.api as dashboard_api
+
+        report = build_regime_policy_calibration_report([
+            {
+                'symbol': 'BTC/USDT',
+                'all_trades': [
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 0.3},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 0.2},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 0.1},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v2', 'strategy_tags': ['Breakout'], 'return_pct': -1.4},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v2', 'strategy_tags': ['Breakout'], 'return_pct': -1.0},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v2', 'strategy_tags': ['Breakout'], 'return_pct': -0.8},
+                ],
+            }
+        ])
+
+        class StubBacktester:
+            def run_all(self, symbols):
+                return {
+                    'summary': {'symbols': len(symbols)},
+                    'symbols': [{'symbol': 'BTC/USDT'}],
+                    'calibration_report': report,
+                }
+
+        old_backtester = dashboard_api.backtester
+        old_get_recent_transition_journal = dashboard_api.db.get_recent_transition_journal
+        old_get_transition_journal_summary = dashboard_api.db.get_transition_journal_summary
+        dashboard_api.backtester = StubBacktester()
+        dashboard_api.db.get_recent_transition_journal = lambda **kwargs: [
+            {
+                'item_id': 'playbook::recover',
+                'approval_id': 'approval::recover',
+                'title': 'Recover item',
+                'timestamp': '2026-03-28T08:33:00',
+                'trigger': 'recovery_blocked',
+                'actor': 'system',
+                'source': 'recovery_loop',
+                'from': {'workflow_state': 'execution_failed'},
+                'to': {'workflow_state': 'blocked'},
+                'changed_fields': ['workflow_state'],
+                'reason': 'requires guarded recovery',
+                'changed': True,
+            }
+        ]
+        dashboard_api.db.get_transition_journal_summary = lambda **kwargs: {
+            'count': 1,
+            'latest_timestamp': '2026-03-28T08:33:00',
+            'changed_only': True,
+            'changed_field_counts': {'workflow_state': 1},
+            'workflow_transition_counts': {'execution_failed->blocked': 1},
+        }
+        try:
+            client = app.test_client()
+            response = client.get('/api/backtest/workflow-alert-digest?max_items=5')
+            self.assertEqual(response.status_code, 200)
+            payload = response.get_json()
+            self.assertTrue(payload['success'])
+            self.assertEqual(payload['view'], 'workflow_alert_digest')
+            self.assertEqual(payload['data']['schema_version'], 'm5_workflow_alert_digest_v1')
+            self.assertIn('severity_counts', payload['data']['summary'])
+            self.assertIn('alerts', payload['data'])
+            self.assertIn('control_plane_readiness', payload['related_summary'])
+        finally:
+            dashboard_api.backtester = old_backtester
+            dashboard_api.db.get_recent_transition_journal = old_get_recent_transition_journal
+            dashboard_api.db.get_transition_journal_summary = old_get_transition_journal_summary
+
+    def test_backtest_calibration_report_api_supports_workflow_alert_digest_view(self):
+        import dashboard.api as dashboard_api
+
+        report = build_regime_policy_calibration_report([
+            {
+                'symbol': 'BTC/USDT',
+                'all_trades': [
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 0.3},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 0.2},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 0.1},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v2', 'strategy_tags': ['Breakout'], 'return_pct': -1.4},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v2', 'strategy_tags': ['Breakout'], 'return_pct': -1.0},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v2', 'strategy_tags': ['Breakout'], 'return_pct': -0.8},
+                ],
+            }
+        ])
+
+        class StubBacktester:
+            def run_all(self, symbols):
+                return {
+                    'summary': {'symbols': len(symbols)},
+                    'symbols': [{'symbol': 'BTC/USDT'}],
+                    'calibration_report': report,
+                }
+
+        old_backtester = dashboard_api.backtester
+        old_get_recent_transition_journal = dashboard_api.db.get_recent_transition_journal
+        old_get_transition_journal_summary = dashboard_api.db.get_transition_journal_summary
+        dashboard_api.backtester = StubBacktester()
+        dashboard_api.db.get_recent_transition_journal = lambda **kwargs: []
+        dashboard_api.db.get_transition_journal_summary = lambda **kwargs: {
+            'count': 0,
+            'latest_timestamp': None,
+            'changed_only': True,
+            'changed_field_counts': {},
+            'workflow_transition_counts': {},
+        }
+        try:
+            client = app.test_client()
+            response = client.get('/api/backtest/calibration-report?view=workflow_alert_digest')
+            self.assertEqual(response.status_code, 200)
+            payload = response.get_json()
+            self.assertEqual(payload['view'], 'workflow_alert_digest')
+            self.assertEqual(payload['data']['schema_version'], 'm5_workflow_alert_digest_v1')
+            self.assertEqual(payload['summary']['workflow_alert_digest'], payload['data']['summary'])
+        finally:
+            dashboard_api.backtester = old_backtester
+            dashboard_api.db.get_recent_transition_journal = old_get_recent_transition_journal
+            dashboard_api.db.get_transition_journal_summary = old_get_transition_journal_summary
+
     def test_backtest_dashboard_summary_cards_api_returns_backend_card_payload(self):
         import dashboard.api as dashboard_api
 
@@ -6090,7 +6208,7 @@ class TestExecutionObservability(unittest.TestCase):
             self.assertIn('recent_decisions', snapshot['summary'])
             self.assertTrue(snapshot['summary']['observe_only_banner'])
 
-from analytics.helper import build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, attach_auto_approval_policy, execute_controlled_rollout_layer, execute_controlled_auto_approval_layer, execute_auto_promotion_review_queue_layer, execute_rollout_executor, build_rollout_control_plane_manifest, build_control_plane_readiness_summary, build_workflow_consumer_view, build_workflow_recovery_view, build_workflow_attention_view, build_workflow_operator_digest, build_dashboard_summary_cards, build_workbench_governance_view, build_workbench_governance_detail_view, build_workbench_merged_timeline, build_workbench_timeline_summary_aggregation, build_unified_workbench_overview, build_auto_promotion_candidate_view, build_auto_promotion_execution_summary, build_auto_promotion_review_queue_consumption, build_auto_promotion_review_queue_filter_view, build_auto_promotion_review_queue_detail_view, _build_state_machine_semantics, _build_safe_rollout_action_registry
+from analytics.helper import build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, attach_auto_approval_policy, execute_controlled_rollout_layer, execute_controlled_auto_approval_layer, execute_auto_promotion_review_queue_layer, execute_rollout_executor, build_rollout_control_plane_manifest, build_control_plane_readiness_summary, build_workflow_consumer_view, build_workflow_recovery_view, build_workflow_attention_view, build_workflow_operator_digest, build_workflow_alert_digest, build_dashboard_summary_cards, build_workbench_governance_view, build_workbench_governance_detail_view, build_workbench_merged_timeline, build_workbench_timeline_summary_aggregation, build_unified_workbench_overview, build_auto_promotion_candidate_view, build_auto_promotion_execution_summary, build_auto_promotion_review_queue_consumption, build_auto_promotion_review_queue_filter_view, build_auto_promotion_review_queue_detail_view, _build_state_machine_semantics, _build_safe_rollout_action_registry
 
 
 class TestApprovalPersistence(unittest.TestCase):
@@ -7383,6 +7501,70 @@ class TestApprovalPersistence(unittest.TestCase):
         self.assertIn('manual_approval', payload['filters']['bucket_ids'])
         self.assertIn('blocked_follow_up', payload['filters']['bucket_ids'])
 
+
+    def test_build_workflow_alert_digest_prioritizes_validation_gate_and_manual_approval(self):
+        payload = build_workflow_alert_digest({
+            'workflow_state': {
+                'item_states': [
+                    {
+                        'item_id': 'playbook::manual',
+                        'title': 'Manual gate item',
+                        'action_type': 'joint_expand_guarded',
+                        'risk_level': 'medium',
+                        'approval_required': True,
+                        'requires_manual': True,
+                        'workflow_state': 'blocked_by_approval',
+                        'blocking_reasons': [],
+                    },
+                    {
+                        'item_id': 'playbook::rollback',
+                        'title': 'Rollback item',
+                        'action_type': 'joint_stage_prepare',
+                        'risk_level': 'critical',
+                        'approval_required': False,
+                        'requires_manual': False,
+                        'workflow_state': 'blocked',
+                        'blocking_reasons': ['critical_risk'],
+                        'state_machine': _build_state_machine_semantics(item_id='approval::rollback', approval_state='pending', workflow_state='blocked', execution_status='error', retryable=False, blocked_by=['critical_risk']),
+                        'rollback_gate': {'candidate': True, 'triggered': ['validation_gate_regressed']},
+                        'stage_loop': {'loop_state': 'rollback_prepare', 'recommended_action': 'rollback_prepare', 'waiting_on': ['validation_gate_regressed']},
+                    },
+                ],
+                'summary': {'item_count': 2},
+            },
+            'approval_state': {
+                'items': [
+                    {
+                        'approval_id': 'approval::manual',
+                        'playbook_id': 'playbook::manual',
+                        'title': 'Manual gate item',
+                        'action_type': 'joint_expand_guarded',
+                        'approval_state': 'pending',
+                        'decision_state': 'pending',
+                        'risk_level': 'medium',
+                        'approval_required': True,
+                        'requires_manual': True,
+                        'blocked_by': [],
+                    },
+                ],
+                'summary': {'pending_count': 1},
+            },
+            'rollout_executor': {'status': 'controlled', 'summary': {}},
+            'validation_gate': {
+                'enabled': True,
+                'ready': False,
+                'freeze_auto_advance': True,
+                'regression_detected': True,
+                'headline': 'validation_gate_regressed',
+                'gap_count': 1,
+                'failing_case_count': 1,
+                'status': 'frozen',
+            },
+        }, max_items=10)
+        self.assertEqual(payload['schema_version'], 'm5_workflow_alert_digest_v1')
+        self.assertTrue(any(row['kind'] == 'validation_gate' and row['severity'] == 'critical' for row in payload['alerts']))
+        self.assertGreaterEqual(payload['summary']['severity_counts']['critical'], 1)
+        self.assertIn('manual_approval', payload['summary']['kind_counts'])
 
     def test_state_machine_semantics_exposes_execution_timeline_and_recovery_policy(self):
         semantics = _build_state_machine_semantics(

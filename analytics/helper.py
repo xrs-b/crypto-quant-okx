@@ -5960,11 +5960,204 @@ def build_workflow_operator_digest(payload: Optional[Dict] = None, *, max_items:
     payload['operator_digest'] = digest
     return digest
 
+def build_workflow_alert_digest(payload: Optional[Dict] = None, *, max_items: int = 10) -> Dict[str, Any]:
+    payload = payload or {}
+    consumer_view = payload.get('consumer_view') or build_workflow_consumer_view(payload)
+    attention_view = payload.get('attention_view') or build_workflow_attention_view(payload, max_items=max_items)
+    operator_digest = payload.get('operator_digest') or build_workflow_operator_digest(payload, max_items=max_items)
+    workflow_items = ((consumer_view.get('workflow_state') or {}).get('item_states') or [])
+    validation_gate = consumer_view.get('validation_gate') or (operator_digest.get('summary') or {}).get('validation_gate') or _build_validation_gate_snapshot(payload)
+    control_plane_readiness = operator_digest.get('control_plane_readiness') or build_control_plane_readiness_summary(
+        payload=payload,
+        control_plane_manifest=operator_digest.get('control_plane_manifest') or build_rollout_control_plane_manifest(payload),
+        validation_gate=validation_gate,
+        validation_consumption=((operator_digest.get('summary') or {}).get('gate_consumption') or {}).get('validation_gate_consumption'),
+    )
+    transition_journal = operator_digest.get('transition_journal') or {
+        'summary': {'count': 0, 'latest_timestamp': None},
+        'latest': {},
+    }
+
+    severity_rank = {'critical': 0, 'high': 1, 'medium': 2, 'low': 3, 'info': 4}
+
+    def _alert_sort_key(row: Dict[str, Any]):
+        return (
+            severity_rank.get(str(row.get('severity') or 'info').lower(), 9),
+            str(row.get('item_id') or row.get('kind') or ''),
+        )
+
+    alerts: List[Dict[str, Any]] = []
+
+    def _push_alert(*, kind: str, severity: str, title: str, message: str,
+                    item_id: Optional[str] = None, route: Optional[str] = None,
+                    follow_up: Optional[str] = None, sources: Optional[List[str]] = None,
+                    details: Optional[Dict[str, Any]] = None):
+        alerts.append({
+            'kind': kind,
+            'severity': severity,
+            'title': title,
+            'message': message,
+            'item_id': item_id,
+            'route': route,
+            'follow_up': follow_up,
+            'sources': _dedupe_strings(sources or []),
+            'details': details or {},
+        })
+
+    if validation_gate.get('enabled') and not validation_gate.get('ready'):
+        severity = 'critical' if validation_gate.get('regression_detected') else 'high'
+        _push_alert(
+            kind='validation_gate',
+            severity=severity,
+            title='Validation gate blocking auto progression',
+            message=validation_gate.get('headline') or 'validation gate not ready',
+            route='validation_review_queue' if validation_gate.get('freeze_auto_advance') else 'rollback_candidate_queue',
+            follow_up='review_validation_freeze' if validation_gate.get('freeze_auto_advance') else 'rollback_candidate_review',
+            sources=['validation_gate', 'control_plane_readiness'],
+            details={
+                'validation_gate': validation_gate,
+                'control_plane_readiness': control_plane_readiness,
+            },
+        )
+
+    if not control_plane_readiness.get('compatible', True) or not control_plane_readiness.get('can_continue_auto_promotion', True):
+        blocking_issues = control_plane_readiness.get('blocking_issues') or []
+        _push_alert(
+            kind='control_plane',
+            severity='high',
+            title='Control plane not ready for auto promotion',
+            message='; '.join(blocking_issues[:3]) if blocking_issues else (control_plane_readiness.get('relation') or 'control plane requires review'),
+            route='control_plane_review',
+            follow_up='review_control_plane_contract',
+            sources=['control_plane_readiness'],
+            details={'control_plane_readiness': control_plane_readiness},
+        )
+
+    for row in (attention_view.get('items') or []):
+        policy = row.get('operator_action_policy') or {}
+        stage_loop = row.get('stage_loop') or {}
+        blocked_by = row.get('blocked_by') or []
+        severity = 'high' if row.get('requires_manual') else ('critical' if row.get('risk_level') == 'critical' else 'medium')
+        if row.get('approval_state') == 'pending' and row.get('requires_manual'):
+            _push_alert(
+                kind='manual_approval',
+                severity=severity,
+                item_id=row.get('item_id'),
+                title=row.get('title') or row.get('item_id') or 'Manual approval required',
+                message=f"manual approval pending / route={policy.get('route') or 'manual_approval_queue'}",
+                route=policy.get('route'),
+                follow_up=policy.get('follow_up'),
+                sources=['workflow_attention_view', 'workflow_operator_digest'],
+                details={'workflow_state': row.get('workflow_state'), 'approval_state': row.get('approval_state')},
+            )
+        elif blocked_by or row.get('workflow_state') in {'blocked', 'blocked_by_approval', 'deferred'}:
+            _push_alert(
+                kind='blocked_follow_up',
+                severity='critical' if stage_loop.get('loop_state') == 'rollback_prepare' else 'medium',
+                item_id=row.get('item_id'),
+                title=row.get('title') or row.get('item_id') or 'Blocked follow-up',
+                message=', '.join(blocked_by[:3]) if blocked_by else (stage_loop.get('recommended_action') or row.get('workflow_state') or 'blocked'),
+                route=policy.get('route'),
+                follow_up=policy.get('follow_up'),
+                sources=['workflow_attention_view'],
+                details={'blocked_by': blocked_by, 'stage_loop': stage_loop},
+            )
+
+    for row in (operator_digest.get('attention') or {}).get('rollback_candidates', []):
+        _push_alert(
+            kind='rollback_candidate',
+            severity='critical',
+            item_id=row.get('item_id'),
+            title=row.get('title') or row.get('item_id') or 'Rollback candidate',
+            message=(row.get('stage_loop') or {}).get('recommended_action') or 'prepare rollback review',
+            route=(row.get('operator_action_policy') or {}).get('route'),
+            follow_up=(row.get('operator_action_policy') or {}).get('follow_up'),
+            sources=['workflow_operator_digest', 'rollout_stage_progression'],
+            details={'stage_loop': row.get('stage_loop') or {}, 'rollback_gate': row.get('rollback_gate') or {}},
+        )
+
+    ready_items = (operator_digest.get('attention') or {}).get('auto_advance_candidates') or []
+    if ready_items and control_plane_readiness.get('can_continue_auto_promotion', True):
+        _push_alert(
+            kind='auto_promotion_opportunity',
+            severity='info',
+            title='Low-intervention auto-promotion candidates available',
+            message=f"{len(ready_items)} candidate(s) ready for guarded progression",
+            route='auto_batch_queue',
+            follow_up='monitor_post_promotion_window',
+            sources=['workflow_operator_digest', 'control_plane_readiness'],
+            details={'candidate_count': len(ready_items)},
+        )
+
+    if (transition_journal.get('summary') or {}).get('count', 0):
+        latest = transition_journal.get('latest') or {}
+        _push_alert(
+            kind='transition_activity',
+            severity='info',
+            title='Recent workflow transition activity',
+            message=latest.get('workflow_transition') or transition_journal.get('headline', {}).get('message') or 'recent transitions observed',
+            item_id=latest.get('item_id'),
+            sources=['transition_journal'],
+            details={'transition_journal': transition_journal},
+        )
+
+    alerts.sort(key=_alert_sort_key)
+    severity_counts: Dict[str, int] = {}
+    kind_counts: Dict[str, int] = {}
+    for row in alerts:
+        severity_counts[row['severity']] = severity_counts.get(row['severity'], 0) + 1
+        kind_counts[row['kind']] = kind_counts.get(row['kind'], 0) + 1
+
+    top_alert = alerts[0] if alerts else {}
+    digest = {
+        'schema_version': 'm5_workflow_alert_digest_v1',
+        'headline': {
+            'status': top_alert.get('severity') or 'steady',
+            'message': top_alert.get('message') or 'No high-priority workflow alerts',
+            'top_alert_kind': top_alert.get('kind'),
+            'top_alert_title': top_alert.get('title'),
+        },
+        'summary': {
+            'alert_count': len(alerts),
+            'severity_counts': severity_counts,
+            'kind_counts': kind_counts,
+            'workflow_item_count': len(workflow_items),
+            'attention_item_count': (attention_view.get('summary') or {}).get('attention_item_count', 0),
+            'manual_approval_count': (operator_digest.get('summary') or {}).get('manual_approval_count', 0),
+            'blocked_count': (operator_digest.get('summary') or {}).get('blocked_count', 0),
+            'rollback_candidate_count': (operator_digest.get('summary') or {}).get('rollback_candidate_count', 0),
+            'auto_advance_candidate_count': (operator_digest.get('summary') or {}).get('auto_advance_candidate_count', 0),
+            'validation_gate': validation_gate,
+            'control_plane_readiness': control_plane_readiness,
+            'latest_transition_at': (transition_journal.get('summary') or {}).get('latest_timestamp'),
+        },
+        'alerts': alerts[:max_items],
+        'alert_index': {
+            'critical': [row for row in alerts if row.get('severity') == 'critical'][:max_items],
+            'high': [row for row in alerts if row.get('severity') == 'high'][:max_items],
+            'medium': [row for row in alerts if row.get('severity') == 'medium'][:max_items],
+            'info': [row for row in alerts if row.get('severity') == 'info'][:max_items],
+        },
+        'upstreams': {
+            'workflow_attention_view': attention_view,
+            'workflow_operator_digest': operator_digest,
+            'control_plane_readiness': control_plane_readiness,
+        },
+        'related_summary': {
+            'validation_gate': validation_gate,
+            'control_plane_readiness': control_plane_readiness,
+        },
+    }
+    payload['workflow_alert_digest'] = digest
+    return digest
+
+
 def build_dashboard_summary_cards(payload: Optional[Dict] = None, *, max_items: int = 3) -> Dict[str, Any]:
     payload = payload or {}
     consumer_view = payload.get('consumer_view') or build_workflow_consumer_view(payload)
     attention_view = payload.get('attention_view') or build_workflow_attention_view(payload, max_items=max_items)
     operator_digest = payload.get('operator_digest') or build_workflow_operator_digest(payload, max_items=max_items)
+    alert_digest = payload.get('workflow_alert_digest') or build_workflow_alert_digest(payload, max_items=max_items)
 
     workflow_summary = (consumer_view.get('workflow_state') or {}).get('summary') or {}
     approval_summary = (consumer_view.get('approval_state') or {}).get('summary') or {}
@@ -6008,15 +6201,17 @@ def build_dashboard_summary_cards(payload: Optional[Dict] = None, *, max_items: 
         {
             'card_id': 'key_alerts',
             'title': 'Key alerts',
-            'status': 'attention_required' if attention_summary.get('attention_item_count', 0) else 'steady',
-            'headline': attention_view.get('headline', {}).get('message') or 'No manual/blocking alerts',
+            'status': alert_digest.get('headline', {}).get('status') or ('attention_required' if attention_summary.get('attention_item_count', 0) else 'steady'),
+            'headline': alert_digest.get('headline', {}).get('message') or attention_view.get('headline', {}).get('message') or 'No manual/blocking alerts',
             'metrics': {
                 'attention': attention_summary.get('attention_item_count', 0),
                 'manual': attention_summary.get('manual_approval_count', 0),
                 'blocked': attention_summary.get('blocked_follow_up_count', 0),
                 'overlap': attention_summary.get('overlap_count', 0),
+                'critical': (alert_digest.get('summary') or {}).get('severity_counts', {}).get('critical', 0),
+                'high': (alert_digest.get('summary') or {}).get('severity_counts', {}).get('high', 0),
             },
-            'items': attention_view.get('items') or [],
+            'items': alert_digest.get('alerts') or attention_view.get('items') or [],
         },
         {
             'card_id': 'next_actions',
@@ -6117,6 +6312,7 @@ def build_dashboard_summary_cards(payload: Optional[Dict] = None, *, max_items: 
             'bridge_mode': controlled_rollout.get('mode') or 'disabled',
             'auto_approval_mode': auto_approval.get('mode') or 'disabled',
             'attention_item_count': attention_summary.get('attention_item_count', 0),
+            'alert_digest': alert_digest.get('summary') or {},
             'pending_approval_count': approval_summary.get('pending_count', 0),
             'approval_roles': approval_summary.get('roles') or [],
             'stage_progression': stage_summary,
@@ -6144,12 +6340,14 @@ def build_dashboard_summary_cards(payload: Optional[Dict] = None, *, max_items: 
         'workflow_consumer_view': consumer_view,
         'workflow_attention_view': attention_view,
         'workflow_operator_digest': operator_digest,
+        'workflow_alert_digest': alert_digest,
         'control_plane_manifest': control_plane_manifest,
         'control_plane_readiness': control_plane_readiness,
         'related_summary': {
             'control_plane_readiness': control_plane_readiness,
             'validation_gate': validation_gate,
             'validation_gate_consumption': validation_consumption,
+            'workflow_alert_digest': alert_digest.get('summary') or {},
         },
     }
     payload['dashboard_summary_cards'] = summary_cards
@@ -7558,6 +7756,7 @@ def build_unified_workbench_overview(payload: Optional[Dict] = None, *, max_item
         max_items=max_items,
         transition_journal_overview=transition_journal_overview,
     )
+    alert_digest = payload.get('workflow_alert_digest') or build_workflow_alert_digest(payload, max_items=max_items)
     workbench_view = payload.get('workbench_governance_view') or build_workbench_governance_view(
         payload,
         max_items=max_items,
@@ -7797,6 +7996,7 @@ def build_unified_workbench_overview(payload: Optional[Dict] = None, *, max_item
             'merged_event_count_total': timeline_summary_meta.get('merged_event_count_total', 0),
             'transition_count': (transition_journal.get('summary') or {}).get('count', 0),
             'latest_transition_at': (transition_journal.get('summary') or {}).get('latest_timestamp'),
+            'workflow_alert_digest': alert_digest.get('summary') or {},
         },
         'lines': lines,
         'top_key_alerts': _take(lines['approval']['key_alerts'] + [row for row in lines['recovery']['key_alerts'] if row.get('item_id') not in {item.get('item_id') for item in lines['approval']['key_alerts']}] + [row for row in lines['rollout']['key_alerts'] if row.get('item_id') not in {item.get('item_id') for item in lines['approval']['key_alerts'] + lines['recovery']['key_alerts']}]),
@@ -7804,10 +8004,12 @@ def build_unified_workbench_overview(payload: Optional[Dict] = None, *, max_item
         'transition_journal': transition_journal,
         'control_plane_manifest': control_plane_manifest,
         'control_plane_readiness': control_plane_readiness,
+        'workflow_alert_digest': alert_digest,
         'related_summary': {
             'control_plane_readiness': control_plane_readiness,
             'validation_gate': validation_gate,
             'validation_gate_consumption': validation_consumption,
+            'workflow_alert_digest': alert_digest.get('summary') or {},
         },
         'upstreams': {
             'workflow_consumer_view': consumer_view,

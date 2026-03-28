@@ -10799,6 +10799,89 @@ class TestApprovalPersistence(unittest.TestCase):
             self.assertEqual(bridge['open_status'], 'filled')
             self.assertEqual(bridge['close_status'], 'filled')
             self.assertEqual(calls[0]['symbol'], 'BTC/USDT')
+            self.assertTrue(executed['workflow_state']['summary']['testnet_bridge_execution']['executed_this_round'])
+            self.assertTrue(executed['workflow_state']['summary']['testnet_bridge_execution']['reconcile_completed'])
+            self.assertTrue(executed['approval_state']['summary']['testnet_bridge_execution']['cleanup_completed'])
+
+    def test_testnet_bridge_execution_evidence_surfaces_across_digest_runtime_and_overview(self):
+        payload = {
+            'workflow_state': {
+                'item_states': [{
+                    'item_id': 'playbook::ready',
+                    'title': 'Ready observe item',
+                    'action_type': 'joint_observe',
+                    'risk_level': 'low',
+                    'approval_required': False,
+                    'requires_manual': False,
+                    'workflow_state': 'ready',
+                    'blocking_reasons': [],
+                }],
+                'summary': {},
+            },
+            'approval_state': {
+                'items': [{
+                    'approval_id': 'approval::ready',
+                    'playbook_id': 'playbook::ready',
+                    'title': 'Ready observe item',
+                    'action_type': 'joint_observe',
+                    'approval_state': 'pending',
+                    'decision_state': 'ready',
+                    'risk_level': 'low',
+                    'approval_required': False,
+                    'requires_manual': False,
+                    'blocked_by': [],
+                }],
+                'summary': {},
+            },
+            'testnet_bridge_execution': {
+                'schema_version': 'm5_testnet_bridge_execution_v1',
+                'enabled': True,
+                'mode': 'controlled_execute',
+                'status': 'error',
+                'plan_only': False,
+                'symbol': 'BTC/USDT',
+                'side': 'long',
+                'open_status': 'filled',
+                'close_status': 'submitted',
+                'cleanup_needed': True,
+                'residual_position_detected': True,
+                'failure_compensation_hint': 'manual_testnet_cleanup_required',
+                'blocking_reasons': [],
+                'audit': {'real_trade_execution': True, 'dangerous_live_parameter_change': False},
+                'result': {
+                    'opened': True,
+                    'closed': True,
+                    'open_status': 'filled',
+                    'close_status': 'submitted',
+                    'cleanup_needed': True,
+                    'residual_position_detected': True,
+                    'cleanup_result': {'status': 'manual_required'},
+                    'reconcile_summary': {
+                        'open_order_confirmed': True,
+                        'close_order_confirmed': False,
+                        'residual_position_detected': True,
+                        'cleanup_attempted': True,
+                        'cleanup_succeeded': False,
+                        'residual_quantity': 0.001,
+                    },
+                },
+                'error': 'cleanup_required_but_cleanup_not_confirmed',
+            },
+            'adaptive_rollout_orchestration': {'summary': {'pass_count': 1}},
+        }
+        consumer = build_workflow_consumer_view(copy.deepcopy(payload))
+        operator_digest = build_workflow_operator_digest(copy.deepcopy(payload))
+        runtime_summary = build_runtime_orchestration_summary(copy.deepcopy(payload))
+        overview = build_unified_workbench_overview(copy.deepcopy(payload))
+        cards = build_dashboard_summary_cards(copy.deepcopy(payload))
+
+        self.assertTrue(consumer['summary']['testnet_bridge_execution']['executed_this_round'])
+        self.assertTrue(operator_digest['summary']['testnet_bridge_execution']['follow_up_required'])
+        self.assertTrue(runtime_summary['summary']['testnet_bridge_execution']['follow_up_required'])
+        self.assertTrue(overview['summary']['testnet_bridge_execution']['pending_exposure'])
+        self.assertEqual(overview['lines']['rollout']['counts']['testnet_follow_up_required'], 1)
+        self.assertEqual(cards['summary']['testnet_bridge_execution']['status'], 'error')
+        self.assertEqual(cards['card_index']['execution_status']['metrics']['testnet_follow_up'], 1)
 
     def test_execute_adaptive_rollout_orchestration_runs_testnet_bridge_after_controlled_rollout(self):
         class DummyConfig:

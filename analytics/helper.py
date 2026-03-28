@@ -4412,6 +4412,8 @@ def build_runtime_orchestration_summary(payload: Optional[Dict[str, Any]] = None
         transition_journal_overview=transition_journal_overview,
     )
     auto_promotion_execution = payload.get('auto_promotion_execution_summary') or build_auto_promotion_execution_summary(payload, max_items=max_items)
+    bridge_evidence = payload.get('testnet_bridge_execution_evidence') or _summarize_testnet_bridge_execution(payload)
+    _attach_testnet_bridge_execution_evidence(payload)
     review_queue_consumption = payload.get('auto_promotion_review_queue_consumption') or build_auto_promotion_review_queue_consumption(
         auto_promotion_execution,
         max_items=max_items,
@@ -4438,6 +4440,14 @@ def build_runtime_orchestration_summary(payload: Optional[Dict[str, Any]] = None
             'dry_run': bool(row.get('dry_run')),
             'count': row.get('rollout_executor_applied_count', 0),
             'message': f"pass {row.get('label') or 'unknown'} applied {row.get('rollout_executor_applied_count', 0)} rollout executor change(s)",
+        })
+    if bridge_evidence.get('executed_this_round') or bridge_evidence.get('follow_up_required'):
+        recent_progress.append({
+            'kind': 'testnet_bridge_execution',
+            'status': bridge_evidence.get('status') or 'disabled',
+            'symbol': bridge_evidence.get('symbol'),
+            'message': f"testnet bridge status={bridge_evidence.get('status') or 'disabled'} / reconcile={str(bool(bridge_evidence.get('reconcile_completed'))).lower()} / cleanup={str(bool(bridge_evidence.get('cleanup_completed'))).lower()}",
+            'follow_up_required': bool(bridge_evidence.get('follow_up_required')),
         })
     for row in (workbench_view.get('recent_adjustments') or [])[:max_items]:
         recent_progress.append({
@@ -4529,7 +4539,7 @@ def build_runtime_orchestration_summary(payload: Optional[Dict[str, Any]] = None
         'manual_recovery_count': (recovery_view.get('summary') or {}).get('manual_recovery_count', 0),
         'rollback_candidate_count': (recovery_view.get('summary') or {}).get('rollback_candidate_count', 0),
     }
-    follow_up_required = any(v > 0 for v in follow_up_summary.values())
+    follow_up_required = any(v > 0 for v in follow_up_summary.values()) or bool(bridge_evidence.get('follow_up_required'))
     status = 'attention_required' if stuck_items or follow_up_required else ('active' if orchestration_summary.get('pass_count', 0) or len(recent_progress) > 1 else 'steady')
     headline = {
         'status': status,
@@ -4558,6 +4568,7 @@ def build_runtime_orchestration_summary(payload: Optional[Dict[str, Any]] = None
         'latest_transition': (transition_journal.get('latest') or {}).get('workflow_transition'),
         'control_plane_readiness': ((unified_overview.get('summary') or {}).get('control_plane_readiness') or {}),
         'validation_gate': ((unified_overview.get('summary') or {}).get('validation_gate') or {}),
+        'testnet_bridge_execution': bridge_evidence.get('summary') or {},
     }
     return {
         'schema_version': 'm5_runtime_orchestration_summary_v1',
@@ -4587,6 +4598,7 @@ def build_runtime_orchestration_summary(payload: Optional[Dict[str, Any]] = None
             'recovery_view': recovery_view.get('summary') or {},
             'workbench_governance_view': workbench_view.get('summary') or {},
             'control_plane_readiness': ((unified_overview.get('summary') or {}).get('control_plane_readiness') or {}),
+            'testnet_bridge_execution': bridge_evidence.get('summary') or {},
         },
     }
 
@@ -4646,6 +4658,7 @@ def execute_testnet_bridge_layer(payload: Dict[str, Any], db: Any, *, config: An
         'audit': {'real_trade_execution': False, 'dangerous_live_parameter_change': False},
     }
     payload['testnet_bridge_execution'] = result
+    _attach_testnet_bridge_execution_evidence(payload)
 
     if not result['enabled'] or result['mode'] == 'disabled':
         return payload
@@ -4726,9 +4739,11 @@ def execute_testnet_bridge_layer(payload: Dict[str, Any], db: Any, *, config: An
     })
 
     if plan_only:
+        _attach_testnet_bridge_execution_evidence(payload)
         return payload
     if blocking_reasons:
         result['status'] = 'blocked'
+        _attach_testnet_bridge_execution_evidence(payload)
         return payload
 
     bridge_runner = bridge_runner or execute_exchange_smoke
@@ -4750,6 +4765,102 @@ def execute_testnet_bridge_layer(payload: Dict[str, Any], db: Any, *, config: An
     result['audit']['real_trade_execution'] = bool(execution_result.get('opened') or execution_result.get('closed'))
     if error:
         result['status'] = 'error'
+    _attach_testnet_bridge_execution_evidence(payload)
+    return payload
+
+
+
+def _summarize_testnet_bridge_execution(payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    payload = payload or {}
+    bridge = payload.get('testnet_bridge_execution') or {}
+    result = bridge.get('result') or {}
+    reconcile = result.get('reconcile_summary') or bridge.get('reconcile_summary') or {}
+    cleanup = result.get('cleanup_result') or bridge.get('cleanup_result') or {}
+    blocking_reasons = _dedupe_strings(bridge.get('blocking_reasons') or [])
+    cleanup_needed = bool(bridge.get('cleanup_needed', result.get('cleanup_needed', False)))
+    residual_detected = bool(bridge.get('residual_position_detected', result.get('residual_position_detected', False)))
+    real_execution = bool(((bridge.get('audit') or {}).get('real_trade_execution')) or result.get('opened') or result.get('closed'))
+    reconcile_completed = bool(reconcile.get('open_order_confirmed')) and bool(reconcile.get('close_order_confirmed'))
+    cleanup_attempted = bool(reconcile.get('cleanup_attempted')) or cleanup.get('status') not in {None, '', 'not_attempted'}
+    cleanup_completed = (not cleanup_needed) or bool(reconcile.get('cleanup_succeeded')) or str(cleanup.get('status') or '').strip().lower() in {'flattened', 'clean', 'confirmed', 'success'}
+    follow_up_reasons = []
+    if cleanup_needed:
+        follow_up_reasons.append('cleanup_needed')
+    if residual_detected:
+        follow_up_reasons.append('residual_position_detected')
+    if blocking_reasons:
+        follow_up_reasons.extend(f'blocked:{reason}' for reason in blocking_reasons)
+    if bridge.get('error'):
+        follow_up_reasons.append(f"error:{bridge.get('error')}")
+    follow_up_required = bool(follow_up_reasons)
+    pending_exposure = real_execution and not cleanup_completed
+    evidence = {
+        'schema_version': 'm5_testnet_bridge_execution_evidence_v1',
+        'status': str(bridge.get('status') or 'disabled'),
+        'mode': str(bridge.get('mode') or 'disabled'),
+        'plan_only': bool(bridge.get('plan_only', True)),
+        'enabled': bool(bridge.get('enabled', False)),
+        'executed_this_round': real_execution,
+        'real_trade_execution': real_execution,
+        'blocked': bool(blocking_reasons) or str(bridge.get('status') or '') == 'blocked',
+        'blocking_reasons': blocking_reasons,
+        'error': bridge.get('error') or result.get('error'),
+        'symbol': bridge.get('symbol') or ((bridge.get('plan') or {}).get('symbol')),
+        'side': bridge.get('side') or result.get('side'),
+        'open_status': bridge.get('open_status') or result.get('open_status'),
+        'close_status': bridge.get('close_status') or result.get('close_status'),
+        'opened': bool(result.get('opened')),
+        'closed': bool(result.get('closed')),
+        'reconcile_completed': reconcile_completed,
+        'reconcile_summary': reconcile,
+        'cleanup_needed': cleanup_needed,
+        'cleanup_attempted': cleanup_attempted,
+        'cleanup_completed': cleanup_completed,
+        'cleanup_result': cleanup,
+        'residual_position_detected': residual_detected,
+        'residual_quantity': float(reconcile.get('residual_quantity') or 0.0),
+        'pending_exposure': pending_exposure,
+        'follow_up_required': follow_up_required,
+        'follow_up_reasons': _dedupe_strings(follow_up_reasons),
+        'failure_compensation_hint': bridge.get('failure_compensation_hint') or result.get('failure_compensation_hint'),
+        'smoke_run_id': result.get('smoke_run_id') or bridge.get('smoke_run_id'),
+        'actor': bridge.get('actor'),
+        'source': bridge.get('source'),
+        'replay_source': bridge.get('replay_source'),
+        'summary': {
+            'status': str(bridge.get('status') or 'disabled'),
+            'mode': str(bridge.get('mode') or 'disabled'),
+            'executed_this_round': real_execution,
+            'reconcile_completed': reconcile_completed,
+            'cleanup_completed': cleanup_completed,
+            'cleanup_needed': cleanup_needed,
+            'residual_position_detected': residual_detected,
+            'follow_up_required': follow_up_required,
+            'pending_exposure': pending_exposure,
+            'open_status': bridge.get('open_status') or result.get('open_status'),
+            'close_status': bridge.get('close_status') or result.get('close_status'),
+            'smoke_run_id': result.get('smoke_run_id') or bridge.get('smoke_run_id'),
+        },
+    }
+    return evidence
+
+
+def _attach_testnet_bridge_execution_evidence(payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    payload = payload or {}
+    evidence = _summarize_testnet_bridge_execution(payload)
+    payload['testnet_bridge_execution_evidence'] = evidence
+    workflow_state = payload.get('workflow_state') or {}
+    workflow_summary = workflow_state.get('summary') or {}
+    workflow_summary['testnet_bridge_execution'] = evidence.get('summary') or {}
+    workflow_state['summary'] = workflow_summary
+    workflow_state['testnet_bridge_execution_evidence'] = evidence
+    payload['workflow_state'] = workflow_state
+    approval_state = payload.get('approval_state') or {}
+    approval_summary = approval_state.get('summary') or {}
+    approval_summary['testnet_bridge_execution'] = evidence.get('summary') or {}
+    approval_state['summary'] = approval_summary
+    approval_state['testnet_bridge_execution_evidence'] = evidence
+    payload['approval_state'] = approval_state
     return payload
 
 
@@ -4886,8 +4997,15 @@ def execute_adaptive_rollout_orchestration(payload: Dict[str, Any], db: Any, *, 
             'gate': orchestration['production_rollout_readiness'],
             'safety_switch': 'production_rollout_readiness_gate_blocked',
         }
+        _attach_testnet_bridge_execution_evidence(payload)
+        bridge_evidence = payload.get('testnet_bridge_execution_evidence') or {}
         orchestration['summary']['testnet_bridge_status'] = 'gated_off'
         orchestration['summary']['testnet_bridge_real_trade_execution'] = False
+        orchestration['summary']['testnet_bridge_executed_this_round'] = bool(bridge_evidence.get('executed_this_round'))
+        orchestration['summary']['testnet_bridge_reconcile_completed'] = bool(bridge_evidence.get('reconcile_completed'))
+        orchestration['summary']['testnet_bridge_cleanup_completed'] = bool(bridge_evidence.get('cleanup_completed'))
+        orchestration['summary']['testnet_bridge_residual_position_detected'] = bool(bridge_evidence.get('residual_position_detected'))
+        orchestration['summary']['testnet_bridge_follow_up_required'] = bool(bridge_evidence.get('follow_up_required'))
         payload['adaptive_rollout_orchestration'] = orchestration
         return payload
 
@@ -4911,8 +5029,15 @@ def execute_adaptive_rollout_orchestration(payload: Dict[str, Any], db: Any, *, 
     orchestration['summary']['controlled_rollout_executed_count'] = int(((payload.get('controlled_rollout_execution') or {}).get('executed_count', 0) or 0))
     orchestration['summary']['auto_approval_executed_count'] = auto_approval_executed
     orchestration['summary']['review_queue_queued_count'] = int(((payload.get('auto_promotion_review_execution') or {}).get('queued_count', 0) or 0))
+    _attach_testnet_bridge_execution_evidence(payload)
+    bridge_evidence = payload.get('testnet_bridge_execution_evidence') or {}
     orchestration['summary']['testnet_bridge_status'] = str(((payload.get('testnet_bridge_execution') or {}).get('status') or 'disabled'))
     orchestration['summary']['testnet_bridge_real_trade_execution'] = bool((((payload.get('testnet_bridge_execution') or {}).get('audit') or {}).get('real_trade_execution', False)))
+    orchestration['summary']['testnet_bridge_executed_this_round'] = bool(bridge_evidence.get('executed_this_round'))
+    orchestration['summary']['testnet_bridge_reconcile_completed'] = bool(bridge_evidence.get('reconcile_completed'))
+    orchestration['summary']['testnet_bridge_cleanup_completed'] = bool(bridge_evidence.get('cleanup_completed'))
+    orchestration['summary']['testnet_bridge_residual_position_detected'] = bool(bridge_evidence.get('residual_position_detected'))
+    orchestration['summary']['testnet_bridge_follow_up_required'] = bool(bridge_evidence.get('follow_up_required'))
     payload['adaptive_rollout_orchestration'] = orchestration
     return payload
 
@@ -4931,6 +5056,8 @@ def execute_rollout_executor(payload: Dict, db: Any, *, config: Any = None, sett
 
     validation_gate = _build_validation_gate_snapshot(payload)
     control_plane_readiness = build_control_plane_readiness_summary(payload=payload, validation_gate=validation_gate)
+    bridge_evidence = (payload.get('testnet_bridge_execution_evidence') or _summarize_testnet_bridge_execution(payload))
+    _attach_testnet_bridge_execution_evidence(payload)
     result = {
         'schema_version': 'm5_rollout_executor_skeleton_v2',
         'enabled': execution_settings.get('enabled', False),
@@ -5543,6 +5670,8 @@ def build_workflow_consumer_view(payload: Optional[Dict] = None) -> Dict[str, An
     recovery_view = payload.get('workflow_recovery_view') or build_workflow_recovery_view(payload)
     validation_gate = _build_validation_gate_snapshot(payload)
     control_plane_readiness = build_control_plane_readiness_summary(payload=payload, validation_gate=validation_gate)
+    bridge_evidence = payload.get('testnet_bridge_execution_evidence') or _summarize_testnet_bridge_execution(payload)
+    _attach_testnet_bridge_execution_evidence(payload)
     approval_items = approval_state.get('items') or []
     workflow_items = workflow_state.get('item_states') or []
     approval_by_playbook = {row.get('playbook_id'): row for row in approval_items if row.get('playbook_id')}
@@ -5587,6 +5716,7 @@ def build_workflow_consumer_view(payload: Optional[Dict] = None) -> Dict[str, An
             'recovery_queue_summary': recovery_view.get('summary') or {},
             'controlled_rollout_executed_count': controlled_rollout.get('executed_count', 0),
             'auto_approval_executed_count': auto_approval.get('executed_count', 0),
+            'testnet_bridge_execution': bridge_evidence.get('summary') or {},
             'validation_gate': validation_gate,
             'control_plane_readiness': control_plane_readiness,
         },
@@ -5598,6 +5728,8 @@ def build_workflow_consumer_view(payload: Optional[Dict] = None) -> Dict[str, An
         'workflow_recovery_view': recovery_view,
         'controlled_rollout_execution': controlled_rollout,
         'auto_approval_execution': auto_approval,
+        'testnet_bridge_execution': payload.get('testnet_bridge_execution') or {},
+        'testnet_bridge_execution_evidence': bridge_evidence,
         'validation_gate': validation_gate,
     }
     payload['consumer_view'] = view
@@ -5676,6 +5808,8 @@ def build_workflow_attention_view(payload: Optional[Dict] = None, *, max_items: 
     rollout_executor = consumer_view.get('rollout_executor') or {}
     auto_approval = consumer_view.get('auto_approval_execution') or {}
     controlled_rollout = consumer_view.get('controlled_rollout_execution') or {}
+    testnet_bridge_execution = consumer_view.get('testnet_bridge_execution') or payload.get('testnet_bridge_execution') or {}
+    bridge_evidence = consumer_view.get('testnet_bridge_execution_evidence') or payload.get('testnet_bridge_execution_evidence') or _summarize_testnet_bridge_execution(payload)
 
     approval_by_playbook = {row.get('playbook_id'): row for row in approval_items if row.get('playbook_id')}
 
@@ -5813,6 +5947,8 @@ def build_workflow_attention_view(payload: Optional[Dict] = None, *, max_items: 
             },
             'auto_approval_execution': auto_approval,
             'controlled_rollout_execution': controlled_rollout,
+            'testnet_bridge_execution': testnet_bridge_execution,
+            'testnet_bridge_execution_evidence': bridge_evidence,
         },
     }
     payload['attention_view'] = attention
@@ -6547,6 +6683,8 @@ def build_workflow_operator_digest(payload: Optional[Dict] = None, *, max_items:
     rollout_executor = consumer_view.get('rollout_executor') or {}
     auto_approval = consumer_view.get('auto_approval_execution') or {}
     controlled_rollout = consumer_view.get('controlled_rollout_execution') or {}
+    testnet_bridge_execution = consumer_view.get('testnet_bridge_execution') or payload.get('testnet_bridge_execution') or {}
+    bridge_evidence = consumer_view.get('testnet_bridge_execution_evidence') or payload.get('testnet_bridge_execution_evidence') or _summarize_testnet_bridge_execution(payload)
     validation_gate = consumer_view.get('validation_gate') or _build_validation_gate_snapshot(payload)
     auto_promotion_execution = build_auto_promotion_execution_summary(payload, max_items=max_items)
     transition_journal = _build_transition_journal_consumer_view(
@@ -6783,6 +6921,7 @@ def build_workflow_operator_digest(payload: Optional[Dict] = None, *, max_items:
             'rollout_executor_status': rollout_executor.get('status') or 'disabled',
             'auto_approval_executed_count': auto_approval.get('executed_count', 0),
             'controlled_rollout_executed_count': controlled_rollout.get('executed_count', 0),
+            'testnet_bridge_execution': bridge_evidence.get('summary') or {},
             'stage_progression': (consumer_view.get('rollout_stage_progression') or {}).get('summary') or {},
             'operator_action_counts': {row.get('kind'): row.get('count', 0) for row in next_actions},
             'operator_routes': sorted({row.get('route') for row in next_actions if row.get('route')}),
@@ -6824,6 +6963,8 @@ def build_workflow_operator_digest(payload: Optional[Dict] = None, *, max_items:
             },
             'auto_approval_execution': auto_approval,
             'controlled_rollout_execution': controlled_rollout,
+            'testnet_bridge_execution': testnet_bridge_execution,
+            'testnet_bridge_execution_evidence': bridge_evidence,
         },
         'stage_progression': {
             'summary': (consumer_view.get('rollout_stage_progression') or {}).get('summary') or {},
@@ -6853,6 +6994,8 @@ def build_workflow_alert_digest(payload: Optional[Dict] = None, *, max_items: in
     operator_digest = payload.get('operator_digest') or build_workflow_operator_digest(payload, max_items=max_items)
     workflow_items = ((consumer_view.get('workflow_state') or {}).get('item_states') or [])
     validation_gate = consumer_view.get('validation_gate') or (operator_digest.get('summary') or {}).get('validation_gate') or _build_validation_gate_snapshot(payload)
+    bridge_evidence = consumer_view.get('testnet_bridge_execution_evidence') or payload.get('testnet_bridge_execution_evidence') or _summarize_testnet_bridge_execution(payload)
+    testnet_bridge_execution = consumer_view.get('testnet_bridge_execution') or payload.get('testnet_bridge_execution') or {}
     control_plane_readiness = operator_digest.get('control_plane_readiness') or build_control_plane_readiness_summary(
         payload=payload,
         control_plane_manifest=operator_digest.get('control_plane_manifest') or build_rollout_control_plane_manifest(payload),
@@ -7070,6 +7213,8 @@ def build_dashboard_summary_cards(payload: Optional[Dict] = None, *, max_items: 
     rollout_executor = consumer_view.get('rollout_executor') or {}
     auto_approval = consumer_view.get('auto_approval_execution') or {}
     controlled_rollout = consumer_view.get('controlled_rollout_execution') or {}
+    testnet_bridge_execution = consumer_view.get('testnet_bridge_execution') or payload.get('testnet_bridge_execution') or {}
+    bridge_evidence = consumer_view.get('testnet_bridge_execution_evidence') or payload.get('testnet_bridge_execution_evidence') or _summarize_testnet_bridge_execution(payload)
     digest_summary = operator_digest.get('summary') or {}
     attention_summary = attention_view.get('summary') or {}
     validation_gate = consumer_view.get('validation_gate') or digest_summary.get('validation_gate') or _build_validation_gate_snapshot(payload)
@@ -7158,7 +7303,7 @@ def build_dashboard_summary_cards(payload: Optional[Dict] = None, *, max_items: 
             'card_id': 'execution_status',
             'title': 'Executor / bridge status',
             'status': rollout_executor.get('status') or 'disabled',
-            'headline': f"executor={rollout_executor.get('status') or 'disabled'} / auto={auto_approval.get('mode') or 'disabled'} / bridge={controlled_rollout.get('mode') or 'disabled'}",
+            'headline': f"executor={rollout_executor.get('status') or 'disabled'} / auto={auto_approval.get('mode') or 'disabled'} / rollout={controlled_rollout.get('mode') or 'disabled'} / testnet={bridge_evidence.get('status') or 'disabled'}",
             'metrics': {
                 'executor_items': len(rollout_executor.get('items') or []),
                 'executor_applied': stage_summary.get('applied_count', 0),
@@ -7166,6 +7311,8 @@ def build_dashboard_summary_cards(payload: Optional[Dict] = None, *, max_items: 
                 'executor_queued': stage_summary.get('queued_count', 0),
                 'bridge_executed': controlled_rollout.get('executed_count', 0),
                 'bridge_skipped': controlled_rollout.get('skipped_count', 0),
+                'testnet_executed': 1 if bridge_evidence.get('executed_this_round') else 0,
+                'testnet_follow_up': 1 if bridge_evidence.get('follow_up_required') else 0,
                 'auto_executed': auto_approval.get('executed_count', 0),
                 'auto_skipped': auto_approval.get('skipped_count', 0),
             },
@@ -7176,6 +7323,8 @@ def build_dashboard_summary_cards(payload: Optional[Dict] = None, *, max_items: 
                 },
                 'controlled_rollout_execution': controlled_rollout,
                 'auto_approval_execution': auto_approval,
+                'testnet_bridge_execution': testnet_bridge_execution,
+                'testnet_bridge_execution_evidence': bridge_evidence,
             },
         },
         {
@@ -7218,6 +7367,7 @@ def build_dashboard_summary_cards(payload: Optional[Dict] = None, *, max_items: 
             'executor_status': rollout_executor.get('status') or 'disabled',
             'bridge_mode': controlled_rollout.get('mode') or 'disabled',
             'auto_approval_mode': auto_approval.get('mode') or 'disabled',
+            'testnet_bridge_execution': bridge_evidence.get('summary') or {},
             'attention_item_count': attention_summary.get('attention_item_count', 0),
             'alert_digest': alert_digest.get('summary') or {},
             'pending_approval_count': approval_summary.get('pending_count', 0),
@@ -7242,6 +7392,8 @@ def build_dashboard_summary_cards(payload: Optional[Dict] = None, *, max_items: 
             },
             'controlled_rollout_execution': controlled_rollout,
             'auto_approval_execution': auto_approval,
+            'testnet_bridge_execution': testnet_bridge_execution,
+            'testnet_bridge_execution_evidence': bridge_evidence,
         },
         'stage_progression': consumer_view.get('rollout_stage_progression') or {},
         'workflow_consumer_view': consumer_view,
@@ -7256,6 +7408,7 @@ def build_dashboard_summary_cards(payload: Optional[Dict] = None, *, max_items: 
             'validation_gate_consumption': validation_consumption,
             'control_plane_contract_drift': contract_drift_summary,
             'workflow_alert_digest': alert_digest.get('summary') or {},
+            'testnet_bridge_execution': bridge_evidence.get('summary') or {},
         },
     }
     payload['dashboard_summary_cards'] = summary_cards
@@ -8443,6 +8596,8 @@ def build_workbench_governance_view(payload: Optional[Dict] = None, *, max_items
     rollout_executor = consumer_view.get('rollout_executor') or {}
     auto_approval = consumer_view.get('auto_approval_execution') or {}
     controlled_rollout = consumer_view.get('controlled_rollout_execution') or {}
+    testnet_bridge_execution = consumer_view.get('testnet_bridge_execution') or payload.get('testnet_bridge_execution') or {}
+    bridge_evidence = consumer_view.get('testnet_bridge_execution_evidence') or payload.get('testnet_bridge_execution_evidence') or _summarize_testnet_bridge_execution(payload)
     workflow_items = ((consumer_view.get('workflow_state') or {}).get('item_states') or [])
     approval_items = ((consumer_view.get('approval_state') or {}).get('items') or [])
 
@@ -8616,6 +8771,8 @@ def build_workbench_governance_view(payload: Optional[Dict] = None, *, max_items
             'auto_promotion_execution': auto_promotion_execution,
             'auto_promotion_review_queues': auto_promotion_review_queues,
             'follow_up_review_queue': auto_promotion_review_queues.get('items') or [],
+            'testnet_bridge_execution': testnet_bridge_execution,
+            'testnet_bridge_execution_evidence': bridge_evidence,
         },
         'recent_adjustments': recent_adjustments[:max_adjustments],
         'transition_journal': transition_journal,
@@ -8725,6 +8882,8 @@ def build_unified_workbench_overview(payload: Optional[Dict] = None, *, max_item
         label='unified_workbench_overview',
     )
     validation_gate = consumer_view.get('validation_gate') or (operator_digest.get('summary') or {}).get('validation_gate') or _build_validation_gate_snapshot(payload)
+    bridge_evidence = consumer_view.get('testnet_bridge_execution_evidence') or payload.get('testnet_bridge_execution_evidence') or _summarize_testnet_bridge_execution(payload)
+    testnet_bridge_execution = consumer_view.get('testnet_bridge_execution') or payload.get('testnet_bridge_execution') or {}
     validation_consumption = _collect_validation_gate_consumption((consumer_view.get('workflow_state') or {}).get('item_states') or [])
     control_plane_manifest = build_rollout_control_plane_manifest(payload)
     control_plane_readiness = build_control_plane_readiness_summary(
@@ -8835,6 +8994,9 @@ def build_unified_workbench_overview(payload: Optional[Dict] = None, *, max_item
                 'promotion_review_due': (auto_promotion_review_queues.get('summary') or {}).get('review_due_count', 0),
                 'contract_drift_frozen': contract_drift_summary.get('frozen_item_count', 0),
                 'contract_drift_review_required': contract_drift_summary.get('review_required_count', 0),
+                'testnet_executed_this_round': 1 if bridge_evidence.get('executed_this_round') else 0,
+                'testnet_follow_up_required': 1 if bridge_evidence.get('follow_up_required') else 0,
+                'testnet_pending_exposure': 1 if bridge_evidence.get('pending_exposure') else 0,
             },
             'validation_gate': validation_gate,
             'control_plane_readiness': control_plane_readiness,
@@ -8848,6 +9010,8 @@ def build_unified_workbench_overview(payload: Optional[Dict] = None, *, max_item
             'auto_promotion_execution': auto_promotion_execution,
             'auto_promotion_review_queues': auto_promotion_review_queues,
             'follow_up_review_queue': auto_promotion_review_queues.get('items') or [],
+            'testnet_bridge_execution': testnet_bridge_execution,
+            'testnet_bridge_execution_evidence': bridge_evidence,
         },
         'recovery': {
             'current_state': recovery_state,
@@ -8916,6 +9080,7 @@ def build_unified_workbench_overview(payload: Optional[Dict] = None, *, max_item
             'transition_count': (transition_journal.get('summary') or {}).get('count', 0),
             'latest_transition_at': (transition_journal.get('summary') or {}).get('latest_timestamp'),
             'workflow_alert_digest': alert_digest.get('summary') or {},
+            'testnet_bridge_execution': bridge_evidence.get('summary') or {},
         },
         'lines': lines,
         'top_key_alerts': _take(lines['approval']['key_alerts'] + [row for row in lines['recovery']['key_alerts'] if row.get('item_id') not in {item.get('item_id') for item in lines['approval']['key_alerts']}] + [row for row in lines['rollout']['key_alerts'] if row.get('item_id') not in {item.get('item_id') for item in lines['approval']['key_alerts'] + lines['recovery']['key_alerts']}]),
@@ -8930,6 +9095,7 @@ def build_unified_workbench_overview(payload: Optional[Dict] = None, *, max_item
             'validation_gate': validation_gate,
             'validation_gate_consumption': validation_consumption,
             'workflow_alert_digest': alert_digest.get('summary') or {},
+            'testnet_bridge_execution': bridge_evidence.get('summary') or {},
         },
         'upstreams': {
             'workflow_consumer_view': consumer_view,

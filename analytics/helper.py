@@ -131,6 +131,17 @@ SAFE_ROLLOUT_STAGE_HANDLER_REGISTRY = {
     },
 }
 
+ROLLOUT_STAGE_ORDER = ['observe', 'candidate', 'guarded_prepare', 'controlled_apply', 'review_pending', 'rollback_prepare']
+ROLLOUT_STAGE_FAMILY_TO_STAGES = {
+    'observe': ['observe'],
+    'queue': ['candidate'],
+    'stage': ['guarded_prepare', 'controlled_apply'],
+    'review': ['review_pending'],
+    'metadata': ['review_pending'],
+    'manual_gate': ['review_pending', 'rollback_prepare'],
+    'unsupported': ['observe'],
+}
+
 ROLLOUT_TRANSITION_POLICY_VERSION = 'm5_rollout_transition_policy_v1'
 ROLLOUT_ACTION_REGISTRY_VERSION = 'm5_safe_rollout_action_registry_v1'
 ROLLOUT_STAGE_HANDLER_REGISTRY_VERSION = 'm5_rollout_stage_handler_registry_v1'
@@ -2202,6 +2213,86 @@ def _recommend_rollout_stage_advisory(*, stage_key: str, current_stage: str, tar
     }
 
 
+def _build_rollout_stage_profile(stage_key: Optional[str], spec: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    normalized_stage = str(stage_key or '').strip().lower() or 'observe'
+    base_spec = dict(spec or ROLLOUT_STAGE_HANDLER_SPECS.get(normalized_stage) or ROLLOUT_STAGE_HANDLER_SPECS['observe'])
+    stage_index = ROLLOUT_STAGE_ORDER.index(normalized_stage) if normalized_stage in ROLLOUT_STAGE_ORDER else 0
+    return {
+        'stage_key': normalized_stage,
+        'stage_index': stage_index,
+        'stage_path': list(ROLLOUT_STAGE_ORDER),
+        'owner': base_spec.get('owner') or 'system',
+        'auto_progression': bool(base_spec.get('auto_progression', False)),
+        'enter_conditions': list(base_spec.get('enter_conditions') or []),
+        'stay_conditions': list(base_spec.get('stay_conditions') or []),
+        'exit_conditions': list(base_spec.get('exit_conditions') or []),
+        'review_due_strategy': base_spec.get('review_due_strategy'),
+        'rollback_stage': base_spec.get('rollback_stage') or 'observe',
+        'lifecycle': {
+            'phase': 'manual_guarded' if (base_spec.get('owner') or 'system') == 'operator' else 'system_guarded',
+            'entry': list(base_spec.get('enter_conditions') or []),
+            'steady_state': list(base_spec.get('stay_conditions') or []),
+            'exit': list(base_spec.get('exit_conditions') or []),
+        },
+    }
+
+
+def _build_rollout_stage_handler_snapshot(*, stage_key: str, current_stage: str, target_stage: str, spec: Dict[str, Any],
+                                          owner: str, action_type: Optional[str], workflow_state: Optional[str],
+                                          waiting_on: Optional[List[str]] = None, why_stopped: Optional[str] = None,
+                                          next_transition: Optional[str] = None, review_due_at: Optional[str] = None,
+                                          review_overdue: bool = False, rollback_candidate: bool = False,
+                                          advisory: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    profile = _build_rollout_stage_profile(stage_key, spec)
+    normalized_workflow_state = str(workflow_state or '').strip().lower() or 'pending'
+    effective_auto_progression = bool(spec.get('auto_progression', False) and owner == 'system' and not rollback_candidate)
+    lane = 'rollback_candidate' if rollback_candidate else ('manual_approval' if owner == 'operator' else 'auto_batch')
+    route_family = 'manual_guarded' if owner == 'operator' or rollback_candidate else 'safe_apply'
+    return {
+        'stage_key': stage_key,
+        'current_stage': current_stage,
+        'target_stage': target_stage,
+        'owner': owner,
+        'auto_progression': effective_auto_progression,
+        'enter_conditions': list(spec.get('enter_conditions') or []),
+        'stay_conditions': list(spec.get('stay_conditions') or []),
+        'exit_conditions': list(spec.get('exit_conditions') or []),
+        'review_due_strategy': spec.get('review_due_strategy'),
+        'rollback_stage': spec.get('rollback_stage') or 'observe',
+        'rollback_candidate': bool(rollback_candidate),
+        'review_due_at': review_due_at,
+        'review_overdue': review_overdue,
+        'waiting_on': list(waiting_on or []),
+        'why_stopped': why_stopped,
+        'next_transition': next_transition,
+        'responsible_actor': owner,
+        'action_type': str(action_type or '').strip().lower() or None,
+        'workflow_state': normalized_workflow_state,
+        'stage_profile': profile,
+        'lifecycle': {
+            'phase': profile['lifecycle']['phase'],
+            'entry': profile['lifecycle']['entry'],
+            'steady_state': profile['lifecycle']['steady_state'],
+            'exit': profile['lifecycle']['exit'],
+            'workflow_state': normalized_workflow_state,
+        },
+        'operator_handoff': {
+            'required': owner == 'operator' or rollback_candidate,
+            'owner': owner,
+            'lane': lane,
+            'route_family': route_family,
+            'reason': why_stopped,
+        },
+        'progression': {
+            'route_family': route_family,
+            'next_transition': next_transition,
+            'ready_for_next_stage': not bool(waiting_on),
+            'blocked': bool(waiting_on),
+        },
+        'advisory': dict(advisory or {}),
+    }
+
+
 def _resolve_rollout_stage_handler(*, current_stage: Optional[str], target_stage: Optional[str], action_type: Optional[str],
                                   workflow_state: Optional[str], blocked_by: Optional[List[str]] = None,
                                   review_due_at: Optional[str] = None, rollback_candidate: bool = False,
@@ -2272,27 +2363,22 @@ def _resolve_rollout_stage_handler(*, current_stage: Optional[str], target_stage
         low_risk=low_risk,
         execution_status=execution_status,
     )
-    return {
-        'stage_key': stage_key,
-        'current_stage': normalized_current,
-        'target_stage': normalized_target,
-        'owner': owner,
-        'auto_progression': bool(spec.get('auto_progression', False) and owner == 'system' and not rollback_candidate),
-        'enter_conditions': spec.get('enter_conditions') or [],
-        'stay_conditions': spec.get('stay_conditions') or [],
-        'exit_conditions': spec.get('exit_conditions') or [],
-        'review_due_strategy': spec.get('review_due_strategy'),
-        'rollback_stage': spec.get('rollback_stage') or 'observe',
-        'rollback_candidate': bool(rollback_candidate),
-        'review_due_at': review_due_at,
-        'review_overdue': review_overdue,
-        'waiting_on': waiting_on,
-        'why_stopped': why_stopped,
-        'next_transition': next_transition,
-        'responsible_actor': owner,
-        'action_type': str(action_type or '').strip().lower() or None,
-        'advisory': advisory,
-    }
+    return _build_rollout_stage_handler_snapshot(
+        stage_key=stage_key,
+        current_stage=normalized_current,
+        target_stage=normalized_target,
+        spec=spec,
+        owner=owner,
+        action_type=action_type,
+        workflow_state=normalized_workflow_state,
+        waiting_on=waiting_on,
+        why_stopped=why_stopped,
+        next_transition=next_transition,
+        review_due_at=review_due_at,
+        review_overdue=review_overdue,
+        rollback_candidate=rollback_candidate,
+        advisory=advisory,
+    )
 
 
 def _build_rollout_gate_policy(spec: Optional[Dict[str, Any]], handler: Optional[Dict[str, Any]], *, allowlisted: bool) -> Dict[str, Any]:
@@ -2467,7 +2553,14 @@ def _evaluate_rollout_gates(*, action_type: str, row: Dict[str, Any], workflow_i
 
 def _build_safe_rollout_action_registry(allowed_action_types: Optional[List[str]] = None) -> Dict[str, Any]:
     allow = set(_dedupe_strings(allowed_action_types or []))
-    handlers = {key: dict(value) for key, value in SAFE_ROLLOUT_STAGE_HANDLER_REGISTRY.items()}
+    handlers = {}
+    for key, value in SAFE_ROLLOUT_STAGE_HANDLER_REGISTRY.items():
+        handler_entry = dict(value)
+        supported_stages = list(ROLLOUT_STAGE_FAMILY_TO_STAGES.get(handler_entry.get('stage_family'), [])) or ['observe']
+        handler_entry['supported_stages'] = supported_stages
+        handler_entry['stage_profiles'] = [_build_rollout_stage_profile(stage_key) for stage_key in supported_stages]
+        handler_entry['lifecycle_boundary'] = 'queue_only' if handler_entry.get('disposition') == 'queue_only' else 'metadata_only'
+        handlers[key] = handler_entry
     actions = {}
     executable = []
     queue_only = []
@@ -2476,6 +2569,8 @@ def _build_safe_rollout_action_registry(allowed_action_types: Optional[List[str]
         handler = _resolve_safe_rollout_handler(spec, action_type)
         allowlisted = action_type in allow
         gate_policy = _build_rollout_gate_policy(spec, handler, allowlisted=allowlisted)
+        transition_policy = _build_rollout_transition_policy_snapshot(spec, action_type)
+        target_stage = transition_policy.get('default_target_stage') or transition_policy.get('target_rollout_stage') or next(iter(ROLLOUT_STAGE_FAMILY_TO_STAGES.get(handler.get('stage_family'), ['observe'])), 'observe')
         entry = {
             'action_type': action_type,
             'allowlisted': allowlisted,
@@ -2487,7 +2582,8 @@ def _build_safe_rollout_action_registry(allowed_action_types: Optional[List[str]
             'stage_family': handler.get('stage_family'),
             'rollback_capable': bool(spec.get('rollback_capable', False)),
             'audit_code': spec.get('audit_code'),
-            'transition_policy': _build_rollout_transition_policy_snapshot(spec, action_type),
+            'transition_policy': transition_policy,
+            'stage_handler_profile': _build_rollout_stage_profile(target_stage),
             'gate_policy': gate_policy,
             'preconditions': gate_policy.get('preconditions') or [],
             'idempotency_rule': gate_policy.get('idempotency_rule'),
@@ -3326,6 +3422,8 @@ def build_rollout_control_plane_manifest(payload: Optional[Dict] = None, executo
         'registries': {
             'action_types': action_types,
             'stage_handlers': stage_handler_keys,
+            'stage_profiles': {stage_key: _build_rollout_stage_profile(stage_key) for stage_key in ROLLOUT_STAGE_ORDER},
+            'handler_stage_map': {key: (value.get('supported_stages') or []) for key, value in stage_handlers.items()},
             'executable_action_types': sorted({row.get('action_type') for row in (registry.get('executable') or []) if row.get('action_type')}),
             'queue_only_action_types': sorted({row.get('action_type') for row in (registry.get('queue_only') or []) if row.get('action_type')}),
             'unsupported_action_types': sorted({row.get('action_type') for row in (registry.get('unsupported') or []) if row.get('action_type')}),

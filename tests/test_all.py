@@ -5731,6 +5731,9 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
             self.assertEqual(payload['data']['schema_version'], 'm5_rollout_control_plane_manifest_v1')
             self.assertTrue(payload['data']['compatibility']['compatible'])
             self.assertIn('joint_review_schedule', payload['data']['registries']['action_types'])
+            self.assertIn('stage_profiles', payload['data']['registries'])
+            self.assertEqual(payload['data']['registries']['stage_profiles']['guarded_prepare']['stage_index'], 2)
+            self.assertIn('stage_prepare_safe', payload['data']['registries']['handler_stage_map'])
             self.assertIn('related_summary', payload)
             self.assertIn('control_plane_readiness', payload['related_summary'])
         finally:
@@ -8537,6 +8540,10 @@ class TestApprovalPersistence(unittest.TestCase):
             self.assertIn('stage_prepare_safe', registry['handlers'])
             self.assertEqual(registry['actions']['joint_stage_prepare']['handler']['route'], 'stage_metadata_apply')
             self.assertEqual(registry['actions']['joint_stage_prepare']['handler']['stage_family'], 'stage')
+            self.assertEqual(registry['actions']['joint_stage_prepare']['stage_handler_profile']['stage_key'], 'guarded_prepare')
+            self.assertEqual(registry['actions']['joint_stage_prepare']['stage_handler_profile']['stage_index'], 2)
+            self.assertEqual(registry['handlers']['stage_prepare_safe']['supported_stages'], ['guarded_prepare', 'controlled_apply'])
+            self.assertEqual(registry['handlers']['stage_prepare_safe']['stage_profiles'][0]['stage_key'], 'guarded_prepare')
             self.assertEqual(registry['fallback_handler']['handler_key'], 'unsupported::unsupported_action')
 
 
@@ -8809,6 +8816,11 @@ class TestApprovalPersistence(unittest.TestCase):
             self.assertEqual(stage_handler['owner'], 'system')
             self.assertTrue(stage_handler['auto_progression'])
             self.assertEqual(stage_handler['next_transition'], 'promote_to_controlled_apply')
+            self.assertEqual(stage_handler['stage_profile']['stage_key'], 'guarded_prepare')
+            self.assertEqual(stage_handler['stage_profile']['stage_index'], 2)
+            self.assertEqual(stage_handler['lifecycle']['phase'], 'system_guarded')
+            self.assertEqual(stage_handler['operator_handoff']['lane'], 'auto_batch')
+            self.assertFalse(stage_handler['progression']['blocked'])
             review_handler = items['approval::review']['plan']['stage_handler']
             self.assertEqual(review_handler['stage_key'], 'review_pending')
             self.assertEqual(review_handler['owner'], 'operator')
@@ -8816,6 +8828,8 @@ class TestApprovalPersistence(unittest.TestCase):
             self.assertIn('review_overdue', review_handler['waiting_on'])
             self.assertIn('rollback_gate_triggered', review_handler['waiting_on'])
             self.assertEqual(review_handler['why_stopped'], 'review_checkpoint_overdue')
+            self.assertEqual(review_handler['stage_profile']['stage_key'], 'review_pending')
+            self.assertEqual(review_handler['operator_handoff']['lane'], 'rollback_candidate')
             self.assertEqual(items['approval::review']['plan']['rollback_gate']['next_action'], 'prepare_rollback_review')
             self.assertEqual(items['approval::stage']['plan']['stage_loop']['loop_state'], 'auto_advance')
             self.assertEqual(items['approval::review']['plan']['stage_loop']['loop_state'], 'rollback_prepare')

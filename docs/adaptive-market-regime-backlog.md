@@ -1,5 +1,27 @@
 # Adaptive Market Regime Backlog
 
+## 2026-03-28 已完成：runtime orchestration summary / low-intervention entrypoint
+- 已新增统一后端运行期入口 `m5_runtime_orchestration_summary_v1`，专门把 `adaptive_rollout_orchestration + workflow operator digest + workbench governance + unified workbench overview + recovery/review queues` 收口成一份更直接可巡检的 runtime summary。
+- 调用方而家可以一眼见到：
+  - 最近自动推进了什么（`recent_progress`）
+  - 当前卡在哪里（`stuck_points`）
+  - 下一步系统会怎么做（`next_step` / `next_actions`）
+  - 是否仍有 review / rollback follow-up（`follow_ups`）
+- 结构保持稳定、可序列化，主字段固定为：
+  - `headline`
+  - `summary`
+  - `recent_progress`
+  - `stuck_points`
+  - `next_step`
+  - `follow_ups`
+  - `transition_journal`
+  - `related_summary`
+- 已落点到：
+  - `analytics/helper.build_runtime_orchestration_summary()`
+  - `dashboard/api:/api/backtest/runtime-orchestration-summary`
+  - `dashboard/api:/api/backtest/calibration-report?view=runtime_orchestration_summary`
+- 已补 helper + API 测试覆盖 runtime entrypoint / calibration-report 视图。
+
 ## 2026-03-28 已完成：control-plane manifest 消费层接入
 - 已新增统一后端消费摘要 `m5_control_plane_readiness_summary_v1`，把 rollout control-plane manifest、validation gate readiness、replay-safe、upgrade-window、rollback-window 收敛成一个稳定、可序列化输出。
 - 继续把 persisted contract drift 收口成稳定 `m5_control_plane_contract_drift_summary_v1`，并回挂到 `workflow_operator_digest / workbench_governance_view / workflow_alert_digest / unified_workbench_overview`；调用方而家可直接见到：边啲 item 因契约漂移被冻结、主导 drift type（`registry/version/generation/missing_snapshot`）、以及 `requires_manual_review`。

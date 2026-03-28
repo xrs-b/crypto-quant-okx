@@ -4388,6 +4388,209 @@ def _consume_rollout_queue_plan(*, db: Any, row: Dict[str, Any], workflow_item: 
 
 
 
+
+def build_runtime_orchestration_summary(payload: Optional[Dict[str, Any]] = None, *, max_items: int = 5,
+                                       transition_journal_overview: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    payload = payload or {}
+    consumer_view = payload.get('consumer_view') or build_workflow_consumer_view(payload)
+    operator_digest = payload.get('workflow_operator_digest') or payload.get('operator_digest') or build_workflow_operator_digest(
+        payload,
+        max_items=max_items,
+        transition_journal_overview=transition_journal_overview,
+    )
+    recovery_view = payload.get('workflow_recovery_view') or build_workflow_recovery_view(payload, max_items=max_items)
+    workbench_view = payload.get('workbench_governance_view') or build_workbench_governance_view(
+        payload,
+        max_items=max_items,
+        max_adjustments=max(max_items, 10),
+        transition_journal_overview=transition_journal_overview,
+    )
+    unified_overview = payload.get('unified_workbench_overview') or build_unified_workbench_overview(
+        payload,
+        max_items=max_items,
+        max_adjustments=max(max_items, 10),
+        transition_journal_overview=transition_journal_overview,
+    )
+    auto_promotion_execution = payload.get('auto_promotion_execution_summary') or build_auto_promotion_execution_summary(payload, max_items=max_items)
+    review_queue_consumption = payload.get('auto_promotion_review_queue_consumption') or build_auto_promotion_review_queue_consumption(
+        auto_promotion_execution,
+        max_items=max_items,
+        label='runtime_orchestration_summary',
+    )
+
+    orchestration = payload.get('adaptive_rollout_orchestration') or {}
+    orchestration_summary = orchestration.get('summary') or {}
+    transition_journal = operator_digest.get('transition_journal') or unified_overview.get('transition_journal') or {
+        'schema_version': 'm5_transition_journal_consumer_v1',
+        'headline': {'status': 'steady', 'message': '0 recent transition(s)', 'latest_timestamp': None, 'latest_transition': None},
+        'summary': {'count': 0, 'latest_timestamp': None, 'changed_only': True, 'changed_field_counts': {}, 'workflow_transition_counts': {}},
+        'recent_transitions': [],
+        'latest': {},
+        'overview': {'schema_version': 'm5_transition_journal_overview_v1', 'summary': {'count': 0, 'changed_field_counts': {}}, 'recent_transitions': [], 'breakdown': {'changed_field_counts': {}, 'trigger_counts': {}, 'actor_counts': {}, 'source_counts': {}}},
+    }
+
+    recent_progress = []
+    for row in orchestration.get('passes') or []:
+        recent_progress.append({
+            'kind': 'orchestration_pass',
+            'label': row.get('label'),
+            'status': 'executed',
+            'dry_run': bool(row.get('dry_run')),
+            'count': row.get('rollout_executor_applied_count', 0),
+            'message': f"pass {row.get('label') or 'unknown'} applied {row.get('rollout_executor_applied_count', 0)} rollout executor change(s)",
+        })
+    for row in (workbench_view.get('recent_adjustments') or [])[:max_items]:
+        recent_progress.append({
+            'kind': row.get('source') or 'runtime_adjustment',
+            'item_id': row.get('item_id'),
+            'approval_id': row.get('approval_id'),
+            'title': row.get('title'),
+            'action_type': row.get('action_type'),
+            'status': row.get('status') or row.get('state') or 'applied',
+            'workflow_state': row.get('workflow_state'),
+            'current_rollout_stage': row.get('current_rollout_stage'),
+            'target_rollout_stage': row.get('target_rollout_stage'),
+            'reason': row.get('reason'),
+            'message': f"{row.get('source') or 'runtime_adjustment'} {row.get('status') or row.get('state') or 'applied'} {row.get('title') or row.get('item_id') or 'item'}",
+        })
+    if not recent_progress:
+        recent_progress.append({
+            'kind': 'idle',
+            'status': 'steady',
+            'message': 'No recent automatic progression recorded in current runtime snapshot',
+        })
+
+    stuck_items = []
+    seen_stuck_keys = set()
+    def _push_stuck(source: str, row: Dict[str, Any], reason: Optional[str] = None):
+        key = row.get('item_id') or row.get('approval_id') or f"{source}:{row.get('title')}"
+        if not key or key in seen_stuck_keys:
+            return
+        seen_stuck_keys.add(key)
+        blocked_by = row.get('blocked_by') or row.get('blocking_reasons') or row.get('rollback_triggered') or []
+        stuck_items.append({
+            'source': source,
+            'item_id': row.get('item_id'),
+            'approval_id': row.get('approval_id'),
+            'title': row.get('title') or row.get('item_id') or row.get('approval_id'),
+            'action_type': row.get('action_type'),
+            'workflow_state': row.get('workflow_state'),
+            'approval_state': row.get('approval_state'),
+            'risk_level': row.get('risk_level') or row.get('risk_label'),
+            'route': row.get('operator_route') or row.get('route') or row.get('queue_kind'),
+            'follow_up': row.get('operator_follow_up') or row.get('follow_up') or row.get('next_step'),
+            'blocked_by': blocked_by,
+            'reason': reason or row.get('reason') or row.get('queue_reason'),
+        })
+    for row in ((operator_digest.get('attention') or {}).get('manual_approval') or [])[:max_items]:
+        _push_stuck('manual_approval', row, 'await_manual_approval')
+    for row in ((operator_digest.get('attention') or {}).get('blocked') or [])[:max_items]:
+        _push_stuck('blocked_follow_up', row)
+    for row in ((recovery_view.get('queues') or {}).get('rollback_candidates') or [])[:max_items]:
+        _push_stuck('rollback_candidate', row, 'freeze_and_review')
+    for row in ((recovery_view.get('queues') or {}).get('manual_recovery') or [])[:max_items]:
+        _push_stuck('manual_recovery', row, 'operator_review_and_safe_requeue')
+
+    next_actions = []
+    for line_id in ['approval', 'rollout', 'recovery']:
+        line = (unified_overview.get('lines') or {}).get(line_id) or {}
+        for row in (line.get('next_actions') or [])[:max_items]:
+            next_actions.append({
+                'line': line_id,
+                'kind': row.get('kind'),
+                'priority': row.get('priority') or 'medium',
+                'count': row.get('count', 0),
+                'message': row.get('message') or '',
+                'route': row.get('route'),
+                'follow_up': row.get('follow_up'),
+                'items': row.get('items') or [],
+            })
+    next_actions.sort(key=lambda row: ({'high': 0, 'medium': 1, 'low': 2}.get(row.get('priority'), 9), -(row.get('count') or 0), row.get('line') or ''))
+    next_step = next_actions[0] if next_actions else {
+        'line': unified_overview.get('dominant_line') or 'approval',
+        'kind': 'observe_only',
+        'priority': 'low',
+        'count': 0,
+        'message': 'No immediate follow-up lane; keep observing runtime state',
+        'route': 'observe_only',
+        'follow_up': 'monitor_runtime_summary',
+        'items': [],
+    }
+
+    follow_up_queues = {
+        'review': (review_queue_consumption.get('post_promotion_review_queue') or [])[:max_items],
+        'rollback': (review_queue_consumption.get('rollback_review_queue') or [])[:max_items],
+    }
+    follow_up_summary = {
+        'post_promotion_review_queue_count': (review_queue_consumption.get('summary') or {}).get('post_promotion_review_queue_count', 0),
+        'rollback_review_queue_count': (review_queue_consumption.get('summary') or {}).get('rollback_review_queue_count', 0),
+        'review_due_count': (review_queue_consumption.get('summary') or {}).get('review_due_count', 0),
+        'retry_queue_count': (recovery_view.get('summary') or {}).get('retry_queue_count', 0),
+        'manual_recovery_count': (recovery_view.get('summary') or {}).get('manual_recovery_count', 0),
+        'rollback_candidate_count': (recovery_view.get('summary') or {}).get('rollback_candidate_count', 0),
+    }
+    follow_up_required = any(v > 0 for v in follow_up_summary.values())
+    status = 'attention_required' if stuck_items or follow_up_required else ('active' if orchestration_summary.get('pass_count', 0) or len(recent_progress) > 1 else 'steady')
+    headline = {
+        'status': status,
+        'message': (
+            f"recent={len(recent_progress[:max_items])} / stuck={len(stuck_items)} / "
+            f"next={next_step.get('route') or next_step.get('kind') or 'observe_only'} / "
+            f"review={follow_up_summary['post_promotion_review_queue_count']} / rollback={follow_up_summary['rollback_review_queue_count']}"
+        ),
+        'dominant_line': unified_overview.get('dominant_line') or 'approval',
+        'overall_state': unified_overview.get('overall_state') or status,
+    }
+    summary = {
+        'pass_count': orchestration_summary.get('pass_count', 0),
+        'rerun_triggered': bool(orchestration_summary.get('rerun_triggered')),
+        'rerun_reason': orchestration_summary.get('rerun_reason'),
+        'rollout_executor_applied_count': orchestration_summary.get('rollout_executor_applied_count', 0),
+        'controlled_rollout_executed_count': orchestration_summary.get('controlled_rollout_executed_count', 0),
+        'auto_approval_executed_count': orchestration_summary.get('auto_approval_executed_count', 0),
+        'review_queue_queued_count': orchestration_summary.get('review_queue_queued_count', 0),
+        'recent_progress_count': len(recent_progress),
+        'stuck_item_count': len(stuck_items),
+        'next_action_count': len(next_actions),
+        'follow_up_required': follow_up_required,
+        'follow_up_summary': follow_up_summary,
+        'transition_journal_count': (transition_journal.get('summary') or {}).get('count', 0),
+        'latest_transition': (transition_journal.get('latest') or {}).get('workflow_transition'),
+        'control_plane_readiness': ((unified_overview.get('summary') or {}).get('control_plane_readiness') or {}),
+        'validation_gate': ((unified_overview.get('summary') or {}).get('validation_gate') or {}),
+    }
+    return {
+        'schema_version': 'm5_runtime_orchestration_summary_v1',
+        'headline': headline,
+        'summary': summary,
+        'recent_progress': recent_progress[:max_items],
+        'stuck_points': stuck_items[:max_items],
+        'next_step': next_step,
+        'next_actions': next_actions[:max_items],
+        'follow_ups': {
+            'required': follow_up_required,
+            'summary': follow_up_summary,
+            'queues': follow_up_queues,
+            'consumption': review_queue_consumption,
+        },
+        'orchestration': orchestration,
+        'transition_journal': transition_journal,
+        'lines': unified_overview.get('lines') or {},
+        'unified_overview': {
+            'dominant_line': unified_overview.get('dominant_line'),
+            'overall_state': unified_overview.get('overall_state'),
+            'headline': unified_overview.get('headline') or {},
+            'summary': unified_overview.get('summary') or {},
+        },
+        'related_summary': {
+            'operator_digest': operator_digest.get('summary') or {},
+            'recovery_view': recovery_view.get('summary') or {},
+            'workbench_governance_view': workbench_view.get('summary') or {},
+            'control_plane_readiness': ((unified_overview.get('summary') or {}).get('control_plane_readiness') or {}),
+        },
+    }
+
+
 def execute_adaptive_rollout_orchestration(payload: Dict[str, Any], db: Any, *, config: Any = None,
                                           replay_source: str = 'workflow_ready') -> Dict[str, Any]:
     payload = payload or {}

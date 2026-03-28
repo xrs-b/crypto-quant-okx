@@ -10685,6 +10685,88 @@ class TestApprovalPersistence(unittest.TestCase):
             self.assertEqual(result['auto_approval_execution']['executed_count'], 1)
             self.assertGreaterEqual(result['auto_approval_execution']['skipped_count'], 3)
 
+    def test_controlled_auto_approval_execution_honors_pass_budget_and_surfaces_budget_summary(self):
+        class StubConfig:
+            def __init__(self, values=None):
+                self.values = values or {}
+
+            def get(self, key, default=None):
+                return self.values.get(key, default)
+
+        config = StubConfig({
+            'governance.auto_approval_execution': {
+                'enabled': True,
+                'mode': 'controlled',
+                'actor': 'system:test-auto-approval-budget',
+                'source': 'unit_test_auto_approval_budget',
+                'reason_prefix': 'unit-test controlled auto approval budget',
+                'max_executed_per_pass': 1,
+            }
+        })
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(str(Path(tmpdir) / 'auto_approval_budget.db'))
+            payload = {
+                'workflow_state': {
+                    'item_states': [
+                        {
+                            'item_id': 'playbook::eligible-1', 'title': 'Eligible low risk item 1', 'action_type': 'joint_observe',
+                            'decision': 'expand', 'governance_mode': 'rollout', 'risk_level': 'low', 'approval_required': False,
+                            'blocking_reasons': [], 'preconditions': [], 'workflow_state': 'pending', 'confidence': 'high',
+                        },
+                        {
+                            'item_id': 'playbook::eligible-2', 'title': 'Eligible low risk item 2', 'action_type': 'joint_observe',
+                            'decision': 'expand', 'governance_mode': 'rollout', 'risk_level': 'low', 'approval_required': False,
+                            'blocking_reasons': [], 'preconditions': [], 'workflow_state': 'pending', 'confidence': 'high',
+                        },
+                    ],
+                    'summary': {},
+                },
+                'approval_state': {
+                    'items': [
+                        {'approval_id': 'approval::eligible-1', 'playbook_id': 'playbook::eligible-1', 'title': 'Eligible low risk item 1', 'action_type': 'joint_observe', 'approval_state': 'pending', 'decision_state': 'pending', 'risk_level': 'low', 'approval_required': False, 'blocked_by': []},
+                        {'approval_id': 'approval::eligible-2', 'playbook_id': 'playbook::eligible-2', 'title': 'Eligible low risk item 2', 'action_type': 'joint_observe', 'approval_state': 'pending', 'decision_state': 'pending', 'risk_level': 'low', 'approval_required': False, 'blocked_by': []},
+                    ],
+                    'summary': {},
+                },
+            }
+            payload = attach_auto_approval_policy(payload)
+            db.sync_approval_items(build_workflow_approval_records(payload), replay_source='unit-test')
+            result = execute_controlled_auto_approval_layer(payload, db, config=config, replay_source='unit-test-replay')
+            self.assertEqual(result['auto_approval_execution']['executed_count'], 1)
+            self.assertEqual(result['auto_approval_execution']['skipped_count'], 1)
+            budget = result['auto_approval_execution']['budget']
+            self.assertEqual(budget['max_executed_per_pass'], 1)
+            self.assertEqual(budget['remaining_slots'], 0)
+            self.assertTrue(budget['exhausted'])
+            self.assertEqual(budget['skipped_by_budget'], 1)
+            self.assertEqual(budget['last_executed_item_id'], 'approval::eligible-1')
+            reasons = {row['item_id']: row['reason'] for row in result['auto_approval_execution']['items'] if row['action'] == 'skipped'}
+            self.assertEqual(reasons['approval::eligible-2'], 'pass_budget_exhausted')
+            self.assertEqual(db.get_approval_state('approval::eligible-1')['state'], 'approved')
+            self.assertEqual(db.get_approval_state('approval::eligible-2')['state'], 'pending')
+
+            runtime_summary = build_runtime_orchestration_summary({
+                **result,
+                'adaptive_rollout_orchestration': {
+                    'schema_version': 'm5_adaptive_rollout_orchestration_v2',
+                    'passes': [{'label': 'pre_auto_approval', 'dry_run': True, 'rollout_executor_applied_count': 0}],
+                    'summary': {
+                        'pass_count': 1,
+                        'rerun_triggered': False,
+                        'rerun_reason': None,
+                        'rollout_executor_applied_count': 0,
+                        'controlled_rollout_executed_count': 0,
+                        'auto_approval_executed_count': 1,
+                        'review_queue_queued_count': 0,
+                        'review_queue_completed_count': 0,
+                        'review_queue_rollback_escalated_count': 0,
+                    },
+                },
+            }, max_items=5)
+            self.assertEqual(runtime_summary['summary']['auto_approval_budget']['max_executed_per_pass'], 1)
+            self.assertTrue(runtime_summary['summary']['auto_approval_budget']['exhausted'])
+            self.assertEqual(runtime_summary['summary']['auto_approval_budget']['skipped_by_budget'], 1)
+
     def test_adaptive_rollout_orchestration_closes_auto_approval_to_rollout_loop_in_same_cycle(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             db = Database(str(Path(tmpdir) / 'adaptive_rollout_orchestration.db'))

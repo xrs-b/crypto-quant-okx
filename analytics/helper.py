@@ -2782,10 +2782,12 @@ def _get_auto_approval_execution_settings(config: Any = None, overrides: Optiona
         'actor': str(raw.get('actor') or 'system:auto-approval'),
         'source': str(raw.get('source') or 'auto_approval_execution'),
         'reason_prefix': str(raw.get('reason_prefix') or 'controlled auto-approval execution'),
+        'max_executed_per_pass': int(raw.get('max_executed_per_pass') or 0),
     }
     settings.update({k: v for k, v in overrides.items() if v is not None})
     settings['enabled'] = bool(settings.get('enabled', False))
     settings['mode'] = _normalize_auto_approval_execution_mode(settings.get('mode'))
+    settings['max_executed_per_pass'] = max(0, min(int(settings.get('max_executed_per_pass') or 0), 1000))
     return settings
 
 
@@ -3191,11 +3193,21 @@ def execute_controlled_auto_approval_layer(payload: Dict, db: Any, *, config: An
         'executed_count': 0,
         'skipped_count': 0,
         'items': [],
+        'budget': {
+            'schema_version': 'm5_auto_approval_budget_v1',
+            'max_executed_per_pass': int(execution_settings.get('max_executed_per_pass', 0) or 0),
+            'remaining_slots': None,
+            'exhausted': False,
+            'skipped_by_budget': 0,
+            'last_executed_item_id': None,
+        },
     }
     payload['auto_approval_execution'] = result
 
     if not result['enabled'] or result['mode'] != 'controlled' or not approval_items:
         result['skipped_count'] = len(approval_items)
+        budget_limit = int((result.get('budget') or {}).get('max_executed_per_pass') or 0)
+        result['budget']['remaining_slots'] = None if budget_limit <= 0 else budget_limit
         return payload
 
     validation_gate = _build_validation_gate_snapshot(payload)
@@ -3203,6 +3215,7 @@ def execute_controlled_auto_approval_layer(payload: Dict, db: Any, *, config: An
     result['validation_gate'] = execution_gate['validation_gate']
     result['execution_gate'] = execution_gate
 
+    budget_limit = int(execution_settings.get('max_executed_per_pass', 0) or 0)
     executed_rows = []
     for row in approval_items:
         approval_id = row.get('approval_id') or row.get('item_id') or row.get('playbook_id')
@@ -3235,6 +3248,10 @@ def execute_controlled_auto_approval_layer(payload: Dict, db: Any, *, config: An
             skip_reason = 'blocked_by:' + ','.join(blocked_by)
         elif execution_gate.get('blocked'):
             skip_reason = execution_gate.get('primary_reason') or 'validation_gate_blocked'
+        elif budget_limit > 0 and result['executed_count'] >= budget_limit:
+            skip_reason = 'pass_budget_exhausted'
+            result['budget']['exhausted'] = True
+            result['budget']['skipped_by_budget'] += 1
 
         if skip_reason:
             result['items'].append({
@@ -3286,6 +3303,17 @@ def execute_controlled_auto_approval_layer(payload: Dict, db: Any, *, config: An
             'reason': reason,
         })
         result['executed_count'] += 1
+        result['budget']['last_executed_item_id'] = approval_id
+        if budget_limit > 0:
+            result['budget']['remaining_slots'] = max(budget_limit - result['executed_count'], 0)
+            result['budget']['exhausted'] = result['executed_count'] >= budget_limit
+
+    if budget_limit > 0 and result['budget']['remaining_slots'] is None:
+        result['budget']['remaining_slots'] = max(budget_limit - result['executed_count'], 0)
+        result['budget']['exhausted'] = result['executed_count'] >= budget_limit or result['budget']['skipped_by_budget'] > 0
+    elif budget_limit <= 0:
+        result['budget']['remaining_slots'] = None
+        result['budget']['exhausted'] = False
 
     if executed_rows:
         merge_persisted_approval_state(payload, executed_rows)
@@ -4765,6 +4793,7 @@ def build_runtime_orchestration_summary(payload: Optional[Dict[str, Any]] = None
         'rollout_executor_applied_count': orchestration_summary.get('rollout_executor_applied_count', 0),
         'controlled_rollout_executed_count': orchestration_summary.get('controlled_rollout_executed_count', 0),
         'controlled_rollout_budget': (auto_promotion_execution.get('summary') or {}).get('budget') or ((payload.get('controlled_rollout_execution') or {}).get('budget') or {}),
+        'auto_approval_budget': (payload.get('auto_approval_execution') or {}).get('budget') or {},
         'auto_approval_executed_count': orchestration_summary.get('auto_approval_executed_count', 0),
         'review_queue_queued_count': orchestration_summary.get('review_queue_queued_count', 0),
         'review_queue_completed_count': orchestration_summary.get('review_queue_completed_count', 0),

@@ -75,6 +75,7 @@ governance:
     actor: system:auto-approval
     source: auto_approval_execution
     reason_prefix: controlled auto-approval execution
+    max_executed_per_pass: 1   # 建议生产低干预先从 1 开始；0=不设上限。先限制上游 auto-approval blast radius，再交给后续 rollout fence 接力
   recovery_execution:
     enabled: false
     mode: disabled   # disabled|dry_run|controlled；只消费 recovery queue，做 metadata-only retry/rollback/manual recovery 调度，不做真实交易执行

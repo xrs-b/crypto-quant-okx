@@ -1358,6 +1358,144 @@ def _resolve_safe_rollout_handler(spec: Optional[Dict[str, Any]] = None, action_
     return fallback
 
 
+def _build_rollout_gate_policy(spec: Optional[Dict[str, Any]], handler: Optional[Dict[str, Any]], *, allowlisted: bool) -> Dict[str, Any]:
+    spec = dict(spec or {})
+    handler = dict(handler or {})
+    dispatch_mode = spec.get('dispatch_mode') or handler.get('disposition') or 'unsupported'
+    safe_boundary = handler.get('safe_boundary') or ('metadata_only' if dispatch_mode == 'apply' else 'queue_only')
+    policy = {
+        'preconditions': [
+            'allowlisted_action',
+            'auto_approval_eligible',
+            'auto_approval_decision_auto_approve',
+            'risk_level_low',
+            'no_blockers',
+            'manual_gate_cleared',
+        ],
+        'auto_advance': {
+            'allowed': bool(allowlisted and dispatch_mode == 'apply'),
+            'mode': 'very_safe_apply' if dispatch_mode == 'apply' else 'manual_followup',
+            'safe_boundary': safe_boundary,
+            'required_flags': ['allowlisted', 'eligible', 'auto_approve', 'low_risk', 'no_blockers', 'no_manual_gate'],
+        },
+        'rollback': {
+            'capable': bool(spec.get('rollback_capable', False)),
+            'safe_boundary': safe_boundary,
+            'trigger_factors': ['execution_error', 'critical_risk', 'blocked_transition', 'review_overdue', 'rollback_pending'],
+        },
+        'review': {
+            'requires_review_window': dispatch_mode == 'apply',
+            'default_review_after_hours': 24 if dispatch_mode == 'apply' else None,
+        },
+        'idempotency_rule': 'same action_type + target state/workflow_state only applies once; repeated executor runs must idempotent-skip',
+    }
+    if spec.get('blocked_reason'):
+        policy['manual_gate_reason'] = spec.get('blocked_reason')
+    return policy
+
+
+
+def _evaluate_rollout_gates(*, action_type: str, row: Dict[str, Any], workflow_item: Dict[str, Any], spec: Optional[Dict[str, Any]],
+                            handler: Dict[str, Any], allowlisted: bool, current_state: str, current_workflow_state: str,
+                            auto_decision: str, eligible: bool, approval_required: bool, requires_manual: bool,
+                            blocked_by: Optional[List[str]] = None, risk_level: Optional[str] = None,
+                            transition_rule: Optional[Dict[str, Any]] = None, persisted_details: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    spec = dict(spec or {})
+    handler = dict(handler or {})
+    transition_rule = dict(transition_rule or {})
+    persisted_details = dict(persisted_details or {})
+    blocked = _dedupe_strings(blocked_by or [])
+    normalized_risk = str(risk_level or '').strip().lower() or 'unknown'
+    review_due_at = row.get('review_due_at') or workflow_item.get('review_due_at') or persisted_details.get('review_due_at')
+    review_overdue = False
+    if review_due_at:
+        try:
+            due_dt = datetime.fromisoformat(str(review_due_at).replace('Z', '+00:00'))
+            review_overdue = due_dt <= datetime.now(timezone.utc)
+        except Exception:
+            review_overdue = False
+    execution_status = _normalize_action_execution_status(
+        persisted_details.get('execution_status'),
+        workflow_state=current_workflow_state,
+        queue_status=((workflow_item.get('queue_progression') or {}).get('status') if isinstance(workflow_item.get('queue_progression'), dict) else None),
+        executor_status=persisted_details.get('executor_status'),
+    )
+    manual_required = bool(approval_required or requires_manual or auto_decision == 'manual_review')
+    low_risk = normalized_risk == 'low'
+    auto_approve = auto_decision == 'auto_approve'
+    dispatch_mode = spec.get('dispatch_mode') or handler.get('disposition') or 'unsupported'
+    safe_boundary = handler.get('safe_boundary') or ('metadata_only' if dispatch_mode == 'apply' else 'queue_only')
+    readiness_score = 0
+    readiness_score += 20 if allowlisted else 0
+    readiness_score += 20 if eligible else 0
+    readiness_score += 20 if auto_approve else 0
+    readiness_score += 20 if low_risk else 0
+    readiness_score += 10 if not blocked else 0
+    readiness_score += 10 if not manual_required else 0
+    readiness_score = max(0, min(readiness_score, 100))
+    blockers = []
+    if not allowlisted:
+        blockers.append('action_not_allowlisted')
+    if not eligible:
+        blockers.append('not_auto_approval_eligible')
+    if not auto_approve:
+        blockers.append(f'auto_decision:{auto_decision or "unknown"}')
+    if not low_risk:
+        blockers.append(f'risk_level:{normalized_risk}')
+    if blocked:
+        blockers.extend([f'blocked_by:{code}' for code in blocked])
+    if manual_required:
+        blockers.append('manual_gate_required')
+    if dispatch_mode != 'apply':
+        blockers.append(f'dispatch_mode:{dispatch_mode}')
+    if current_state in TERMINAL_APPROVAL_STATES:
+        blockers.append(f'terminal_state:{current_state}')
+    auto_allowed = not blockers
+    rollback_triggers = []
+    if persisted_details.get('execution_status') == 'error' or current_workflow_state == 'execution_failed' or execution_status == 'error':
+        rollback_triggers.append('execution_error')
+    if current_workflow_state == 'rollback_pending':
+        rollback_triggers.append('rollback_pending')
+    if normalized_risk == 'critical':
+        rollback_triggers.append('critical_risk')
+    if blocked and transition_rule.get('dispatch_route') in {'stage_metadata_apply', 'safe_state_apply'}:
+        rollback_triggers.append('blocked_transition')
+    if review_overdue:
+        rollback_triggers.append('review_overdue')
+    rollback_candidate = bool(spec.get('rollback_capable', False) and rollback_triggers)
+    return {
+        'auto_advance_gate': {
+            'allowed': auto_allowed,
+            'mode': 'very_safe_apply' if auto_allowed else 'hold',
+            'safe_boundary': safe_boundary,
+            'readiness_score': readiness_score,
+            'manual_required': manual_required,
+            'cooldown_active': False,
+            'review_window_open': not review_overdue,
+            'blockers': blockers,
+            'required_flags': {
+                'allowlisted': allowlisted,
+                'eligible': bool(eligible),
+                'auto_approve': auto_approve,
+                'low_risk': low_risk,
+                'no_blockers': not blocked,
+                'no_manual_gate': not manual_required,
+            },
+            'explain': 'auto advance requires very-safe apply + low risk + no blockers + approval-eligible + no manual gate',
+        },
+        'rollback_gate': {
+            'candidate': rollback_candidate,
+            'capable': bool(spec.get('rollback_capable', False)),
+            'safe_boundary': safe_boundary,
+            'triggered': rollback_triggers,
+            'next_action': 'prepare_rollback_review' if rollback_candidate else None,
+            'rollback_hint': transition_rule.get('rollback_hint') or 'restore_previous_state_from_approval_timeline',
+            'explain': 'rollback opens on execution error, rollback pending, critical risk, blocked transition, or overdue review',
+        },
+    }
+
+
+
 def _build_safe_rollout_action_registry(allowed_action_types: Optional[List[str]] = None) -> Dict[str, Any]:
     allow = set(_dedupe_strings(allowed_action_types or []))
     handlers = {key: dict(value) for key, value in SAFE_ROLLOUT_STAGE_HANDLER_REGISTRY.items()}
@@ -1367,9 +1505,11 @@ def _build_safe_rollout_action_registry(allowed_action_types: Optional[List[str]
     unsupported = []
     for action_type, spec in ROLLOUT_EXECUTOR_ACTION_SPECS.items():
         handler = _resolve_safe_rollout_handler(spec, action_type)
+        allowlisted = action_type in allow
+        gate_policy = _build_rollout_gate_policy(spec, handler, allowlisted=allowlisted)
         entry = {
             'action_type': action_type,
-            'allowlisted': action_type in allow,
+            'allowlisted': allowlisted,
             'dispatch_mode': spec.get('dispatch_mode') or handler.get('disposition'),
             'executor_class': spec.get('executor_class') or handler.get('executor_class'),
             'handler': handler,
@@ -1378,6 +1518,9 @@ def _build_safe_rollout_action_registry(allowed_action_types: Optional[List[str]
             'stage_family': handler.get('stage_family'),
             'rollback_capable': bool(spec.get('rollback_capable', False)),
             'audit_code': spec.get('audit_code'),
+            'gate_policy': gate_policy,
+            'preconditions': gate_policy.get('preconditions') or [],
+            'idempotency_rule': gate_policy.get('idempotency_rule'),
         }
         actions[action_type] = entry
         disposition = entry['dispatch_mode']
@@ -2321,6 +2464,24 @@ def execute_rollout_executor(payload: Dict, db: Any, *, config: Any = None, sett
             requires_manual=requires_manual,
             blocked_by=blocked_by,
         )
+        rollout_gates = _evaluate_rollout_gates(
+            action_type=action_type,
+            row=row,
+            workflow_item=workflow_item,
+            spec=spec,
+            handler=handler,
+            allowlisted=action_type in allowlisted,
+            current_state=current_state,
+            current_workflow_state=current_workflow_state,
+            auto_decision=auto_decision,
+            eligible=eligible,
+            approval_required=approval_required,
+            requires_manual=requires_manual,
+            blocked_by=blocked_by,
+            risk_level=risk_level,
+            transition_rule=transition_rule,
+            persisted_details=persisted_details,
+        )
 
         plan = {
             'item_id': approval_id,
@@ -2353,6 +2514,8 @@ def execute_rollout_executor(payload: Dict, db: Any, *, config: Any = None, sett
             'target_rollout_stage': transition_rule.get('target_rollout_stage'),
             'readiness': transition_rule.get('readiness'),
             'execution_status': _normalize_action_execution_status(None, workflow_state=current_workflow_state, queue_status=((workflow_item.get('queue_progression') or {}).get('status') if isinstance(workflow_item.get('queue_progression'), dict) else None)),
+            'auto_advance_gate': rollout_gates.get('auto_advance_gate') or {},
+            'rollback_gate': rollout_gates.get('rollback_gate') or {},
         }
 
         audit = {
@@ -2378,6 +2541,8 @@ def execute_rollout_executor(payload: Dict, db: Any, *, config: Any = None, sett
             'next_transition': transition_rule.get('next_transition'),
             'retryable': bool(transition_rule.get('retryable', True)),
             'rollback_hint': transition_rule.get('rollback_hint'),
+            'auto_advance_gate': rollout_gates.get('auto_advance_gate') or {},
+            'rollback_gate': rollout_gates.get('rollback_gate') or {},
         }
 
         result_row = {
@@ -2566,6 +2731,8 @@ def execute_rollout_executor(payload: Dict, db: Any, *, config: Any = None, sett
             'dangerous_live_parameter_change': False,
             'execution_status': 'dispatching',
             'previous_execution_status': persisted_details.get('execution_status'),
+            'auto_advance_gate': rollout_gates.get('auto_advance_gate') or {},
+            'rollback_gate': rollout_gates.get('rollback_gate') or {},
         }
         details.update(_build_controlled_rollout_action_details(action_type, row, workflow_item, spec, execution_settings))
         details['last_transition'] = {'rule': transition_rule.get('transition_rule'), 'from_execution_status': persisted_details.get('execution_status'), 'to_execution_status': 'applied', 'from_workflow_state': current_workflow_state, 'to_workflow_state': spec.get('workflow_state'), 'dispatch_route': transition_rule.get('dispatch_route'), 'next_transition': transition_rule.get('next_transition')}

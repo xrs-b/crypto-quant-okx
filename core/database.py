@@ -2137,6 +2137,74 @@ class Database:
             'workflow_transition_counts': {f"{(row.get('from') or {}).get('workflow_state') or (row.get('from') or {}).get('state') or 'new'}->{(row.get('to') or {}).get('workflow_state') or (row.get('to') or {}).get('state') or 'unknown'}": sum(1 for item in items if f"{(item.get('from') or {}).get('workflow_state') or (item.get('from') or {}).get('state') or 'new'}->{(item.get('to') or {}).get('workflow_state') or (item.get('to') or {}).get('state') or 'unknown'}" == f"{(row.get('from') or {}).get('workflow_state') or (row.get('from') or {}).get('state') or 'new'}->{(row.get('to') or {}).get('workflow_state') or (row.get('to') or {}).get('state') or 'unknown'}") for row in items},
         }
 
+
+    def get_auto_promotion_activity(self, limit: int = 20, item_id: str = None) -> List[Dict[str, Any]]:
+        rows = self.get_approval_timeline(item_id=item_id, limit=max(1, int(limit or 20)), ascending=False)
+        activity = []
+        for row in rows:
+            event_type = str(row.get('event_type') or '').strip().lower()
+            if not event_type.startswith('controlled_rollout_'):
+                continue
+            details = row.get('details') or {}
+            execution = details.get('auto_promotion_execution') or {}
+            before = execution.get('before') or {}
+            after = execution.get('after') or {}
+            rollback_gate = details.get('rollback_gate') or {}
+            activity.append({
+                'item_id': row.get('item_id'),
+                'approval_type': row.get('approval_type'),
+                'target': row.get('target'),
+                'title': row.get('title'),
+                'event_type': row.get('event_type'),
+                'created_at': row.get('created_at'),
+                'actor': row.get('actor'),
+                'source': row.get('source'),
+                'reason': row.get('reason'),
+                'before': before,
+                'after': after,
+                'reason_codes': execution.get('reason_codes') or [],
+                'candidate_summary': execution.get('candidate_summary') or {},
+                'rollback_hint': execution.get('rollback_hint') or details.get('rollback_hint'),
+                'rollback_candidate': bool(rollback_gate.get('candidate')),
+                'rollback_triggered': rollback_gate.get('triggered') or [],
+            })
+        return activity[:max(1, int(limit or 20))]
+
+    def get_auto_promotion_activity_summary(self, limit: int = 20, item_id: str = None) -> Dict[str, Any]:
+        items = self.get_auto_promotion_activity(limit=limit, item_id=item_id)
+        stage_transition_counts: Dict[str, int] = {}
+        target_stage_counts: Dict[str, int] = {}
+        reason_code_counts: Dict[str, int] = {}
+        rollback_trigger_counts: Dict[str, int] = {}
+        risk_label_counts: Dict[str, int] = {}
+        for row in items:
+            before = row.get('before') or {}
+            after = row.get('after') or {}
+            transition_key = f"{before.get('rollout_stage') or 'unknown'}->{after.get('rollout_stage') or 'unknown'}"
+            stage_transition_counts[transition_key] = stage_transition_counts.get(transition_key, 0) + 1
+            target_stage = str(after.get('rollout_stage') or 'unknown')
+            target_stage_counts[target_stage] = target_stage_counts.get(target_stage, 0) + 1
+            risk_label = str((row.get('candidate_summary') or {}).get('risk_label') or 'unknown')
+            risk_label_counts[risk_label] = risk_label_counts.get(risk_label, 0) + 1
+            for code in row.get('reason_codes') or []:
+                reason_code_counts[str(code)] = reason_code_counts.get(str(code), 0) + 1
+            for trigger in row.get('rollback_triggered') or []:
+                rollback_trigger_counts[str(trigger)] = rollback_trigger_counts.get(str(trigger), 0) + 1
+        rollback_candidates = [row for row in items if row.get('rollback_candidate')]
+        return {
+            'event_count': len(items),
+            'item_id': item_id,
+            'latest_created_at': items[0].get('created_at') if items else None,
+            'stage_transition_counts': stage_transition_counts,
+            'target_stage_counts': target_stage_counts,
+            'reason_code_counts': reason_code_counts,
+            'rollback_trigger_counts': rollback_trigger_counts,
+            'risk_label_counts': risk_label_counts,
+            'rollback_review_candidate_count': len(rollback_candidates),
+            'recent_items': items,
+            'rollback_review_candidates': rollback_candidates,
+        }
+
     def get_recent_approval_decision_diff(self, limit: int = 20, approval_type: str = None) -> List[Dict]:
         query_limit = max(20, int(limit or 20) * 10)
         timeline = self.get_approval_timeline(approval_type=approval_type, limit=query_limit, ascending=True)

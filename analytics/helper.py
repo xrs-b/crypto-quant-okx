@@ -1959,6 +1959,8 @@ def merge_persisted_approval_state(payload: Dict, persisted_rows: Optional[List[
         row['rollback_gate'] = persisted_details.get('rollback_gate') or ((persisted_details.get('state_machine') or {}).get('rollback_gate') if isinstance(persisted_details.get('state_machine'), dict) else None) or row.get('rollback_gate') or {}
         row['validation_gate'] = persisted_details.get('validation_gate') or (row.get('auto_advance_gate') or {}).get('validation_gate') or (row.get('rollback_gate') or {}).get('validation_gate') or row.get('validation_gate') or {}
         row['stage_loop'] = persisted_details.get('stage_loop') or ((persisted_details.get('state_machine') or {}).get('stage_loop') if isinstance(persisted_details.get('state_machine'), dict) else None) or row.get('stage_loop') or {}
+        row['auto_promotion_execution'] = persisted_details.get('auto_promotion_execution') or row.get('auto_promotion_execution') or {}
+        row['promotion_execution_status'] = (row.get('auto_promotion_execution') or {}).get('after', {}).get('workflow_state') or row.get('promotion_execution_status')
         if persisted.get('state') in TERMINAL_APPROVAL_STATES:
             row['approval_state'] = persisted.get('state')
             row['decision_state'] = persisted.get('state')
@@ -4839,6 +4841,142 @@ def _build_transition_journal_consumer_view(*, overview: Optional[Dict[str, Any]
     }
 
 
+
+def build_auto_promotion_execution_summary(payload: Optional[Dict] = None, *, max_items: int = 5) -> Dict[str, Any]:
+    payload = payload or {}
+    consumer_view = payload.get('consumer_view') or build_workflow_consumer_view(payload)
+    controlled_rollout = consumer_view.get('controlled_rollout_execution') or payload.get('controlled_rollout_execution') or {}
+    workflow_items = ((consumer_view.get('workflow_state') or {}).get('item_states') or [])
+    approval_items = ((consumer_view.get('approval_state') or {}).get('items') or [])
+    approval_by_playbook = {row.get('playbook_id'): row for row in approval_items if row.get('playbook_id')}
+    workflow_by_item = {row.get('item_id'): row for row in workflow_items if row.get('item_id')}
+
+    recent = []
+    rollback_candidates = []
+    reason_code_counts: Dict[str, int] = {}
+    stage_transition_counts: Dict[str, int] = {}
+    target_stage_counts: Dict[str, int] = {}
+    risk_label_counts: Dict[str, int] = {}
+
+    seen_keys = set()
+    for workflow_item in workflow_items:
+        execution = workflow_item.get('auto_promotion_execution') or {}
+        if not execution:
+            continue
+        approval_item = approval_by_playbook.get(workflow_item.get('item_id')) or {}
+        seen_keys.add((workflow_item.get('item_id'), approval_item.get('approval_id')))
+        before = execution.get('before') or {}
+        after = execution.get('after') or {}
+        event_log = execution.get('event_log') or []
+        latest_event = event_log[-1] if event_log else {}
+        rollback_gate = workflow_item.get('rollback_gate') or approval_item.get('rollback_gate') or {}
+        risk_label = ((execution.get('candidate_summary') or {}).get('risk_label') or workflow_item.get('risk_level') or approval_item.get('risk_level') or 'unknown')
+        summary_row = {
+            'item_id': workflow_item.get('item_id'),
+            'approval_id': approval_item.get('approval_id'),
+            'title': workflow_item.get('title') or approval_item.get('title') or workflow_item.get('item_id'),
+            'action_type': workflow_item.get('action_type') or approval_item.get('action_type'),
+            'workflow_state': workflow_item.get('workflow_state') or approval_item.get('workflow_state') or after.get('workflow_state'),
+            'approval_state': approval_item.get('approval_state') or after.get('state'),
+            'current_rollout_stage': workflow_item.get('current_rollout_stage') or after.get('rollout_stage'),
+            'target_rollout_stage': workflow_item.get('target_rollout_stage') or after.get('rollout_stage'),
+            'before': before,
+            'after': after,
+            'reason_codes': execution.get('reason_codes') or [],
+            'rollback_hint': execution.get('rollback_hint'),
+            'risk_label': risk_label,
+            'risk_score': (execution.get('candidate_summary') or {}).get('risk_score'),
+            'manual_fallback_required': bool((execution.get('candidate_summary') or {}).get('manual_fallback_required', False)),
+            'why_promotable': (execution.get('candidate_summary') or {}).get('why_promotable') or [],
+            'actor': latest_event.get('actor'),
+            'source': latest_event.get('source'),
+            'created_at': latest_event.get('created_at'),
+            'event_type': latest_event.get('event_type'),
+            'rollback_candidate': bool(rollback_gate.get('candidate')),
+            'rollback_triggered': rollback_gate.get('triggered') or [],
+        }
+        recent.append(summary_row)
+        transition_key = f"{before.get('rollout_stage') or 'unknown'}->{after.get('rollout_stage') or 'unknown'}"
+        stage_transition_counts[transition_key] = stage_transition_counts.get(transition_key, 0) + 1
+        target_key = str(after.get('rollout_stage') or workflow_item.get('target_rollout_stage') or 'unknown')
+        target_stage_counts[target_key] = target_stage_counts.get(target_key, 0) + 1
+        risk_label_counts[str(risk_label)] = risk_label_counts.get(str(risk_label), 0) + 1
+        for code in execution.get('reason_codes') or []:
+            reason_code_counts[str(code)] = reason_code_counts.get(str(code), 0) + 1
+        if summary_row['rollback_candidate']:
+            rollback_candidates.append(summary_row)
+
+    for approval_item in approval_items:
+        key = (approval_item.get('playbook_id'), approval_item.get('approval_id'))
+        if key in seen_keys:
+            continue
+        execution = approval_item.get('auto_promotion_execution') or {}
+        if not execution:
+            continue
+        workflow_item = workflow_by_item.get(approval_item.get('playbook_id')) or {}
+        before = execution.get('before') or {}
+        after = execution.get('after') or {}
+        event_log = execution.get('event_log') or []
+        latest_event = event_log[-1] if event_log else {}
+        rollback_gate = workflow_item.get('rollback_gate') or approval_item.get('rollback_gate') or {}
+        risk_label = ((execution.get('candidate_summary') or {}).get('risk_label') or workflow_item.get('risk_level') or approval_item.get('risk_level') or 'unknown')
+        summary_row = {
+            'item_id': approval_item.get('playbook_id'),
+            'approval_id': approval_item.get('approval_id'),
+            'title': approval_item.get('title') or approval_item.get('playbook_id'),
+            'action_type': approval_item.get('action_type') or workflow_item.get('action_type'),
+            'workflow_state': workflow_item.get('workflow_state') or approval_item.get('workflow_state') or after.get('workflow_state'),
+            'approval_state': approval_item.get('approval_state') or after.get('state'),
+            'current_rollout_stage': workflow_item.get('current_rollout_stage') or after.get('rollout_stage'),
+            'target_rollout_stage': workflow_item.get('target_rollout_stage') or after.get('rollout_stage'),
+            'before': before,
+            'after': after,
+            'reason_codes': execution.get('reason_codes') or [],
+            'rollback_hint': execution.get('rollback_hint'),
+            'risk_label': risk_label,
+            'risk_score': (execution.get('candidate_summary') or {}).get('risk_score'),
+            'manual_fallback_required': bool((execution.get('candidate_summary') or {}).get('manual_fallback_required', False)),
+            'why_promotable': (execution.get('candidate_summary') or {}).get('why_promotable') or [],
+            'actor': latest_event.get('actor'),
+            'source': latest_event.get('source'),
+            'created_at': latest_event.get('created_at'),
+            'event_type': latest_event.get('event_type'),
+            'rollback_candidate': bool(rollback_gate.get('candidate')),
+            'rollback_triggered': rollback_gate.get('triggered') or [],
+        }
+        recent.append(summary_row)
+        transition_key = f"{before.get('rollout_stage') or 'unknown'}->{after.get('rollout_stage') or 'unknown'}"
+        stage_transition_counts[transition_key] = stage_transition_counts.get(transition_key, 0) + 1
+        target_key = str(after.get('rollout_stage') or workflow_item.get('target_rollout_stage') or 'unknown')
+        target_stage_counts[target_key] = target_stage_counts.get(target_key, 0) + 1
+        risk_label_counts[str(risk_label)] = risk_label_counts.get(str(risk_label), 0) + 1
+        for code in execution.get('reason_codes') or []:
+            reason_code_counts[str(code)] = reason_code_counts.get(str(code), 0) + 1
+        if summary_row['rollback_candidate']:
+            rollback_candidates.append(summary_row)
+
+    recent.sort(key=lambda row: (str(row.get('created_at') or ''), str(row.get('item_id') or '')), reverse=True)
+    rollback_candidates.sort(key=lambda row: (str(row.get('created_at') or ''), str(row.get('item_id') or '')), reverse=True)
+    summary = {
+        'event_count': len(recent),
+        'executed_count': controlled_rollout.get('executed_count', len(recent)),
+        'skipped_count': controlled_rollout.get('skipped_count', 0),
+        'recent_execution_count': len(recent),
+        'rollback_review_candidate_count': len(rollback_candidates),
+        'latest_executed_at': recent[0].get('created_at') if recent else None,
+        'stage_transition_counts': stage_transition_counts,
+        'target_stage_counts': target_stage_counts,
+        'reason_code_counts': reason_code_counts,
+        'risk_label_counts': risk_label_counts,
+    }
+    return {
+        'schema_version': 'm5_auto_promotion_execution_summary_v1',
+        'summary': summary,
+        'recent_executions': recent[:max_items],
+        'rollback_review_candidates': rollback_candidates[:max_items],
+        'execution': controlled_rollout,
+    }
+
 def build_workflow_operator_digest(payload: Optional[Dict] = None, *, max_items: int = 5,
                                   transition_journal_overview: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     payload = payload or {}
@@ -4850,6 +4988,7 @@ def build_workflow_operator_digest(payload: Optional[Dict] = None, *, max_items:
     auto_approval = consumer_view.get('auto_approval_execution') or {}
     controlled_rollout = consumer_view.get('controlled_rollout_execution') or {}
     validation_gate = consumer_view.get('validation_gate') or _build_validation_gate_snapshot(payload)
+    auto_promotion_execution = build_auto_promotion_execution_summary(payload, max_items=max_items)
     transition_journal = _build_transition_journal_consumer_view(
         overview=transition_journal_overview or payload.get('transition_journal')
     ) if (transition_journal_overview or payload.get('transition_journal')) else {
@@ -5082,6 +5221,7 @@ def build_workflow_operator_digest(payload: Optional[Dict] = None, *, max_items:
             'group_summaries': group_summaries,
             'gate_consumption': gate_consumption,
             'rollout_advisory': advisory_consumption,
+            'auto_promotion_execution': auto_promotion_execution.get('summary') or {},
             'transition_count': (transition_journal.get('summary') or {}).get('count', 0),
             'latest_transition_at': (transition_journal.get('summary') or {}).get('latest_timestamp'),
             'latest_transition': transition_journal.get('latest') or {},
@@ -5095,6 +5235,8 @@ def build_workflow_operator_digest(payload: Optional[Dict] = None, *, max_items:
             'auto_advance_candidates': auto_advance_items[:max_items],
             'rollback_candidates': rollback_candidate_items[:max_items],
             'auto_promotion_candidates': advisory_consumption.get('auto_promotion_candidates') or [],
+            'recent_auto_promotions': auto_promotion_execution.get('recent_executions') or [],
+            'auto_promotion_rollback_candidates': auto_promotion_execution.get('rollback_review_candidates') or [],
         },
         'next_actions': next_actions,
         'group_summaries': group_summaries,
@@ -5114,6 +5256,7 @@ def build_workflow_operator_digest(payload: Optional[Dict] = None, *, max_items:
         },
         'stage_loop': _summarize_stage_loop_rows(policy_rows, label='workflow_operator_digest', max_items=max_items),
         'transition_journal': transition_journal,
+        'auto_promotion_execution': auto_promotion_execution,
     }
     payload['operator_digest'] = digest
     return digest
@@ -5274,6 +5417,7 @@ def build_dashboard_summary_cards(payload: Optional[Dict] = None, *, max_items: 
             'operator_action_counts': digest_summary.get('operator_action_counts') or {},
             'operator_routes': digest_summary.get('operator_routes') or [],
             'operator_follow_ups': digest_summary.get('operator_follow_ups') or [],
+            'auto_promotion_execution': digest_summary.get('auto_promotion_execution') or {},
         },
         'cards': cards,
         'card_index': payload_cards,
@@ -6547,6 +6691,7 @@ def build_workbench_governance_view(payload: Optional[Dict] = None, *, max_items
 
     gate_consumption = _build_gate_consumption_summary(active_items, label='workbench_governance_view', max_items=max_items)
     advisory_consumption = _summarize_rollout_advisories(active_items, label='workbench_governance_view', max_items=max_items)
+    auto_promotion_execution = build_auto_promotion_execution_summary(payload, max_items=max_items)
 
     group_summaries = {
         'by_lane': _build_group_summary_rows('lane', [(lane_id, [row for row in active_items if row.get('lane_id') == lane_id]) for lane_id in lane_titles.keys()]),
@@ -6619,6 +6764,7 @@ def build_workbench_governance_view(payload: Optional[Dict] = None, *, max_items
             'group_summaries': {key: len(value) for key, value in group_summaries.items()},
             'gate_consumption': gate_consumption,
             'rollout_advisory': advisory_consumption,
+            'auto_promotion_execution': auto_promotion_execution.get('summary') or {},
             'stage_loop': _summarize_stage_loop_rows(unique_active_items, label='workbench_governance_view', max_items=max_items),
             'transition_count': (transition_journal.get('summary') or {}).get('count', 0),
             'latest_transition_at': (transition_journal.get('summary') or {}).get('latest_timestamp'),
@@ -6634,6 +6780,7 @@ def build_workbench_governance_view(payload: Optional[Dict] = None, *, max_items
             'stage_loop': _summarize_stage_loop_rows((stage_progression.get('items') or []), label='rollout_stage_progression', max_items=max_items),
             'rollout_advisory': advisory_consumption,
             'auto_promotion_candidate_queue': advisory_consumption.get('auto_promotion_candidates') or [],
+            'auto_promotion_execution': auto_promotion_execution,
         },
         'recent_adjustments': recent_adjustments[:max_adjustments],
         'transition_journal': transition_journal,
@@ -6734,6 +6881,7 @@ def build_unified_workbench_overview(payload: Optional[Dict] = None, *, max_item
     recent_adjustments = _take(workbench_view.get('recent_adjustments') or [])
     gate_consumption = ((workbench_summary.get('gate_consumption') or (operator_digest.get('summary') or {}).get('gate_consumption')) or {})
     rollout_advisory = (workbench_summary.get('rollout_advisory') or (operator_digest.get('summary') or {}).get('rollout_advisory') or _summarize_rollout_advisories(workbench_view.get('rollout', {}).get('items') or [], label='unified_workbench_overview', max_items=max_items))
+    auto_promotion_execution = (workbench_view.get('rollout') or {}).get('auto_promotion_execution') or (operator_digest.get('auto_promotion_execution') or {}) or build_auto_promotion_execution_summary(payload, max_items=max_items)
     validation_gate = consumer_view.get('validation_gate') or (operator_digest.get('summary') or {}).get('validation_gate') or _build_validation_gate_snapshot(payload)
     validation_consumption = _collect_validation_gate_consumption((consumer_view.get('workflow_state') or {}).get('item_states') or [])
     workbench_stage_loop = (workbench_summary.get('stage_loop') or workbench_view.get('rollout', {}).get('stage_loop') or _summarize_stage_loop_rows(workbench_view.get('upstreams', {}).get('workflow_operator_digest', {}).get('operator_action_policies') or [], label='unified_workbench_rollout', max_items=max_items))
@@ -6829,6 +6977,8 @@ def build_unified_workbench_overview(payload: Optional[Dict] = None, *, max_item
                 'validation_regression': 1 if validation_gate.get('regression_detected') else 0,
                 'ready_for_live_promotion': rollout_advisory.get('ready_for_live_promotion_count', 0),
                 'auto_promotion_candidates': rollout_advisory.get('auto_promotion_candidate_count', 0),
+                'auto_promotion_executed': (auto_promotion_execution.get('summary') or {}).get('executed_count', 0),
+                'auto_promotion_rollback_review_candidates': (auto_promotion_execution.get('summary') or {}).get('rollback_review_candidate_count', 0),
             },
             'validation_gate': validation_gate,
             'rollout_advisory': rollout_advisory,
@@ -6838,6 +6988,7 @@ def build_unified_workbench_overview(payload: Optional[Dict] = None, *, max_item
             'next_actions': _take(rollout_next_actions),
             'stage_loop': workbench_stage_loop,
             'auto_promotion_candidate_queue': rollout_advisory.get('auto_promotion_candidates') or [],
+            'auto_promotion_execution': auto_promotion_execution,
         },
         'recovery': {
             'current_state': recovery_state,
@@ -6880,6 +7031,7 @@ def build_unified_workbench_overview(payload: Optional[Dict] = None, *, max_item
             'operator_action_policy_summary': (operator_digest.get('summary') or {}).get('group_summaries') or {},
             'gate_consumption': gate_consumption,
             'rollout_advisory': rollout_advisory,
+            'auto_promotion_execution': auto_promotion_execution.get('summary') or {},
             'validation_gate': validation_gate,
             'validation_gate_consumption': validation_consumption,
             'timeline_group_counts': {

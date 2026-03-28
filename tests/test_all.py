@@ -6028,7 +6028,7 @@ class TestExecutionObservability(unittest.TestCase):
             self.assertIn('recent_decisions', snapshot['summary'])
             self.assertTrue(snapshot['summary']['observe_only_banner'])
 
-from analytics.helper import build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, attach_auto_approval_policy, execute_controlled_rollout_layer, execute_controlled_auto_approval_layer, execute_rollout_executor, build_workflow_consumer_view, build_workflow_recovery_view, build_workflow_attention_view, build_workflow_operator_digest, build_dashboard_summary_cards, build_workbench_governance_view, build_workbench_governance_detail_view, build_workbench_merged_timeline, build_workbench_timeline_summary_aggregation, build_unified_workbench_overview, build_auto_promotion_candidate_view, _build_state_machine_semantics, _build_safe_rollout_action_registry
+from analytics.helper import build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, attach_auto_approval_policy, execute_controlled_rollout_layer, execute_controlled_auto_approval_layer, execute_rollout_executor, build_workflow_consumer_view, build_workflow_recovery_view, build_workflow_attention_view, build_workflow_operator_digest, build_dashboard_summary_cards, build_workbench_governance_view, build_workbench_governance_detail_view, build_workbench_merged_timeline, build_workbench_timeline_summary_aggregation, build_unified_workbench_overview, build_auto_promotion_candidate_view, build_auto_promotion_execution_summary, _build_state_machine_semantics, _build_safe_rollout_action_registry
 
 
 class TestApprovalPersistence(unittest.TestCase):
@@ -9295,6 +9295,48 @@ class TestApprovalPersistence(unittest.TestCase):
             self.assertEqual(result['controlled_rollout_execution']['executed_count'], 0)
             self.assertEqual(result['controlled_rollout_execution']['safety_switch'], 'auto_promote_ready_candidates_disabled')
 
+
+    def test_auto_promotion_execution_summary_surfaces_recent_execution_and_rollback_candidates(self):
+        payload = self._make_controlled_auto_promotion_payload()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(str(Path(tmpdir) / 'auto_promotion_summary.db'))
+            executed = execute_controlled_rollout_layer(payload, db, settings={
+                'enabled': True,
+                'mode': 'state_apply',
+                'auto_promote_ready_candidates': True,
+                'allowed_action_types': ['joint_stage_prepare'],
+                'actor': 'system:test-auto-promotion-summary',
+                'source': 'unit_test_auto_promotion_summary',
+            })
+            consumer = build_workflow_consumer_view(executed)
+            workflow_item = consumer['workflow_state']['item_states'][0]
+            workflow_item['rollback_gate'] = {'candidate': True, 'triggered': ['review_overdue']}
+            summary = build_auto_promotion_execution_summary(executed, max_items=5)
+            self.assertEqual(summary['summary']['event_count'], 1)
+            self.assertEqual(summary['summary']['stage_transition_counts']['guarded_prepare->controlled_apply'], 1)
+            self.assertEqual(summary['summary']['rollback_review_candidate_count'], 1)
+            self.assertEqual(summary['recent_executions'][0]['actor'], 'system:test-auto-promotion-summary')
+            self.assertEqual(summary['rollback_review_candidates'][0]['rollback_triggered'], ['review_overdue'])
+
+    def test_database_auto_promotion_activity_summary_reads_controlled_rollout_events(self):
+        payload = self._make_controlled_auto_promotion_payload()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(str(Path(tmpdir) / 'auto_promotion_activity.db'))
+            execute_controlled_rollout_layer(payload, db, settings={
+                'enabled': True,
+                'mode': 'state_apply',
+                'auto_promote_ready_candidates': True,
+                'allowed_action_types': ['joint_stage_prepare'],
+                'actor': 'system:test-db-auto-promotion',
+                'source': 'unit_test_db_auto_promotion',
+            })
+            summary = db.get_auto_promotion_activity_summary(limit=10)
+            self.assertEqual(summary['event_count'], 1)
+            self.assertEqual(summary['stage_transition_counts']['guarded_prepare->controlled_apply'], 1)
+            self.assertEqual(summary['target_stage_counts']['controlled_apply'], 1)
+            self.assertIn('auto_advance_allowed', summary['reason_code_counts'])
+            self.assertEqual(summary['recent_items'][0]['actor'], 'system:test-db-auto-promotion')
+
     def test_controlled_rollout_execution_applies_ready_candidate_with_full_audit(self):
         class StubConfig:
             def __init__(self, values=None):
@@ -9650,6 +9692,49 @@ class TestUnifiedWorkflowStateMachine(unittest.TestCase):
             self.assertEqual(latest['actor'], 'system:test')
             self.assertEqual(latest['source'], 'unit-test-transition')
             self.assertIn('workflow_state', latest['changed_fields'])
+
+
+    def test_backtest_auto_promotion_summary_api_returns_execution_summary(self):
+        import dashboard.api as dashboard_api_module
+        with tempfile.TemporaryDirectory() as tmpdir:
+            test_db = Database(str(Path(tmpdir) / 'api_auto_promotion_summary.db'))
+            test_db.upsert_approval_state(
+                item_id='approval::promo',
+                approval_type='joint_stage_prepare',
+                target='playbook::promo',
+                title='Promotion item',
+                decision='pending',
+                state='approved',
+                workflow_state='ready',
+                reason='controlled auto promotion executed',
+                actor='system:test-api-auto-promotion',
+                replay_source='unit_test_api_auto_promotion',
+                details={
+                    'auto_promotion_execution': {
+                        'before': {'state': 'pending', 'workflow_state': 'ready', 'rollout_stage': 'guarded_prepare'},
+                        'after': {'state': 'approved', 'workflow_state': 'ready', 'rollout_stage': 'controlled_apply'},
+                        'reason_codes': ['auto_advance_allowed'],
+                        'candidate_summary': {'risk_label': 'low'},
+                        'event_log': [{'event_type': 'controlled_rollout_state_apply', 'actor': 'system:test-api-auto-promotion', 'source': 'unit_test_api_auto_promotion', 'created_at': '2026-03-28T00:00:00Z'}],
+                        'rollback_hint': 'revert_stage_metadata_to_previous_stage',
+                    },
+                    'rollback_gate': {'candidate': True, 'triggered': ['review_overdue']},
+                },
+                event_type='controlled_rollout_state_apply',
+            )
+            old_db = dashboard_api_module.db
+            dashboard_api_module.db = test_db
+            try:
+                with dashboard_api_module.app.test_client() as client:
+                    response = client.get('/api/backtest/auto-promotion-summary?limit=5')
+                    self.assertEqual(response.status_code, 200)
+                    payload = response.get_json()
+                    self.assertEqual(payload['view'], 'auto_promotion_execution_summary')
+                    self.assertEqual(payload['data']['event_count'], 1)
+                    self.assertEqual(payload['data']['rollback_review_candidate_count'], 1)
+                    self.assertEqual(payload['data']['stage_transition_counts']['guarded_prepare->controlled_apply'], 1)
+            finally:
+                dashboard_api_module.db = old_db
 
     def test_approval_state_machine_api_returns_phase_summary(self):
         import dashboard.api as dashboard_api

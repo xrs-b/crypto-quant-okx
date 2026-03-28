@@ -18,6 +18,16 @@ import difflib
 app = Flask(__name__, static_folder='templates', static_url_path='')
 CORS(app)
 
+def _ensure_workflow_ready_payload(calibration_report, payload):
+    payload = payload or {}
+    if isinstance(payload, dict) and payload.get('schema_version') and payload.get('workflow_state') and payload.get('approval_state'):
+        return payload
+    fallback = (calibration_report or {}).get('workflow_ready') or {}
+    if fallback.get('schema_version') and fallback.get('workflow_state') and fallback.get('approval_state'):
+        return fallback
+    return build_governance_workflow_ready_payload(calibration_report or {})
+
+
 # Custom JSON encoder to handle NaN/Inf values
 import math
 
@@ -53,7 +63,7 @@ from bot.run import execute_exchange_smoke, reconcile_exchange_positions, load_r
 from ml.engine import MLEngine
 from core.regime import RegimeDetector, detect_regime, Regime
 from analytics import StrategyBacktester, SignalQualityAnalyzer, ParameterOptimizer, GovernanceEngine, build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, build_transition_journal_overview, attach_auto_approval_policy, execute_controlled_rollout_layer, execute_controlled_auto_approval_layer, execute_rollout_executor, build_workflow_consumer_view, build_workflow_recovery_view, build_workflow_attention_view, build_workflow_operator_digest, build_dashboard_summary_cards, build_workbench_governance_view, build_workbench_governance_filter_view, build_workbench_governance_detail_view, build_workbench_merged_timeline, build_workbench_timeline_summary_aggregation, build_unified_workbench_overview, build_auto_promotion_candidate_view
-from analytics.backtest import export_calibration_payload
+from analytics.backtest import export_calibration_payload, build_governance_workflow_ready_payload
 from analytics.mfe_mae import MFEAnalyzer, get_mfe_mae_analysis
 from core.regime_policy import summarize_observe_only_collection
 
@@ -2519,6 +2529,7 @@ def get_backtest_workflow_state():
     backtest_result = backtester.run_all(config.symbols)
     calibration_report = backtest_result.get('calibration_report') or {}
     payload = export_calibration_payload(calibration_report, view='workflow_ready')
+    payload = _ensure_workflow_ready_payload(calibration_report, payload)
     payload = _persist_workflow_approval_payload(payload, replay_source='workflow_state_api')
     return jsonify({
         'success': True,
@@ -2534,6 +2545,7 @@ def get_backtest_workflow_consumer_view():
     backtest_result = backtester.run_all(config.symbols)
     calibration_report = backtest_result.get('calibration_report') or {}
     payload = export_calibration_payload(calibration_report, view='workflow_ready')
+    payload = _ensure_workflow_ready_payload(calibration_report, payload)
     payload = _persist_workflow_approval_payload(payload, replay_source='workflow_consumer_view_api')
     consumer_view = payload.get('consumer_view') or build_workflow_consumer_view(payload)
     return jsonify({
@@ -2688,6 +2700,20 @@ def get_backtest_unified_workbench_overview():
         approval_timeline_fetcher=lambda approval_id, limit: db.get_approval_timeline(item_id=approval_id, limit=limit, ascending=True) if approval_id else [],
     )
     return jsonify({'success': True, 'view': 'unified_workbench_overview', 'data': overview, 'summary': overview.get('summary') or {}})
+
+
+
+@app.route('/api/backtest/auto-promotion-summary')
+def get_backtest_auto_promotion_summary():
+    """返回 controlled auto-promotion 执行摘要，方便 dashboard/workbench 低干预巡检。"""
+    limit = max(1, min(int(request.args.get('limit', 20)), 200))
+    summary = db.get_auto_promotion_activity_summary(limit=limit, item_id=request.args.get('item_id'))
+    return jsonify({'success': True, 'view': 'auto_promotion_execution_summary', 'data': summary, 'summary': {
+        'event_count': summary.get('event_count', 0),
+        'latest_created_at': summary.get('latest_created_at'),
+        'rollback_review_candidate_count': summary.get('rollback_review_candidate_count', 0),
+        'stage_transition_counts': summary.get('stage_transition_counts') or {},
+    }})
 
 
 @app.route('/api/backtest/auto-promotion-candidates')
@@ -3003,6 +3029,7 @@ def get_approval_state_machine_list():
     state = request.args.get('state')
     approval_type = request.args.get('type')
     rows = db.get_approval_states(state=state, approval_type=approval_type, limit=limit)
+    auto_promotion_summary = db.get_auto_promotion_activity_summary(limit=limit)
     items = []
     phase_counts = {}
     workflow_counts = {}

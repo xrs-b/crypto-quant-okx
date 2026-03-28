@@ -163,3 +163,5 @@
 - 强回滚边界
 
 而不是“一次性大爆改”。
+
+- 2026-03-28 auto-promotion closure follow-up：controlled auto-promotion 现已补上执行后摘要层；`auto_promotion_execution` 会随 persisted approval/workflow state 回灌，operator digest / workbench governance / unified workbench overview 会直接显示最近 promotion、stage transition、reason code 同 rollback review candidate。数据库/API 亦新增 auto-promotion activity summary（含 `/api/backtest/auto-promotion-summary` 与 state-machine summary 聚合），令低干预巡检可以直接答到“最近自动推进过乜、由 guarded_prepare 去咗边、边啲要准备 rollback review”。

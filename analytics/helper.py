@@ -5181,6 +5181,7 @@ def execute_adaptive_rollout_orchestration(payload: Dict[str, Any], db: Any, *, 
     payload = attach_auto_approval_policy(payload)
     payload = execute_testnet_bridge_layer(_refresh_payload_from_db(payload), db, config=config, replay_source=replay_source)
     payload = execute_auto_promotion_review_queue_layer(_refresh_payload_from_db(payload), db, config=config, replay_source=replay_source)
+    payload = execute_recovery_queue_layer(_refresh_payload_from_db(payload), db, config=config, replay_source=replay_source)
     payload = attach_auto_approval_policy(payload)
 
     orchestration['summary']['pass_count'] = len(orchestration['passes'])
@@ -5188,6 +5189,9 @@ def execute_adaptive_rollout_orchestration(payload: Dict[str, Any], db: Any, *, 
     orchestration['summary']['controlled_rollout_executed_count'] = int(((payload.get('controlled_rollout_execution') or {}).get('executed_count', 0) or 0))
     orchestration['summary']['auto_approval_executed_count'] = auto_approval_executed
     orchestration['summary']['review_queue_queued_count'] = int(((payload.get('auto_promotion_review_execution') or {}).get('queued_count', 0) or 0))
+    orchestration['summary']['recovery_retry_scheduled_count'] = int(((payload.get('recovery_execution') or {}).get('scheduled_retry_count', 0) or 0))
+    orchestration['summary']['recovery_rollback_queued_count'] = int(((payload.get('recovery_execution') or {}).get('rollback_queued_count', 0) or 0))
+    orchestration['summary']['recovery_manual_annotation_count'] = int(((payload.get('recovery_execution') or {}).get('manual_recovery_annotated_count', 0) or 0))
     _attach_testnet_bridge_execution_evidence(payload)
     bridge_evidence = payload.get('testnet_bridge_execution_evidence') or {}
     orchestration['summary']['testnet_bridge_status'] = str(((payload.get('testnet_bridge_execution') or {}).get('status') or 'disabled'))
@@ -6645,6 +6649,227 @@ def _normalize_auto_promotion_review_execution_mode(value: Optional[str]) -> str
     normalized = str(value or '').strip().lower()
     return normalized if normalized in {'disabled', 'dry_run', 'controlled'} else 'disabled'
 
+
+
+def _normalize_recovery_execution_mode(value: Optional[str]) -> str:
+    normalized = str(value or '').strip().lower()
+    return normalized if normalized in {'disabled', 'dry_run', 'controlled'} else 'disabled'
+
+
+def _get_recovery_execution_settings(config: Any = None, overrides: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    overrides = dict(overrides or {})
+    getter = getattr(config, 'get', None)
+    raw = getter('governance.recovery_execution', {}) if callable(getter) else {}
+    raw = dict(raw or {}) if isinstance(raw, dict) else {}
+    settings = {
+        'enabled': bool(raw.get('enabled', False)),
+        'mode': _normalize_recovery_execution_mode(raw.get('mode')),
+        'actor': str(raw.get('actor') or 'system:recovery-execution'),
+        'source': str(raw.get('source') or 'recovery_execution'),
+        'reason_prefix': str(raw.get('reason_prefix') or 'workflow recovery execution'),
+        'execute_retry_queue': bool(raw.get('execute_retry_queue', True)),
+        'execute_rollback_candidates': bool(raw.get('execute_rollback_candidates', True)),
+        'annotate_manual_recovery': bool(raw.get('annotate_manual_recovery', True)),
+    }
+    settings.update({k: v for k, v in overrides.items() if v is not None})
+    settings['enabled'] = bool(settings.get('enabled', False))
+    settings['mode'] = _normalize_recovery_execution_mode(settings.get('mode'))
+    settings['execute_retry_queue'] = bool(settings.get('execute_retry_queue', True))
+    settings['execute_rollback_candidates'] = bool(settings.get('execute_rollback_candidates', True))
+    settings['annotate_manual_recovery'] = bool(settings.get('annotate_manual_recovery', True))
+    return settings
+
+
+def execute_recovery_queue_layer(payload: Dict[str, Any], db: Any, *, config: Any = None,
+                                 settings: Optional[Dict[str, Any]] = None,
+                                 replay_source: str = 'workflow_ready',
+                                 now: Optional[str] = None) -> Dict[str, Any]:
+    payload = payload or {}
+    execution_settings = _get_recovery_execution_settings(config=config, overrides=settings)
+    recovery_view = payload.get('workflow_recovery_view') or build_workflow_recovery_view(payload, max_items=10000)
+    queue_groups = (recovery_view.get('queues') or {}) if isinstance(recovery_view, dict) else {}
+    queue_items = []
+    for bucket in ('retry_queue', 'rollback_candidates', 'manual_recovery'):
+        for row in queue_groups.get(bucket) or []:
+            merged = dict(row)
+            merged['queue_bucket'] = bucket
+            queue_items.append(merged)
+    result = {
+        'schema_version': 'm5_recovery_execution_v1',
+        'enabled': execution_settings.get('enabled', False),
+        'mode': execution_settings.get('mode'),
+        'actor': execution_settings.get('actor'),
+        'source': execution_settings.get('source'),
+        'replay_source': replay_source,
+        'scheduled_retry_count': 0,
+        'rollback_queued_count': 0,
+        'manual_recovery_annotated_count': 0,
+        'skipped_count': 0,
+        'items': [],
+        'summary': {
+            'queue_count': len(queue_items),
+            'retry_queue_count': len(queue_groups.get('retry_queue') or []),
+            'rollback_candidate_count': len(queue_groups.get('rollback_candidates') or []),
+            'manual_recovery_count': len(queue_groups.get('manual_recovery') or []),
+        },
+    }
+    payload['recovery_execution'] = result
+    if not result['enabled'] or result['mode'] not in {'controlled', 'dry_run'} or not queue_items:
+        result['skipped_count'] = len(queue_items)
+        return payload
+
+    dry_run = result['mode'] == 'dry_run'
+    workflow_lookup = {row.get('item_id'): row for row in ((payload.get('workflow_state') or {}).get('item_states') or []) if row.get('item_id')}
+    executed_rows = []
+    now_dt = None
+    if now:
+        try:
+            now_dt = datetime.fromisoformat(str(now).replace('Z', '+00:00'))
+        except Exception:
+            now_dt = None
+
+    for item in queue_items:
+        item_id = item.get('item_id')
+        approval_id = item.get('approval_id') or item_id
+        if not approval_id:
+            result['skipped_count'] += 1
+            continue
+        persisted_row = db.get_approval_state(approval_id)
+        workflow_item = workflow_lookup.get(item_id) or {}
+        persisted_details = dict((persisted_row or {}).get('details') or {})
+        bucket = str(item.get('queue_bucket') or 'observe')
+        orchestration = dict(item.get('recovery_orchestration') or {})
+        retry_schedule = dict(orchestration.get('retry_schedule') or {})
+        should_retry_at = retry_schedule.get('should_retry_at')
+        retry_due = True
+        if should_retry_at and now_dt is not None:
+            try:
+                retry_due = datetime.fromisoformat(str(should_retry_at).replace('Z', '+00:00')) <= now_dt
+            except Exception:
+                retry_due = True
+
+        if bucket == 'retry_queue' and not execution_settings.get('execute_retry_queue', True):
+            result['items'].append({'item_id': item_id, 'approval_id': approval_id, 'queue_bucket': bucket, 'action': 'skipped', 'reason': 'retry_queue_execution_disabled'})
+            result['skipped_count'] += 1
+            continue
+        if bucket == 'rollback_candidates' and not execution_settings.get('execute_rollback_candidates', True):
+            result['items'].append({'item_id': item_id, 'approval_id': approval_id, 'queue_bucket': bucket, 'action': 'skipped', 'reason': 'rollback_candidate_execution_disabled'})
+            result['skipped_count'] += 1
+            continue
+        if bucket == 'manual_recovery' and not execution_settings.get('annotate_manual_recovery', True):
+            result['items'].append({'item_id': item_id, 'approval_id': approval_id, 'queue_bucket': bucket, 'action': 'skipped', 'reason': 'manual_recovery_annotation_disabled'})
+            result['skipped_count'] += 1
+            continue
+        if bucket == 'retry_queue' and not retry_due:
+            result['items'].append({'item_id': item_id, 'approval_id': approval_id, 'queue_bucket': bucket, 'action': 'skipped', 'reason': 'retry_not_due', 'should_retry_at': should_retry_at})
+            result['skipped_count'] += 1
+            continue
+
+        existing_exec = dict(persisted_details.get('recovery_execution') or {})
+        desired_status = {'retry_queue': 'retry_scheduled', 'rollback_candidates': 'rollback_review_queued', 'manual_recovery': 'manual_recovery_annotated'}.get(bucket, 'observed')
+        if existing_exec.get('status') == desired_status:
+            result['items'].append({'item_id': item_id, 'approval_id': approval_id, 'queue_bucket': bucket, 'action': 'skipped', 'reason': 'already_applied'})
+            result['skipped_count'] += 1
+            continue
+
+        desired_workflow_state = {'retry_queue': 'queued', 'rollback_candidates': 'rollback_pending', 'manual_recovery': (persisted_row or {}).get('workflow_state') or workflow_item.get('workflow_state') or 'execution_failed'}.get(bucket, 'pending')
+        desired_execution_status = {'retry_queue': 'queued', 'rollback_candidates': 'blocked', 'manual_recovery': 'error'}.get(bucket, 'planned')
+        desired_route = {'retry_queue': 'retry_queue', 'rollback_candidates': 'rollback_candidate_queue', 'manual_recovery': 'manual_recovery_queue'}.get(bucket, 'observe')
+        desired_follow_up = {'retry_queue': 'retry_execution', 'rollback_candidates': 'freeze_and_review', 'manual_recovery': 'operator_review_and_safe_requeue'}.get(bucket, 'observe')
+        event_type = {'retry_queue': 'recovery_retry_scheduled', 'rollback_candidates': 'recovery_rollback_review_queued', 'manual_recovery': 'recovery_manual_recovery_annotated'}.get(bucket, 'recovery_observed')
+        result_action = {'retry_queue': 'retry_scheduled', 'rollback_candidates': 'rollback_queued', 'manual_recovery': 'manual_recovery_annotated'}.get(bucket, 'observed')
+        reason = f"{execution_settings['reason_prefix']}: {bucket}"
+        event = {
+            'event_type': event_type,
+            'actor': execution_settings['actor'],
+            'source': execution_settings['source'],
+            'queue_bucket': bucket,
+            'status': desired_status,
+            'created_at': _utc_now_iso(),
+        }
+        recovery_execution = {
+            'status': desired_status,
+            'queue_bucket': bucket,
+            'route': desired_route,
+            'follow_up': desired_follow_up,
+            'retry_schedule': retry_schedule,
+            'rollback_route': orchestration.get('rollback_route'),
+            'manual_recovery': orchestration.get('manual_recovery') or {},
+            'reason_codes': orchestration.get('routing_reason') or [],
+            'event_log': (existing_exec.get('event_log') or []) + [event],
+            'last_applied_at': event['created_at'],
+        }
+        result['items'].append({
+            'item_id': item_id,
+            'approval_id': approval_id,
+            'queue_bucket': bucket,
+            'action': 'dry_run' if dry_run else result_action,
+            'workflow_state': desired_workflow_state,
+            'route': desired_route,
+            'follow_up': desired_follow_up,
+            'reason': reason,
+        })
+        if dry_run:
+            result['skipped_count'] += 1
+            continue
+
+        new_details = dict(persisted_details)
+        new_details.update({
+            'item_id': approval_id,
+            'approval_id': approval_id,
+            'playbook_id': item_id,
+            'title': item.get('title') or workflow_item.get('title'),
+            'action_type': item.get('action_type') or workflow_item.get('action_type') or (persisted_row or {}).get('approval_type'),
+            'workflow_state': desired_workflow_state,
+            'reason': reason,
+            'actor': execution_settings['actor'],
+            'source': execution_settings['source'],
+            'replay_source': replay_source,
+            'real_trade_execution': False,
+            'dangerous_live_parameter_change': False,
+            'recovery_execution': recovery_execution,
+            'queue_progression': {
+                'status': 'ready_to_queue' if bucket == 'retry_queue' else ('blocked_by_approval' if bucket == 'rollback_candidates' else 'deferred'),
+                'dispatch_route': desired_route,
+                'next_transition': desired_follow_up,
+                'queue_name': desired_route,
+            },
+            'last_transition': {
+                'rule': 'recovery_execution_apply',
+                'from_workflow_state': (persisted_row or {}).get('workflow_state') or workflow_item.get('workflow_state'),
+                'to_workflow_state': desired_workflow_state,
+                'dispatch_route': desired_route,
+                'next_transition': desired_follow_up,
+            },
+            'execution_status': desired_execution_status,
+        })
+        db.upsert_approval_state(
+            item_id=approval_id,
+            approval_type=item.get('action_type') or workflow_item.get('action_type') or (persisted_row or {}).get('approval_type') or 'workflow_approval',
+            target=item_id,
+            title=item.get('title') or workflow_item.get('title'),
+            decision=(persisted_row or {}).get('decision') or item.get('approval_state') or 'pending',
+            state=(persisted_row or {}).get('state') or item.get('approval_state') or 'pending',
+            workflow_state=desired_workflow_state,
+            reason=reason,
+            actor=execution_settings['actor'],
+            replay_source=replay_source,
+            details=new_details,
+            preserve_terminal=True,
+            event_type=event_type,
+            append_event=True,
+        )
+        executed_rows.append(db.get_approval_state(approval_id))
+        if bucket == 'retry_queue':
+            result['scheduled_retry_count'] += 1
+        elif bucket == 'rollback_candidates':
+            result['rollback_queued_count'] += 1
+        elif bucket == 'manual_recovery':
+            result['manual_recovery_annotated_count'] += 1
+
+    if executed_rows:
+        merge_persisted_approval_state(payload, executed_rows)
+    return payload
 
 
 def _get_auto_promotion_review_execution_settings(config: Any = None, overrides: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:

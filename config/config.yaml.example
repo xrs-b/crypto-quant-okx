@@ -74,6 +74,15 @@ governance:
     actor: system:auto-approval
     source: auto_approval_execution
     reason_prefix: controlled auto-approval execution
+  recovery_execution:
+    enabled: false
+    mode: disabled   # disabled|dry_run|controlled；只消费 recovery queue，做 metadata-only retry/rollback/manual recovery 调度，不做真实交易执行
+    actor: system:recovery-execution
+    source: recovery_execution
+    reason_prefix: workflow recovery execution
+    execute_retry_queue: true
+    execute_rollback_candidates: true
+    annotate_manual_recovery: true
   adaptive_rollout_orchestration:
     enforce_production_gate: true   # 默认保守：production rollout readiness 未过时，只跑 preflight/dry-run，不落真实自动审批/自动推进
     gate_max_items: 10

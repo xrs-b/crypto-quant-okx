@@ -6098,12 +6098,14 @@ def _get_auto_promotion_review_execution_settings(config: Any = None, overrides:
         'source': str(raw.get('source') or 'auto_promotion_review_execution'),
         'reason_prefix': str(raw.get('reason_prefix') or 'auto-promotion follow-up review queued'),
         'execute_due_post_promotion_reviews': bool(raw.get('execute_due_post_promotion_reviews', True)),
+        'complete_due_post_promotion_reviews': bool(raw.get('complete_due_post_promotion_reviews', True)),
         'escalate_rollback_review_queue': bool(raw.get('escalate_rollback_review_queue', True)),
     }
     settings.update({k: v for k, v in overrides.items() if v is not None})
     settings['enabled'] = bool(settings.get('enabled', False))
     settings['mode'] = _normalize_auto_promotion_review_execution_mode(settings.get('mode'))
     settings['execute_due_post_promotion_reviews'] = bool(settings.get('execute_due_post_promotion_reviews', True))
+    settings['complete_due_post_promotion_reviews'] = bool(settings.get('complete_due_post_promotion_reviews', True))
     settings['escalate_rollback_review_queue'] = bool(settings.get('escalate_rollback_review_queue', True))
     return settings
 
@@ -6123,6 +6125,8 @@ def execute_auto_promotion_review_queue_layer(payload: Dict[str, Any], db: Any, 
         'source': execution_settings.get('source'),
         'replay_source': replay_source,
         'queued_count': 0,
+        'completed_count': 0,
+        'rollback_escalated_count': 0,
         'skipped_count': 0,
         'items': [],
         'summary': {
@@ -6159,15 +6163,28 @@ def execute_auto_promotion_review_queue_layer(payload: Dict[str, Any], db: Any, 
         workflow_item = workflow_lookup.get(item_id) or {}
         persisted_details = dict((persisted_row or {}).get('details') or {})
         existing_review = dict(persisted_details.get('auto_promotion_review_execution') or {})
-        desired_status = 'rollback_review_pending' if queue_kind == 'rollback_review_queue' else 'post_promotion_review_pending'
-        desired_workflow_state = 'rollback_prepare' if queue_kind == 'rollback_review_queue' else 'review_pending'
+
+        should_complete = (
+            queue_kind == 'post_promotion_review_queue'
+            and bool(item.get('is_due'))
+            and execution_settings.get('complete_due_post_promotion_reviews', True)
+            and not _dedupe_strings(item.get('rollback_triggered') or [])
+        )
+        desired_status = 'rollback_review_pending' if queue_kind == 'rollback_review_queue' else ('post_promotion_review_completed' if should_complete else 'post_promotion_review_pending')
+        desired_workflow_state = 'rollback_prepare' if queue_kind == 'rollback_review_queue' else ('ready' if should_complete else 'review_pending')
+        desired_execution_status = 'review_completed' if should_complete else 'review_queued'
+        event_type = (
+            'auto_promotion_rollback_review_queued' if queue_kind == 'rollback_review_queue'
+            else ('auto_promotion_post_review_completed' if should_complete else 'auto_promotion_post_review_queued')
+        )
+        result_action = 'rollback_escalated' if queue_kind == 'rollback_review_queue' else ('completed' if should_complete else 'queued')
         if existing_review.get('review_status') == desired_status:
-            result['items'].append({'item_id': item_id, 'approval_id': approval_id, 'queue_kind': queue_kind, 'action': 'skipped', 'reason': 'already_queued'})
+            result['items'].append({'item_id': item_id, 'approval_id': approval_id, 'queue_kind': queue_kind, 'action': 'skipped', 'reason': 'already_queued' if not should_complete else 'already_completed'})
             result['skipped_count'] += 1
             continue
         reason_codes = _dedupe_strings((item.get('why_in_queue') or []) + (item.get('rollback_triggered') or []))
         review_event = {
-            'event_type': 'auto_promotion_rollback_review_queued' if queue_kind == 'rollback_review_queue' else 'auto_promotion_post_review_queued',
+            'event_type': event_type,
             'actor': execution_settings['actor'],
             'source': execution_settings['source'],
             'queue_kind': queue_kind,
@@ -6178,20 +6195,22 @@ def execute_auto_promotion_review_queue_layer(payload: Dict[str, Any], db: Any, 
         review_details = {
             'queue_kind': queue_kind,
             'review_status': desired_status,
+            'review_resolution': 'rollback_prepare' if queue_kind == 'rollback_review_queue' else ('completed_no_regression' if should_complete else 'queued_pending_review'),
             'queue_reason': item.get('queue_reason'),
             'why_in_queue': item.get('why_in_queue') or [],
-            'next_step': item.get('next_step'),
+            'next_step': 'continue_guarded_observe' if should_complete else item.get('next_step'),
             'review_due': item.get('review_due') or {},
             'observation_targets': item.get('observation_targets') or [],
             'rollback_triggered': item.get('rollback_triggered') or [],
             'reason_codes': reason_codes,
+            'completed_at': review_event['created_at'] if should_complete else None,
             'event_log': (existing_review.get('event_log') or []) + [review_event],
         }
         result_row = {
             'item_id': item_id,
             'approval_id': approval_id,
             'queue_kind': queue_kind,
-            'action': 'queued' if not dry_run else 'dry_run',
+            'action': result_action if not dry_run else ('dry_run_complete' if should_complete else 'dry_run'),
             'review_status': desired_status,
             'workflow_state': desired_workflow_state,
             'reason': item.get('queue_reason'),
@@ -6221,9 +6240,9 @@ def execute_auto_promotion_review_queue_layer(payload: Dict[str, Any], db: Any, 
                 'from_workflow_state': (persisted_row or {}).get('workflow_state') or workflow_item.get('workflow_state'),
                 'to_workflow_state': desired_workflow_state,
                 'queue_kind': queue_kind,
-                'next_transition': item.get('next_step'),
+                'next_transition': review_details.get('next_step'),
             },
-            'execution_status': 'review_queued',
+            'execution_status': desired_execution_status,
         })
         db.upsert_approval_state(
             item_id=approval_id,
@@ -6242,7 +6261,12 @@ def execute_auto_promotion_review_queue_layer(payload: Dict[str, Any], db: Any, 
             append_event=True,
         )
         executed_rows.append(db.get_approval_state(approval_id))
-        result['queued_count'] += 1
+        if should_complete:
+            result['completed_count'] += 1
+        elif queue_kind == 'rollback_review_queue':
+            result['rollback_escalated_count'] += 1
+        else:
+            result['queued_count'] += 1
 
     if executed_rows:
         merge_persisted_approval_state(payload, executed_rows)

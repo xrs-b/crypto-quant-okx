@@ -7194,13 +7194,49 @@ class TestApprovalPersistence(unittest.TestCase):
             ], replay_source='unit-test')
             executed = execute_auto_promotion_review_queue_layer(payload, db, settings={'enabled': True, 'mode': 'controlled'}, replay_source='unit-test')
             summary = executed['auto_promotion_review_execution']['summary']
-            self.assertEqual(executed['auto_promotion_review_execution']['queued_count'], 2)
+            self.assertEqual(executed['auto_promotion_review_execution']['completed_count'], 1)
+            self.assertEqual(executed['auto_promotion_review_execution']['rollback_escalated_count'], 1)
             self.assertEqual(summary['queue_count'], 2)
             post_state = db.get_approval_state('approval::post')
-            self.assertEqual(post_state['workflow_state'], 'review_pending')
-            self.assertEqual(post_state['details']['auto_promotion_review_execution']['review_status'], 'post_promotion_review_pending')
+            self.assertEqual(post_state['workflow_state'], 'ready')
+            self.assertEqual(post_state['details']['auto_promotion_review_execution']['review_status'], 'post_promotion_review_completed')
+            self.assertEqual(post_state['details']['auto_promotion_review_execution']['review_resolution'], 'completed_no_regression')
+            self.assertTrue(post_state['details']['auto_promotion_review_execution']['completed_at'])
             rollback_item = next(row for row in executed['auto_promotion_review_execution']['items'] if row['queue_kind'] == 'rollback_review_queue')
             self.assertEqual(rollback_item['workflow_state'], 'rollback_prepare')
+
+
+    def test_execute_auto_promotion_review_queue_layer_dry_run_completion_does_not_persist(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(os.path.join(tmpdir, 'auto_promotion_review_dry_run.db'))
+            payload = {
+                'workflow_state': {
+                    'item_states': [
+                        {
+                            'item_id': 'playbook::post', 'title': 'Post review item', 'action_type': 'joint_stage_prepare', 'workflow_state': 'ready', 'risk_level': 'low',
+                            'scheduled_review': {'review_due_at': '2024-03-28T08:00:00+00:00', 'review_after_hours': 24},
+                            'auto_promotion_execution': {'reason_codes': ['auto_advance_allowed'], 'after': {'rollout_stage': 'controlled_apply'}},
+                            'rollback_gate': {'candidate': False, 'triggered': []},
+                        },
+                    ],
+                    'summary': {'item_count': 1},
+                },
+                'approval_state': {
+                    'items': [
+                        {'approval_id': 'approval::post', 'playbook_id': 'playbook::post', 'title': 'Post review item', 'action_type': 'joint_stage_prepare', 'approval_state': 'pending', 'decision_state': 'ready', 'risk_level': 'low', 'approval_required': False, 'requires_manual': False, 'blocked_by': []},
+                    ],
+                    'summary': {'pending_count': 1},
+                },
+            }
+            db.sync_approval_items([
+                {'item_id': 'approval::post', 'approval_type': 'joint_stage_prepare', 'target': 'playbook::post', 'title': 'Post review item', 'approval_state': 'pending', 'workflow_state': 'ready'},
+            ], replay_source='unit-test')
+            executed = execute_auto_promotion_review_queue_layer(payload, db, settings={'enabled': True, 'mode': 'dry_run'}, replay_source='unit-test')
+            self.assertEqual(executed['auto_promotion_review_execution']['completed_count'], 0)
+            self.assertEqual(executed['auto_promotion_review_execution']['items'][0]['action'], 'dry_run_complete')
+            post_state = db.get_approval_state('approval::post')
+            self.assertEqual(post_state['workflow_state'], 'ready')
+            self.assertFalse(post_state['details'].get('auto_promotion_review_execution'))
 
     def test_auto_promotion_review_execution_api_returns_execution_summary(self):
         import dashboard.api as dashboard_api

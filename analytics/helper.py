@@ -2528,7 +2528,7 @@ def _build_controlled_rollout_action_details(action_type: str, row: Dict, workfl
     }
 
     if action_type == 'joint_queue_promote_safe':
-        queue_name = row.get('target_queue') or workflow_item.get('queue_name') or row.get('bucket_id') or workflow_item.get('bucket_id') or 'priority_queue'
+        queue_name = row.get('target_queue') or row.get('bucket_id') or workflow_item.get('bucket_id') or workflow_item.get('queue_name') or 'priority_queue'
         details.update({
             'queue_name': queue_name,
             'queue_action': 'promote_safe',
@@ -2637,6 +2637,7 @@ def _get_controlled_rollout_execution_settings(config: Any = None, overrides: Op
         'target_workflow_state': str(raw.get('target_workflow_state') or 'ready').strip().lower() or 'ready',
         'target_state': str(raw.get('target_state') or 'ready').strip().lower() or 'ready',
         'default_review_after_hours': int(raw.get('default_review_after_hours') or 24),
+        'auto_promote_ready_candidates': bool(raw.get('auto_promote_ready_candidates', False)),
     }
     settings.update({k: v for k, v in overrides.items() if v is not None})
     settings['enabled'] = bool(settings.get('enabled', False))
@@ -2655,6 +2656,10 @@ def execute_controlled_rollout_layer(payload: Dict, db: Any, *, config: Any = No
     workflow_state = payload.get('workflow_state') or {}
     approval_items = approval_state.get('items') or []
     workflow_lookup = {row.get('item_id'): row for row in (workflow_state.get('item_states') or []) if row.get('item_id')}
+    candidate_view = build_auto_promotion_candidate_view(payload, limit=max(len(workflow_lookup) or 0, len(approval_items) or 0, 50))
+    candidate_items = candidate_view.get('items') or []
+    candidate_by_approval = {row.get('approval_id'): row for row in candidate_items if row.get('approval_id')}
+    candidate_by_playbook = {row.get('item_id'): row for row in candidate_items if row.get('item_id')}
 
     result = {
         'enabled': execution_settings.get('enabled', False),
@@ -2663,14 +2668,18 @@ def execute_controlled_rollout_layer(payload: Dict, db: Any, *, config: Any = No
         'source': execution_settings.get('source'),
         'replay_source': replay_source,
         'allowed_action_types': execution_settings.get('allowed_action_types') or [],
+        'auto_promote_ready_candidates': bool(execution_settings.get('auto_promote_ready_candidates', False)),
+        'candidate_summary': candidate_view.get('summary') or {},
         'executed_count': 0,
         'skipped_count': 0,
         'items': [],
     }
     payload['controlled_rollout_execution'] = result
 
-    if not result['enabled'] or result['mode'] != 'state_apply' or not approval_items:
+    if not result['enabled'] or result['mode'] != 'state_apply' or not result['auto_promote_ready_candidates'] or not approval_items:
         result['skipped_count'] = len(approval_items)
+        if not result['auto_promote_ready_candidates']:
+            result['safety_switch'] = 'auto_promote_ready_candidates_disabled'
         return payload
 
     validation_gate = _build_validation_gate_snapshot(payload)
@@ -2683,34 +2692,60 @@ def execute_controlled_rollout_layer(payload: Dict, db: Any, *, config: Any = No
     for row in approval_items:
         approval_id = row.get('approval_id') or row.get('item_id') or row.get('playbook_id')
         workflow_item = workflow_lookup.get(row.get('playbook_id')) or {}
+        candidate = candidate_by_approval.get(approval_id) or candidate_by_playbook.get(row.get('playbook_id')) or {}
         persisted_row = db.get_approval_state(approval_id) if approval_id else None
         persisted_details = (persisted_row or {}).get('details') or {}
         action_type = str(row.get('action_type') or workflow_item.get('action_type') or (persisted_row or {}).get('approval_type') or '').strip().lower()
         action_spec = CONTROLLED_ROLLOUT_ACTION_SPECS.get(action_type)
         current_state = str((persisted_row or {}).get('state') or row.get('approval_state') or row.get('persisted_state') or row.get('state') or 'pending').strip().lower()
         current_workflow_state = str((persisted_row or {}).get('workflow_state') or row.get('persisted_workflow_state') or workflow_item.get('workflow_state') or row.get('decision_state') or 'pending').strip().lower()
-        auto_decision = _normalize_auto_approval_decision(row.get('auto_approval_decision'))
-        blocked_by = _dedupe_strings(row.get('blocked_by') or workflow_item.get('blocked_by') or workflow_item.get('blocking_reasons') or [])
-        risk_level = str(row.get('risk_level') or workflow_item.get('risk_level') or '').strip().lower()
-        requires_manual = bool(row.get('requires_manual'))
-        approval_required = bool(row.get('approval_required') if row.get('approval_required') is not None else workflow_item.get('approval_required'))
-        eligible = bool(row.get('auto_approval_eligible'))
+        auto_decision = _normalize_auto_approval_decision(row.get('auto_approval_decision') or candidate.get('auto_approval_decision'))
+        blocked_by = _dedupe_strings(row.get('blocked_by') or workflow_item.get('blocked_by') or workflow_item.get('blocking_reasons') or candidate.get('blocked_by') or [])
+        risk_level = str(row.get('risk_level') or workflow_item.get('risk_level') or candidate.get('risk_level') or '').strip().lower()
+        requires_manual = bool(row.get('requires_manual') if row.get('requires_manual') is not None else candidate.get('requires_manual'))
+        approval_required = bool(row.get('approval_required') if row.get('approval_required') is not None else workflow_item.get('approval_required', candidate.get('approval_required')))
+        eligible = bool(row.get('auto_approval_eligible') if row.get('auto_approval_eligible') is not None else candidate.get('auto_approval_eligible'))
 
         target_state = str((action_spec or {}).get('state') or execution_settings['target_state']).strip().lower() or execution_settings['target_state']
         target_workflow_state = str((action_spec or {}).get('workflow_state') or execution_settings['target_workflow_state']).strip().lower() or execution_settings['target_workflow_state']
         event_type = str((action_spec or {}).get('event_type') or 'controlled_rollout_state_apply')
         result_action = str((action_spec or {}).get('result_action') or 'state_applied')
 
+        before_stage = str(candidate.get('current_rollout_stage') or workflow_item.get('current_rollout_stage') or persisted_details.get('rollout_stage') or row.get('current_rollout_stage') or 'observe').strip().lower() or 'observe'
+        default_after_stage = {
+            'joint_queue_promote_safe': 'candidate',
+            'joint_stage_prepare': 'prepared',
+            'joint_review_schedule': 'review_pending',
+        }.get(action_type, before_stage)
+        candidate_stage = candidate.get('recommended_stage') or candidate.get('target_rollout_stage') if candidate.get('can_auto_promote') else None
+        after_stage = str(candidate_stage or workflow_item.get('target_rollout_stage') or row.get('target_rollout_stage') or default_after_stage or persisted_details.get('target_rollout_stage')).strip().lower() or before_stage
+        stage_terminal = before_stage in {'review_pending', 'rollback_prepare'} and after_stage == before_stage
+        fallback_candidate_ready = bool(
+            action_spec
+            and current_state not in TERMINAL_APPROVAL_STATES
+            and action_type in allowed_action_types
+            and auto_decision == 'auto_approve'
+            and eligible
+            and risk_level == 'low'
+            and not blocked_by
+            and not approval_required
+            and not requires_manual
+            and not execution_gate.get('blocked')
+        )
+        candidate_ready = bool(candidate.get('can_auto_promote') or fallback_candidate_ready)
         skip_reason = None
         already_effect_applied = (
             current_state == target_state
             and current_workflow_state == target_workflow_state
             and persisted_details.get('effect') == (action_spec or {}).get('effect')
             and persisted_details.get('action_type') == action_type
+            and str(persisted_details.get('rollout_stage') or '') == after_stage
         )
 
         if current_state in TERMINAL_APPROVAL_STATES:
             skip_reason = f'terminal_state:{current_state}'
+        elif stage_terminal:
+            skip_reason = f'terminal_stage:{before_stage}'
         elif action_type not in allowed_action_types:
             skip_reason = f'action_type_not_allowlisted:{action_type or "unknown"}'
         elif not action_spec:
@@ -2725,12 +2760,16 @@ def execute_controlled_rollout_layer(payload: Dict, db: Any, *, config: Any = No
             skip_reason = 'not_eligible'
         elif auto_decision != 'auto_approve':
             skip_reason = f'judgement:{auto_decision}'
-        elif risk_level != 'low':
-            skip_reason = f'risk_level:{risk_level or "unknown"}'
-        elif blocked_by:
-            skip_reason = 'blocked_by:' + ','.join(blocked_by)
         elif execution_gate.get('blocked'):
             skip_reason = execution_gate.get('primary_reason') or 'validation_gate_blocked'
+        elif not candidate_ready:
+            skip_reason = 'candidate_not_ready'
+        elif candidate.get('risk_label') not in {None, '', 'low'} or risk_level != 'low':
+            skip_reason = f'risk_level:{risk_level or candidate.get("risk_label") or "unknown"}'
+        elif candidate.get('manual_fallback_required'):
+            skip_reason = 'manual_fallback_required'
+        elif candidate.get('blocked_by') or blocked_by:
+            skip_reason = 'blocked_by:' + ','.join(candidate.get('blocked_by') or blocked_by)
 
         if skip_reason:
             result['items'].append({
@@ -2741,13 +2780,19 @@ def execute_controlled_rollout_layer(payload: Dict, db: Any, *, config: Any = No
                 'reason': skip_reason,
                 'state': current_state,
                 'workflow_state': current_workflow_state,
+                'before_stage': before_stage,
+                'after_stage': after_stage,
+                'candidate': candidate,
                 'validation_gate': execution_gate.get('validation_gate'),
                 'execution_gate': execution_gate,
             })
             result['skipped_count'] += 1
             continue
 
-        reason = f"{execution_settings['reason_prefix']}: {row.get('reason') or 'policy judged item as low-risk controlled-rollout candidate'}"
+        candidate_reasons = _dedupe_strings((candidate.get('why_promotable') or []) + (candidate.get('missing_requirements') or []))
+        if fallback_candidate_ready and not candidate_reasons:
+            candidate_reasons = ['auto_advance_allowed', 'derived_from_controlled_rollout_guardrails']
+        reason = f"{execution_settings['reason_prefix']}: {row.get('reason') or 'ready auto-promotion candidate passed strict safety boundary'}"
         details = {
             'item_id': approval_id,
             'approval_id': approval_id,
@@ -2767,14 +2812,75 @@ def execute_controlled_rollout_layer(payload: Dict, db: Any, *, config: Any = No
             'requires_manual': False,
             'blocked_by': blocked_by,
             'rule_hits': row.get('rule_hits') or [],
-            'risk_level': row.get('risk_level') or workflow_item.get('risk_level'),
+            'risk_level': row.get('risk_level') or workflow_item.get('risk_level') or candidate.get('risk_level'),
             'action_type': action_type,
             'execution_layer': 'controlled_rollout_state_apply',
             'execution_mode': execution_settings['mode'],
             'validation_gate': execution_gate.get('validation_gate'),
             'execution_gate': execution_gate,
+            'real_trade_execution': False,
+            'dangerous_live_parameter_change': False,
+            'auto_promotion_execution': {
+                'enabled': True,
+                'candidate_ready': True,
+                'strict_boundary': 'very_safe_ready_low_risk_no_blocker_no_manual_fallback',
+                'candidate_summary': {
+                    'can_auto_promote': True,
+                    'risk_label': candidate.get('risk_label') or 'low',
+                    'risk_score': candidate.get('risk_score') if candidate else 0,
+                    'manual_fallback_required': candidate.get('manual_fallback_required', False),
+                    'why_promotable': (candidate.get('why_promotable') or candidate_reasons),
+                },
+                'before': {
+                    'state': current_state,
+                    'workflow_state': current_workflow_state,
+                    'rollout_stage': before_stage,
+                },
+                'after': {
+                    'state': target_state,
+                    'workflow_state': target_workflow_state,
+                    'rollout_stage': after_stage,
+                },
+                'reason_codes': candidate_reasons or ['auto_advance_allowed'],
+                'rollback_hint': candidate.get('rollback_gate', {}).get('rollback_hint') or 'revert_stage_metadata_to_previous_stage',
+                'event_log': [{
+                    'event_type': event_type,
+                    'actor': execution_settings['actor'],
+                    'source': execution_settings['source'],
+                    'reason': reason,
+                    'before_stage': before_stage,
+                    'after_stage': after_stage,
+                    'before_state': current_state,
+                    'after_state': target_state,
+                    'before_workflow_state': current_workflow_state,
+                    'after_workflow_state': target_workflow_state,
+                    'reason_codes': candidate_reasons or ['auto_advance_allowed'],
+                    'created_at': _utc_now_iso(),
+                }],
+            },
+            'previous_state': current_state,
+            'previous_workflow_state': current_workflow_state,
+            'previous_rollout_stage': before_stage,
+            'rollout_stage': after_stage,
+            'target_rollout_stage': after_stage,
+            'stage_transition': {'from': before_stage, 'to': after_stage},
+            'rollback_hint': candidate.get('rollback_gate', {}).get('rollback_hint') or 'revert_stage_metadata_to_previous_stage',
+            'last_transition': {
+                'rule': 'controlled_auto_promotion_execute',
+                'from_execution_status': persisted_details.get('execution_status'),
+                'to_execution_status': 'applied',
+                'from_workflow_state': current_workflow_state,
+                'to_workflow_state': target_workflow_state,
+                'dispatch_route': candidate.get('dispatch_route') or 'stage_metadata_apply',
+                'next_transition': candidate.get('recommended_action') or 'continue_monitoring',
+            },
+            'execution_status': 'applied',
         }
-        details.update(_build_controlled_rollout_action_details(action_type, row, workflow_item, action_spec, execution_settings))
+        details.update(_build_controlled_rollout_action_details(action_type, {**row, 'current_rollout_stage': before_stage, 'target_rollout_stage': after_stage}, {**workflow_item, 'current_rollout_stage': before_stage, 'target_rollout_stage': after_stage}, action_spec, execution_settings))
+        details['previous_rollout_stage'] = before_stage
+        details['rollout_stage'] = after_stage
+        details['target_rollout_stage'] = after_stage
+        details['stage_transition'] = {'from': before_stage, 'to': after_stage}
         db.upsert_approval_state(
             item_id=approval_id,
             approval_type=row.get('action_type') or workflow_item.get('action_type') or 'workflow_approval',
@@ -2800,6 +2906,9 @@ def execute_controlled_rollout_layer(payload: Dict, db: Any, *, config: Any = No
             'state': target_state,
             'workflow_state': target_workflow_state,
             'reason': reason,
+            'before_stage': before_stage,
+            'after_stage': after_stage,
+            'reason_codes': candidate_reasons or ['auto_advance_allowed'],
         })
         result['executed_count'] += 1
 

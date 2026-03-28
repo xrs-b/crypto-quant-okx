@@ -8756,6 +8756,7 @@ class TestApprovalPersistence(unittest.TestCase):
             'governance.controlled_rollout_execution': {
                 'enabled': True,
                 'mode': 'state_apply',
+                'auto_promote_ready_candidates': True,
                 'actor': 'system:test-controlled-rollout',
                 'source': 'unit_test_controlled_rollout',
                 'reason_prefix': 'unit-test controlled rollout state apply',
@@ -8841,6 +8842,7 @@ class TestApprovalPersistence(unittest.TestCase):
             'governance.controlled_rollout_execution': {
                 'enabled': True,
                 'mode': 'state_apply',
+                'auto_promote_ready_candidates': True,
                 'actor': 'system:test-controlled-rollout',
                 'source': 'unit_test_controlled_rollout',
                 'reason_prefix': 'unit-test controlled rollout state apply',
@@ -8931,6 +8933,7 @@ class TestApprovalPersistence(unittest.TestCase):
             'governance.controlled_rollout_execution': {
                 'enabled': True,
                 'mode': 'state_apply',
+                'auto_promote_ready_candidates': True,
                 'allowed_action_types': ['joint_queue_promote_safe'],
             }
         })
@@ -8979,6 +8982,7 @@ class TestApprovalPersistence(unittest.TestCase):
             'governance.controlled_rollout_execution': {
                 'enabled': True,
                 'mode': 'state_apply',
+                'auto_promote_ready_candidates': True,
             }
         })
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -9200,7 +9204,7 @@ class TestApprovalPersistence(unittest.TestCase):
             def get(self, key, default=None):
                 return self.values.get(key, default)
 
-        config = StubConfig({'governance.controlled_rollout_execution': {'enabled': True, 'mode': 'state_apply', 'allowed_action_types': ['joint_stage_prepare']}})
+        config = StubConfig({'governance.controlled_rollout_execution': {'enabled': True, 'mode': 'state_apply', 'auto_promote_ready_candidates': True, 'allowed_action_types': ['joint_stage_prepare']}})
         with tempfile.TemporaryDirectory() as tmpdir:
             db = Database(str(Path(tmpdir) / 'controlled_rollout_validation_regression.db'))
             payload = {
@@ -9214,6 +9218,148 @@ class TestApprovalPersistence(unittest.TestCase):
             self.assertEqual(db.get_approval_state('approval::stage')['state'], 'pending')
             self.assertEqual(result['controlled_rollout_execution']['items'][0]['reason'], 'validation_gate_regression')
             self.assertEqual(result['controlled_rollout_execution']['execution_gate']['effect'], 'blocked_regression')
+
+    def _make_controlled_auto_promotion_payload(self, *, blocked=False, manual=False, approval_required=False, workflow_state='ready', current_stage='guarded_prepare', target_stage='controlled_apply'):
+        workflow_item = {
+            'item_id': 'playbook::promo',
+            'title': 'Promotion ready item',
+            'action_type': 'joint_stage_prepare',
+            'risk_level': 'low',
+            'approval_required': approval_required,
+            'requires_manual': manual,
+            'workflow_state': workflow_state,
+            'current_rollout_stage': current_stage,
+            'target_rollout_stage': target_stage,
+            'blocking_reasons': ['validation_gap'] if blocked else [],
+            'auto_approval_decision': 'auto_approve',
+            'auto_approval_eligible': True,
+            'stage_handler': {
+                'stage_key': current_stage,
+                'advisory': {
+                    'recommended_stage': target_stage,
+                    'recommended_action': 'promote_to_controlled_apply',
+                    'urgency': 'high',
+                    'confidence': 0.93,
+                    'reasons': ['auto_advance_allowed'],
+                    'ready_for_live_promotion': not (blocked or manual or approval_required),
+                    'auto_promotion_candidate': not (blocked or manual or approval_required),
+                },
+            },
+            'state_machine': {
+                'auto_advance_gate': {
+                    'allowed': not (blocked or manual or approval_required),
+                    'readiness_score': 100 if not (blocked or manual or approval_required) else 30,
+                    'blockers': ([] if not blocked else ['blocked_by:validation_gap']) + ([] if not manual else ['manual_gate_required']) + ([] if not approval_required else ['approval_required']),
+                },
+                'rollback_gate': {'candidate': False, 'triggered': []},
+            },
+            'validation_gate': {'enabled': True, 'ready': True, 'freeze_auto_advance': False, 'rollback_on_regression': False, 'reasons': []},
+            'lane_routing': {'lane_id': 'auto_batch' if not (blocked or manual or approval_required) else 'blocked', 'queue_name': None, 'dispatch_route': 'stage_metadata_apply', 'route_family': 'safe_apply', 'next_transition': 'promote_to_controlled_apply'},
+            'stage_loop': {'loop_state': 'auto_advance' if not (blocked or manual or approval_required) else 'review_pending', 'recommended_action': 'promote_to_controlled_apply', 'waiting_on': [] if not blocked else ['blocked_by:validation_gap']},
+        }
+        approval_item = {
+            'approval_id': 'approval::promo',
+            'playbook_id': 'playbook::promo',
+            'title': 'Promotion ready item',
+            'action_type': 'joint_stage_prepare',
+            'approval_state': 'pending',
+            'decision_state': workflow_state,
+            'risk_level': 'low',
+            'approval_required': approval_required,
+            'requires_manual': manual,
+            'blocked_by': ['validation_gap'] if blocked else [],
+            'auto_approval_decision': 'auto_approve',
+            'auto_approval_eligible': True,
+        }
+        return {
+            'validation_gate': {'enabled': True, 'ready': True, 'freeze_auto_advance': False, 'rollback_on_regression': False, 'reasons': []},
+            'workflow_state': {'item_states': [workflow_item], 'summary': {}},
+            'approval_state': {'items': [approval_item], 'summary': {}},
+        }
+
+    def test_controlled_rollout_execution_default_switch_keeps_ready_candidate_inert(self):
+        class StubConfig:
+            def __init__(self, values=None):
+                self.values = values or {}
+            def get(self, key, default=None):
+                return self.values.get(key, default)
+
+        config = StubConfig({'governance.controlled_rollout_execution': {'enabled': True, 'mode': 'state_apply', 'allowed_action_types': ['joint_stage_prepare']}})
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(str(Path(tmpdir) / 'controlled_rollout_default_switch.db'))
+            payload = self._make_controlled_auto_promotion_payload()
+            db.sync_approval_items(build_workflow_approval_records(payload), replay_source='unit-test')
+            result = execute_controlled_rollout_layer(payload, db, config=config, replay_source='unit-test-replay')
+            persisted = db.get_approval_state('approval::promo')
+            self.assertEqual(persisted['state'], 'pending')
+            self.assertEqual(result['controlled_rollout_execution']['executed_count'], 0)
+            self.assertEqual(result['controlled_rollout_execution']['safety_switch'], 'auto_promote_ready_candidates_disabled')
+
+    def test_controlled_rollout_execution_applies_ready_candidate_with_full_audit(self):
+        class StubConfig:
+            def __init__(self, values=None):
+                self.values = values or {}
+            def get(self, key, default=None):
+                return self.values.get(key, default)
+
+        config = StubConfig({'governance.controlled_rollout_execution': {'enabled': True, 'mode': 'state_apply', 'auto_promote_ready_candidates': True, 'allowed_action_types': ['joint_stage_prepare'], 'actor': 'system:test-controlled-rollout', 'source': 'unit_test_controlled_rollout'}})
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(str(Path(tmpdir) / 'controlled_rollout_ready_candidate.db'))
+            payload = self._make_controlled_auto_promotion_payload()
+            db.sync_approval_items(build_workflow_approval_records(payload), replay_source='unit-test')
+            result = execute_controlled_rollout_layer(payload, db, config=config, replay_source='unit-test-replay')
+            persisted = db.get_approval_state('approval::promo')
+            details = persisted['details']
+            self.assertEqual(result['controlled_rollout_execution']['executed_count'], 1)
+            self.assertEqual(persisted['state'], 'ready')
+            self.assertEqual(persisted['workflow_state'], 'ready')
+            self.assertEqual(details['rollout_stage'], 'controlled_apply')
+            self.assertEqual(details['stage_transition']['from'], 'guarded_prepare')
+            self.assertEqual(details['stage_transition']['to'], 'controlled_apply')
+            self.assertEqual(details['auto_promotion_execution']['before']['rollout_stage'], 'guarded_prepare')
+            self.assertEqual(details['auto_promotion_execution']['after']['rollout_stage'], 'controlled_apply')
+            self.assertEqual(details['auto_promotion_execution']['event_log'][0]['actor'], 'system:test-controlled-rollout')
+            self.assertEqual(details['auto_promotion_execution']['event_log'][0]['source'], 'unit_test_controlled_rollout')
+            self.assertTrue(details['real_trade_execution'] is False)
+            self.assertTrue(details['dangerous_live_parameter_change'] is False)
+            self.assertTrue(details['auto_promotion_execution']['rollback_hint'])
+            timeline = db.get_approval_timeline(item_id='approval::promo', ascending=True)
+            self.assertEqual(timeline[-1]['event_type'], 'controlled_rollout_stage_prepare')
+
+    def test_controlled_rollout_execution_rejects_blocked_candidate(self):
+        class StubConfig:
+            def __init__(self, values=None):
+                self.values = values or {}
+            def get(self, key, default=None):
+                return self.values.get(key, default)
+
+        config = StubConfig({'governance.controlled_rollout_execution': {'enabled': True, 'mode': 'state_apply', 'auto_promote_ready_candidates': True, 'allowed_action_types': ['joint_stage_prepare']}})
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(str(Path(tmpdir) / 'controlled_rollout_blocked_candidate.db'))
+            payload = self._make_controlled_auto_promotion_payload(blocked=True)
+            db.sync_approval_items(build_workflow_approval_records(payload), replay_source='unit-test')
+            result = execute_controlled_rollout_layer(payload, db, config=config, replay_source='unit-test-replay')
+            persisted = db.get_approval_state('approval::promo')
+            self.assertEqual(persisted['state'], 'pending')
+            self.assertEqual(result['controlled_rollout_execution']['items'][0]['reason'], 'candidate_not_ready')
+            self.assertEqual(result['controlled_rollout_execution']['executed_count'], 0)
+
+    def test_controlled_rollout_execution_protects_terminal_stage(self):
+        class StubConfig:
+            def __init__(self, values=None):
+                self.values = values or {}
+            def get(self, key, default=None):
+                return self.values.get(key, default)
+
+        config = StubConfig({'governance.controlled_rollout_execution': {'enabled': True, 'mode': 'state_apply', 'auto_promote_ready_candidates': True, 'allowed_action_types': ['joint_stage_prepare']}})
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(str(Path(tmpdir) / 'controlled_rollout_terminal_stage.db'))
+            payload = self._make_controlled_auto_promotion_payload(current_stage='review_pending', target_stage='review_pending')
+            db.sync_approval_items(build_workflow_approval_records(payload), replay_source='unit-test')
+            result = execute_controlled_rollout_layer(payload, db, config=config, replay_source='unit-test-replay')
+            persisted = db.get_approval_state('approval::promo')
+            self.assertEqual(persisted['state'], 'pending')
+            self.assertEqual(result['controlled_rollout_execution']['items'][0]['reason'], 'terminal_stage:review_pending')
 
     def test_approval_state_api_and_replay_endpoint_expose_persisted_rows(self):
         import dashboard.api as dashboard_api

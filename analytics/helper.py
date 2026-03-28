@@ -2604,6 +2604,18 @@ def _build_rollout_result_envelope(*, disposition: str, status: str, reason: Opt
     return result
 
 
+def _parse_validation_timestamp(value: Any) -> Optional[datetime]:
+    if value in (None, ''):
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    try:
+        parsed = datetime.fromisoformat(str(value).replace('Z', '+00:00'))
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    except Exception:
+        return None
+
+
 def _extract_validation_gate(payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     payload = payload or {}
     source = (
@@ -2622,17 +2634,59 @@ def _extract_validation_gate(payload: Optional[Dict[str, Any]] = None) -> Dict[s
     missing = _dedupe_strings((source.get('missing_required_capabilities') if snapshot_like else None) or readiness.get('missing_required_capabilities') or coverage.get('missing_required') or [])
     failing = _dedupe_strings((source.get('failing_required_capabilities') if snapshot_like else None) or readiness.get('failing_required_capabilities') or coverage.get('failing_required') or [])
     failing_case_count = int((source.get('failing_case_count') if snapshot_like else None) or readiness.get('failing_case_count') or source.get('fail_count') or 0)
+    freshness_policy = dict((source.get('freshness_policy') if isinstance(source, dict) else None) or {})
+    max_age_minutes = freshness_policy.get('max_age_minutes')
+    max_age_hours = freshness_policy.get('max_age_hours')
+    if max_age_minutes in (None, '') and max_age_hours not in (None, ''):
+        try:
+            max_age_minutes = float(max_age_hours) * 60.0
+        except Exception:
+            max_age_minutes = None
+    try:
+        max_age_minutes = float(max_age_minutes) if max_age_minutes not in (None, '') else None
+    except Exception:
+        max_age_minutes = None
+    freshness_enabled = bool(freshness_policy.get('enabled')) or (max_age_minutes is not None and max_age_minutes > 0)
+    evaluated_at = _parse_validation_timestamp(
+        (source.get('evaluated_at') if isinstance(source, dict) else None)
+        or (source.get('generated_at') if isinstance(source, dict) else None)
+        or readiness.get('evaluated_at')
+        or readiness.get('generated_at')
+        or ((source.get('summary') or {}).get('generated_at') if isinstance(source.get('summary'), dict) else None)
+    )
+    age_seconds = None
+    stale = False
+    now = datetime.now(timezone.utc)
+    if freshness_enabled and evaluated_at:
+        age_seconds = max(0.0, (now - evaluated_at).total_seconds())
+        stale = bool(max_age_minutes is not None and age_seconds > (max_age_minutes * 60.0))
+    elif freshness_enabled and not evaluated_at:
+        stale = True
+    effective_ready = ready and not stale if freshness_enabled else ready
     reasons = []
     reasons.extend([f'missing_required:{item}' for item in missing])
     reasons.extend([f'failing_required:{item}' for item in failing])
     if failing_case_count:
         reasons.append(f'failing_cases:{failing_case_count}')
+    if freshness_enabled:
+        if stale:
+            reasons.append('validation_stale')
+        if evaluated_at is None:
+            reasons.append('validation_timestamp_missing')
     enabled = bool(source.get('enabled')) if snapshot_like else bool(source)
     summary = {
         'enabled': enabled,
-        'ready': ready,
-        'freeze_auto_advance': enabled and not ready,
-        'rollback_on_regression': enabled and not ready,
+        'ready': effective_ready,
+        'freshness_policy': {
+            'enabled': freshness_enabled,
+            'max_age_minutes': max_age_minutes,
+            'max_age_hours': (max_age_minutes / 60.0) if max_age_minutes is not None else None,
+        },
+        'evaluated_at': evaluated_at.isoformat().replace('+00:00', 'Z') if evaluated_at else None,
+        'age_seconds': age_seconds,
+        'stale': stale,
+        'freeze_auto_advance': enabled and not effective_ready,
+        'rollback_on_regression': enabled and not effective_ready and not stale,
         'coverage_schema_version': coverage.get('schema_version'),
         'required_capability_count': coverage.get('required_capability_count'),
         'covered_required_count': coverage.get('covered_required_count'),
@@ -2640,7 +2694,7 @@ def _extract_validation_gate(payload: Optional[Dict[str, Any]] = None) -> Dict[s
         'missing_required_capabilities': missing,
         'failing_required_capabilities': failing,
         'failing_case_count': failing_case_count,
-        'reasons': reasons,
+        'reasons': _dedupe_strings(reasons),
         'summary': source,
     }
     if not summary['enabled']:
@@ -2649,6 +2703,8 @@ def _extract_validation_gate(payload: Optional[Dict[str, Any]] = None) -> Dict[s
             'freeze_auto_advance': False,
             'rollback_on_regression': False,
             'reasons': [],
+            'stale': False,
+            'age_seconds': None,
         })
     return summary
 
@@ -2668,6 +2724,10 @@ def _build_validation_gate_snapshot(payload: Optional[Dict[str, Any]] = None) ->
         'required_capability_count': gate.get('required_capability_count'),
         'covered_required_count': gate.get('covered_required_count'),
         'passing_required_count': gate.get('passing_required_count'),
+        'freshness_policy': gate.get('freshness_policy') or {'enabled': False, 'max_age_minutes': None, 'max_age_hours': None},
+        'evaluated_at': gate.get('evaluated_at'),
+        'age_seconds': gate.get('age_seconds'),
+        'stale': bool(gate.get('stale', False)),
     }
     snapshot['regression_detected'] = bool(snapshot['enabled']) and snapshot.get('ready') is False and bool(snapshot.get('rollback_on_regression')) and bool((snapshot.get('failing_required_capabilities') or []) or int(snapshot.get('failing_case_count') or 0) > 0)
     snapshot['gap_count'] = len(snapshot.get('missing_required_capabilities') or []) + len(snapshot.get('failing_required_capabilities') or [])
@@ -2690,12 +2750,15 @@ def _build_validation_execution_gate(validation_gate: Optional[Dict[str, Any]] =
     failing = gate.get('failing_required_capabilities') or []
     failing_case_count = int(gate.get('failing_case_count') or 0)
     regression = bool(gate.get('regression_detected'))
+    stale = bool(gate.get('stale'))
     frozen = bool(gate.get('enabled')) and bool(gate.get('freeze_auto_advance'))
-    gap_only = frozen and not regression and bool(missing)
-    plain_freeze = frozen and not regression and not gap_only
+    gap_only = frozen and not regression and not stale and bool(missing)
+    plain_freeze = frozen and not regression and not stale and not gap_only
     reason_codes = []
     if regression:
         reason_codes.append('validation_gate_regression')
+    elif stale:
+        reason_codes.append('validation_gate_stale')
     elif gap_only:
         reason_codes.append('validation_gate_gap')
     elif plain_freeze:
@@ -2708,6 +2771,8 @@ def _build_validation_execution_gate(validation_gate: Optional[Dict[str, Any]] =
     effect = 'allowed'
     if regression:
         effect = 'blocked_regression'
+    elif stale:
+        effect = 'blocked_stale'
     elif gap_only:
         effect = 'blocked_gap'
     elif plain_freeze:
@@ -2715,6 +2780,8 @@ def _build_validation_execution_gate(validation_gate: Optional[Dict[str, Any]] =
     explain = 'validation gate ready or disabled'
     if regression:
         explain = f'{layer} blocked by validation regression; rollback/review required before auto progression'
+    elif stale:
+        explain = f'{layer} blocked because validation evidence is stale; refresh replay/coverage before auto progression'
     elif gap_only:
         explain = f'{layer} blocked by validation capability gap; low-intervention auto progression frozen'
     elif plain_freeze:

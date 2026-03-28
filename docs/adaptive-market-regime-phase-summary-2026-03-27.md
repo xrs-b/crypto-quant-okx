@@ -67,6 +67,7 @@
 - recovery orchestration / retry queue policy 首版（把 `execution_timeline + recovery_policy` 继续推进到 `recovery_orchestration`：明确 item 应进 `retry_queue / rollback_candidate / manual_recovery / recovered_monitoring`，补 `retry_stage / retry_schedule / should_retry_at / manual fallback / rollback_route`，并新增 `/api/backtest/workflow-recovery-view` 方便 dashboard / agent / operator 直接回答“边个重试、边个回滚、边个转人工、几时再试”）
 - unified transition journal / state-change audit trail 首版（approval event details 回挂 `transition_journal`，数据库可直接拉最近 `from -> to / trigger / reason / actor / source / timestamp / changed_fields`，dashboard/API 提供独立 recent transition 入口，方便 workbench / agent / 人工巡检直接看“最近发生了哪些状态迁移”）
 - 2026-03-28 消费层续推：transition journal 已进一步接到 `workflow_operator_digest / workbench_governance_view / unified_workbench_overview`，并同步透过 calibration-report 入口输出稳定 `transition_journal` 摘要；低干预巡检时可直接在 workbench/operator digest 看到最近状态迁移，唔使再额外单独请求 transition-journal API。
+- 2026-03-28 validation freshness gate：validation replay/summary 现可声明 `freshness_policy + generated_at/evaluated_at`；当验证证据过旧时，会把 gate 标成 `stale`、冻结 auto-approval / controlled rollout / rollout executor 的自动推进，但**不会**误判成 regression rollback，避免系统拿旧 replay 结果继续自动推进。
 
 ---
 

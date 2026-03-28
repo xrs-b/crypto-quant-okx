@@ -8132,6 +8132,41 @@ class TestApprovalPersistence(unittest.TestCase):
             self.assertEqual(result['rollout_executor']['items'][0]['result']['reason'], 'validation_gate_regression')
             self.assertEqual(result['rollout_executor']['items'][0]['plan']['execution_gate']['effect'], 'blocked_regression')
 
+    def test_rollout_executor_validation_gate_stale_snapshot_freezes_without_regression(self):
+        class StubConfig:
+            def __init__(self, values=None):
+                self.values = values or {}
+            def get(self, key, default=None):
+                return self.values.get(key, default)
+
+        config = StubConfig({'governance.rollout_executor': {'enabled': True, 'mode': 'controlled', 'allowed_action_types': ['joint_stage_prepare']}})
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(str(Path(tmpdir) / 'rollout_executor_validation_stale.db'))
+            payload = {
+                'validation_replay': {'summary': {
+                    'generated_at': '2020-01-01T00:00:00Z',
+                    'coverage_matrix': {'schema_version': 'm5_validation_coverage_matrix_v1', 'ready_for_low_intervention_gate': True, 'required_capability_count': 8, 'covered_required_count': 8, 'passing_required_count': 8, 'missing_required': [], 'failing_required': []},
+                    'readiness': {'low_intervention_gate_ready': True, 'missing_required_capabilities': [], 'failing_required_capabilities': [], 'failing_case_count': 0},
+                    'freshness_policy': {'enabled': True, 'max_age_minutes': 30},
+                }},
+                'workflow_state': {'item_states': [{'item_id': 'playbook::stage', 'title': 'Stage prepare item', 'action_type': 'joint_stage_prepare', 'decision': 'expand', 'governance_mode': 'rollout', 'risk_level': 'low', 'approval_required': False, 'blocking_reasons': [], 'preconditions': [], 'workflow_state': 'ready', 'confidence': 'high', 'current_rollout_stage': 'guarded_prepare', 'target_rollout_stage': 'controlled_apply'}], 'summary': {}},
+                'approval_state': {'items': [{'approval_id': 'approval::stage', 'playbook_id': 'playbook::stage', 'title': 'Stage prepare item', 'action_type': 'joint_stage_prepare', 'approval_state': 'pending', 'decision_state': 'ready', 'risk_level': 'low', 'approval_required': False, 'blocked_by': []}], 'summary': {}},
+            }
+            payload = attach_auto_approval_policy(payload)
+            db.sync_approval_items(build_workflow_approval_records(payload), replay_source='unit-test')
+            result = execute_rollout_executor(payload, db, config=config, replay_source='unit-test-replay')
+            item = result['rollout_executor']['items'][0]
+            gate = item['plan']['execution_gate']
+            rollback_gate = item['plan']['rollback_gate']
+            self.assertEqual(gate['primary_reason'], 'validation_gate_stale')
+            self.assertEqual(gate['effect'], 'blocked_stale')
+            self.assertIn('validation_stale', gate['validation_gate']['reasons'])
+            self.assertTrue(gate['validation_gate']['stale'])
+            self.assertFalse(gate['validation_gate']['ready'])
+            self.assertFalse(rollback_gate['candidate'])
+            self.assertNotIn('validation_gate_regressed', rollback_gate['triggered'])
+            self.assertEqual(item['result']['reason'], 'validation_gate_stale')
+
 
     def test_rollout_executor_stage_handlers_expose_owner_waiting_points_and_next_transition(self):
         class StubConfig:

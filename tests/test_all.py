@@ -9041,6 +9041,79 @@ class TestApprovalPersistence(unittest.TestCase):
         self.assertEqual(summary['upgrade_window'], manifest['contracts']['upgrade_window'])
         self.assertEqual(summary['rollback_window'], manifest['contracts']['rollback_window'])
 
+
+    def test_rollout_executor_persists_control_plane_contract_snapshot(self):
+        class StubConfig:
+            def __init__(self, values=None):
+                self.values = values or {}
+
+            def get(self, key, default=None):
+                return self.values.get(key, default)
+
+        config = StubConfig({
+            'governance.rollout_executor': {
+                'enabled': True,
+                'mode': 'controlled',
+                'allowed_action_types': ['joint_stage_prepare'],
+            }
+        })
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(str(Path(tmpdir) / 'rollout_contract_snapshot.db'))
+            payload = {
+                'workflow_state': {'item_states': [{
+                    'item_id': 'playbook::stage', 'title': 'Stage prepare item', 'action_type': 'joint_stage_prepare',
+                    'decision': 'expand', 'governance_mode': 'rollout', 'risk_level': 'low', 'approval_required': False,
+                    'blocking_reasons': [], 'preconditions': [], 'workflow_state': 'ready', 'confidence': 'high',
+                    'current_rollout_stage': 'observe', 'target_rollout_stage': 'guarded_prepare'
+                }], 'summary': {}},
+                'approval_state': {'items': [{
+                    'approval_id': 'approval::stage', 'playbook_id': 'playbook::stage', 'title': 'Stage prepare item',
+                    'action_type': 'joint_stage_prepare', 'approval_state': 'pending', 'decision_state': 'ready',
+                    'risk_level': 'low', 'approval_required': False, 'blocked_by': []
+                }], 'summary': {}},
+            }
+            payload = attach_auto_approval_policy(payload)
+            db.sync_approval_items(build_workflow_approval_records(payload), replay_source='unit-test')
+            result = execute_rollout_executor(payload, db, config=config, replay_source='unit-test-replay')
+            row = db.get_approval_state('approval::stage')
+            contract = row['details']['control_plane_contract']
+            self.assertEqual(contract['schema_version'], 'm5_control_plane_contract_snapshot_v1')
+            self.assertEqual(contract['action_type'], 'joint_stage_prepare')
+            self.assertEqual(contract['handler_key'], 'apply::stage_prepare_safe')
+            self.assertEqual(contract['versions']['action_registry'], result['rollout_executor']['control_plane_manifest']['versions']['action_registry'])
+            self.assertEqual(contract['dispatch_route'], 'stage_metadata_apply')
+
+    def test_control_plane_readiness_summary_blocks_on_persisted_contract_drift(self):
+        manifest = build_rollout_control_plane_manifest()
+        payload = {
+            'workflow_state': {'item_states': [{
+                'item_id': 'playbook::stale',
+                'title': 'Stale contract item',
+                'control_plane_contract': {
+                    'schema_version': 'm5_control_plane_contract_snapshot_v1',
+                    'generation': 'm5',
+                    'action_type': 'joint_stage_prepare',
+                    'handler_key': 'apply::stage_prepare_safe',
+                    'versions': {
+                        'action_registry': 'm5_safe_rollout_action_registry_v0',
+                        'stage_handler_registry': 'm5_rollout_stage_handler_registry_v1',
+                        'transition_policy': 'm5_rollout_transition_policy_v1',
+                        'gate_policy': 'm5_rollout_gate_policy_v1',
+                        'control_plane_manifest': 'm5_rollout_control_plane_manifest_v1',
+                    },
+                },
+            }], 'summary': {}},
+            'approval_state': {'items': [], 'summary': {}},
+        }
+        summary = build_control_plane_readiness_summary(payload=payload, control_plane_manifest=manifest)
+        self.assertFalse(summary['control_plane_compatible'])
+        self.assertFalse(summary['replay_safe'])
+        self.assertEqual(summary['persisted_control_plane_contracts']['review_required_count'], 1)
+        self.assertEqual(summary['persisted_control_plane_contracts']['version_drift_count'], 1)
+        self.assertIn('persisted_control_plane_contract_review_required', summary['blocking_issues'])
+        self.assertIn('persisted_control_plane_version_drift', summary['blocking_issues'])
+        self.assertFalse(summary['can_continue_auto_promotion'])
+
     def test_rollout_executor_plan_and_stage_progression_expose_transition_policy(self):
         class StubConfig:
             def __init__(self, values=None):

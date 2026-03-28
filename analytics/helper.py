@@ -2801,6 +2801,14 @@ def execute_controlled_rollout_layer(payload: Dict, db: Any, *, config: Any = No
         reason = f"{execution_settings['reason_prefix']}: {row.get('reason') or 'ready auto-promotion candidate passed strict safety boundary'}"
         details = {
             'item_id': approval_id,
+            'control_plane_contract': _build_control_plane_contract_snapshot(
+                action_type=action_type,
+                handler_key=handler_key,
+                dispatch_mode=dispatch_mode,
+                control_plane_manifest=result.get('control_plane_manifest') or build_rollout_control_plane_manifest(payload, result, allowed_action_types=execution_settings.get('allowed_action_types')),
+                transition_policy=transition_rule.get('transition_policy') or transition_policy_snapshot,
+                safe_handler=handler,
+            ),
             'approval_id': approval_id,
             'playbook_id': row.get('playbook_id'),
             'title': row.get('title') or workflow_item.get('title'),
@@ -3103,6 +3111,82 @@ def _build_rollout_executor_catalog(allowed_action_types: Optional[List[str]] = 
     }
 
 
+
+def _build_control_plane_contract_snapshot(*, action_type: Optional[str] = None, handler_key: Optional[str] = None,
+                                          dispatch_mode: Optional[str] = None,
+                                          control_plane_manifest: Optional[Dict[str, Any]] = None,
+                                          transition_policy: Optional[Dict[str, Any]] = None,
+                                          safe_handler: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    manifest = dict(control_plane_manifest or {})
+    versions = dict(manifest.get('versions') or {})
+    transition_policy = dict(transition_policy or {})
+    safe_handler = dict(safe_handler or {})
+    return {
+        'schema_version': 'm5_control_plane_contract_snapshot_v1',
+        'generation': manifest.get('generation') or 'm5',
+        'action_type': str(action_type or '').strip().lower() or None,
+        'handler_key': str(handler_key or safe_handler.get('handler_key') or '').strip() or None,
+        'dispatch_mode': str(dispatch_mode or '').strip().lower() or None,
+        'route': safe_handler.get('route'),
+        'safe_boundary': safe_handler.get('safe_boundary'),
+        'versions': {
+            'action_registry': versions.get('action_registry') or ROLLOUT_ACTION_REGISTRY_VERSION,
+            'stage_handler_registry': versions.get('stage_handler_registry') or ROLLOUT_STAGE_HANDLER_REGISTRY_VERSION,
+            'transition_policy': versions.get('transition_policy') or ROLLOUT_TRANSITION_POLICY_VERSION,
+            'gate_policy': versions.get('gate_policy') or ROLLOUT_GATE_POLICY_VERSION,
+            'control_plane_manifest': versions.get('control_plane_manifest') or ROLLOUT_CONTROL_PLANE_MANIFEST_VERSION,
+        },
+        'transition_rule': transition_policy.get('transition_rule'),
+        'dispatch_route': transition_policy.get('dispatch_route'),
+        'next_transition': transition_policy.get('next_transition'),
+        'retryable': transition_policy.get('retryable'),
+        'rollback_hint': transition_policy.get('rollback_hint'),
+        'captured_at': _utc_now_iso(),
+    }
+
+
+def _evaluate_control_plane_contract_snapshot(snapshot: Optional[Dict[str, Any]], *, manifest: Optional[Dict[str, Any]] = None,
+                                             action_registry: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    manifest = dict(manifest or {})
+    snapshot = dict(snapshot or {})
+    versions = dict(snapshot.get('versions') or {})
+    manifest_versions = dict(manifest.get('versions') or {})
+    registry = dict(action_registry or {})
+    action_entries = registry.get('actions') or {}
+    handlers = registry.get('handlers') or {}
+    action_type = str(snapshot.get('action_type') or '').strip().lower() or None
+    handler_key = str(snapshot.get('handler_key') or '').strip() or None
+    issues = []
+    if not snapshot:
+        issues.append('missing_snapshot')
+    snapshot_generation = str(snapshot.get('generation') or '').strip().lower() or None
+    manifest_generation = str(manifest.get('generation') or '').strip().lower() or 'm5'
+    if snapshot_generation and snapshot_generation != manifest_generation:
+        issues.append(f'generation_mismatch:{snapshot_generation}->{manifest_generation}')
+    if action_type and action_type not in action_entries:
+        issues.append(f'action_type_missing:{action_type}')
+    if handler_key and handler_key not in handlers and handler_key != (registry.get('fallback_handler') or {}).get('handler_key'):
+        issues.append(f'handler_key_missing:{handler_key}')
+    for key, current in manifest_versions.items():
+        persisted = versions.get(key)
+        if persisted and current and persisted != current:
+            issues.append(f'version_mismatch:{key}:{persisted}->{current}')
+    compatible = not issues
+    return {
+        'schema_version': 'm5_control_plane_contract_evaluation_v1',
+        'compatible': compatible,
+        'status': 'compatible' if compatible else 'review_required',
+        'action_type': action_type,
+        'handler_key': handler_key,
+        'generation': snapshot_generation or manifest_generation,
+        'issues': issues,
+        'requires_manual_review': not compatible,
+        'missing_snapshot': 'missing_snapshot' in issues,
+        'version_drift': any(str(issue).startswith('version_mismatch:') for issue in issues),
+        'registry_drift': any(str(issue).startswith('action_type_missing:') or str(issue).startswith('handler_key_missing:') for issue in issues),
+    }
+
+
 def build_rollout_control_plane_manifest(payload: Optional[Dict] = None, executor: Optional[Dict] = None,
                                         *, allowed_action_types: Optional[List[str]] = None) -> Dict[str, Any]:
     payload = payload or {}
@@ -3190,6 +3274,24 @@ def build_control_plane_readiness_summary(*, payload: Optional[Dict[str, Any]] =
         validation = dict(consumption.get('latest_validation_gate') or {})
     compatibility = (manifest.get('compatibility') or {}) if isinstance(manifest, dict) else {}
     contracts = (manifest.get('contracts') or {}) if isinstance(manifest, dict) else {}
+    persisted_contract_rows = []
+    registry = (manifest.get('registries') or {}) if isinstance(manifest, dict) else {}
+    registry_snapshot = {'actions': {key: {} for key in (registry.get('action_types') or [])}, 'handlers': {key: {} for key in (registry.get('stage_handlers') or [])}, 'fallback_handler': {'handler_key': registry.get('fallback_handler')}}
+    for row in list(((payload.get('workflow_state') or {}).get('item_states') or [])) + list(((payload.get('approval_state') or {}).get('items') or [])):
+        contract = (row.get('control_plane_contract') or ((row.get('state_machine') or {}).get('control_plane_contract')) or ((row.get('details') or {}).get('control_plane_contract')) or {})
+        if contract:
+            persisted_contract_rows.append({
+                'item_id': row.get('item_id') or row.get('approval_id') or row.get('playbook_id'),
+                'evaluation': _evaluate_control_plane_contract_snapshot(contract, manifest=manifest, action_registry=registry_snapshot),
+            })
+    persisted_contract_summary = {
+        'item_count': len(persisted_contract_rows),
+        'review_required_count': sum(1 for row in persisted_contract_rows if not (row.get('evaluation') or {}).get('compatible')),
+        'version_drift_count': sum(1 for row in persisted_contract_rows if (row.get('evaluation') or {}).get('version_drift')),
+        'registry_drift_count': sum(1 for row in persisted_contract_rows if (row.get('evaluation') or {}).get('registry_drift')),
+        'missing_snapshot_count': sum(1 for row in persisted_contract_rows if (row.get('evaluation') or {}).get('missing_snapshot')),
+        'items': persisted_contract_rows[:10],
+    }
     readiness = readiness or {}
     readiness_status = str(readiness.get('status') or '').strip() or None
     readiness_pct = readiness.get('readiness_pct')
@@ -3197,11 +3299,17 @@ def build_control_plane_readiness_summary(*, payload: Optional[Dict[str, Any]] =
     validation_ready = bool(validation.get('ready')) if validation_enabled else None
     validation_frozen = bool(validation_enabled and validation.get('freeze_auto_advance'))
     validation_regression = bool(validation.get('regression_detected'))
-    compatible = bool(compatibility.get('compatible'))
-    replay_safe = bool(compatibility.get('replay_safe'))
+    compatible = bool(compatibility.get('compatible')) and not persisted_contract_summary.get('review_required_count')
+    replay_safe = bool(compatibility.get('replay_safe')) and not persisted_contract_summary.get('version_drift_count') and not persisted_contract_summary.get('registry_drift_count')
     can_continue_auto_promotion = compatible and replay_safe and not validation_frozen and not validation_regression and (not validation_enabled or validation_ready)
     blockers = []
     blockers.extend(list(compatibility.get('blocking_issues') or []))
+    if persisted_contract_summary.get('review_required_count'):
+        blockers.append('persisted_control_plane_contract_review_required')
+    if persisted_contract_summary.get('version_drift_count'):
+        blockers.append('persisted_control_plane_version_drift')
+    if persisted_contract_summary.get('registry_drift_count'):
+        blockers.append('persisted_control_plane_registry_drift')
     if validation_frozen:
         blockers.append('validation_gate_frozen')
     if validation_regression:
@@ -3244,6 +3352,7 @@ def build_control_plane_readiness_summary(*, payload: Optional[Dict[str, Any]] =
         'readiness_pct': readiness_pct,
         'upgrade_window': contracts.get('upgrade_window'),
         'rollback_window': contracts.get('rollback_window'),
+        'persisted_control_plane_contracts': persisted_contract_summary,
         'blocking_issues': list(dict.fromkeys([str(item) for item in blockers if item])),
         'control_plane_manifest': {
             'schema_version': manifest.get('schema_version'),
@@ -4007,6 +4116,14 @@ def _consume_rollout_queue_plan(*, db: Any, row: Dict[str, Any], workflow_item: 
     reason = ((queue_plan or {}).get('queue_transition') or {}).get('transition_reason') or ((queue_plan or {}).get('approval_hook') or {}).get('gate_reason') or (queue_plan or {}).get('blocked_reason') or 'queue_plan_consumed'
     details = {
         'queue_result_action': result_action,
+        'control_plane_contract': _build_control_plane_contract_snapshot(
+            action_type=action_type,
+            handler_key=handler_key,
+            dispatch_mode=dispatch_mode,
+            control_plane_manifest=build_rollout_control_plane_manifest(),
+            transition_policy=transition_rule.get('transition_policy') or {},
+            safe_handler=handler,
+        ),
         'item_id': approval_id,
         'approval_id': approval_id,
         'playbook_id': row.get('playbook_id'),
@@ -4437,6 +4554,14 @@ def execute_rollout_executor(payload: Dict, db: Any, *, config: Any = None, sett
         reason = f"{execution_settings['reason_prefix']}: {row.get('reason') or 'safe rollout executor action'}"
         details = {
             'item_id': approval_id,
+            'control_plane_contract': _build_control_plane_contract_snapshot(
+                action_type=action_type,
+                handler_key=handler_key,
+                dispatch_mode=dispatch_mode,
+                control_plane_manifest=result.get('control_plane_manifest') or build_rollout_control_plane_manifest(payload, result, allowed_action_types=execution_settings.get('allowed_action_types')),
+                transition_policy=transition_rule.get('transition_policy') or transition_policy_snapshot,
+                safe_handler=handler,
+            ),
             'approval_id': approval_id,
             'playbook_id': row.get('playbook_id'),
             'title': row.get('title') or workflow_item.get('title'),

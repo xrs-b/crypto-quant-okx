@@ -6358,7 +6358,7 @@ class TestExecutionObservability(unittest.TestCase):
             self.assertIn('recent_decisions', snapshot['summary'])
             self.assertTrue(snapshot['summary']['observe_only_banner'])
 
-from analytics.helper import build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, attach_auto_approval_policy, execute_controlled_rollout_layer, execute_controlled_auto_approval_layer, execute_auto_promotion_review_queue_layer, execute_adaptive_rollout_orchestration, execute_rollout_executor, build_rollout_control_plane_manifest, build_control_plane_readiness_summary, build_workflow_consumer_view, build_workflow_recovery_view, build_workflow_attention_view, build_workflow_operator_digest, build_workflow_alert_digest, build_dashboard_summary_cards, build_runtime_orchestration_summary, build_production_rollout_readiness, build_workbench_governance_view, build_workbench_governance_detail_view, build_workbench_merged_timeline, build_workbench_timeline_summary_aggregation, build_unified_workbench_overview, build_auto_promotion_candidate_view, build_auto_promotion_execution_summary, build_auto_promotion_review_queue_consumption, build_auto_promotion_review_queue_filter_view, build_auto_promotion_review_queue_detail_view, _build_state_machine_semantics, _build_safe_rollout_action_registry
+from analytics.helper import build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, attach_auto_approval_policy, execute_controlled_rollout_layer, execute_controlled_auto_approval_layer, execute_auto_promotion_review_queue_layer, execute_testnet_bridge_layer, execute_adaptive_rollout_orchestration, execute_rollout_executor, build_rollout_control_plane_manifest, build_control_plane_readiness_summary, build_workflow_consumer_view, build_workflow_recovery_view, build_workflow_attention_view, build_workflow_operator_digest, build_workflow_alert_digest, build_dashboard_summary_cards, build_runtime_orchestration_summary, build_production_rollout_readiness, build_workbench_governance_view, build_workbench_governance_detail_view, build_workbench_merged_timeline, build_workbench_timeline_summary_aggregation, build_unified_workbench_overview, build_auto_promotion_candidate_view, build_auto_promotion_execution_summary, build_auto_promotion_review_queue_consumption, build_auto_promotion_review_queue_filter_view, build_auto_promotion_review_queue_detail_view, _build_state_machine_semantics, _build_safe_rollout_action_registry
 
 
 class TestApprovalPersistence(unittest.TestCase):
@@ -10120,6 +10120,9 @@ class TestApprovalPersistence(unittest.TestCase):
                             'enabled': True, 'mode': 'controlled', 'execute_due_post_promotion_reviews': True,
                             'escalate_rollback_review_queue': True,
                         },
+                        'governance.adaptive_rollout_orchestration': {
+                            'enforce_production_gate': False,
+                        },
                     }
                     return mapping.get(key, default)
 
@@ -10686,6 +10689,203 @@ class TestApprovalPersistence(unittest.TestCase):
             self.assertEqual(result['auto_approval_execution']['executed_count'], 0)
             self.assertIsNone(db.get_approval_state('approval::eligible'))
             self.assertEqual(result['approval_state']['items'][0]['approval_state'], 'pending')
+
+    def test_execute_testnet_bridge_layer_blocks_without_controlled_rollout_execution(self):
+        class DummyConfig:
+            def __init__(self, mapping):
+                self.mapping = mapping
+                self.exchange_mode = 'testnet'
+                self.position_mode = 'hedge'
+                self.symbols = ['BTC/USDT']
+                self.all = mapping
+            def get(self, key, default=None):
+                parts = key.split('.')
+                value = self.mapping
+                for part in parts:
+                    if isinstance(value, dict) and part in value:
+                        value = value[part]
+                    else:
+                        return default
+                return value
+
+        class BridgeExchangeStub:
+            def fetch_balance(self):
+                return {'free': {'USDT': 1000}}
+            def is_futures_symbol(self, symbol):
+                return True
+            def fetch_ticker(self, symbol):
+                return {'last': 50000}
+            def normalize_contract_amount(self, symbol, desired_notional, price):
+                return 0.001
+            def get_order_symbol(self, symbol):
+                return symbol
+
+        cfg = DummyConfig({
+            'exchange': {'mode': 'testnet'},
+            'governance': {'testnet_bridge_execution': {'enabled': True, 'mode': 'controlled_execute', 'require_controlled_rollout_execution': True}},
+        })
+        payload = {
+            'approval_state': {'items': []},
+            'controlled_rollout_execution': {'executed_count': 0},
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(str(Path(tmpdir) / 'testnet_bridge_blocked.db'))
+            executed = execute_testnet_bridge_layer(copy.deepcopy(payload), db, config=cfg, exchange=BridgeExchangeStub())
+            bridge = executed['testnet_bridge_execution']
+            self.assertEqual(bridge['status'], 'blocked')
+            self.assertIn('controlled_rollout_execution_missing', bridge['blocking_reasons'])
+            self.assertIsNone(bridge['result'])
+
+    def test_execute_testnet_bridge_layer_runs_minimal_smoke_when_guardrails_pass(self):
+        class DummyConfig:
+            def __init__(self, mapping):
+                self.mapping = mapping
+                self.exchange_mode = 'testnet'
+                self.position_mode = 'hedge'
+                self.symbols = ['BTC/USDT']
+                self.all = mapping
+            def get(self, key, default=None):
+                parts = key.split('.')
+                value = self.mapping
+                for part in parts:
+                    if isinstance(value, dict) and part in value:
+                        value = value[part]
+                    else:
+                        return default
+                return value
+
+        class BridgeExchangeStub:
+            def fetch_balance(self):
+                return {'free': {'USDT': 1000}}
+            def is_futures_symbol(self, symbol):
+                return True
+            def fetch_ticker(self, symbol):
+                return {'last': 50000}
+            def normalize_contract_amount(self, symbol, desired_notional, price):
+                return 0.001
+            def get_order_symbol(self, symbol):
+                return symbol
+
+        calls = []
+        def fake_bridge_runner(cfg, exchange, symbol=None, side='long', db=None):
+            calls.append({'symbol': symbol, 'side': side, 'db': bool(db)})
+            return {
+                'opened': True,
+                'closed': True,
+                'open_status': 'filled',
+                'close_status': 'filled',
+                'cleanup_needed': False,
+                'residual_position_detected': False,
+                'reconcile_summary': {'open_order_confirmed': True, 'close_order_confirmed': True},
+                'failure_compensation_hint': None,
+            }
+
+        cfg = DummyConfig({
+            'exchange': {'mode': 'testnet'},
+            'governance': {'testnet_bridge_execution': {'enabled': True, 'mode': 'controlled_execute', 'require_controlled_rollout_execution': True}},
+        })
+        payload = {
+            'approval_state': {'items': []},
+            'controlled_rollout_execution': {'executed_count': 1},
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(str(Path(tmpdir) / 'testnet_bridge_execute.db'))
+            executed = execute_testnet_bridge_layer(copy.deepcopy(payload), db, config=cfg, exchange=BridgeExchangeStub(), bridge_runner=fake_bridge_runner)
+            bridge = executed['testnet_bridge_execution']
+            self.assertEqual(bridge['status'], 'controlled_execute')
+            self.assertTrue(bridge['audit']['real_trade_execution'])
+            self.assertEqual(bridge['open_status'], 'filled')
+            self.assertEqual(bridge['close_status'], 'filled')
+            self.assertEqual(calls[0]['symbol'], 'BTC/USDT')
+
+    def test_execute_adaptive_rollout_orchestration_runs_testnet_bridge_after_controlled_rollout(self):
+        class DummyConfig:
+            def __init__(self, mapping):
+                self.mapping = mapping
+                self.exchange_mode = 'testnet'
+                self.position_mode = 'hedge'
+                self.symbols = ['BTC/USDT']
+                self.all = mapping
+            def get(self, key, default=None):
+                parts = key.split('.')
+                value = self.mapping
+                for part in parts:
+                    if isinstance(value, dict) and part in value:
+                        value = value[part]
+                    else:
+                        return default
+                return value
+
+        payload = {
+            'workflow_state': {
+                'item_states': [{
+                    'item_id': 'playbook::eligible',
+                    'title': 'Eligible low risk item',
+                    'action_type': 'joint_observe',
+                    'risk_level': 'low',
+                    'approval_required': False,
+                    'requires_manual': False,
+                    'workflow_state': 'ready',
+                    'blocking_reasons': [],
+                }],
+                'summary': {'item_count': 1},
+            },
+            'approval_state': {
+                'items': [{
+                    'approval_id': 'approval::eligible',
+                    'playbook_id': 'playbook::eligible',
+                    'title': 'Eligible low risk item',
+                    'action_type': 'joint_observe',
+                    'approval_state': 'pending',
+                    'decision_state': 'pending',
+                    'risk_level': 'low',
+                    'approval_required': False,
+                    'requires_manual': False,
+                    'blocked_by': [],
+                }],
+                'summary': {'pending_count': 1},
+            },
+            'validation_gate': {'enabled': False},
+        }
+        cfg = DummyConfig({
+            'exchange': {'mode': 'testnet'},
+            'governance': {
+                'auto_approval_execution': {'enabled': True, 'mode': 'controlled'},
+                'controlled_rollout_execution': {'enabled': True, 'mode': 'state_apply', 'auto_promote_ready_candidates': True, 'allowed_action_types': ['joint_observe']},
+                'testnet_bridge_execution': {'enabled': True, 'mode': 'controlled_execute', 'require_controlled_rollout_execution': True},
+                'adaptive_rollout_orchestration': {'enforce_production_gate': False},
+            },
+        })
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(str(Path(tmpdir) / 'adaptive_orchestration_bridge.db'))
+            import analytics.helper as helper_module
+            old_bridge = helper_module.execute_testnet_bridge_layer
+            def fake_bridge(payload, db, *, config=None, settings=None, replay_source='workflow_ready', bridge_runner=None, exchange=None):
+                payload = copy.deepcopy(payload)
+                payload['testnet_bridge_execution'] = {
+                    'schema_version': 'm5_testnet_bridge_execution_v1',
+                    'enabled': True,
+                    'mode': 'controlled_execute',
+                    'status': 'controlled_execute',
+                    'plan_only': False,
+                    'gating': {'controlled_rollout_executed_count': 1},
+                    'blocking_reasons': [],
+                    'audit': {'real_trade_execution': True, 'dangerous_live_parameter_change': False},
+                    'result': {'opened': True, 'closed': True, 'open_status': 'filled', 'close_status': 'filled'},
+                }
+                return payload
+            helper_module.execute_testnet_bridge_layer = fake_bridge
+            try:
+                result = execute_adaptive_rollout_orchestration(copy.deepcopy(payload), db, config=cfg, replay_source='test_orchestration_bridge')
+            finally:
+                helper_module.execute_testnet_bridge_layer = old_bridge
+            orchestration = result['adaptive_rollout_orchestration']
+            self.assertEqual(result['testnet_bridge_execution']['status'], 'controlled_execute')
+            self.assertEqual(orchestration['summary']['testnet_bridge_status'], 'controlled_execute')
+            self.assertTrue(orchestration['summary']['testnet_bridge_real_trade_execution'])
 
     def test_execute_adaptive_rollout_orchestration_can_bypass_production_gate_when_disabled(self):
         class DummyConfig:

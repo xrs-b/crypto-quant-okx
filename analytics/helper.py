@@ -4591,6 +4591,168 @@ def build_runtime_orchestration_summary(payload: Optional[Dict[str, Any]] = None
     }
 
 
+def _normalize_testnet_bridge_execution_mode(value: Optional[str]) -> str:
+    normalized = str(value or '').strip().lower()
+    return normalized if normalized in {'disabled', 'plan_only', 'controlled_execute'} else 'disabled'
+
+
+def _get_testnet_bridge_execution_settings(config: Any = None, overrides: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    overrides = dict(overrides or {})
+    getter = getattr(config, 'get', None)
+    raw = getter('governance.testnet_bridge_execution', {}) if callable(getter) else {}
+    raw = dict(raw or {}) if isinstance(raw, dict) else {}
+    settings = {
+        'enabled': bool(raw.get('enabled', False)),
+        'mode': _normalize_testnet_bridge_execution_mode(raw.get('mode')),
+        'symbol': raw.get('symbol'),
+        'side': str(raw.get('side') or 'long').strip().lower() or 'long',
+        'execute_profile': str(raw.get('execute_profile') or 'minimal_smoke').strip().lower() or 'minimal_smoke',
+        'require_no_pending_approvals': bool(raw.get('require_no_pending_approvals', True)),
+        'require_controlled_rollout_execution': bool(raw.get('require_controlled_rollout_execution', True)),
+        'cleanup_required': bool(raw.get('cleanup_required', True)),
+        'actor': str(raw.get('actor') or 'system:testnet-bridge'),
+        'source': str(raw.get('source') or 'testnet_bridge_execution'),
+    }
+    settings.update({k: v for k, v in overrides.items() if v is not None})
+    settings['enabled'] = bool(settings.get('enabled', False))
+    settings['mode'] = _normalize_testnet_bridge_execution_mode(settings.get('mode'))
+    settings['side'] = str(settings.get('side') or 'long').strip().lower() or 'long'
+    settings['execute_profile'] = str(settings.get('execute_profile') or 'minimal_smoke').strip().lower() or 'minimal_smoke'
+    settings['require_no_pending_approvals'] = bool(settings.get('require_no_pending_approvals', True))
+    settings['require_controlled_rollout_execution'] = bool(settings.get('require_controlled_rollout_execution', True))
+    settings['cleanup_required'] = bool(settings.get('cleanup_required', True))
+    return settings
+
+
+def execute_testnet_bridge_layer(payload: Dict[str, Any], db: Any, *, config: Any = None, settings: Optional[Dict[str, Any]] = None,
+                                 replay_source: str = 'workflow_ready', bridge_runner=None, exchange: Any = None) -> Dict[str, Any]:
+    payload = payload or {}
+    bridge_settings = _get_testnet_bridge_execution_settings(config=config, overrides=settings)
+    result = {
+        'schema_version': 'm5_testnet_bridge_execution_v1',
+        'enabled': bool(bridge_settings.get('enabled', False)),
+        'mode': bridge_settings.get('mode') or 'disabled',
+        'actor': bridge_settings.get('actor'),
+        'source': bridge_settings.get('source'),
+        'replay_source': replay_source,
+        'status': 'disabled',
+        'plan_only': True,
+        'symbol': bridge_settings.get('symbol'),
+        'side': bridge_settings.get('side') or 'long',
+        'execute_profile': bridge_settings.get('execute_profile') or 'minimal_smoke',
+        'gating': {},
+        'blocking_reasons': [],
+        'result': None,
+        'audit': {'real_trade_execution': False, 'dangerous_live_parameter_change': False},
+    }
+    payload['testnet_bridge_execution'] = result
+
+    if not result['enabled'] or result['mode'] == 'disabled':
+        return payload
+
+    from bot.run import build_exchange_smoke_plan, execute_exchange_smoke
+
+    plan_only = result['mode'] != 'controlled_execute'
+    cfg = config or None
+    if cfg is None:
+        class _ConfigProxy:
+            def get(self, key, default=None):
+                return default
+            exchange_mode = 'testnet'
+            position_mode = 'hedge'
+            symbols = []
+            all = {}
+        cfg = _ConfigProxy()
+    if exchange is None:
+        try:
+            from core.exchange import Exchange
+            exchange = Exchange(getattr(cfg, 'all', {}) or {})
+        except Exception:
+            exchange = None
+    if exchange is None:
+        class _BridgePlanOnlyExchange:
+            def fetch_balance(self):
+                return {'free': {'USDT': 0}}
+            def is_futures_symbol(self, symbol):
+                return False
+            def fetch_ticker(self, symbol):
+                return {'last': 0}
+            def normalize_contract_amount(self, symbol, desired_notional, price):
+                return 0
+            def get_order_symbol(self, symbol):
+                return symbol
+        exchange = _BridgePlanOnlyExchange()
+
+    selected_symbol = bridge_settings.get('symbol') or (getattr(cfg, 'symbols', None) or [None])[0]
+    plan = build_exchange_smoke_plan(cfg, exchange, symbol=selected_symbol, side=result['side'])
+    pending_approvals = sum(1 for row in ((payload.get('approval_state') or {}).get('items') or []) if str(row.get('approval_state') or row.get('state') or '').strip().lower() == 'pending')
+    controlled_rollout = payload.get('controlled_rollout_execution') or {}
+    controlled_rollout_executed_count = int(controlled_rollout.get('executed_count', 0) or 0)
+    exchange_mode = str(getattr(cfg, 'exchange_mode', None) or (getattr(cfg, 'get', lambda *_: None)('exchange.mode', 'testnet')) or 'testnet').strip().lower()
+    gating = {
+        'exchange_mode': exchange_mode,
+        'workflow_pending_approvals': pending_approvals,
+        'controlled_rollout_executed_count': controlled_rollout_executed_count,
+        'require_no_pending_approvals': bool(bridge_settings.get('require_no_pending_approvals', True)),
+        'require_controlled_rollout_execution': bool(bridge_settings.get('require_controlled_rollout_execution', True)),
+        'cleanup_required': bool(bridge_settings.get('cleanup_required', True)),
+        'execute_ready': bool(plan.get('execute_ready', False)),
+    }
+    blocking_reasons = []
+    if not plan.get('execute_ready', False):
+        blocking_reasons.append('plan_not_execute_ready')
+    if gating['require_no_pending_approvals'] and pending_approvals > 0:
+        blocking_reasons.append('workflow_pending_approvals_present')
+    if exchange_mode != 'testnet':
+        blocking_reasons.append('exchange_mode_not_testnet')
+    if gating['require_controlled_rollout_execution'] and not plan_only and controlled_rollout_executed_count <= 0:
+        blocking_reasons.append('controlled_rollout_execution_missing')
+    if not plan_only and result['execute_profile'] != 'minimal_smoke':
+        blocking_reasons.append('unsupported_execute_profile')
+
+    result.update({
+        'status': 'plan_only' if plan_only else 'controlled_execute',
+        'plan_only': plan_only,
+        'plan': plan,
+        'symbol': plan.get('symbol') or selected_symbol,
+        'gating': gating,
+        'blocking_reasons': blocking_reasons,
+        'audit': {
+            'real_trade_execution': not plan_only and not bool(blocking_reasons),
+            'dangerous_live_parameter_change': False,
+            'exchange_mode': exchange_mode,
+            'execute_profile': result['execute_profile'],
+        },
+    })
+
+    if plan_only:
+        return payload
+    if blocking_reasons:
+        result['status'] = 'blocked'
+        return payload
+
+    bridge_runner = bridge_runner or execute_exchange_smoke
+    execution_result = bridge_runner(cfg, exchange, symbol=result['symbol'], side=result['side'], db=db)
+    cleanup_needed = bool(execution_result.get('cleanup_needed', False))
+    residual = bool(execution_result.get('residual_position_detected', False))
+    error = execution_result.get('error')
+    if bridge_settings.get('cleanup_required', True) and cleanup_needed and not error:
+        error = 'cleanup_required_but_cleanup_not_confirmed'
+    result.update({
+        'result': execution_result,
+        'cleanup_needed': cleanup_needed,
+        'residual_position_detected': residual,
+        'open_status': execution_result.get('open_status'),
+        'close_status': execution_result.get('close_status'),
+        'failure_compensation_hint': execution_result.get('failure_compensation_hint'),
+        'error': error,
+    })
+    result['audit']['real_trade_execution'] = bool(execution_result.get('opened') or execution_result.get('closed'))
+    if error:
+        result['status'] = 'error'
+    return payload
+
+
 def _get_adaptive_rollout_orchestration_settings(config: Any = None, overrides: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     overrides = dict(overrides or {})
     getter = getattr(config, 'get', None)
@@ -4623,6 +4785,8 @@ def execute_adaptive_rollout_orchestration(payload: Dict[str, Any], db: Any, *, 
             'controlled_rollout_executed_count': 0,
             'auto_approval_executed_count': 0,
             'review_queue_queued_count': 0,
+            'testnet_bridge_status': 'disabled',
+            'testnet_bridge_real_trade_execution': False,
             'gate_enforced': bool(orchestration_settings.get('enforce_production_gate', True)),
             'gate_blocked': False,
             'gate_status': 'not_evaluated',
@@ -4706,6 +4870,24 @@ def execute_adaptive_rollout_orchestration(payload: Dict[str, Any], db: Any, *, 
             'gate': orchestration['production_rollout_readiness'],
             'safety_switch': 'production_rollout_readiness_gate_blocked',
         }
+        payload['testnet_bridge_execution'] = {
+            'schema_version': 'm5_testnet_bridge_execution_v1',
+            'enabled': False,
+            'mode': 'gated_off',
+            'actor': 'system:adaptive-rollout-gate',
+            'source': 'production_rollout_readiness_gate',
+            'replay_source': replay_source,
+            'status': 'gated_off',
+            'plan_only': True,
+            'gating': {'gate_status': orchestration['production_rollout_readiness'].get('status')},
+            'blocking_reasons': ['production_rollout_readiness_gate_blocked'],
+            'result': None,
+            'audit': {'real_trade_execution': False, 'dangerous_live_parameter_change': False},
+            'gate': orchestration['production_rollout_readiness'],
+            'safety_switch': 'production_rollout_readiness_gate_blocked',
+        }
+        orchestration['summary']['testnet_bridge_status'] = 'gated_off'
+        orchestration['summary']['testnet_bridge_real_trade_execution'] = False
         payload['adaptive_rollout_orchestration'] = orchestration
         return payload
 
@@ -4720,6 +4902,7 @@ def execute_adaptive_rollout_orchestration(payload: Dict[str, Any], db: Any, *, 
 
     payload = execute_controlled_rollout_layer(_refresh_payload_from_db(payload), db, config=config, replay_source=replay_source)
     payload = attach_auto_approval_policy(payload)
+    payload = execute_testnet_bridge_layer(_refresh_payload_from_db(payload), db, config=config, replay_source=replay_source)
     payload = execute_auto_promotion_review_queue_layer(_refresh_payload_from_db(payload), db, config=config, replay_source=replay_source)
     payload = attach_auto_approval_policy(payload)
 
@@ -4728,6 +4911,8 @@ def execute_adaptive_rollout_orchestration(payload: Dict[str, Any], db: Any, *, 
     orchestration['summary']['controlled_rollout_executed_count'] = int(((payload.get('controlled_rollout_execution') or {}).get('executed_count', 0) or 0))
     orchestration['summary']['auto_approval_executed_count'] = auto_approval_executed
     orchestration['summary']['review_queue_queued_count'] = int(((payload.get('auto_promotion_review_execution') or {}).get('queued_count', 0) or 0))
+    orchestration['summary']['testnet_bridge_status'] = str(((payload.get('testnet_bridge_execution') or {}).get('status') or 'disabled'))
+    orchestration['summary']['testnet_bridge_real_trade_execution'] = bool((((payload.get('testnet_bridge_execution') or {}).get('audit') or {}).get('real_trade_execution', False)))
     payload['adaptive_rollout_orchestration'] = orchestration
     return payload
 

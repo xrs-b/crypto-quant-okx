@@ -77,6 +77,17 @@ governance:
   adaptive_rollout_orchestration:
     enforce_production_gate: true   # 默认保守：production rollout readiness 未过时，只跑 preflight/dry-run，不落真实自动审批/自动推进
     gate_max_items: 10
+  testnet_bridge_execution:
+    enabled: false
+    mode: disabled   # disabled|plan_only|controlled_execute；只允许 testnet minimal smoke，严禁真实盘
+    actor: system:testnet-bridge
+    source: testnet_bridge_execution
+    symbol: null
+    side: long
+    execute_profile: minimal_smoke
+    require_no_pending_approvals: true
+    require_controlled_rollout_execution: true
+    cleanup_required: true
 
 logging:
   backup_count: 5

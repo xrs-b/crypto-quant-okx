@@ -5293,6 +5293,74 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
             dashboard_api.db.get_recent_transition_journal = old_get_recent_transition_journal
             dashboard_api.db.get_transition_journal_summary = old_get_transition_journal_summary
 
+    def test_backtest_auto_promotion_candidates_api_returns_candidate_list_and_filters(self):
+        import dashboard.api as dashboard_api
+
+        report = build_regime_policy_calibration_report([
+            {
+                'symbol': 'BTC/USDT',
+                'all_trades': [
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 0.3},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 0.2},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 0.1},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v2', 'strategy_tags': ['Breakout'], 'return_pct': -1.4},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v2', 'strategy_tags': ['Breakout'], 'return_pct': -1.0},
+                    {'regime_tag': 'panic', 'policy_tag': 'policy_v2', 'strategy_tags': ['Breakout'], 'return_pct': -0.8},
+                ],
+            }
+        ])
+
+        class StubBacktester:
+            def run_all(self, symbols):
+                return {'summary': {'symbols': len(symbols)}, 'symbols': [{'symbol': 'BTC/USDT'}], 'calibration_report': report}
+
+        old_backtester = dashboard_api.backtester
+        dashboard_api.backtester = StubBacktester()
+        try:
+            client = app.test_client()
+            response = client.get('/api/backtest/auto-promotion-candidates?candidate_status=ready&limit=10')
+            self.assertEqual(response.status_code, 200)
+            payload = response.get_json()
+            self.assertEqual(payload['view'], 'auto_promotion_candidate_view')
+            self.assertEqual(payload['data']['schema_version'], 'm5_auto_promotion_candidate_view_v1')
+            self.assertEqual(payload['data']['applied_filters']['candidate_status'], 'ready')
+            self.assertGreaterEqual(payload['data']['summary']['candidate_count'], payload['data']['summary']['ready_count'])
+            self.assertTrue(all(row['can_auto_promote'] for row in payload['data']['items']))
+        finally:
+            dashboard_api.backtester = old_backtester
+
+    def test_backtest_calibration_report_api_supports_auto_promotion_candidate_view(self):
+        import dashboard.api as dashboard_api
+
+        report = build_regime_policy_calibration_report([{
+            'symbol': 'BTC/USDT',
+            'all_trades': [
+                {'regime_tag': 'panic', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 0.3},
+                {'regime_tag': 'panic', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 0.2},
+                {'regime_tag': 'panic', 'policy_tag': 'policy_v1', 'strategy_tags': ['Breakout'], 'return_pct': 0.1},
+                {'regime_tag': 'panic', 'policy_tag': 'policy_v2', 'strategy_tags': ['Breakout'], 'return_pct': -1.4},
+                {'regime_tag': 'panic', 'policy_tag': 'policy_v2', 'strategy_tags': ['Breakout'], 'return_pct': -1.0},
+                {'regime_tag': 'panic', 'policy_tag': 'policy_v2', 'strategy_tags': ['Breakout'], 'return_pct': -0.8},
+            ],
+        }])
+
+        class StubBacktester:
+            def run_all(self, symbols):
+                return {'summary': {'symbols': len(symbols)}, 'symbols': [{'symbol': 'BTC/USDT'}], 'calibration_report': report}
+
+        old_backtester = dashboard_api.backtester
+        dashboard_api.backtester = StubBacktester()
+        try:
+            client = app.test_client()
+            response = client.get('/api/backtest/calibration-report?view=auto_promotion_candidate_view&candidate_status=ready')
+            self.assertEqual(response.status_code, 200)
+            payload = response.get_json()
+            self.assertEqual(payload['view'], 'auto_promotion_candidate_view')
+            self.assertEqual(payload['data']['schema_version'], 'm5_auto_promotion_candidate_view_v1')
+            self.assertEqual(payload['summary']['auto_promotion_candidate_view'], payload['data']['summary'])
+        finally:
+            dashboard_api.backtester = old_backtester
+
     def test_backtest_unified_workbench_overview_api_returns_three_line_snapshot(self):
         import dashboard.api as dashboard_api_module
         original_run_all = dashboard_api_module.backtester.run_all
@@ -5960,7 +6028,7 @@ class TestExecutionObservability(unittest.TestCase):
             self.assertIn('recent_decisions', snapshot['summary'])
             self.assertTrue(snapshot['summary']['observe_only_banner'])
 
-from analytics.helper import build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, attach_auto_approval_policy, execute_controlled_rollout_layer, execute_controlled_auto_approval_layer, execute_rollout_executor, build_workflow_consumer_view, build_workflow_recovery_view, build_workflow_attention_view, build_workflow_operator_digest, build_dashboard_summary_cards, build_workbench_governance_view, build_workbench_governance_detail_view, build_workbench_merged_timeline, build_workbench_timeline_summary_aggregation, build_unified_workbench_overview, _build_state_machine_semantics, _build_safe_rollout_action_registry
+from analytics.helper import build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, attach_auto_approval_policy, execute_controlled_rollout_layer, execute_controlled_auto_approval_layer, execute_rollout_executor, build_workflow_consumer_view, build_workflow_recovery_view, build_workflow_attention_view, build_workflow_operator_digest, build_dashboard_summary_cards, build_workbench_governance_view, build_workbench_governance_detail_view, build_workbench_merged_timeline, build_workbench_timeline_summary_aggregation, build_unified_workbench_overview, build_auto_promotion_candidate_view, _build_state_machine_semantics, _build_safe_rollout_action_registry
 
 
 class TestApprovalPersistence(unittest.TestCase):
@@ -6621,6 +6689,93 @@ class TestApprovalPersistence(unittest.TestCase):
         self.assertEqual(overview['summary']['rollout_advisory']['ready_for_live_promotion_count'], 1)
         self.assertEqual(overview['lines']['rollout']['counts']['ready_for_live_promotion'], 1)
         self.assertEqual(overview['lines']['rollout']['auto_promotion_candidate_queue'][0]['recommended_stage'], 'controlled_apply')
+
+    def test_build_auto_promotion_candidate_view_exposes_ready_and_blocked_items(self):
+        payload = {
+            'workflow_state': {
+                'item_states': [
+                    {
+                        'item_id': 'playbook::promo',
+                        'title': 'Promotion ready item',
+                        'action_type': 'joint_stage_prepare',
+                        'risk_level': 'low',
+                        'approval_required': False,
+                        'requires_manual': False,
+                        'workflow_state': 'ready',
+                        'blocking_reasons': [],
+                        'auto_approval_decision': 'auto_approve',
+                        'auto_approval_eligible': True,
+                        'current_rollout_stage': 'guarded_prepare',
+                        'target_rollout_stage': 'controlled_apply',
+                        'stage_handler': {'stage_key': 'guarded_prepare', 'advisory': {'recommended_stage': 'controlled_apply', 'recommended_action': 'promote_to_controlled_apply', 'urgency': 'high', 'confidence': 0.93, 'reasons': ['auto_advance_allowed'], 'ready_for_live_promotion': True}},
+                        'state_machine': {'auto_advance_gate': {'allowed': True, 'readiness_score': 100, 'blockers': []}, 'rollback_gate': {'candidate': False, 'triggered': []}},
+                    },
+                    {
+                        'item_id': 'playbook::blocked',
+                        'title': 'Blocked promotion item',
+                        'action_type': 'joint_stage_prepare',
+                        'risk_level': 'medium',
+                        'approval_required': False,
+                        'requires_manual': False,
+                        'workflow_state': 'queued',
+                        'blocking_reasons': ['validation_gap'],
+                        'auto_approval_decision': 'auto_approve',
+                        'auto_approval_eligible': True,
+                        'current_rollout_stage': 'guarded_prepare',
+                        'target_rollout_stage': 'controlled_apply',
+                        'stage_handler': {'stage_key': 'guarded_prepare', 'advisory': {'recommended_stage': 'guarded_prepare', 'recommended_action': 'hold_until_blockers_clear', 'urgency': 'medium', 'confidence': 0.8, 'reasons': ['validation_gap'], 'ready_for_live_promotion': False}},
+                        'state_machine': {'auto_advance_gate': {'allowed': False, 'readiness_score': 40, 'blockers': ['validation_gate:not_ready']}, 'rollback_gate': {'candidate': False, 'triggered': []}},
+                        'validation_gate': {'enabled': True, 'ready': False, 'freeze_auto_advance': True, 'rollback_on_regression': True, 'reasons': ['missing_required:testnet_bridge_controlled_execute']},
+                    },
+                ],
+                'summary': {'item_count': 2},
+            },
+            'approval_state': {
+                'items': [
+                    {'approval_id': 'approval::promo', 'playbook_id': 'playbook::promo', 'title': 'Promotion ready item', 'action_type': 'joint_stage_prepare', 'approval_state': 'pending', 'decision_state': 'ready', 'risk_level': 'low', 'approval_required': False, 'requires_manual': False, 'blocked_by': []},
+                    {'approval_id': 'approval::blocked', 'playbook_id': 'playbook::blocked', 'title': 'Blocked promotion item', 'action_type': 'joint_stage_prepare', 'approval_state': 'pending', 'decision_state': 'queued', 'risk_level': 'medium', 'approval_required': False, 'requires_manual': False, 'blocked_by': ['validation_gap']},
+                ],
+                'summary': {'pending_count': 2},
+            },
+            'rollout_executor': {'status': 'controlled', 'summary': {}},
+        }
+        candidate_view = build_auto_promotion_candidate_view(payload, limit=10)
+        self.assertEqual(candidate_view['schema_version'], 'm5_auto_promotion_candidate_view_v1')
+        self.assertEqual(candidate_view['summary']['candidate_count'], 2)
+        self.assertEqual(candidate_view['summary']['ready_count'], 1)
+        self.assertEqual(candidate_view['summary']['blocked_count'], 1)
+        self.assertEqual(candidate_view['ready_items'][0]['item_id'], 'playbook::promo')
+        self.assertTrue(candidate_view['ready_items'][0]['can_auto_promote'])
+        self.assertIn('auto_advance_allowed', candidate_view['ready_items'][0]['why_promotable'])
+        self.assertEqual(candidate_view['blocked_items'][0]['item_id'], 'playbook::blocked')
+        self.assertIn('validation_gate:not_ready', candidate_view['blocked_items'][0]['missing_requirements'])
+        self.assertTrue(candidate_view['blocked_items'][0]['manual_fallback_required'])
+
+    def test_build_auto_promotion_candidate_view_filters_ready_status_and_manual_fallback(self):
+        payload = {
+            'workflow_state': {
+                'item_states': [
+                    {'item_id': 'playbook::promo', 'title': 'Promotion ready item', 'action_type': 'joint_stage_prepare', 'risk_level': 'low', 'approval_required': False, 'requires_manual': False, 'workflow_state': 'ready', 'blocking_reasons': [], 'auto_approval_decision': 'auto_approve', 'auto_approval_eligible': True, 'current_rollout_stage': 'guarded_prepare', 'target_rollout_stage': 'controlled_apply', 'stage_handler': {'stage_key': 'guarded_prepare', 'advisory': {'recommended_stage': 'controlled_apply', 'recommended_action': 'promote_to_controlled_apply', 'reasons': ['auto_advance_allowed'], 'ready_for_live_promotion': True}}, 'state_machine': {'auto_advance_gate': {'allowed': True, 'readiness_score': 100, 'blockers': []}, 'rollback_gate': {'candidate': False, 'triggered': []}}},
+                    {'item_id': 'playbook::manual', 'title': 'Manual fallback item', 'action_type': 'joint_expand_guarded', 'risk_level': 'high', 'approval_required': True, 'requires_manual': True, 'workflow_state': 'blocked_by_approval', 'blocking_reasons': [], 'current_rollout_stage': 'guarded_prepare', 'target_rollout_stage': 'controlled_apply', 'stage_handler': {'stage_key': 'guarded_prepare', 'advisory': {'recommended_stage': 'controlled_apply', 'recommended_action': 'promote_to_controlled_apply', 'reasons': ['manual_gate_required'], 'ready_for_live_promotion': False}}, 'state_machine': {'auto_advance_gate': {'allowed': False, 'readiness_score': 20, 'blockers': ['manual_gate_required']}, 'rollback_gate': {'candidate': False, 'triggered': []}}},
+                ],
+                'summary': {'item_count': 2},
+            },
+            'approval_state': {
+                'items': [
+                    {'approval_id': 'approval::promo', 'playbook_id': 'playbook::promo', 'title': 'Promotion ready item', 'action_type': 'joint_stage_prepare', 'approval_state': 'pending', 'decision_state': 'ready', 'risk_level': 'low', 'approval_required': False, 'requires_manual': False, 'blocked_by': []},
+                    {'approval_id': 'approval::manual', 'playbook_id': 'playbook::manual', 'title': 'Manual fallback item', 'action_type': 'joint_expand_guarded', 'approval_state': 'pending', 'decision_state': 'pending', 'risk_level': 'high', 'approval_required': True, 'requires_manual': True, 'blocked_by': []},
+                ],
+                'summary': {'pending_count': 2},
+            },
+            'rollout_executor': {'status': 'controlled', 'summary': {}},
+        }
+        ready_only = build_auto_promotion_candidate_view(payload, candidate_status='ready', limit=10)
+        self.assertEqual(ready_only['summary']['candidate_count'], 1)
+        self.assertEqual(ready_only['items'][0]['item_id'], 'playbook::promo')
+        manual_only = build_auto_promotion_candidate_view(payload, manual_fallback_required=True, limit=10)
+        self.assertEqual(manual_only['summary']['candidate_count'], 1)
+        self.assertEqual(manual_only['items'][0]['item_id'], 'playbook::manual')
+        self.assertEqual(manual_only['applied_filters']['candidate_status'], None)
 
     def test_gate_consumption_flows_into_operator_digest_workbench_and_timeline_layers(self):
         gate_payload = {

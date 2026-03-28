@@ -52,7 +52,7 @@ from signals.validator import SignalValidator
 from bot.run import execute_exchange_smoke, reconcile_exchange_positions, load_runtime_state
 from ml.engine import MLEngine
 from core.regime import RegimeDetector, detect_regime, Regime
-from analytics import StrategyBacktester, SignalQualityAnalyzer, ParameterOptimizer, GovernanceEngine, build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, build_transition_journal_overview, attach_auto_approval_policy, execute_controlled_rollout_layer, execute_controlled_auto_approval_layer, execute_rollout_executor, build_workflow_consumer_view, build_workflow_recovery_view, build_workflow_attention_view, build_workflow_operator_digest, build_dashboard_summary_cards, build_workbench_governance_view, build_workbench_governance_filter_view, build_workbench_governance_detail_view, build_workbench_merged_timeline, build_workbench_timeline_summary_aggregation, build_unified_workbench_overview
+from analytics import StrategyBacktester, SignalQualityAnalyzer, ParameterOptimizer, GovernanceEngine, build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, build_transition_journal_overview, attach_auto_approval_policy, execute_controlled_rollout_layer, execute_controlled_auto_approval_layer, execute_rollout_executor, build_workflow_consumer_view, build_workflow_recovery_view, build_workflow_attention_view, build_workflow_operator_digest, build_dashboard_summary_cards, build_workbench_governance_view, build_workbench_governance_filter_view, build_workbench_governance_detail_view, build_workbench_merged_timeline, build_workbench_timeline_summary_aggregation, build_unified_workbench_overview, build_auto_promotion_candidate_view
 from analytics.backtest import export_calibration_payload
 from analytics.mfe_mae import MFEAnalyzer, get_mfe_mae_analysis
 from core.regime_policy import summarize_observe_only_collection
@@ -2442,8 +2442,8 @@ def _load_recent_transition_journal_overview(*, limit: int = 5, approval_type: s
 def get_backtest_calibration_report():
     """获取 M5 calibration 聚合输出，默认返回 report-ready payload。"""
     view = (request.args.get('view') or 'report_ready').strip().lower()
-    if view not in {'report_ready', 'delivery', 'governance_ready', 'workflow_ready', 'operator_digest', 'dashboard_summary_cards', 'workbench_governance_view', 'unified_workbench_overview', 'full'}:
-        return jsonify({'success': False, 'error': 'view must be one of report_ready|delivery|governance_ready|workflow_ready|operator_digest|dashboard_summary_cards|workbench_governance_view|unified_workbench_overview|full'}), 400
+    if view not in {'report_ready', 'delivery', 'governance_ready', 'workflow_ready', 'operator_digest', 'dashboard_summary_cards', 'workbench_governance_view', 'auto_promotion_candidate_view', 'unified_workbench_overview', 'full'}:
+        return jsonify({'success': False, 'error': 'view must be one of report_ready|delivery|governance_ready|workflow_ready|operator_digest|dashboard_summary_cards|workbench_governance_view|auto_promotion_candidate_view|unified_workbench_overview|full'}), 400
 
     backtest_result = backtester.run_all(config.symbols)
     calibration_report = backtest_result.get('calibration_report') or {}
@@ -2451,8 +2451,8 @@ def get_backtest_calibration_report():
         calibration_report,
         view='full' if view == 'full' else ('workflow_ready' if view in {'operator_digest', 'dashboard_summary_cards', 'workbench_governance_view', 'unified_workbench_overview'} else view),
     )
-    if view in {'workflow_ready', 'operator_digest', 'dashboard_summary_cards', 'workbench_governance_view', 'unified_workbench_overview', 'full'}:
-        workflow_payload = payload if view in {'workflow_ready', 'operator_digest', 'dashboard_summary_cards', 'workbench_governance_view', 'unified_workbench_overview'} else (payload.get('workflow_ready') or {})
+    if view in {'workflow_ready', 'operator_digest', 'dashboard_summary_cards', 'workbench_governance_view', 'auto_promotion_candidate_view', 'unified_workbench_overview', 'full'}:
+        workflow_payload = payload if view in {'workflow_ready', 'operator_digest', 'dashboard_summary_cards', 'workbench_governance_view', 'auto_promotion_candidate_view', 'unified_workbench_overview'} else (payload.get('workflow_ready') or {})
         payload_to_persist = dict(workflow_payload)
         if payload_to_persist:
             persisted_workflow = _persist_workflow_approval_payload(payload_to_persist, replay_source=f'calibration_report:{view}')
@@ -2465,6 +2465,21 @@ def get_backtest_calibration_report():
                 payload = build_dashboard_summary_cards(persisted_workflow)
             elif view == 'workbench_governance_view':
                 payload = build_workbench_governance_view(persisted_workflow, transition_journal_overview=transition_journal_overview)
+            elif view == 'auto_promotion_candidate_view':
+                payload = build_auto_promotion_candidate_view(
+                    persisted_workflow,
+                    lane_ids=request.args.get('lane') or request.args.get('lane_ids'),
+                    action_types=request.args.get('action') or request.args.get('action_types'),
+                    risk_levels=request.args.get('risk') or request.args.get('risk_levels'),
+                    workflow_states=request.args.get('workflow_state') or request.args.get('workflow_states'),
+                    approval_states=request.args.get('approval_state') or request.args.get('approval_states'),
+                    current_rollout_stages=request.args.get('stage') or request.args.get('current_rollout_stages'),
+                    target_rollout_stages=request.args.get('target_stage') or request.args.get('target_rollout_stages'),
+                    candidate_status=request.args.get('candidate_status'),
+                    manual_fallback_required=(request.args.get('manual_fallback_required').lower() in ('1', 'true', 'yes') if request.args.get('manual_fallback_required') is not None else None),
+                    q=request.args.get('q'),
+                    limit=max(1, min(int(request.args.get('limit', 50)), 200)),
+                )
             elif view == 'unified_workbench_overview':
                 payload = build_unified_workbench_overview(persisted_workflow, transition_journal_overview=transition_journal_overview)
             else:
@@ -2472,10 +2487,11 @@ def get_backtest_calibration_report():
                 payload['operator_digest'] = build_workflow_operator_digest(persisted_workflow, transition_journal_overview=transition_journal_overview)
                 payload['dashboard_summary_cards'] = build_dashboard_summary_cards(persisted_workflow)
                 payload['workbench_governance_view'] = build_workbench_governance_view(persisted_workflow, transition_journal_overview=transition_journal_overview)
+                payload['auto_promotion_candidate_view'] = build_auto_promotion_candidate_view(persisted_workflow)
                 payload['unified_workbench_overview'] = build_unified_workbench_overview(persisted_workflow, transition_journal_overview=transition_journal_overview)
     summary = calibration_report.get('summary') or {}
     governance_ready = payload if view == 'governance_ready' else (payload.get('governance_ready') or {})
-    workflow_ready = {} if view in {'operator_digest', 'dashboard_summary_cards', 'workbench_governance_view', 'unified_workbench_overview'} else (payload if view == 'workflow_ready' else (payload.get('workflow_ready') or {}))
+    workflow_ready = {} if view in {'operator_digest', 'dashboard_summary_cards', 'workbench_governance_view', 'auto_promotion_candidate_view', 'unified_workbench_overview'} else (payload if view == 'workflow_ready' else (payload.get('workflow_ready') or {}))
     return jsonify({
         'success': True,
         'view': view,
@@ -2490,6 +2506,7 @@ def get_backtest_calibration_report():
             'operator_digest': payload.get('summary') or {} if view == 'operator_digest' else (payload.get('workflow_operator_digest') or payload.get('operator_digest') or {}).get('summary') or {},
             'dashboard_summary_cards': payload.get('summary') or {} if view == 'dashboard_summary_cards' else (payload.get('dashboard_summary_cards') or {}).get('summary') or {},
             'workbench_governance_view': payload.get('summary') or {} if view == 'workbench_governance_view' else (payload.get('workbench_governance_view') or {}).get('summary') or {},
+            'auto_promotion_candidate_view': payload.get('summary') or {} if view == 'auto_promotion_candidate_view' else (payload.get('auto_promotion_candidate_view') or {}).get('summary') or {},
             'unified_workbench_overview': payload.get('summary') or {} if view == 'unified_workbench_overview' else (payload.get('unified_workbench_overview') or {}).get('summary') or {},
             'joint_governance_summary': summary.get('joint_governance_summary') or {},
         }
@@ -2671,6 +2688,31 @@ def get_backtest_unified_workbench_overview():
         approval_timeline_fetcher=lambda approval_id, limit: db.get_approval_timeline(item_id=approval_id, limit=limit, ascending=True) if approval_id else [],
     )
     return jsonify({'success': True, 'view': 'unified_workbench_overview', 'data': overview, 'summary': overview.get('summary') or {}})
+
+
+@app.route('/api/backtest/auto-promotion-candidates')
+def get_backtest_auto_promotion_candidates():
+    """返回可自动推进 candidate 清单，直接说明可推进原因、缺口、风险与人工兜底需求。"""
+    limit = max(1, min(int(request.args.get('limit', 50)), 200))
+    backtest_result = backtester.run_all(config.symbols)
+    calibration_report = backtest_result.get('calibration_report') or {}
+    payload = export_calibration_payload(calibration_report, view='workflow_ready')
+    payload = _persist_workflow_approval_payload(payload, replay_source='auto_promotion_candidate_view_api')
+    candidate_view = build_auto_promotion_candidate_view(
+        payload,
+        lane_ids=request.args.get('lane') or request.args.get('lane_ids'),
+        action_types=request.args.get('action') or request.args.get('action_types'),
+        risk_levels=request.args.get('risk') or request.args.get('risk_levels'),
+        workflow_states=request.args.get('workflow_state') or request.args.get('workflow_states'),
+        approval_states=request.args.get('approval_state') or request.args.get('approval_states'),
+        current_rollout_stages=request.args.get('stage') or request.args.get('current_rollout_stages'),
+        target_rollout_stages=request.args.get('target_stage') or request.args.get('target_rollout_stages'),
+        candidate_status=request.args.get('candidate_status'),
+        manual_fallback_required=(request.args.get('manual_fallback_required').lower() in ('1', 'true', 'yes') if request.args.get('manual_fallback_required') is not None else None),
+        q=request.args.get('q'),
+        limit=limit,
+    )
+    return jsonify({'success': True, 'view': 'auto_promotion_candidate_view', 'data': candidate_view, 'summary': candidate_view.get('summary') or {}})
 
 
 @app.route('/api/backtest/workbench-governance-items')

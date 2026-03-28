@@ -1269,6 +1269,220 @@ def _summarize_rollout_advisories(rows: Optional[List[Dict[str, Any]]], *, label
     }
 
 
+def _build_auto_promotion_candidate_item(row: Dict[str, Any]) -> Dict[str, Any]:
+    workflow_item = row or {}
+    approval_item = row.get('approval_item') or {}
+    item_id = workflow_item.get('item_id') or approval_item.get('playbook_id') or row.get('item_id')
+    approval_id = approval_item.get('approval_id') or row.get('approval_id')
+    blocked_by = _dedupe_strings((workflow_item.get('blocking_reasons') or []) + (approval_item.get('blocked_by') or []) + (row.get('blocked_by') or []))
+    auto_gate = _extract_rollout_gate_snapshot(workflow_item, approval_item, row).get('auto_advance_gate') or {}
+    rollback_gate = _extract_rollout_gate_snapshot(workflow_item, approval_item, row).get('rollback_gate') or {}
+    validation_gate = _resolve_validation_gate_context(workflow_item, approval_item, row, auto_gate, rollback_gate)
+    stage_loop = workflow_item.get('stage_loop') or row.get('stage_loop') or _resolve_stage_loop_snapshot(workflow_item=workflow_item, approval_item=approval_item, row=row)
+    operator_action_policy = (workflow_item.get('operator_action_policy') or row.get('operator_action_policy') or _build_operator_action_policy(
+        item_id=item_id,
+        approval_state=approval_item.get('approval_state') or workflow_item.get('approval_state'),
+        workflow_state=workflow_item.get('workflow_state'),
+        queue_status=((workflow_item.get('queue_progression') or {}).get('status') if isinstance(workflow_item.get('queue_progression'), dict) else None),
+        dispatch_route=((workflow_item.get('queue_progression') or {}).get('dispatch_route') if isinstance(workflow_item.get('queue_progression'), dict) else None),
+        next_transition=((workflow_item.get('queue_progression') or {}).get('next_transition') if isinstance(workflow_item.get('queue_progression'), dict) else None),
+        blocked_by=blocked_by,
+        retryable=((workflow_item.get('state_machine') or {}).get('retryable') if isinstance(workflow_item.get('state_machine'), dict) else None),
+        rollout_stage=workflow_item.get('current_rollout_stage') or workflow_item.get('rollout_stage'),
+        target_rollout_stage=workflow_item.get('target_rollout_stage'),
+        terminal=bool(((workflow_item.get('state_machine') or {}) if isinstance(workflow_item.get('state_machine'), dict) else {}).get('terminal')),
+        validation_gate=validation_gate,
+    ))
+    lane_routing = workflow_item.get('lane_routing') or row.get('lane_routing') or _resolve_lane_routing(workflow_item=workflow_item, approval_item=approval_item, row=row, operator_action_policy=operator_action_policy, stage_loop=stage_loop)
+    advisory = workflow_item.get('rollout_advisory') or row.get('rollout_advisory') or _resolve_rollout_advisory_snapshot(workflow_item=workflow_item, approval_item=approval_item, row=row)
+    current_stage = workflow_item.get('current_rollout_stage') or workflow_item.get('rollout_stage') or approval_item.get('rollout_stage') or advisory.get('current_stage')
+    target_stage = workflow_item.get('target_rollout_stage') or approval_item.get('target_rollout_stage') or advisory.get('target_stage') or current_stage
+    risk_level = workflow_item.get('risk_level') or approval_item.get('risk_level') or row.get('risk_level') or 'unknown'
+    auto_approval_decision = workflow_item.get('auto_approval_decision') or approval_item.get('auto_approval_decision') or row.get('auto_approval_decision') or 'manual_review'
+    requires_manual = bool(workflow_item.get('requires_manual', approval_item.get('requires_manual', row.get('requires_manual'))))
+    approval_required = bool(workflow_item.get('approval_required', approval_item.get('approval_required', row.get('approval_required'))))
+    queue_progression = workflow_item.get('queue_progression') or row.get('queue_progression') or {}
+    missing_requirements = _dedupe_strings(
+        blocked_by
+        + (auto_gate.get('blockers') or [])
+        + (validation_gate.get('reasons') or [])
+        + (([] if advisory.get('ready_for_live_promotion') else (advisory.get('reasons') or [])))
+    )
+    promotion_allowed = bool(
+        advisory.get('ready_for_live_promotion')
+        and advisory.get('auto_promotion_candidate')
+        and auto_gate.get('allowed')
+        and not rollback_gate.get('candidate')
+        and not validation_gate.get('freeze_auto_advance')
+        and not validation_gate.get('regression_detected')
+        and not blocked_by
+        and not requires_manual
+        and not approval_required
+    )
+    why_promotable = _dedupe_strings([
+        *(advisory.get('reasons') or []),
+        *(operator_action_policy.get('reason_codes') or []),
+        *(stage_loop.get('waiting_on') or []),
+    ])
+    if promotion_allowed and 'auto_advance_allowed' not in why_promotable:
+        why_promotable.insert(0, 'auto_advance_allowed')
+    risk_rank = _workbench_risk_rank(risk_level)
+    if rollback_gate.get('candidate') or validation_gate.get('regression_detected'):
+        risk_label = 'critical'
+    elif validation_gate.get('freeze_auto_advance') or risk_rank <= 1:
+        risk_label = 'high'
+    elif risk_rank == 2:
+        risk_label = 'medium'
+    else:
+        risk_label = 'low'
+    manual_fallback_required = bool((not promotion_allowed) and (requires_manual or approval_required or operator_action_policy.get('owner') == 'operator' or lane_routing.get('lane_id') in {'manual_approval', 'blocked', 'rollback_candidate'}))
+    return {
+        'item_id': item_id,
+        'approval_id': approval_id,
+        'title': workflow_item.get('title') or approval_item.get('title') or row.get('title') or item_id,
+        'action_type': workflow_item.get('action_type') or approval_item.get('action_type') or row.get('action_type') or 'unknown',
+        'workflow_state': workflow_item.get('workflow_state') or approval_item.get('workflow_state') or row.get('workflow_state') or 'pending',
+        'approval_state': approval_item.get('approval_state') or row.get('approval_state') or 'not_required',
+        'lane_id': lane_routing.get('lane_id'),
+        'queue_name': lane_routing.get('queue_name'),
+        'dispatch_route': lane_routing.get('dispatch_route'),
+        'current_rollout_stage': current_stage,
+        'target_rollout_stage': target_stage,
+        'recommended_stage': advisory.get('recommended_stage'),
+        'recommended_action': advisory.get('recommended_action'),
+        'stage_path': advisory.get('stage_path') or f"{current_stage or 'observe'}->{target_stage or current_stage or 'observe'}",
+        'can_auto_promote': promotion_allowed,
+        'ready_for_live_promotion': bool(advisory.get('ready_for_live_promotion')),
+        'auto_promotion_candidate': bool(advisory.get('auto_promotion_candidate')),
+        'why_promotable': why_promotable,
+        'missing_requirements': [] if promotion_allowed else missing_requirements,
+        'risk_level': risk_level,
+        'risk_label': risk_label,
+        'risk_score': max(0, 100 - int(auto_gate.get('readiness_score') or 0)),
+        'manual_fallback_required': manual_fallback_required,
+        'manual_fallback_reason_codes': _dedupe_strings(([] if not manual_fallback_required else (operator_action_policy.get('reason_codes') or ['manual_fallback_required']))),
+        'operator_action_policy': operator_action_policy,
+        'auto_advance_gate': auto_gate,
+        'rollback_gate': rollback_gate,
+        'validation_gate': validation_gate,
+        'stage_loop': stage_loop,
+        'lane_routing': lane_routing,
+        'auto_approval_decision': auto_approval_decision,
+        'auto_approval_eligible': bool(workflow_item.get('auto_approval_eligible', approval_item.get('auto_approval_eligible', row.get('auto_approval_eligible')))),
+        'requires_manual': requires_manual,
+        'approval_required': approval_required,
+        'blocked_by': blocked_by,
+        'queue_progression': queue_progression,
+        'scheduled_review': workflow_item.get('scheduled_review') or approval_item.get('scheduled_review') or row.get('scheduled_review') or {},
+        'summary': (
+            f"ready:{bool(promotion_allowed)} | action={advisory.get('recommended_action') or operator_action_policy.get('action')} | "
+            f"stage={current_stage or '--'}->{target_stage or '--'} | missing={len([] if promotion_allowed else missing_requirements)} | risk={risk_label}"
+        ),
+    }
+
+
+def build_auto_promotion_candidate_view(payload: Optional[Dict] = None, *, lane_ids: Any = None, action_types: Any = None,
+                                        risk_levels: Any = None, workflow_states: Any = None, approval_states: Any = None,
+                                        current_rollout_stages: Any = None, target_rollout_stages: Any = None,
+                                        candidate_status: Optional[str] = None, manual_fallback_required: Optional[bool] = None,
+                                        q: Optional[str] = None, limit: int = 50) -> Dict[str, Any]:
+    payload = payload or {}
+    consumer_view = payload.get('consumer_view') or build_workflow_consumer_view(payload)
+    workflow_items = ((consumer_view.get('workflow_state') or {}).get('item_states') or [])
+    approval_items = ((consumer_view.get('approval_state') or {}).get('items') or [])
+    approval_by_playbook = {row.get('playbook_id'): row for row in approval_items if row.get('playbook_id')}
+    items = []
+    for workflow_item in workflow_items:
+        item_id = workflow_item.get('item_id')
+        approval_item = approval_by_playbook.get(item_id) or {}
+        items.append(_build_auto_promotion_candidate_item({**workflow_item, 'approval_item': approval_item}))
+
+    lane_filter = set(_normalize_filter_values(lane_ids))
+    action_filter = set(_normalize_filter_values(action_types))
+    risk_filter = set(_normalize_filter_values(risk_levels))
+    workflow_filter = set(_normalize_filter_values(workflow_states))
+    approval_filter = set(_normalize_filter_values(approval_states))
+    current_stage_filter = set(_normalize_filter_values(current_rollout_stages))
+    target_stage_filter = set(_normalize_filter_values(target_rollout_stages))
+    q_norm = str(q or '').strip().lower()
+    candidate_status_norm = str(candidate_status or '').strip().lower() or None
+
+    def _matches(row: Dict[str, Any]) -> bool:
+        if lane_filter and str(row.get('lane_id') or '').lower() not in lane_filter:
+            return False
+        if action_filter and str(row.get('action_type') or '').lower() not in action_filter:
+            return False
+        if risk_filter and str(row.get('risk_level') or '').lower() not in risk_filter:
+            return False
+        if workflow_filter and str(row.get('workflow_state') or '').lower() not in workflow_filter:
+            return False
+        if approval_filter and str(row.get('approval_state') or '').lower() not in approval_filter:
+            return False
+        if current_stage_filter and str(row.get('current_rollout_stage') or '').lower() not in current_stage_filter:
+            return False
+        if target_stage_filter and str(row.get('target_rollout_stage') or '').lower() not in target_stage_filter:
+            return False
+        if candidate_status_norm == 'ready' and not row.get('can_auto_promote'):
+            return False
+        if candidate_status_norm == 'blocked' and row.get('can_auto_promote'):
+            return False
+        if manual_fallback_required is not None and bool(row.get('manual_fallback_required')) != bool(manual_fallback_required):
+            return False
+        if q_norm:
+            haystacks = [
+                row.get('item_id'), row.get('approval_id'), row.get('title'), row.get('action_type'), row.get('workflow_state'), row.get('approval_state'),
+                row.get('recommended_action'), row.get('recommended_stage'), row.get('risk_level'), row.get('risk_label'), row.get('summary'),
+            ] + list(row.get('why_promotable') or []) + list(row.get('missing_requirements') or []) + list(row.get('manual_fallback_reason_codes') or [])
+            if q_norm not in ' '.join(str(v or '').lower() for v in haystacks):
+                return False
+        return True
+
+    filtered_items = sorted([row for row in items if _matches(row)], key=lambda row: (0 if row.get('can_auto_promote') else 1, _workbench_item_sort_key(row)))
+    ready_items = [row for row in filtered_items if row.get('can_auto_promote')]
+    blocked_items = [row for row in filtered_items if not row.get('can_auto_promote')]
+    missing_counts: Dict[str, int] = {}
+    why_counts: Dict[str, int] = {}
+    risk_counts: Dict[str, int] = {}
+    for row in filtered_items:
+        for code in row.get('missing_requirements') or []:
+            missing_counts[code] = missing_counts.get(code, 0) + 1
+        for code in row.get('why_promotable') or []:
+            why_counts[code] = why_counts.get(code, 0) + 1
+        risk = str(row.get('risk_label') or 'unknown')
+        risk_counts[risk] = risk_counts.get(risk, 0) + 1
+    view = {
+        'schema_version': 'm5_auto_promotion_candidate_view_v1',
+        'summary': {
+            'candidate_count': len(filtered_items),
+            'ready_count': len(ready_items),
+            'blocked_count': len(blocked_items),
+            'manual_fallback_required_count': sum(1 for row in filtered_items if row.get('manual_fallback_required')),
+            'risk_label_counts': dict(sorted(risk_counts.items())),
+            'top_missing_requirements': [key for key, _ in sorted(missing_counts.items(), key=lambda item: (-item[1], item[0]))[:10]],
+            'missing_requirement_counts': dict(sorted(missing_counts.items(), key=lambda item: (-item[1], item[0]))),
+            'why_promotable_counts': dict(sorted(why_counts.items(), key=lambda item: (-item[1], item[0]))),
+            'validation_gate': consumer_view.get('validation_gate') or _build_validation_gate_snapshot(payload),
+        },
+        'applied_filters': {
+            'lane_ids': _normalize_filter_values(lane_ids),
+            'action_types': _normalize_filter_values(action_types),
+            'risk_levels': _normalize_filter_values(risk_levels),
+            'workflow_states': _normalize_filter_values(workflow_states),
+            'approval_states': _normalize_filter_values(approval_states),
+            'current_rollout_stages': _normalize_filter_values(current_rollout_stages),
+            'target_rollout_stages': _normalize_filter_values(target_rollout_stages),
+            'candidate_status': candidate_status_norm,
+            'manual_fallback_required': manual_fallback_required,
+            'q': str(q or '').strip(),
+        },
+        'items': filtered_items[:limit],
+        'ready_items': ready_items[:limit],
+        'blocked_items': blocked_items[:limit],
+    }
+    payload['auto_promotion_candidate_view'] = view
+    return view
+
+
 def _build_low_intervention_group_summary(rows: Optional[List[Dict[str, Any]]], *, label: Optional[str] = None) -> Dict[str, Any]:
     rows = rows or []
     operator_policy_summary = _summarize_operator_action_policies(rows)

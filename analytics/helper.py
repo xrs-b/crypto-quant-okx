@@ -131,6 +131,47 @@ SAFE_ROLLOUT_STAGE_HANDLER_REGISTRY = {
     },
 }
 
+ROLLOUT_TRANSITION_POLICY_VERSION = 'm5_rollout_transition_policy_v1'
+
+ROLLOUT_TRANSITION_TEMPLATES = {
+    'preserve_terminal_state': {
+        'dispatch_route': 'terminal_hold',
+        'next_transition': 'preserve_terminal_state',
+        'retryable': False,
+        'rollback_hint': 'terminal_state_preserved_no_further_executor_apply',
+    },
+    'defer_until_blockers_clear': {
+        'dispatch_route': 'deferred_review_queue',
+        'next_transition': 'retry_after_blockers_clear',
+        'retryable': True,
+        'rollback_hint': 'keep_current_state_and_clear_blockers_before_retry',
+    },
+    'defer_or_freeze_by_policy': {
+        'dispatch_route': 'deferred_hold_queue',
+        'next_transition': 'manual_review_or_policy_refresh',
+        'retryable': True,
+        'rollback_hint': 'revert_to_observe_or_hold_until_next_review',
+    },
+    'manual_gate_before_dispatch': {
+        'dispatch_route': 'manual_review_queue',
+        'next_transition': 'await_manual_approval',
+        'retryable': True,
+        'rollback_hint': 'revert_to_previous_stage_if_manual_review_rejects',
+    },
+    'queue_only_followup_required': {
+        'dispatch_route': 'operator_followup_queue',
+        'next_transition': 'queue_for_followup_execution',
+        'retryable': True,
+        'rollback_hint': 'cancel_or_deprioritize_queue_item_to_rollback',
+    },
+    'safe_apply_ready': {
+        'dispatch_route': 'safe_state_apply',
+        'next_transition': 'mark_ready_for_followup',
+        'retryable': True,
+        'rollback_hint': 'restore_previous_state_from_approval_timeline',
+    },
+}
+
 CONTROLLED_ROLLOUT_ACTION_SPECS = {
     'joint_observe': {
         'state': 'ready',
@@ -238,6 +279,13 @@ ROLLOUT_EXECUTOR_ACTION_SPECS = {
         'executor_class': 'state_transition',
         'audit_code': 'SAFE_STATE_APPLY',
         'rollback_capable': True,
+        'transition_policy': {
+            'transition_rule': 'safe_apply_ready',
+            'dispatch_route': 'safe_state_apply',
+            'next_transition': 'mark_ready_for_followup',
+            'retryable': True,
+            'rollback_hint': 'restore_previous_state_from_approval_timeline',
+        },
     },
     'joint_queue_promote_safe': {
         **CONTROLLED_ROLLOUT_ACTION_SPECS['joint_queue_promote_safe'],
@@ -245,6 +293,15 @@ ROLLOUT_EXECUTOR_ACTION_SPECS = {
         'executor_class': 'queue_metadata',
         'audit_code': 'SAFE_QUEUE_PROMOTE',
         'rollback_capable': True,
+        'transition_policy': {
+            'transition_rule': 'queue_promotion_ready_for_safe_apply',
+            'dispatch_route': 'queue_metadata_apply',
+            'next_transition': 'queue_safe_promotion',
+            'retryable': True,
+            'rollback_hint': 'demote_queue_priority_and_restore_previous_progression',
+            'default_target_stage': 'candidate',
+            'use_stage_handler_next_transition': True,
+        },
     },
     'joint_stage_prepare': {
         **CONTROLLED_ROLLOUT_ACTION_SPECS['joint_stage_prepare'],
@@ -252,6 +309,13 @@ ROLLOUT_EXECUTOR_ACTION_SPECS = {
         'executor_class': 'stage_metadata',
         'audit_code': 'SAFE_STAGE_PREPARE',
         'rollback_capable': True,
+        'transition_policy': {
+            'transition_rule': 'stage_prepare_ready_for_safe_apply',
+            'dispatch_route': 'stage_metadata_apply',
+            'next_transition': 'promote_to_target_stage',
+            'retryable': True,
+            'rollback_hint': 'revert_stage_metadata_to_previous_stage',
+        },
     },
     'joint_review_schedule': {
         **CONTROLLED_ROLLOUT_ACTION_SPECS['joint_review_schedule'],
@@ -259,6 +323,15 @@ ROLLOUT_EXECUTOR_ACTION_SPECS = {
         'executor_class': 'review_metadata',
         'audit_code': 'SAFE_REVIEW_SCHEDULE',
         'rollback_capable': True,
+        'transition_policy': {
+            'transition_rule': 'schedule_review_checkpoint',
+            'dispatch_route': 'review_metadata_apply',
+            'next_transition': 'wait_for_review_checkpoint',
+            'retryable': True,
+            'rollback_hint': 'clear_scheduled_review_and_return_to_previous_stage',
+            'default_target_stage': 'review_pending',
+            'use_stage_handler_next_transition': True,
+        },
     },
     'joint_metadata_annotate': {
         **CONTROLLED_ROLLOUT_ACTION_SPECS['joint_metadata_annotate'],
@@ -266,6 +339,13 @@ ROLLOUT_EXECUTOR_ACTION_SPECS = {
         'executor_class': 'annotation_metadata',
         'audit_code': 'SAFE_METADATA_ANNOTATE',
         'rollback_capable': True,
+        'transition_policy': {
+            'transition_rule': 'safe_apply_ready',
+            'dispatch_route': 'metadata_annotation_apply',
+            'next_transition': 'persist_annotation_and_continue_review',
+            'retryable': True,
+            'rollback_hint': 'remove_or_replace_metadata_annotation_from_approval_timeline',
+        },
     },
     'joint_expand_guarded': {
         'dispatch_mode': 'queue_only',
@@ -275,6 +355,13 @@ ROLLOUT_EXECUTOR_ACTION_SPECS = {
         'requires_approval': True,
         'rollback_capable': False,
         'safe_handler': 'queue_only_live_trading_change',
+        'transition_policy': {
+            'transition_rule': 'queue_only_followup_required',
+            'dispatch_route': 'stage_promotion_queue',
+            'next_transition': 'queue_for_followup_execution',
+            'retryable': True,
+            'rollback_hint': 'cancel_or_deprioritize_queue_item_to_rollback',
+        },
     },
     'joint_freeze': {
         'dispatch_mode': 'queue_only',
@@ -284,6 +371,13 @@ ROLLOUT_EXECUTOR_ACTION_SPECS = {
         'requires_approval': True,
         'rollback_capable': False,
         'safe_handler': 'queue_only_governance_control',
+        'transition_policy': {
+            'transition_rule': 'queue_only_followup_required',
+            'dispatch_route': 'operator_followup_queue',
+            'next_transition': 'queue_for_followup_execution',
+            'retryable': True,
+            'rollback_hint': 'cancel_or_deprioritize_queue_item_to_rollback',
+        },
     },
     'joint_deweight': {
         'dispatch_mode': 'queue_only',
@@ -293,6 +387,13 @@ ROLLOUT_EXECUTOR_ACTION_SPECS = {
         'requires_approval': True,
         'rollback_capable': False,
         'safe_handler': 'queue_only_strategy_weight_change',
+        'transition_policy': {
+            'transition_rule': 'queue_only_followup_required',
+            'dispatch_route': 'operator_followup_queue',
+            'next_transition': 'queue_for_followup_execution',
+            'retryable': True,
+            'rollback_hint': 'cancel_or_deprioritize_queue_item_to_rollback',
+        },
     },
     'prefer_strategy_best_policy': {
         'dispatch_mode': 'queue_only',
@@ -302,6 +403,13 @@ ROLLOUT_EXECUTOR_ACTION_SPECS = {
         'requires_approval': True,
         'rollback_capable': False,
         'safe_handler': 'queue_only_policy_switch',
+        'transition_policy': {
+            'transition_rule': 'queue_only_followup_required',
+            'dispatch_route': 'operator_followup_queue',
+            'next_transition': 'queue_for_followup_execution',
+            'retryable': True,
+            'rollback_hint': 'cancel_or_deprioritize_queue_item_to_rollback',
+        },
     },
     'rollout_freeze': {
         'dispatch_mode': 'queue_only',
@@ -311,6 +419,13 @@ ROLLOUT_EXECUTOR_ACTION_SPECS = {
         'requires_approval': True,
         'rollback_capable': False,
         'safe_handler': 'queue_only_rollout_control',
+        'transition_policy': {
+            'transition_rule': 'queue_only_followup_required',
+            'dispatch_route': 'operator_followup_queue',
+            'next_transition': 'queue_for_followup_execution',
+            'retryable': True,
+            'rollback_hint': 'cancel_or_deprioritize_queue_item_to_rollback',
+        },
     },
 }
 
@@ -1823,6 +1938,7 @@ def _build_safe_rollout_action_registry(allowed_action_types: Optional[List[str]
             'stage_family': handler.get('stage_family'),
             'rollback_capable': bool(spec.get('rollback_capable', False)),
             'audit_code': spec.get('audit_code'),
+            'transition_policy': _build_rollout_transition_policy_snapshot(spec, action_type),
             'gate_policy': gate_policy,
             'preconditions': gate_policy.get('preconditions') or [],
             'idempotency_rule': gate_policy.get('idempotency_rule'),
@@ -2291,6 +2407,7 @@ def _build_rollout_executor_catalog(allowed_action_types: Optional[List[str]] = 
             'handler': entry.get('handler'),
             'route': entry.get('route'),
             'stage_family': entry.get('stage_family'),
+            'transition_policy': entry.get('transition_policy') or {},
         }
         spec = ROLLOUT_EXECUTOR_ACTION_SPECS.get(action_type) or {}
         if spec.get('blocked_reason'):
@@ -2514,6 +2631,47 @@ def _summarize_stage_loop_rows(rows: Optional[List[Dict[str, Any]]] = None, *, l
     }
 
 
+def _build_rollout_transition_policy_snapshot(spec: Optional[Dict[str, Any]] = None, action_type: Optional[str] = None) -> Dict[str, Any]:
+    spec = dict(spec or {})
+    policy = dict(spec.get('transition_policy') or {})
+    if not policy:
+        template = dict(ROLLOUT_TRANSITION_TEMPLATES.get('safe_apply_ready') or {})
+        policy = {
+            'transition_rule': 'safe_apply_ready',
+            **template,
+        }
+    rule = str(policy.get('transition_rule') or 'safe_apply_ready').strip() or 'safe_apply_ready'
+    template = dict(ROLLOUT_TRANSITION_TEMPLATES.get(rule) or {})
+    merged = {**template, **policy}
+    merged['transition_rule'] = rule
+    merged['schema_version'] = ROLLOUT_TRANSITION_POLICY_VERSION
+    if action_type:
+        merged['action_type'] = str(action_type).strip().lower()
+    return merged
+
+
+def _materialize_rollout_transition_rule(*, policy: Optional[Dict[str, Any]] = None, rollout_stage: Optional[str] = None,
+                                         target_rollout_stage: Optional[str] = None, readiness: Optional[str] = None,
+                                         stage_handler: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    policy = dict(policy or {})
+    stage_handler = dict(stage_handler or {})
+    next_transition = policy.get('next_transition')
+    if policy.get('use_stage_handler_next_transition') and stage_handler.get('next_transition'):
+        next_transition = stage_handler.get('next_transition')
+    return {
+        'transition_rule': policy.get('transition_rule') or 'safe_apply_ready',
+        'dispatch_route': policy.get('dispatch_route') or 'safe_state_apply',
+        'next_transition': next_transition or 'mark_ready_for_followup',
+        'retryable': bool(policy.get('retryable', True)),
+        'rollback_hint': policy.get('rollback_hint') or 'restore_previous_state_from_approval_timeline',
+        'rollout_stage': rollout_stage,
+        'target_rollout_stage': target_rollout_stage,
+        'readiness': readiness,
+        'transition_policy': policy,
+        **({'stage_handler': stage_handler} if stage_handler else {}),
+    }
+
+
 def _resolve_rollout_transition_rule(*, action_type: str, row: Dict[str, Any], workflow_item: Dict[str, Any],
                                      spec: Optional[Dict[str, Any]], current_state: str,
                                      current_workflow_state: str, auto_decision: str, eligible: bool,
@@ -2540,130 +2698,72 @@ def _resolve_rollout_transition_rule(*, action_type: str, row: Dict[str, Any], w
     blocked = _dedupe_strings(blocked_by or [])
 
     if current_state in TERMINAL_APPROVAL_STATES:
-        return {
-            'transition_rule': 'preserve_terminal_state',
-            'dispatch_route': 'terminal_hold',
-            'next_transition': 'preserve_terminal_state',
-            'retryable': False,
-            'rollback_hint': 'terminal_state_preserved_no_further_executor_apply',
-            'rollout_stage': rollout_stage,
-            'target_rollout_stage': target_rollout_stage,
-            'readiness': readiness,
-        }
+        return _materialize_rollout_transition_rule(
+            policy={'transition_rule': 'preserve_terminal_state'},
+            rollout_stage=rollout_stage,
+            target_rollout_stage=target_rollout_stage,
+            readiness=readiness,
+        )
     if blocked:
-        return {
-            'transition_rule': 'defer_until_blockers_clear',
-            'dispatch_route': 'deferred_review_queue',
-            'next_transition': 'retry_after_blockers_clear',
-            'retryable': True,
-            'rollback_hint': 'keep_current_state_and_clear_blockers_before_retry',
-            'rollout_stage': rollout_stage,
-            'target_rollout_stage': target_rollout_stage,
-            'readiness': readiness,
-        }
+        return _materialize_rollout_transition_rule(
+            policy={'transition_rule': 'defer_until_blockers_clear'},
+            rollout_stage=rollout_stage,
+            target_rollout_stage=target_rollout_stage,
+            readiness=readiness,
+        )
     if auto_decision in {'defer', 'freeze'}:
-        return {
-            'transition_rule': 'defer_or_freeze_by_policy',
-            'dispatch_route': 'deferred_hold_queue',
-            'next_transition': 'manual_review_or_policy_refresh',
-            'retryable': auto_decision == 'defer',
-            'rollback_hint': 'revert_to_observe_or_hold_until_next_review',
-            'rollout_stage': rollout_stage,
-            'target_rollout_stage': target_rollout_stage,
-            'readiness': readiness,
-        }
+        return _materialize_rollout_transition_rule(
+            policy={
+                'transition_rule': 'defer_or_freeze_by_policy',
+                'retryable': auto_decision == 'defer',
+            },
+            rollout_stage=rollout_stage,
+            target_rollout_stage=target_rollout_stage,
+            readiness=readiness,
+        )
     if approval_required or requires_manual or auto_decision == 'manual_review':
-        return {
-            'transition_rule': 'manual_gate_before_dispatch',
-            'dispatch_route': 'manual_review_queue',
-            'next_transition': 'await_manual_approval',
-            'retryable': True,
-            'rollback_hint': 'revert_to_previous_stage_if_manual_review_rejects',
-            'rollout_stage': rollout_stage,
-            'target_rollout_stage': target_rollout_stage,
-            'readiness': readiness,
-        }
+        return _materialize_rollout_transition_rule(
+            policy={'transition_rule': 'manual_gate_before_dispatch'},
+            rollout_stage=rollout_stage,
+            target_rollout_stage=target_rollout_stage,
+            readiness=readiness,
+        )
     if dispatch_mode == 'queue_only':
-        route = 'stage_promotion_queue' if action_type in {'joint_expand_guarded', 'joint_stage_prepare'} else 'operator_followup_queue'
-        return {
-            'transition_rule': 'queue_only_followup_required',
-            'dispatch_route': route,
-            'next_transition': 'queue_for_followup_execution',
-            'retryable': True,
-            'rollback_hint': 'cancel_or_deprioritize_queue_item_to_rollback',
-            'rollout_stage': rollout_stage,
-            'target_rollout_stage': target_rollout_stage,
-            'readiness': readiness,
-        }
-    if action_type == 'joint_stage_prepare':
+        queue_policy = _build_rollout_transition_policy_snapshot(spec, action_type)
+        return _materialize_rollout_transition_rule(
+            policy=queue_policy,
+            rollout_stage=rollout_stage,
+            target_rollout_stage=target_rollout_stage,
+            readiness=readiness,
+        )
+
+    transition_policy = _build_rollout_transition_policy_snapshot(spec, action_type)
+    default_target_stage = str(transition_policy.get('default_target_stage') or '').strip().lower()
+    if default_target_stage and target_rollout_stage in {'', 'pending', rollout_stage}:
+        target_rollout_stage = default_target_stage
+    review_due_at = row.get('review_due_at') or workflow_item.get('review_due_at')
+    if action_type in {'joint_stage_prepare', 'joint_queue_promote_safe', 'joint_review_schedule'}:
         stage_handler = _resolve_rollout_stage_handler(
             current_stage=rollout_stage,
             target_stage=target_rollout_stage,
             action_type=action_type,
             workflow_state=current_workflow_state,
             blocked_by=blocked,
-        )
-        return {
-            'transition_rule': 'stage_prepare_ready_for_safe_apply',
-            'dispatch_route': 'stage_metadata_apply',
-            'next_transition': 'promote_to_target_stage',
-            'retryable': True,
-            'rollback_hint': 'revert_stage_metadata_to_previous_stage',
-            'rollout_stage': rollout_stage,
-            'target_rollout_stage': target_rollout_stage,
-            'readiness': readiness,
-            'stage_handler': stage_handler,
-        }
-    if action_type == 'joint_queue_promote_safe':
-        stage_handler = _resolve_rollout_stage_handler(
-            current_stage=rollout_stage,
-            target_stage=target_rollout_stage or 'candidate',
-            action_type=action_type,
-            workflow_state=current_workflow_state,
-            blocked_by=blocked,
-        )
-        return {
-            'transition_rule': 'queue_promotion_ready_for_safe_apply',
-            'dispatch_route': 'queue_metadata_apply',
-            'next_transition': stage_handler.get('next_transition') or 'mark_queue_promoted_and_wait_review',
-            'retryable': True,
-            'rollback_hint': 'demote_queue_priority_and_restore_previous_progression',
-            'rollout_stage': rollout_stage,
-            'target_rollout_stage': target_rollout_stage,
-            'readiness': readiness,
-            'stage_handler': stage_handler,
-        }
-    if action_type == 'joint_review_schedule':
-        review_due_at = row.get('review_due_at') or workflow_item.get('review_due_at')
-        stage_handler = _resolve_rollout_stage_handler(
-            current_stage=rollout_stage,
-            target_stage=target_rollout_stage or 'review_pending',
-            action_type=action_type,
-            workflow_state=current_workflow_state,
-            blocked_by=blocked,
             review_due_at=review_due_at,
         )
-        return {
-            'transition_rule': 'schedule_review_checkpoint',
-            'dispatch_route': 'review_metadata_apply',
-            'next_transition': stage_handler.get('next_transition') or 'wait_for_review_checkpoint',
-            'retryable': True,
-            'rollback_hint': 'clear_scheduled_review_and_return_to_previous_stage',
-            'rollout_stage': rollout_stage,
-            'target_rollout_stage': target_rollout_stage,
-            'readiness': readiness,
-            'stage_handler': stage_handler,
-        }
-    return {
-        'transition_rule': 'safe_apply_ready',
-        'dispatch_route': 'safe_state_apply',
-        'next_transition': 'mark_ready_for_followup',
-        'retryable': True,
-        'rollback_hint': 'restore_previous_state_from_approval_timeline',
-        'rollout_stage': rollout_stage,
-        'target_rollout_stage': target_rollout_stage,
-        'readiness': readiness,
-    }
+        return _materialize_rollout_transition_rule(
+            policy=transition_policy,
+            rollout_stage=rollout_stage,
+            target_rollout_stage=target_rollout_stage,
+            readiness=readiness,
+            stage_handler=stage_handler,
+        )
+    return _materialize_rollout_transition_rule(
+        policy=transition_policy,
+        rollout_stage=rollout_stage,
+        target_rollout_stage=target_rollout_stage,
+        readiness=readiness,
+    )
 
 
 
@@ -3009,6 +3109,7 @@ def execute_rollout_executor(payload: Dict, db: Any, *, config: Any = None, sett
             'target_rollout_stage': transition_rule.get('target_rollout_stage'),
             'readiness': transition_rule.get('readiness'),
             'stage_handler': transition_rule.get('stage_handler') or rollout_gates.get('stage_handler') or {},
+            'transition_policy': transition_rule.get('transition_policy') or _build_rollout_transition_policy_snapshot(spec, action_type),
             'execution_status': _normalize_action_execution_status(None, workflow_state=current_workflow_state, queue_status=((workflow_item.get('queue_progression') or {}).get('status') if isinstance(workflow_item.get('queue_progression'), dict) else None)),
             'auto_advance_gate': rollout_gates.get('auto_advance_gate') or {},
             'rollback_gate': rollout_gates.get('rollback_gate') or {},
@@ -3046,6 +3147,7 @@ def execute_rollout_executor(payload: Dict, db: Any, *, config: Any = None, sett
             'retryable': bool(transition_rule.get('retryable', True)),
             'rollback_hint': transition_rule.get('rollback_hint'),
             'stage_handler': transition_rule.get('stage_handler') or rollout_gates.get('stage_handler') or {},
+            'transition_policy': transition_rule.get('transition_policy') or _build_rollout_transition_policy_snapshot(spec, action_type),
             'auto_advance_gate': rollout_gates.get('auto_advance_gate') or {},
             'rollback_gate': rollout_gates.get('rollback_gate') or {},
             'stage_loop': _build_stage_loop_envelope(
@@ -3236,6 +3338,7 @@ def execute_rollout_executor(payload: Dict, db: Any, *, config: Any = None, sett
             'rollback_capable': bool(spec.get('rollback_capable', False)),
             'idempotency_key': idempotency_key,
             'transition_rule': transition_rule.get('transition_rule'),
+            'transition_policy': transition_rule.get('transition_policy') or _build_rollout_transition_policy_snapshot(spec, action_type),
             'dispatch_route': transition_rule.get('dispatch_route'),
             'next_transition': transition_rule.get('next_transition'),
             'retryable': bool(transition_rule.get('retryable', True)),
@@ -3387,6 +3490,7 @@ def build_rollout_stage_progression(payload: Optional[Dict] = None, executor: Op
                 'dispatch_route': dispatch_route,
                 'next_transition': next_transition,
                 'transition_rule': plan.get('transition_rule') or result.get('transition_rule') or dispatch.get('transition_rule'),
+                'transition_policy': plan.get('transition_policy') or {},
                 'retryable': bool(plan.get('retryable', result.get('retryable', True))),
                 'rollback_hint': plan.get('rollback_hint') or result.get('rollback_hint') or dispatch.get('rollback_hint'),
                 'readiness': plan.get('readiness') or workflow_item.get('workflow_state') or approval_item.get('workflow_state') or 'pending',

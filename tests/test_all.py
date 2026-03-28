@@ -5960,7 +5960,7 @@ class TestExecutionObservability(unittest.TestCase):
             self.assertIn('recent_decisions', snapshot['summary'])
             self.assertTrue(snapshot['summary']['observe_only_banner'])
 
-from analytics.helper import build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, attach_auto_approval_policy, execute_controlled_rollout_layer, execute_controlled_auto_approval_layer, execute_rollout_executor, build_workflow_consumer_view, build_workflow_recovery_view, build_workflow_attention_view, build_workflow_operator_digest, build_dashboard_summary_cards, build_workbench_governance_view, build_workbench_governance_detail_view, build_workbench_merged_timeline, build_workbench_timeline_summary_aggregation, build_unified_workbench_overview, _build_state_machine_semantics
+from analytics.helper import build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, attach_auto_approval_policy, execute_controlled_rollout_layer, execute_controlled_auto_approval_layer, execute_rollout_executor, build_workflow_consumer_view, build_workflow_recovery_view, build_workflow_attention_view, build_workflow_operator_digest, build_dashboard_summary_cards, build_workbench_governance_view, build_workbench_governance_detail_view, build_workbench_merged_timeline, build_workbench_timeline_summary_aggregation, build_unified_workbench_overview, _build_state_machine_semantics, _build_safe_rollout_action_registry
 
 
 class TestApprovalPersistence(unittest.TestCase):
@@ -8110,6 +8110,60 @@ class TestApprovalPersistence(unittest.TestCase):
             self.assertEqual(item['plan']['safe_handler']['handler_key'], 'unsupported::unsupported_action')
             self.assertEqual(item['audit']['handler_disposition'], 'unsupported')
             self.assertEqual(item['audit']['handler_route'], 'unsupported_hold')
+
+    def test_rollout_executor_registry_exposes_transition_policy_metadata(self):
+        registry = _build_safe_rollout_action_registry(['joint_stage_prepare', 'joint_review_schedule', 'joint_expand_guarded'])
+        stage_entry = registry['actions']['joint_stage_prepare']
+        review_entry = registry['actions']['joint_review_schedule']
+        queue_entry = registry['actions']['joint_expand_guarded']
+        self.assertEqual(stage_entry['transition_policy']['schema_version'], 'm5_rollout_transition_policy_v1')
+        self.assertEqual(stage_entry['transition_policy']['dispatch_route'], 'stage_metadata_apply')
+        self.assertEqual(review_entry['transition_policy']['default_target_stage'], 'review_pending')
+        self.assertTrue(review_entry['transition_policy']['use_stage_handler_next_transition'])
+        self.assertEqual(queue_entry['transition_policy']['dispatch_route'], 'stage_promotion_queue')
+        self.assertEqual(queue_entry['transition_policy']['transition_rule'], 'queue_only_followup_required')
+
+    def test_rollout_executor_plan_and_stage_progression_expose_transition_policy(self):
+        class StubConfig:
+            def __init__(self, values=None):
+                self.values = values or {}
+
+            def get(self, key, default=None):
+                return self.values.get(key, default)
+
+        config = StubConfig({
+            'governance.rollout_executor': {
+                'enabled': True,
+                'mode': 'controlled',
+                'allowed_action_types': ['joint_review_schedule'],
+            }
+        })
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(str(Path(tmpdir) / 'rollout_transition_policy.db'))
+            payload = {
+                'workflow_state': {'item_states': [{
+                    'item_id': 'playbook::review', 'title': 'Review item', 'action_type': 'joint_review_schedule',
+                    'decision': 'expand', 'governance_mode': 'rollout', 'risk_level': 'low', 'approval_required': False,
+                    'blocking_reasons': [], 'preconditions': [], 'workflow_state': 'pending', 'confidence': 'high',
+                    'current_rollout_stage': 'controlled_apply', 'target_rollout_stage': 'review_pending', 'review_after_hours': 2
+                }], 'summary': {}},
+                'approval_state': {'items': [{
+                    'approval_id': 'approval::review', 'playbook_id': 'playbook::review', 'title': 'Review item',
+                    'action_type': 'joint_review_schedule', 'approval_state': 'pending', 'decision_state': 'pending',
+                    'risk_level': 'low', 'approval_required': False, 'blocked_by': [], 'review_after_hours': 2
+                }], 'summary': {}},
+            }
+            payload = attach_auto_approval_policy(payload)
+            db.sync_approval_items(build_workflow_approval_records(payload), replay_source='unit-test')
+            result = execute_rollout_executor(payload, db, config=config, replay_source='unit-test-replay')
+            item = result['rollout_executor']['items'][0]
+            self.assertEqual(item['plan']['transition_policy']['schema_version'], 'm5_rollout_transition_policy_v1')
+            self.assertEqual(item['plan']['transition_policy']['transition_rule'], 'schedule_review_checkpoint')
+            self.assertEqual(item['plan']['transition_policy']['dispatch_route'], 'review_metadata_apply')
+            self.assertEqual(item['audit']['transition_policy']['default_target_stage'], 'review_pending')
+            stage_progression = result['rollout_executor']['stage_progression']['items'][0]['stage_progression']
+            self.assertEqual(stage_progression['transition_policy']['transition_rule'], 'schedule_review_checkpoint')
+            self.assertEqual(stage_progression['transition_policy']['schema_version'], 'm5_rollout_transition_policy_v1')
 
     def test_controlled_rollout_execution_defaults_to_disabled(self):
         class StubConfig:

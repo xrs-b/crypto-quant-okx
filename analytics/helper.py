@@ -2273,6 +2273,46 @@ def _build_rollout_result_envelope(*, disposition: str, status: str, reason: Opt
     return result
 
 
+def _build_stage_loop_envelope(*, stage_handler: Optional[Dict[str, Any]] = None, auto_advance_gate: Optional[Dict[str, Any]] = None,
+                               rollback_gate: Optional[Dict[str, Any]] = None, dispatch_route: Optional[str] = None,
+                               next_transition: Optional[str] = None, result_status: Optional[str] = None) -> Dict[str, Any]:
+    stage_handler = dict(stage_handler or {})
+    auto_advance_gate = dict(auto_advance_gate or {})
+    rollback_gate = dict(rollback_gate or {})
+    stage_key = str(stage_handler.get('stage_key') or 'unknown')
+    owner = str(stage_handler.get('owner') or stage_handler.get('responsible_actor') or 'unknown')
+    auto_allowed = bool(auto_advance_gate.get('allowed'))
+    rollback_candidate = bool(rollback_gate.get('candidate'))
+    review_pending = stage_key == 'review_pending' or dispatch_route == 'review_metadata_apply' or next_transition in {'await_manual_approval', 'await_review_checkpoint'}
+    if rollback_candidate or stage_key == 'rollback_prepare':
+        loop_state = 'rollback_prepare'
+        recommended_action = 'rollback_prepare'
+    elif review_pending:
+        loop_state = 'review_pending'
+        recommended_action = 'review_pending'
+    elif auto_allowed and owner == 'system':
+        loop_state = 'auto_advance'
+        recommended_action = 'auto_advance'
+    else:
+        loop_state = 'hold'
+        recommended_action = 'hold'
+    return {
+        'loop_state': loop_state,
+        'recommended_action': recommended_action,
+        'stage_key': stage_key,
+        'owner': owner,
+        'dispatch_route': dispatch_route,
+        'next_transition': next_transition,
+        'result_status': result_status,
+        'auto_advance_allowed': auto_allowed,
+        'review_pending': review_pending,
+        'rollback_candidate': rollback_candidate,
+        'waiting_on': list(stage_handler.get('waiting_on') or []),
+        'why_stopped': stage_handler.get('why_stopped'),
+        'safe_boundary': auto_advance_gate.get('safe_boundary') or rollback_gate.get('safe_boundary'),
+    }
+
+
 def _resolve_rollout_transition_rule(*, action_type: str, row: Dict[str, Any], workflow_item: Dict[str, Any],
                                      spec: Optional[Dict[str, Any]], current_state: str,
                                      current_workflow_state: str, auto_decision: str, eligible: bool,
@@ -2519,6 +2559,12 @@ def _build_rollout_queue_plan(action_type: str, row: Dict[str, Any], workflow_it
             'rollback_hint': transition.get('rollback_hint'),
         },
         'queue_progression': queue_progression,
+        'stage_loop': _build_stage_loop_envelope(
+            stage_handler=transition.get('stage_handler') or {},
+            dispatch_route=transition.get('dispatch_route'),
+            next_transition=transition.get('next_transition'),
+            result_status=queue_status,
+        ),
         'real_trade_execution': False,
         'dangerous_live_parameter_change': False,
     }
@@ -2589,6 +2635,11 @@ def _consume_rollout_queue_plan(*, db: Any, row: Dict[str, Any], workflow_item: 
         'real_trade_execution': False,
         'dangerous_live_parameter_change': False,
         'serialization_ready': True,
+        'stage_loop': (queue_plan or {}).get('stage_loop') or _build_stage_loop_envelope(
+            dispatch_route=transition_rule.get('dispatch_route'),
+            next_transition=transition_rule.get('next_transition'),
+            result_status=result_action,
+        ),
     }
     db.upsert_approval_state(
         item_id=approval_id,
@@ -2760,6 +2811,14 @@ def execute_rollout_executor(payload: Dict, db: Any, *, config: Any = None, sett
             'execution_status': _normalize_action_execution_status(None, workflow_state=current_workflow_state, queue_status=((workflow_item.get('queue_progression') or {}).get('status') if isinstance(workflow_item.get('queue_progression'), dict) else None)),
             'auto_advance_gate': rollout_gates.get('auto_advance_gate') or {},
             'rollback_gate': rollout_gates.get('rollback_gate') or {},
+            'stage_loop': _build_stage_loop_envelope(
+                stage_handler=transition_rule.get('stage_handler') or rollout_gates.get('stage_handler') or {},
+                auto_advance_gate=rollout_gates.get('auto_advance_gate') or {},
+                rollback_gate=rollout_gates.get('rollback_gate') or {},
+                dispatch_route=transition_rule.get('dispatch_route'),
+                next_transition=transition_rule.get('next_transition'),
+                result_status='planned',
+            ),
         }
 
         audit = {
@@ -2788,6 +2847,14 @@ def execute_rollout_executor(payload: Dict, db: Any, *, config: Any = None, sett
             'stage_handler': transition_rule.get('stage_handler') or rollout_gates.get('stage_handler') or {},
             'auto_advance_gate': rollout_gates.get('auto_advance_gate') or {},
             'rollback_gate': rollout_gates.get('rollback_gate') or {},
+            'stage_loop': _build_stage_loop_envelope(
+                stage_handler=transition_rule.get('stage_handler') or rollout_gates.get('stage_handler') or {},
+                auto_advance_gate=rollout_gates.get('auto_advance_gate') or {},
+                rollback_gate=rollout_gates.get('rollback_gate') or {},
+                dispatch_route=transition_rule.get('dispatch_route'),
+                next_transition=transition_rule.get('next_transition'),
+                result_status='planned',
+            ),
         }
 
         result_row = {
@@ -2861,6 +2928,7 @@ def execute_rollout_executor(payload: Dict, db: Any, *, config: Any = None, sett
             if result['dry_run']:
                 result_row['apply'] = _build_rollout_apply_envelope(attempted=True, persisted=False, status='dry_run', operation='queue_plan_consume', idempotency_key=idempotency_key)
                 result_row['result'] = _build_rollout_result_envelope(disposition='dry_run' if queue_status == 'ready_to_queue' else disposition, status='dry_run', reason=dispatch_reason, code='DRY_RUN_ONLY', state=current_state, workflow_state=current_workflow_state, transition_rule=transition_rule.get('transition_rule'), dispatch_route=transition_rule.get('dispatch_route'), next_transition=transition_rule.get('next_transition'), retryable=bool(transition_rule.get('retryable', True)), rollback_hint=transition_rule.get('rollback_hint'))
+                result_row['result']['stage_loop'] = _build_stage_loop_envelope(stage_handler=plan.get('stage_handler') or {}, auto_advance_gate=plan.get('auto_advance_gate') or {}, rollback_gate=plan.get('rollback_gate') or {}, dispatch_route=transition_rule.get('dispatch_route'), next_transition=transition_rule.get('next_transition'), result_status='dry_run')
                 result_row['status'] = 'dry_run'
                 result['summary']['dry_run_count'] += 1
                 bump('dry_run', 'dry_run')
@@ -2889,6 +2957,7 @@ def execute_rollout_executor(payload: Dict, db: Any, *, config: Any = None, sett
                         executed_rows.append(queue_consumed_row)
                     result_row['apply'] = _build_rollout_apply_envelope(attempted=True, persisted=True, status=apply_status, operation='queue_plan_consume', idempotency_key=idempotency_key, effect_applied=True)
                     result_row['result'] = _build_rollout_result_envelope(disposition=disposition, status=item_status, reason=dispatch_reason, code=dispatch_code, state=(queue_consumed_row or {}).get('state'), workflow_state=(queue_consumed_row or {}).get('workflow_state'), transition_rule=transition_rule.get('transition_rule'), dispatch_route=transition_rule.get('dispatch_route'), next_transition=transition_rule.get('next_transition'), retryable=bool(transition_rule.get('retryable', True)), rollback_hint=transition_rule.get('rollback_hint'))
+                    result_row['result']['stage_loop'] = _build_stage_loop_envelope(stage_handler=plan.get('stage_handler') or {}, auto_advance_gate=plan.get('auto_advance_gate') or {}, rollback_gate=plan.get('rollback_gate') or {}, dispatch_route=transition_rule.get('dispatch_route'), next_transition=transition_rule.get('next_transition'), result_status=item_status)
                     result_row['status'] = item_status
                     result_row['execution_status'] = 'blocked' if item_status == 'blocked_by_approval' else ('deferred' if item_status == 'deferred' else 'queued')
                     result_row['last_transition'] = {'rule': transition_rule.get('transition_rule'), 'to_execution_status': result_row['execution_status'], 'to_workflow_state': item_status, 'dispatch_route': transition_rule.get('dispatch_route'), 'next_transition': transition_rule.get('next_transition')}
@@ -2924,6 +2993,7 @@ def execute_rollout_executor(payload: Dict, db: Any, *, config: Any = None, sett
             result_row['dispatch']['reason'] = skip_reason
             result_row['dispatch']['code'] = skip_code
             result_row['result'] = _build_rollout_result_envelope(disposition='skipped', status='skipped', reason=skip_reason, code=skip_code, transition_rule=transition_rule.get('transition_rule'), dispatch_route=transition_rule.get('dispatch_route'), next_transition=transition_rule.get('next_transition'), retryable=bool(transition_rule.get('retryable', True)), rollback_hint=transition_rule.get('rollback_hint'))
+            result_row['result']['stage_loop'] = _build_stage_loop_envelope(stage_handler=plan.get('stage_handler') or {}, auto_advance_gate=plan.get('auto_advance_gate') or {}, rollback_gate=plan.get('rollback_gate') or {}, dispatch_route=transition_rule.get('dispatch_route'), next_transition=transition_rule.get('next_transition'), result_status='skipped')
             result_row['status'] = 'skipped'
             result_row['execution_status'] = 'skipped'
             result_row['last_transition'] = {'rule': transition_rule.get('transition_rule'), 'to_execution_status': 'skipped', 'to_workflow_state': current_workflow_state, 'dispatch_route': transition_rule.get('dispatch_route'), 'next_transition': transition_rule.get('next_transition')}
@@ -2978,6 +3048,14 @@ def execute_rollout_executor(payload: Dict, db: Any, *, config: Any = None, sett
             'previous_execution_status': persisted_details.get('execution_status'),
             'auto_advance_gate': rollout_gates.get('auto_advance_gate') or {},
             'rollback_gate': rollout_gates.get('rollback_gate') or {},
+            'stage_loop': _build_stage_loop_envelope(
+                stage_handler=transition_rule.get('stage_handler') or rollout_gates.get('stage_handler') or {},
+                auto_advance_gate=rollout_gates.get('auto_advance_gate') or {},
+                rollback_gate=rollout_gates.get('rollback_gate') or {},
+                dispatch_route=transition_rule.get('dispatch_route'),
+                next_transition=transition_rule.get('next_transition'),
+                result_status='planned',
+            ),
         }
         details.update(_build_controlled_rollout_action_details(action_type, row, workflow_item, spec, execution_settings))
         details['last_transition'] = {'rule': transition_rule.get('transition_rule'), 'from_execution_status': persisted_details.get('execution_status'), 'to_execution_status': 'applied', 'from_workflow_state': current_workflow_state, 'to_workflow_state': spec.get('workflow_state'), 'dispatch_route': transition_rule.get('dispatch_route'), 'next_transition': transition_rule.get('next_transition')}
@@ -2992,6 +3070,7 @@ def execute_rollout_executor(payload: Dict, db: Any, *, config: Any = None, sett
             result_row['execution_status'] = 'dry_run'
             result_row['last_transition'] = {'rule': transition_rule.get('transition_rule'), 'to_execution_status': 'dry_run', 'to_workflow_state': spec.get('workflow_state'), 'dispatch_route': transition_rule.get('dispatch_route'), 'next_transition': transition_rule.get('next_transition')}
             result_row['result'] = _build_rollout_result_envelope(disposition='dry_run', status='dry_run', reason=reason, code='DRY_RUN_ONLY', state=spec.get('state'), workflow_state=spec.get('workflow_state'), transition_rule=transition_rule.get('transition_rule'), dispatch_route=transition_rule.get('dispatch_route'), next_transition=transition_rule.get('next_transition'), retryable=bool(transition_rule.get('retryable', True)), rollback_hint=transition_rule.get('rollback_hint'))
+            result_row['result']['stage_loop'] = _build_stage_loop_envelope(stage_handler=plan.get('stage_handler') or {}, auto_advance_gate=plan.get('auto_advance_gate') or {}, rollback_gate=plan.get('rollback_gate') or {}, dispatch_route=transition_rule.get('dispatch_route'), next_transition=transition_rule.get('next_transition'), result_status='dry_run')
             result_row['status'] = 'dry_run'
             result['summary']['applied_count'] += 1
             result['summary']['dry_run_count'] += 1
@@ -3019,6 +3098,7 @@ def execute_rollout_executor(payload: Dict, db: Any, *, config: Any = None, sett
             executed_rows.append(db.get_approval_state(approval_id))
             result_row['apply'] = _build_rollout_apply_envelope(attempted=True, persisted=True, status='applied', operation='upsert_approval_state', idempotency_key=idempotency_key, effect_applied=True)
             result_row['result'] = _build_rollout_result_envelope(disposition='applied', status='applied', reason=reason, code='SAFE_APPLIED', state=spec.get('state'), workflow_state=spec.get('workflow_state'), transition_rule=transition_rule.get('transition_rule'), dispatch_route=transition_rule.get('dispatch_route'), next_transition=transition_rule.get('next_transition'), retryable=bool(transition_rule.get('retryable', True)), rollback_hint=transition_rule.get('rollback_hint'))
+            result_row['result']['stage_loop'] = _build_stage_loop_envelope(stage_handler=plan.get('stage_handler') or {}, auto_advance_gate=plan.get('auto_advance_gate') or {}, rollback_gate=plan.get('rollback_gate') or {}, dispatch_route=transition_rule.get('dispatch_route'), next_transition=transition_rule.get('next_transition'), result_status='applied')
             result_row['status'] = 'applied'
             result_row['execution_status'] = details.get('execution_status') or 'applied'
             result_row['last_transition'] = details.get('last_transition') or {}
@@ -3028,6 +3108,7 @@ def execute_rollout_executor(payload: Dict, db: Any, *, config: Any = None, sett
         except Exception as exc:
             result_row['apply'] = _build_rollout_apply_envelope(attempted=True, persisted=False, status='error', operation='upsert_approval_state', idempotency_key=idempotency_key)
             result_row['result'] = _build_rollout_result_envelope(disposition='error', status='error', reason=str(exc), code='APPLY_EXCEPTION', transition_rule=transition_rule.get('transition_rule'), dispatch_route=transition_rule.get('dispatch_route'), next_transition=transition_rule.get('next_transition'), retryable=bool(transition_rule.get('retryable', True)), rollback_hint=transition_rule.get('rollback_hint'))
+            result_row['result']['stage_loop'] = _build_stage_loop_envelope(stage_handler=plan.get('stage_handler') or {}, auto_advance_gate=plan.get('auto_advance_gate') or {}, rollback_gate=plan.get('rollback_gate') or {}, dispatch_route=transition_rule.get('dispatch_route'), next_transition=transition_rule.get('next_transition'), result_status='error')
             result_row['status'] = 'error'
             result_row['execution_status'] = 'error'
             result_row['last_transition'] = {'rule': transition_rule.get('transition_rule'), 'to_execution_status': 'error', 'to_workflow_state': current_workflow_state, 'dispatch_route': transition_rule.get('dispatch_route'), 'next_transition': transition_rule.get('next_transition')}
@@ -3064,10 +3145,14 @@ def build_rollout_stage_progression(payload: Optional[Dict] = None, executor: Op
         'blocked_count': 0,
         'deferred_count': 0,
         'ready_stage_count': 0,
+        'auto_advance_count': 0,
+        'review_pending_count': 0,
+        'rollback_prepare_count': 0,
         'by_stage': {},
         'by_next_transition': {},
         'by_dispatch_route': {},
         'by_status': {},
+        'by_loop_state': {},
     }
 
     def bump(bucket: Dict[str, int], key: Optional[str]):
@@ -3086,6 +3171,7 @@ def build_rollout_stage_progression(payload: Optional[Dict] = None, executor: Op
         next_transition = plan.get('next_transition') or result.get('next_transition') or dispatch.get('next_transition') or 'unknown'
         dispatch_route = plan.get('dispatch_route') or result.get('dispatch_route') or dispatch.get('dispatch_route') or 'unknown'
         status = row.get('status') or result.get('status') or dispatch.get('status') or 'planned'
+        stage_loop = result.get('stage_loop') or plan.get('stage_loop') or {}
         stage_row = {
             'item_id': item_id,
             'playbook_id': row.get('playbook_id'),
@@ -3104,6 +3190,7 @@ def build_rollout_stage_progression(payload: Optional[Dict] = None, executor: Op
                 'rollback_hint': plan.get('rollback_hint') or result.get('rollback_hint') or dispatch.get('rollback_hint'),
                 'readiness': plan.get('readiness') or workflow_item.get('workflow_state') or approval_item.get('workflow_state') or 'pending',
                 'stage_handler': plan.get('stage_handler') or {},
+                'stage_loop': stage_loop,
             },
             'queue_plan': plan.get('queue_plan') or {},
             'dispatch': dispatch,
@@ -3125,6 +3212,13 @@ def build_rollout_stage_progression(payload: Optional[Dict] = None, executor: Op
         bump(summary['by_next_transition'], next_transition)
         bump(summary['by_dispatch_route'], dispatch_route)
         bump(summary['by_status'], status)
+        bump(summary['by_loop_state'], stage_loop.get('loop_state'))
+        if stage_loop.get('loop_state') == 'auto_advance':
+            summary['auto_advance_count'] += 1
+        elif stage_loop.get('loop_state') == 'review_pending':
+            summary['review_pending_count'] += 1
+        elif stage_loop.get('loop_state') == 'rollback_prepare':
+            summary['rollback_prepare_count'] += 1
 
     return {
         'schema_version': 'm5_rollout_stage_progression_v1',

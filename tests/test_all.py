@@ -7998,8 +7998,52 @@ class TestApprovalPersistence(unittest.TestCase):
             self.assertIn('rollback_gate_triggered', review_handler['waiting_on'])
             self.assertEqual(review_handler['why_stopped'], 'review_checkpoint_overdue')
             self.assertEqual(items['approval::review']['plan']['rollback_gate']['next_action'], 'prepare_rollback_review')
+            self.assertEqual(items['approval::stage']['plan']['stage_loop']['loop_state'], 'auto_advance')
+            self.assertEqual(items['approval::review']['plan']['stage_loop']['loop_state'], 'rollback_prepare')
+            self.assertEqual(items['approval::review']['result']['stage_loop']['recommended_action'], 'rollback_prepare')
             stage_progression = result['rollout_executor']['stage_progression']['items'][1]['stage_progression']
             self.assertEqual(stage_progression['stage_handler']['responsible_actor'], 'operator')
+            self.assertEqual(stage_progression['stage_loop']['loop_state'], 'rollback_prepare')
+            self.assertEqual(result['rollout_executor']['stage_progression']['summary']['auto_advance_count'], 1)
+            self.assertEqual(result['rollout_executor']['stage_progression']['summary']['rollback_prepare_count'], 1)
+
+    def test_rollout_executor_stage_loop_marks_review_schedule_as_review_pending(self):
+        class StubConfig:
+            def __init__(self, values=None):
+                self.values = values or {}
+
+            def get(self, key, default=None):
+                return self.values.get(key, default)
+
+        config = StubConfig({
+            'governance.rollout_executor': {
+                'enabled': True,
+                'mode': 'controlled',
+                'allowed_action_types': ['joint_review_schedule'],
+            }
+        })
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(str(Path(tmpdir) / 'rollout_stage_loop_review.db'))
+            payload = {
+                'workflow_state': {'item_states': [{
+                    'item_id': 'playbook::review', 'title': 'Review item', 'action_type': 'joint_review_schedule',
+                    'decision': 'expand', 'governance_mode': 'rollout', 'risk_level': 'low', 'approval_required': False,
+                    'blocking_reasons': [], 'preconditions': [], 'workflow_state': 'pending', 'confidence': 'high',
+                    'current_rollout_stage': 'controlled_apply', 'target_rollout_stage': 'review_pending', 'review_after_hours': 2
+                }], 'summary': {}},
+                'approval_state': {'items': [{
+                    'approval_id': 'approval::review', 'playbook_id': 'playbook::review', 'title': 'Review item',
+                    'action_type': 'joint_review_schedule', 'approval_state': 'pending', 'decision_state': 'pending',
+                    'risk_level': 'low', 'approval_required': False, 'blocked_by': [], 'review_after_hours': 2
+                }], 'summary': {}},
+            }
+            payload = attach_auto_approval_policy(payload)
+            db.sync_approval_items(build_workflow_approval_records(payload), replay_source='unit-test')
+            result = execute_rollout_executor(payload, db, config=config, replay_source='unit-test-replay')
+            item = result['rollout_executor']['items'][0]
+            self.assertEqual(item['plan']['stage_loop']['loop_state'], 'review_pending')
+            self.assertEqual(item['result']['stage_loop']['recommended_action'], 'review_pending')
+            self.assertEqual(result['rollout_executor']['stage_progression']['summary']['review_pending_count'], 1)
 
     def test_rollout_executor_marks_unknown_actions_as_unsupported_with_fallback_handler(self):
         class StubConfig:

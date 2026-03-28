@@ -4501,6 +4501,56 @@ def _consume_rollout_queue_plan(*, db: Any, row: Dict[str, Any], workflow_item: 
 
 
 
+def _build_orchestration_rerun_observability(orchestration: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    orchestration = orchestration or {}
+    summary = orchestration.get('summary') or {}
+    passes = orchestration.get('passes') or []
+    rerun_passes = [row for row in passes if str(row.get('label') or '').startswith('post_')]
+    rerun_labels = [str(row.get('label') or 'unknown') for row in rerun_passes]
+    rerun_reasons = _dedupe_strings(summary.get('rerun_reasons') or [])
+    primary_reason = summary.get('rerun_reason')
+    recovery_reason_prefix = 'recovery_'
+    recovery_reasons = [reason for reason in rerun_reasons if str(reason).startswith(recovery_reason_prefix)]
+    review_reasons = [reason for reason in rerun_reasons if str(reason).startswith('post_') or str(reason).startswith('rollback_')]
+    auto_approval_reasons = []
+    if summary.get('rerun_triggered') and primary_reason == 'auto_approval_promoted_ready_items':
+        auto_approval_reasons.append('auto_approval_promoted_ready_items')
+    if summary.get('rerun_triggered') and primary_reason == 'production_rollout_gate_blocked':
+        review_reasons.append('production_rollout_gate_blocked')
+    reason_groups = {
+        'recovery': recovery_reasons,
+        'review_queue': _dedupe_strings(review_reasons),
+        'auto_approval': auto_approval_reasons,
+    }
+    result_counts = {
+        'rerun_pass_count': len(rerun_passes),
+        'rerun_applied_count': sum(int(row.get('rollout_executor_applied_count', 0) or 0) for row in rerun_passes),
+        'recovery_retry_scheduled_count': int(summary.get('recovery_retry_scheduled_count', 0) or 0),
+        'recovery_retry_reentered_executor_count': int(summary.get('recovery_retry_reentered_executor_count', 0) or 0),
+        'recovery_rollback_queued_count': int(summary.get('recovery_rollback_queued_count', 0) or 0),
+        'recovery_manual_annotation_count': int(summary.get('recovery_manual_annotation_count', 0) or 0),
+        'review_queue_completed_count': int(summary.get('review_queue_completed_count', 0) or 0),
+        'review_queue_rollback_escalated_count': int(summary.get('review_queue_rollback_escalated_count', 0) or 0),
+    }
+    status = 'not_triggered'
+    if summary.get('rerun_triggered'):
+        status = 'recovery_triggered' if recovery_reasons else 'triggered'
+    return {
+        'status': status,
+        'triggered': bool(summary.get('rerun_triggered')),
+        'primary_reason': primary_reason,
+        'reason_count': len(rerun_reasons),
+        'reasons': rerun_reasons,
+        'reason_groups': {k: v for k, v in reason_groups.items() if v},
+        'rerun_labels': rerun_labels,
+        'recovery_triggered': bool(recovery_reasons),
+        'recovery_reason_count': len(recovery_reasons),
+        'recovery_reasons': recovery_reasons,
+        'result_counts': result_counts,
+    }
+
+
+
 def build_runtime_orchestration_summary(payload: Optional[Dict[str, Any]] = None, *, max_items: int = 5,
                                        transition_journal_overview: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     payload = payload or {}
@@ -4534,6 +4584,7 @@ def build_runtime_orchestration_summary(payload: Optional[Dict[str, Any]] = None
 
     orchestration = payload.get('adaptive_rollout_orchestration') or {}
     orchestration_summary = orchestration.get('summary') or {}
+    rerun_observability = _build_orchestration_rerun_observability(orchestration)
     transition_journal = operator_digest.get('transition_journal') or unified_overview.get('transition_journal') or {
         'schema_version': 'm5_transition_journal_consumer_v1',
         'headline': {'status': 'steady', 'message': '0 recent transition(s)', 'latest_timestamp': None, 'latest_transition': None},
@@ -4552,6 +4603,21 @@ def build_runtime_orchestration_summary(payload: Optional[Dict[str, Any]] = None
             'dry_run': bool(row.get('dry_run')),
             'count': row.get('rollout_executor_applied_count', 0),
             'message': f"pass {row.get('label') or 'unknown'} applied {row.get('rollout_executor_applied_count', 0)} rollout executor change(s)",
+        })
+    if rerun_observability.get('triggered'):
+        recovery_counts = rerun_observability.get('result_counts') or {}
+        recent_progress.append({
+            'kind': 'orchestration_rerun',
+            'status': rerun_observability.get('status') or 'triggered',
+            'primary_reason': rerun_observability.get('primary_reason'),
+            'reasons': rerun_observability.get('reasons') or [],
+            'rerun_labels': rerun_observability.get('rerun_labels') or [],
+            'recovery_triggered': bool(rerun_observability.get('recovery_triggered')),
+            'message': (
+                f"rerun {rerun_observability.get('primary_reason') or 'triggered'} / "
+                f"passes={recovery_counts.get('rerun_pass_count', 0)} / "
+                f"recovery-reasons={rerun_observability.get('recovery_reason_count', 0)}"
+            ),
         })
     if bridge_evidence.get('executed_this_round') or bridge_evidence.get('follow_up_required'):
         recent_progress.append({
@@ -4658,7 +4724,8 @@ def build_runtime_orchestration_summary(payload: Optional[Dict[str, Any]] = None
         'message': (
             f"recent={len(recent_progress[:max_items])} / stuck={len(stuck_items)} / "
             f"next={next_step.get('route') or next_step.get('kind') or 'observe_only'} / "
-            f"review={follow_up_summary['post_promotion_review_queue_count']} / rollback={follow_up_summary['rollback_review_queue_count']}"
+            f"review={follow_up_summary['post_promotion_review_queue_count']} / rollback={follow_up_summary['rollback_review_queue_count']} / "
+            f"rerun={rerun_observability.get('primary_reason') or 'none'}"
         ),
         'dominant_line': unified_overview.get('dominant_line') or 'approval',
         'overall_state': unified_overview.get('overall_state') or status,
@@ -4674,6 +4741,8 @@ def build_runtime_orchestration_summary(payload: Optional[Dict[str, Any]] = None
         'review_queue_completed_count': orchestration_summary.get('review_queue_completed_count', 0),
         'review_queue_rollback_escalated_count': orchestration_summary.get('review_queue_rollback_escalated_count', 0),
         'rerun_reasons': orchestration_summary.get('rerun_reasons') or [],
+        'rerun_count': (rerun_observability.get('result_counts') or {}).get('rerun_pass_count', 0),
+        'rerun_observability': rerun_observability,
         'recent_progress_count': len(recent_progress),
         'stuck_item_count': len(stuck_items),
         'next_action_count': len(next_actions),
@@ -5345,6 +5414,7 @@ def execute_adaptive_rollout_orchestration(payload: Dict[str, Any], db: Any, *, 
     orchestration['summary']['review_queue_completed_count'] = int(((payload.get('auto_promotion_review_execution') or {}).get('completed_count', 0) or 0))
     orchestration['summary']['review_queue_rollback_escalated_count'] = int(((payload.get('auto_promotion_review_execution') or {}).get('rollback_escalated_count', 0) or 0))
     orchestration['summary']['recovery_retry_scheduled_count'] = int(((payload.get('recovery_execution') or {}).get('scheduled_retry_count', 0) or 0))
+    orchestration['summary']['recovery_retry_reentered_executor_count'] = int(((payload.get('recovery_execution') or {}).get('retry_reentered_executor_count', 0) or 0))
     orchestration['summary']['recovery_rollback_queued_count'] = int(((payload.get('recovery_execution') or {}).get('rollback_queued_count', 0) or 0))
     orchestration['summary']['recovery_manual_annotation_count'] = int(((payload.get('recovery_execution') or {}).get('manual_recovery_annotated_count', 0) or 0))
     _attach_testnet_bridge_execution_evidence(payload)

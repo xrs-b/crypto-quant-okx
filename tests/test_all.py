@@ -2726,6 +2726,48 @@ class TestHealthSummary(unittest.TestCase):
             if os.path.exists('data/test_health_summary.db'):
                 os.remove('data/test_health_summary.db')
 
+    def test_build_runtime_health_summary_surfaces_recovery_rerun_observability(self):
+        import bot.run as bot_run
+        cfg = Config()
+        db = Database('data/test_health_summary_recovery_rerun.db')
+        old_runtime_path = bot_run.RUNTIME_STATE_PATH
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bot_run.RUNTIME_STATE_PATH = Path(tmpdir) / 'runtime_state.json'
+            bot_run.RUNTIME_STATE_PATH.write_text(json.dumps({
+                'adaptive_rollout_orchestration': {
+                    'last_run_at': '2026-03-29T06:00:00',
+                    'summary': {
+                        'gate_status': 'ready',
+                        'gate_blocked': False,
+                        'auto_approval_executed_count': 0,
+                        'controlled_rollout_executed_count': 1,
+                        'review_queue_queued_count': 0,
+                        'recovery_retry_scheduled_count': 1,
+                        'recovery_retry_reentered_executor_count': 1,
+                        'recovery_rollback_queued_count': 1,
+                        'recovery_manual_annotation_count': 1,
+                    },
+                    'runtime_summary': {
+                        'rerun_observability': {
+                            'primary_reason': 'post_recovery_state_transition',
+                            'recovery_triggered': True,
+                            'recovery_reasons': ['recovery_retry_scheduled', 'recovery_retry_reentered_executor'],
+                            'result_counts': {'rerun_pass_count': 1},
+                        },
+                        'next_step': {'summary': 'drain recovery follow-ups'},
+                    },
+                    'cooldown': {'min_interval_seconds': 300, 'active': False, 'remaining_seconds': 0},
+                },
+            }, ensure_ascii=False, indent=2))
+            try:
+                summary = build_runtime_health_summary(cfg, db)
+                self.assertTrue(any('Recovery rerun：triggered=yes' in line for line in summary['lines']))
+                self.assertTrue(any('Recovery lane：retry 1 ｜ reentered 1 ｜ rollback 1 ｜ manual-note 1' in line for line in summary['lines']))
+            finally:
+                bot_run.RUNTIME_STATE_PATH = old_runtime_path
+        if os.path.exists('data/test_health_summary_recovery_rerun.db'):
+            os.remove('data/test_health_summary_recovery_rerun.db')
+
     def test_maybe_run_adaptive_rollout_orchestration_persists_runtime_summary(self):
         import bot.run as bot_run
         cfg = Config()
@@ -2767,7 +2809,8 @@ class TestHealthSummary(unittest.TestCase):
                         'summary': {
                             'pass_count': 2,
                             'rerun_triggered': True,
-                            'rerun_reason': 'auto_approval_promoted_ready_items',
+                            'rerun_reason': 'post_recovery_state_transition',
+                            'rerun_reasons': ['recovery_retry_scheduled', 'recovery_retry_reentered_executor'],
                             'gate_status': 'ready',
                             'gate_blocked': False,
                             'gate_blocking_issues': [],
@@ -2775,19 +2818,34 @@ class TestHealthSummary(unittest.TestCase):
                             'controlled_rollout_executed_count': 1,
                             'review_queue_queued_count': 1,
                             'recovery_retry_scheduled_count': 1,
+                            'recovery_retry_reentered_executor_count': 1,
                             'recovery_rollback_queued_count': 0,
+                            'recovery_manual_annotation_count': 0,
                             'testnet_bridge_status': 'disabled',
                             'testnet_bridge_follow_up_required': False,
                         },
+                        'passes': [
+                            {'label': 'pre_auto_approval', 'dry_run': True, 'rollout_executor_applied_count': 0},
+                            {'label': 'post_recovery_queue', 'dry_run': False, 'rollout_executor_applied_count': 1},
+                        ],
                     },
                 }
                 bot_run.build_runtime_orchestration_summary = lambda payload, max_items=5, **kwargs: {
                     'schema_version': 'm5_runtime_orchestration_summary_v1',
                     'headline': {'text': 'runtime orchestration ok'},
-                    'summary': {'recent_progress_count': 1},
+                    'summary': {
+                        'recent_progress_count': 1,
+                        'rerun_observability': {
+                            'primary_reason': 'post_recovery_state_transition',
+                            'triggered': True,
+                            'recovery_triggered': True,
+                            'recovery_reasons': ['recovery_retry_scheduled', 'recovery_retry_reentered_executor'],
+                            'result_counts': {'rerun_pass_count': 1},
+                        },
+                    },
                     'next_step': {'action': 'review_followups', 'summary': 'review queued follow-ups'},
                     'stuck_points': [],
-                    'follow_ups': [{'item_id': 'item-1'}],
+                    'follow_ups': {'required': True, 'summary': {'retry_queue_count': 1}},
                 }
                 result = maybe_run_adaptive_rollout_orchestration(cfg, db, notifier)
                 self.assertTrue(result['ran'])
@@ -2795,6 +2853,9 @@ class TestHealthSummary(unittest.TestCase):
                 state = json.loads(bot_run.RUNTIME_STATE_PATH.read_text())
                 self.assertIn('adaptive_rollout_orchestration', state)
                 self.assertEqual(state['adaptive_rollout_orchestration']['summary']['controlled_rollout_executed_count'], 1)
+                self.assertTrue(state['adaptive_rollout_orchestration']['summary']['recovery_rerun_triggered'])
+                self.assertEqual(state['adaptive_rollout_orchestration']['summary']['recovery_retry_reentered_executor_count'], 1)
+                self.assertEqual(state['adaptive_rollout_orchestration']['runtime_summary']['rerun_observability']['primary_reason'], 'post_recovery_state_transition')
                 self.assertEqual(state['adaptive_rollout_orchestration']['runtime_summary']['next_step']['action'], 'review_followups')
                 self.assertTrue(any(call['event_type'] == 'adaptive_rollout_orchestration' for call in notifier.calls))
             finally:
@@ -7310,6 +7371,7 @@ class TestApprovalPersistence(unittest.TestCase):
                     'pass_count': 2,
                     'rerun_triggered': True,
                     'rerun_reason': 'auto_approval_promoted_ready_items',
+                    'rerun_reasons': [],
                     'rollout_executor_applied_count': 3,
                     'controlled_rollout_executed_count': 1,
                     'auto_approval_executed_count': 1,
@@ -7367,12 +7429,15 @@ class TestApprovalPersistence(unittest.TestCase):
         })
         self.assertEqual(payload['schema_version'], 'm5_runtime_orchestration_summary_v1')
         self.assertEqual(payload['summary']['pass_count'], 2)
+        self.assertEqual(payload['summary']['rerun_count'], 1)
+        self.assertEqual(payload['summary']['rerun_observability']['primary_reason'], 'auto_approval_promoted_ready_items')
         self.assertTrue(payload['summary']['follow_up_required'])
         self.assertEqual(payload['next_step']['route'], 'manual_approval_queue')
         self.assertEqual(payload['follow_ups']['summary']['rollback_candidate_count'], 1)
         self.assertEqual(payload['follow_ups']['summary']['post_promotion_review_queue_count'], 1)
         self.assertTrue(any(row['source'] == 'manual_approval' for row in payload['stuck_points']))
         self.assertTrue(any(row['source'] == 'rollback_candidate' for row in payload['stuck_points']))
+        self.assertTrue(any(row['kind'] == 'orchestration_rerun' for row in payload['recent_progress']))
         self.assertEqual(payload['transition_journal']['latest']['workflow_transition'], 'ready->review_pending')
         self.assertIn('control_plane_readiness', payload['related_summary'])
 
@@ -7710,6 +7775,7 @@ class TestApprovalPersistence(unittest.TestCase):
             self.assertIn('recovery_rollback_candidate_queued', summary['rerun_reasons'])
             self.assertIn('recovery_manual_follow_up_annotated', summary['rerun_reasons'])
             self.assertEqual(summary['recovery_retry_scheduled_count'], 1)
+            self.assertEqual(summary['recovery_retry_reentered_executor_count'], 1)
             self.assertEqual(summary['recovery_rollback_queued_count'], 1)
             self.assertEqual(summary['recovery_manual_annotation_count'], 1)
             self.assertEqual(summary['pass_count'], 2)

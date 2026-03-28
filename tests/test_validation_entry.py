@@ -182,6 +182,7 @@ class TestShadowValidationEntry(unittest.TestCase):
         self.assertEqual(replay['summary']['pass_count'], replay['summary']['case_count'])
         self.assertIn('shadow_execution', replay['summary']['case_types'])
         self.assertIn('shadow_workflow', replay['summary']['case_types'])
+        self.assertIn('workflow_dry_run', replay['summary']['modes'])
         self.assertEqual(replay['summary']['transition_policy']['case_count'], 3)
         self.assertEqual(replay['summary']['transition_policy']['rule_counts']['manual_gate_before_dispatch'], 1)
         self.assertEqual(replay['summary']['transition_policy']['rule_counts']['safe_apply_ready'], 2)
@@ -196,6 +197,18 @@ class TestShadowValidationEntry(unittest.TestCase):
         self.assertEqual(replay['summary']['testnet_bridge']['status_counts']['blocked'], 2)
         self.assertEqual(replay['summary']['testnet_bridge']['status_counts']['error'], 1)
         self.assertIn('testnet-bridge-cleanup-needed-001', replay['summary']['testnet_bridge']['case_ids_requiring_cleanup'])
+        coverage = replay['summary']['coverage_matrix']
+        self.assertEqual(coverage['schema_version'], 'm5_validation_coverage_matrix_v1')
+        self.assertTrue(coverage['ready_for_low_intervention_gate'])
+        self.assertEqual(coverage['required_capability_count'], 8)
+        self.assertEqual(coverage['covered_required_count'], 8)
+        self.assertEqual(coverage['passing_required_count'], 8)
+        self.assertFalse(coverage['missing_required'])
+        self.assertFalse(coverage['failing_required'])
+        self.assertTrue(coverage['capabilities']['transition_policy_contract']['covered'])
+        self.assertTrue(coverage['capabilities']['transition_policy_contract']['passing'])
+        self.assertIn('queue-executor-dry-run-001', coverage['capabilities']['transition_policy_contract']['case_ids'])
+        self.assertTrue(replay['summary']['readiness']['low_intervention_gate_ready'])
 
     def test_cli_validation_entry_prints_report_and_writes_output(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -234,6 +247,9 @@ class TestShadowValidationEntry(unittest.TestCase):
         report = run_shadow_validation_replay([FIXTURE_DIR])
         markdown = format_validation_report_markdown(report)
         self.assertIn('# Shadow Validation Replay Report', markdown)
+        self.assertIn('## Validation Coverage Matrix', markdown)
+        self.assertIn('transition_policy_contract', markdown)
+        self.assertIn('ready_for_low_intervention_gate: True', markdown)
         self.assertIn('## Transition Policy', markdown)
         self.assertIn('manual_gate_before_dispatch', markdown)
         self.assertIn('manual_review_queue', markdown)

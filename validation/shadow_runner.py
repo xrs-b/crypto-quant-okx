@@ -571,11 +571,87 @@ def _summarize_transition_policy_artifacts(results: List[Dict[str, Any]]) -> Dic
     }
 
 
+def _build_validation_coverage_matrix(results: List[Dict[str, Any]]) -> Dict[str, Any]:
+    capabilities = {
+        'signal_shadow': {'title': 'Signal / execution adaptive shadow', 'required': True, 'covered': False, 'passing': False, 'case_ids': [], 'status_counts': {}, 'evidence': []},
+        'approval_replay': {'title': 'Workflow approval replay', 'required': True, 'covered': False, 'passing': False, 'case_ids': [], 'status_counts': {}, 'evidence': []},
+        'rollout_executor_dry_run': {'title': 'Safe rollout executor dry-run', 'required': True, 'covered': False, 'passing': False, 'case_ids': [], 'status_counts': {}, 'evidence': []},
+        'transition_policy_contract': {'title': 'Transition policy consistency contract', 'required': True, 'covered': False, 'passing': False, 'case_ids': [], 'status_counts': {}, 'evidence': []},
+        'testnet_bridge_plan_only': {'title': 'Testnet bridge plan-only', 'required': True, 'covered': False, 'passing': False, 'case_ids': [], 'status_counts': {}, 'evidence': []},
+        'testnet_bridge_controlled_execute': {'title': 'Testnet bridge controlled execute', 'required': True, 'covered': False, 'passing': False, 'case_ids': [], 'status_counts': {}, 'evidence': []},
+        'testnet_bridge_blocked_guard': {'title': 'Testnet bridge blocked guardrails', 'required': True, 'covered': False, 'passing': False, 'case_ids': [], 'status_counts': {}, 'evidence': []},
+        'testnet_bridge_cleanup_recovery': {'title': 'Testnet bridge cleanup / recovery trail', 'required': True, 'covered': False, 'passing': False, 'case_ids': [], 'status_counts': {}, 'evidence': []},
+    }
+
+    def record(capability_key: str, row: Dict[str, Any], status: Optional[str] = None, evidence: Optional[str] = None):
+        capability = capabilities[capability_key]
+        capability['covered'] = True
+        case_id = row.get('case_id')
+        if case_id and case_id not in capability['case_ids']:
+            capability['case_ids'].append(case_id)
+        label = str(status or row.get('status') or 'unknown')
+        capability['status_counts'][label] = capability['status_counts'].get(label, 0) + 1
+        if row.get('status') == 'pass':
+            capability['passing'] = True
+        if evidence:
+            capability['evidence'].append({'case_id': case_id, 'detail': evidence})
+
+    for row in results or []:
+        case_type = row.get('case_type')
+        diff = row.get('diff') or {}
+        if case_type in {'shadow_signal', 'shadow_execution'}:
+            evidence = f"decision={((diff.get('decision') or {}).get('adaptive'))} / validator={((diff.get('validator') or {}).get('adaptive'))}"
+            record('signal_shadow', row, evidence=evidence)
+
+        workflow = diff.get('workflow') or {}
+        replay = diff.get('replay') or {}
+        executor = diff.get('executor') or {}
+        transition = diff.get('transition_policy') or {}
+        bridge = diff.get('testnet_bridge') or {}
+
+        if workflow or replay or executor or transition or bridge:
+            if replay.get('synced_count', 0) > 0:
+                record('approval_replay', row, status=f"synced:{replay.get('synced_count', 0)}", evidence=f"pending={replay.get('pending_state_count', 0)} / timeline={replay.get('timeline_events', 0)}")
+            if executor.get('dry_run_count', 0) > 0 or executor.get('planned_count', 0) > 0:
+                record('rollout_executor_dry_run', row, status=f"dry_run:{executor.get('dry_run_count', 0)}", evidence=f"planned={executor.get('planned_count', 0)} / route={((executor.get('timeline_summary') or {}).get('route'))}")
+            if transition.get('enabled'):
+                consistency = transition.get('consistency') or {}
+                record('transition_policy_contract', row, status='consistent' if consistency.get('all_match') else 'inconsistent', evidence=f"rule={transition.get('transition_rule')} / route={transition.get('dispatch_route')} / next={transition.get('next_transition')}")
+            if bridge.get('enabled'):
+                bridge_status = str(bridge.get('status') or 'unknown')
+                if bridge.get('mode') == 'plan_only':
+                    record('testnet_bridge_plan_only', row, status=bridge_status, evidence=f"execute_ready={bridge.get('execute_ready')}")
+                if bridge_status == 'controlled_execute':
+                    record('testnet_bridge_controlled_execute', row, status=bridge_status, evidence=f"open={bridge.get('open_status')} / close={bridge.get('close_status')}")
+                if bridge_status == 'blocked':
+                    record('testnet_bridge_blocked_guard', row, status=bridge_status, evidence=f"pending_approval_count={bridge.get('pending_approval_count', 0)}")
+                if bridge.get('cleanup_needed') or bridge_status == 'error':
+                    record('testnet_bridge_cleanup_recovery', row, status=bridge_status, evidence=f"cleanup_needed={bridge.get('cleanup_needed')} / residual={bridge.get('residual_position_detected')}")
+
+    required_keys = [key for key, value in capabilities.items() if value.get('required')]
+    covered_required = [key for key in required_keys if capabilities[key]['covered']]
+    passing_required = [key for key in required_keys if capabilities[key]['passing']]
+    missing_required = [key for key in required_keys if not capabilities[key]['covered']]
+    failing_required = [key for key in required_keys if capabilities[key]['covered'] and not capabilities[key]['passing']]
+
+    return {
+        'schema_version': 'm5_validation_coverage_matrix_v1',
+        'required_capability_count': len(required_keys),
+        'covered_required_count': len(covered_required),
+        'passing_required_count': len(passing_required),
+        'missing_required': missing_required,
+        'failing_required': failing_required,
+        'ready_for_low_intervention_gate': not missing_required and not failing_required,
+        'capabilities': capabilities,
+    }
+
+
 def format_validation_report_markdown(report: Dict[str, Any]) -> str:
     if report.get('mode') == 'validation_replay':
         summary = report.get('summary') or {}
         bridge = summary.get('testnet_bridge') or {}
         transition = summary.get('transition_policy') or {}
+        coverage = summary.get('coverage_matrix') or {}
         lines = [
             '# Shadow Validation Replay Report',
             '',
@@ -584,12 +660,32 @@ def format_validation_report_markdown(report: Dict[str, Any]) -> str:
             f"- pass: {summary.get('pass_count', 0)}",
             f"- fail: {summary.get('fail_count', 0)}",
             '',
+            '## Validation Coverage Matrix',
+            f"- required capabilities: {coverage.get('required_capability_count', 0)}",
+            f"- covered required capabilities: {coverage.get('covered_required_count', 0)}",
+            f"- passing required capabilities: {coverage.get('passing_required_count', 0)}",
+            f"- ready_for_low_intervention_gate: {coverage.get('ready_for_low_intervention_gate')}",
+        ]
+        if coverage.get('missing_required'):
+            lines.append(f"- missing_required: {', '.join(coverage.get('missing_required') or [])}")
+        if coverage.get('failing_required'):
+            lines.append(f"- failing_required: {', '.join(coverage.get('failing_required') or [])}")
+        lines.extend([
+            '',
+            '### Capability Status',
+        ])
+        for capability_key, capability in sorted((coverage.get('capabilities') or {}).items()):
+            lines.append(
+                f"- {capability_key}: covered={capability.get('covered')} / passing={capability.get('passing')} / cases={len(capability.get('case_ids') or [])}"
+            )
+        lines.extend([
+            '',
             '## Transition Policy',
             f"- enabled cases: {transition.get('case_count', 0)}",
             f"- consistent cases: {transition.get('consistent_case_count', 0)}",
             '',
             '### Transition Rules',
-        ]
+        ])
         for key, value in sorted((transition.get('rule_counts') or {}).items()):
             lines.append(f'- {key}: {value}')
         lines.extend(['', '### Dispatch Routes'])
@@ -871,11 +967,33 @@ def run_shadow_validation_case(case_path: str, *, base_config: Config = None) ->
     return _run_signal_or_execution_case(case, base_config=base_config, case_path=case_path)
 
 def build_validation_summary(results: List[Dict[str, Any]]) -> Dict[str, Any]:
-    case_types, statuses = {}, {}
+    case_types, statuses, modes = {}, {}, {}
     for row in results:
         case_types[row.get('case_type') or 'unknown'] = case_types.get(row.get('case_type') or 'unknown', 0) + 1
         statuses[row.get('status') or 'unknown'] = statuses.get(row.get('status') or 'unknown', 0) + 1
-    return {'case_count': len(results), 'pass_count': statuses.get('pass', 0), 'fail_count': statuses.get('fail', 0), 'case_types': case_types, 'statuses': statuses, 'failed_cases': [{'case_id': row.get('case_id'), 'case_type': row.get('case_type'), 'case_path': (row.get('audit') or {}).get('case_path'), 'failed_assertions': [item for item in (row.get('assertions') or []) if not item.get('passed')]} for row in results if row.get('status') != 'pass'], 'generated_at': datetime.now().isoformat(), 'real_trade_execution': False, 'exchange_mode': 'shadow', 'transition_policy': _summarize_transition_policy_artifacts(results), 'testnet_bridge': _aggregate_testnet_bridge_batch(results)}
+        modes[row.get('mode') or 'unknown'] = modes.get(row.get('mode') or 'unknown', 0) + 1
+    coverage_matrix = _build_validation_coverage_matrix(results)
+    return {
+        'case_count': len(results),
+        'pass_count': statuses.get('pass', 0),
+        'fail_count': statuses.get('fail', 0),
+        'case_types': case_types,
+        'modes': modes,
+        'statuses': statuses,
+        'failed_cases': [{'case_id': row.get('case_id'), 'case_type': row.get('case_type'), 'case_path': (row.get('audit') or {}).get('case_path'), 'failed_assertions': [item for item in (row.get('assertions') or []) if not item.get('passed')]} for row in results if row.get('status') != 'pass'],
+        'generated_at': datetime.now().isoformat(),
+        'real_trade_execution': False,
+        'exchange_mode': 'shadow',
+        'transition_policy': _summarize_transition_policy_artifacts(results),
+        'testnet_bridge': _aggregate_testnet_bridge_batch(results),
+        'coverage_matrix': coverage_matrix,
+        'readiness': {
+            'low_intervention_gate_ready': coverage_matrix.get('ready_for_low_intervention_gate', False) and statuses.get('fail', 0) == 0,
+            'missing_required_capabilities': coverage_matrix.get('missing_required') or [],
+            'failing_required_capabilities': coverage_matrix.get('failing_required') or [],
+            'failing_case_count': statuses.get('fail', 0),
+        },
+    }
 
 def run_shadow_validation_replay(paths: Iterable[str], *, base_config: Optional[Config] = None) -> Dict[str, Any]:
     case_paths = collect_validation_case_paths(paths)

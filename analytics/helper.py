@@ -3032,6 +3032,7 @@ def execute_controlled_rollout_layer(payload: Dict, db: Any, *, config: Any = No
 
     if executed_rows:
         merge_persisted_approval_state(payload, executed_rows)
+
     return payload
 
 
@@ -3150,6 +3151,7 @@ def execute_controlled_auto_approval_layer(payload: Dict, db: Any, *, config: An
 
     if executed_rows:
         merge_persisted_approval_state(payload, executed_rows)
+
     return payload
 
 
@@ -6661,6 +6663,8 @@ def _get_recovery_execution_settings(config: Any = None, overrides: Optional[Dic
     getter = getattr(config, 'get', None)
     raw = getter('governance.recovery_execution', {}) if callable(getter) else {}
     raw = dict(raw or {}) if isinstance(raw, dict) else {}
+    executor_raw = raw.get('retry_executor') or {}
+    executor_raw = dict(executor_raw or {}) if isinstance(executor_raw, dict) else {}
     settings = {
         'enabled': bool(raw.get('enabled', False)),
         'mode': _normalize_recovery_execution_mode(raw.get('mode')),
@@ -6670,6 +6674,13 @@ def _get_recovery_execution_settings(config: Any = None, overrides: Optional[Dic
         'execute_retry_queue': bool(raw.get('execute_retry_queue', True)),
         'execute_rollback_candidates': bool(raw.get('execute_rollback_candidates', True)),
         'annotate_manual_recovery': bool(raw.get('annotate_manual_recovery', True)),
+        'retry_executor': {
+            'enabled': bool(executor_raw.get('enabled', True)),
+            'mode': _normalize_rollout_executor_mode(executor_raw.get('mode') or raw.get('mode')),
+            'source': str(executor_raw.get('source') or 'recovery_retry_executor'),
+            'reason_prefix': str(executor_raw.get('reason_prefix') or 'workflow retry re-entered rollout executor'),
+            'allowed_action_types': _dedupe_strings(executor_raw.get('allowed_action_types') or []),
+        },
     }
     settings.update({k: v for k, v in overrides.items() if v is not None})
     settings['enabled'] = bool(settings.get('enabled', False))
@@ -6677,7 +6688,56 @@ def _get_recovery_execution_settings(config: Any = None, overrides: Optional[Dic
     settings['execute_retry_queue'] = bool(settings.get('execute_retry_queue', True))
     settings['execute_rollback_candidates'] = bool(settings.get('execute_rollback_candidates', True))
     settings['annotate_manual_recovery'] = bool(settings.get('annotate_manual_recovery', True))
+    retry_executor = dict(settings.get('retry_executor') or {})
+    retry_executor['enabled'] = bool(retry_executor.get('enabled', True))
+    retry_mode = _normalize_rollout_executor_mode(retry_executor.get('mode'))
+    if retry_mode == 'disabled' and settings.get('mode') in {'controlled', 'dry_run'}:
+        retry_mode = settings.get('mode')
+    retry_executor['mode'] = retry_mode
+    retry_executor['source'] = str(retry_executor.get('source') or 'recovery_retry_executor')
+    retry_executor['reason_prefix'] = str(retry_executor.get('reason_prefix') or 'workflow retry re-entered rollout executor')
+    retry_executor['allowed_action_types'] = _dedupe_strings(retry_executor.get('allowed_action_types') or [])
+    settings['retry_executor'] = retry_executor
     return settings
+
+
+def _build_recovery_retry_executor_payload(payload: Dict[str, Any], retry_items: List[Dict[str, Any]]) -> Dict[str, Any]:
+    workflow_lookup = {row.get('item_id'): dict(row) for row in ((payload.get('workflow_state') or {}).get('item_states') or []) if row.get('item_id')}
+    approval_lookup = {row.get('playbook_id') or row.get('approval_id'): dict(row) for row in ((payload.get('approval_state') or {}).get('items') or []) if (row.get('playbook_id') or row.get('approval_id'))}
+    workflow_items = []
+    approval_items = []
+    retry_ids = []
+    for row in retry_items:
+        item_id = row.get('item_id')
+        approval_id = row.get('approval_id')
+        if item_id:
+            workflow_row = dict(workflow_lookup.get(item_id) or {})
+            if workflow_row:
+                workflow_row['workflow_state'] = 'queued'
+                queue_progression = dict(workflow_row.get('queue_progression') or {})
+                queue_progression.update({'status': 'ready_to_queue', 'dispatch_route': 'retry_queue', 'next_transition': 'retry_execution', 'queue_name': 'retry_queue'})
+                workflow_row['queue_progression'] = queue_progression
+                workflow_items.append(workflow_row)
+        approval_row = dict(approval_lookup.get(item_id) or approval_lookup.get(approval_id) or {})
+        if approval_row:
+            approval_row['approval_id'] = approval_id or approval_row.get('approval_id')
+            approval_row['playbook_id'] = item_id or approval_row.get('playbook_id')
+            approval_row['approval_required'] = bool(approval_row.get('approval_required', False))
+            approval_row['blocked_by'] = _dedupe_strings(approval_row.get('blocked_by') or (workflow_row.get('blocking_reasons') if workflow_row else []) or [])
+            approval_row['risk_level'] = approval_row.get('risk_level') or (workflow_row.get('risk_level') if workflow_row else None) or 'low'
+            if approval_row.get('auto_approval_eligible') is None:
+                approval_row['auto_approval_eligible'] = (not approval_row['approval_required']) and (not approval_row['blocked_by']) and str(approval_row.get('risk_level') or '').strip().lower() == 'low'
+            if not approval_row.get('auto_approval_decision') and approval_row.get('auto_approval_eligible'):
+                approval_row['auto_approval_decision'] = 'auto_approve'
+            approval_items.append(approval_row)
+        if approval_id:
+            retry_ids.append(approval_id)
+    subset = {'workflow_state': {'item_states': workflow_items, 'summary': {}}, 'approval_state': {'items': approval_items, 'summary': {}}}
+    for key in ('validation_gate', 'workflow_recovery_view', 'approval_state_machine'):
+        if key in payload:
+            subset[key] = payload.get(key)
+    subset['_retry_executor_approval_ids'] = retry_ids
+    return subset
 
 
 def execute_recovery_queue_layer(payload: Dict[str, Any], db: Any, *, config: Any = None,
@@ -6704,8 +6764,19 @@ def execute_recovery_queue_layer(payload: Dict[str, Any], db: Any, *, config: An
         'scheduled_retry_count': 0,
         'rollback_queued_count': 0,
         'manual_recovery_annotated_count': 0,
+        'retry_reentered_executor_count': 0,
         'skipped_count': 0,
         'items': [],
+        'executor_pass': {
+            'attempted': False,
+            'eligible_count': 0,
+            'reentered_count': 0,
+            'applied_count': 0,
+            'queued_count': 0,
+            'skipped_count': 0,
+            'error_count': 0,
+            'items': [],
+        },
         'summary': {
             'queue_count': len(queue_items),
             'retry_queue_count': len(queue_groups.get('retry_queue') or []),
@@ -6721,6 +6792,7 @@ def execute_recovery_queue_layer(payload: Dict[str, Any], db: Any, *, config: An
     dry_run = result['mode'] == 'dry_run'
     workflow_lookup = {row.get('item_id'): row for row in ((payload.get('workflow_state') or {}).get('item_states') or []) if row.get('item_id')}
     executed_rows = []
+    retry_executor_candidates = []
     now_dt = None
     if now:
         try:
@@ -6749,26 +6821,26 @@ def execute_recovery_queue_layer(payload: Dict[str, Any], db: Any, *, config: An
                 retry_due = True
 
         if bucket == 'retry_queue' and not execution_settings.get('execute_retry_queue', True):
-            result['items'].append({'item_id': item_id, 'approval_id': approval_id, 'queue_bucket': bucket, 'action': 'skipped', 'reason': 'retry_queue_execution_disabled'})
+            result['items'].append({'item_id': item_id, 'approval_id': approval_id, 'queue_bucket': bucket, 'action': 'skipped', 'reason': 'retry_queue_execution_disabled', 'reentered_executor': False})
             result['skipped_count'] += 1
             continue
         if bucket == 'rollback_candidates' and not execution_settings.get('execute_rollback_candidates', True):
-            result['items'].append({'item_id': item_id, 'approval_id': approval_id, 'queue_bucket': bucket, 'action': 'skipped', 'reason': 'rollback_candidate_execution_disabled'})
+            result['items'].append({'item_id': item_id, 'approval_id': approval_id, 'queue_bucket': bucket, 'action': 'skipped', 'reason': 'rollback_candidate_execution_disabled', 'reentered_executor': False})
             result['skipped_count'] += 1
             continue
         if bucket == 'manual_recovery' and not execution_settings.get('annotate_manual_recovery', True):
-            result['items'].append({'item_id': item_id, 'approval_id': approval_id, 'queue_bucket': bucket, 'action': 'skipped', 'reason': 'manual_recovery_annotation_disabled'})
+            result['items'].append({'item_id': item_id, 'approval_id': approval_id, 'queue_bucket': bucket, 'action': 'skipped', 'reason': 'manual_recovery_annotation_disabled', 'reentered_executor': False})
             result['skipped_count'] += 1
             continue
         if bucket == 'retry_queue' and not retry_due:
-            result['items'].append({'item_id': item_id, 'approval_id': approval_id, 'queue_bucket': bucket, 'action': 'skipped', 'reason': 'retry_not_due', 'should_retry_at': should_retry_at})
+            result['items'].append({'item_id': item_id, 'approval_id': approval_id, 'queue_bucket': bucket, 'action': 'skipped', 'reason': 'retry_not_due', 'should_retry_at': should_retry_at, 'reentered_executor': False})
             result['skipped_count'] += 1
             continue
 
         existing_exec = dict(persisted_details.get('recovery_execution') or {})
         desired_status = {'retry_queue': 'retry_scheduled', 'rollback_candidates': 'rollback_review_queued', 'manual_recovery': 'manual_recovery_annotated'}.get(bucket, 'observed')
         if existing_exec.get('status') == desired_status:
-            result['items'].append({'item_id': item_id, 'approval_id': approval_id, 'queue_bucket': bucket, 'action': 'skipped', 'reason': 'already_applied'})
+            result['items'].append({'item_id': item_id, 'approval_id': approval_id, 'queue_bucket': bucket, 'action': 'skipped', 'reason': 'already_applied', 'reentered_executor': False})
             result['skipped_count'] += 1
             continue
 
@@ -6799,7 +6871,8 @@ def execute_recovery_queue_layer(payload: Dict[str, Any], db: Any, *, config: An
             'event_log': (existing_exec.get('event_log') or []) + [event],
             'last_applied_at': event['created_at'],
         }
-        result['items'].append({
+        retry_schedule_count = int(retry_schedule.get('retry_count') or 0)
+        result_item = {
             'item_id': item_id,
             'approval_id': approval_id,
             'queue_bucket': bucket,
@@ -6808,7 +6881,17 @@ def execute_recovery_queue_layer(payload: Dict[str, Any], db: Any, *, config: An
             'route': desired_route,
             'follow_up': desired_follow_up,
             'reason': reason,
-        })
+            'retry_source': orchestration.get('target_route') or (orchestration.get('routing_reason_codes') or orchestration.get('routing_reason') or ['recovery_retry_queue'])[0],
+            'retry_attempt': retry_schedule_count + 1 if bucket == 'retry_queue' else retry_schedule_count,
+            'retry_schedule': retry_schedule,
+            'reentered_executor': False,
+            'status_transition': {
+                'from_workflow_state': (persisted_row or {}).get('workflow_state') or workflow_item.get('workflow_state'),
+                'to_workflow_state': desired_workflow_state,
+                'to_execution_status': desired_execution_status,
+            },
+        }
+        result['items'].append(result_item)
         if dry_run:
             result['skipped_count'] += 1
             continue
@@ -6862,6 +6945,14 @@ def execute_recovery_queue_layer(payload: Dict[str, Any], db: Any, *, config: An
         executed_rows.append(db.get_approval_state(approval_id))
         if bucket == 'retry_queue':
             result['scheduled_retry_count'] += 1
+            retry_executor_candidates.append({
+                'item_id': item_id,
+                'approval_id': approval_id,
+                'action_type': item.get('action_type') or workflow_item.get('action_type'),
+                'retry_attempt': retry_schedule_count + 1,
+                'retry_source': orchestration.get('target_route') or (orchestration.get('routing_reason_codes') or orchestration.get('routing_reason') or ['recovery_retry_queue'])[0],
+                'recovery_execution_action': result_action,
+            })
         elif bucket == 'rollback_candidates':
             result['rollback_queued_count'] += 1
         elif bucket == 'manual_recovery':
@@ -6869,6 +6960,101 @@ def execute_recovery_queue_layer(payload: Dict[str, Any], db: Any, *, config: An
 
     if executed_rows:
         merge_persisted_approval_state(payload, executed_rows)
+
+    retry_executor_settings = dict(execution_settings.get('retry_executor') or {})
+    if (not dry_run and retry_executor_candidates and retry_executor_settings.get('enabled') and retry_executor_settings.get('mode') in {'controlled', 'dry_run'}):
+        retry_executor_payload = _build_recovery_retry_executor_payload(payload, retry_executor_candidates)
+        eligible_action_types = retry_executor_settings.get('allowed_action_types') or [row.get('action_type') for row in retry_executor_candidates if row.get('action_type')]
+        retry_executor_settings['enabled'] = True
+        retry_executor_settings['allowed_action_types'] = _dedupe_strings(eligible_action_types or ['joint_observe'])
+        retry_executor_settings['actor'] = execution_settings.get('actor')
+        retry_executor_settings['source'] = retry_executor_settings.get('source') or execution_settings.get('source')
+        retry_executor_settings['reason_prefix'] = retry_executor_settings.get('reason_prefix') or execution_settings.get('reason_prefix')
+        retry_executor_payload = attach_auto_approval_policy(retry_executor_payload)
+        executor_result_payload = execute_rollout_executor(
+            retry_executor_payload,
+            db,
+            config=config,
+            settings=retry_executor_settings,
+            replay_source=f'{replay_source}:recovery_retry_reenter',
+        )
+        executor_result = executor_result_payload.get('rollout_executor') or {}
+        result['executor_pass']['attempted'] = True
+        result['executor_pass']['eligible_count'] = len(retry_executor_candidates)
+        result['executor_pass']['items'] = executor_result.get('items') or []
+        summary = executor_result.get('summary') or {}
+        result['executor_pass']['reentered_count'] = len(executor_result.get('items') or [])
+        result['executor_pass']['applied_count'] = int(summary.get('applied_count', 0) or 0)
+        result['executor_pass']['queued_count'] = int(summary.get('queued_count', 0) or 0)
+        result['executor_pass']['skipped_count'] = int(summary.get('skipped_count', 0) or 0)
+        result['executor_pass']['error_count'] = int(summary.get('error_count', 0) or 0)
+        result['retry_reentered_executor_count'] = len(executor_result.get('items') or [])
+        persisted_retry_rows = []
+        executor_by_item = {row.get('playbook_id') or row.get('item_id'): row for row in (executor_result.get('items') or [])}
+        recovery_items_by_item = {row.get('item_id'): row for row in result.get('items') or []}
+        for candidate in retry_executor_candidates:
+            item_id = candidate.get('item_id')
+            approval_id = candidate.get('approval_id')
+            executor_item = executor_by_item.get(item_id) or executor_by_item.get(approval_id) or {}
+            recovery_item = recovery_items_by_item.get(item_id)
+            if recovery_item and executor_item:
+                dispatch = executor_item.get('dispatch') or {}
+                outcome = executor_item.get('result') or {}
+                recovery_item['reentered_executor'] = True
+                recovery_item['executor_reentry'] = {
+                    'status': executor_item.get('status'),
+                    'execution_status': executor_item.get('execution_status'),
+                    'dispatch_route': (executor_item.get('plan') or {}).get('dispatch_route') or dispatch.get('dispatch_route') or outcome.get('dispatch_route'),
+                    'next_transition': outcome.get('next_transition') or dispatch.get('next_transition') or (executor_item.get('plan') or {}).get('next_transition'),
+                    'handler_key': (executor_item.get('plan') or {}).get('handler_key') or dispatch.get('handler_key'),
+                    'result_code': outcome.get('code') or dispatch.get('code'),
+                    'result_reason': outcome.get('reason') or dispatch.get('reason'),
+                    'disposition': outcome.get('disposition') or executor_item.get('status'),
+                }
+                recovery_item['status_transition']['executor_reentry_status'] = executor_item.get('status')
+                recovery_item['status_transition']['executor_reentry_execution_status'] = executor_item.get('execution_status')
+            if approval_id:
+                row = db.get_approval_state(approval_id)
+                if row:
+                    details = dict(row.get('details') or {})
+                    existing_recovery_exec = dict(details.get('recovery_execution') or {})
+                    event = {
+                        'event_type': 'recovery_retry_reentered_executor',
+                        'actor': execution_settings['actor'],
+                        'source': retry_executor_settings.get('source') or execution_settings.get('source'),
+                        'retry_attempt': candidate.get('retry_attempt'),
+                        'retry_source': candidate.get('retry_source'),
+                        'created_at': _utc_now_iso(),
+                        'executor_status': executor_item.get('status'),
+                        'executor_execution_status': executor_item.get('execution_status'),
+                    }
+                    existing_recovery_exec['reentered_executor'] = bool(executor_item)
+                    existing_recovery_exec['retry_attempt'] = candidate.get('retry_attempt')
+                    existing_recovery_exec['retry_source'] = candidate.get('retry_source')
+                    existing_recovery_exec['executor_reentry'] = (recovery_item or {}).get('executor_reentry') if recovery_item else {}
+                    existing_recovery_exec['event_log'] = (existing_recovery_exec.get('event_log') or []) + [event]
+                    details['recovery_execution'] = existing_recovery_exec
+                    db.upsert_approval_state(
+                        item_id=approval_id,
+                        approval_type=row.get('approval_type') or row.get('type') or details.get('action_type') or 'workflow_approval',
+                        target=row.get('target') or item_id,
+                        title=row.get('title'),
+                        decision=row.get('decision') or 'pending',
+                        state=row.get('state') or 'pending',
+                        workflow_state=row.get('workflow_state') or 'queued',
+                        reason=row.get('reason') or 'recovery retry executor re-entry',
+                        actor=execution_settings['actor'],
+                        replay_source=f'{replay_source}:recovery_retry_reenter_merge',
+                        details=details,
+                        preserve_terminal=True,
+                        event_type='recovery_retry_reentered_executor',
+                        append_event=True,
+                    )
+                    persisted = db.get_approval_state(approval_id)
+                    if persisted:
+                        persisted_retry_rows.append(persisted)
+        if persisted_retry_rows:
+            merge_persisted_approval_state(payload, persisted_retry_rows)
     return payload
 
 
@@ -7056,6 +7242,7 @@ def execute_auto_promotion_review_queue_layer(payload: Dict[str, Any], db: Any, 
 
     if executed_rows:
         merge_persisted_approval_state(payload, executed_rows)
+
     return payload
 
 

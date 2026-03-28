@@ -10393,9 +10393,20 @@ class TestApprovalPersistence(unittest.TestCase):
             self.assertEqual(summary['scheduled_retry_count'], 1)
             self.assertEqual(summary['rollback_queued_count'], 1)
             self.assertEqual(summary['manual_recovery_annotated_count'], 1)
+            self.assertEqual(summary['retry_reentered_executor_count'], 1)
+            self.assertTrue(summary['executor_pass']['attempted'])
+            self.assertEqual(summary['executor_pass']['applied_count'], 1)
+            retry_item = next(row for row in summary['items'] if row['item_id'] == 'playbook::retry')
+            self.assertEqual(retry_item['retry_source'], 'retry_queue')
+            self.assertEqual(retry_item['retry_attempt'], 1)
+            self.assertTrue(retry_item['reentered_executor'])
+            self.assertEqual(retry_item['executor_reentry']['disposition'], 'applied')
+            self.assertEqual(retry_item['executor_reentry']['dispatch_route'], 'safe_state_apply')
             retry_row = db.get_approval_state('approval::retry')
-            self.assertEqual(retry_row['workflow_state'], 'queued')
-            self.assertEqual(retry_row['details']['queue_progression']['dispatch_route'], 'retry_queue')
+            self.assertEqual(retry_row['workflow_state'], 'ready')
+            self.assertEqual(retry_row['details']['recovery_execution']['retry_attempt'], 1)
+            self.assertTrue(retry_row['details']['recovery_execution']['reentered_executor'])
+            self.assertEqual(retry_row['details']['recovery_execution']['executor_reentry']['disposition'], 'applied')
             rollback_row = db.get_approval_state('approval::rollback')
             self.assertEqual(rollback_row['workflow_state'], 'rollback_pending')
             self.assertEqual(rollback_row['details']['recovery_execution']['route'], 'rollback_candidate_queue')
@@ -10419,6 +10430,49 @@ class TestApprovalPersistence(unittest.TestCase):
             self.assertEqual(dry_run['recovery_execution']['skipped_count'], 1)
             persisted = db.get_approval_state('approval::retry')
             self.assertEqual(persisted['workflow_state'], 'execution_failed')
+
+    def test_recovery_execution_only_reenters_due_retry_items_into_executor(self):
+        payload = {
+            'workflow_state': {'item_states': [
+                {'item_id': 'playbook::retry_due', 'title': 'Retry due item', 'action_type': 'joint_observe', 'workflow_state': 'execution_failed', 'risk_level': 'low', 'approval_required': False, 'blocking_reasons': [], 'confidence': 'high', 'state_machine': _build_state_machine_semantics(item_id='approval::retry_due', approval_state='pending', workflow_state='execution_failed', execution_status='error', retryable=True, rollback_hint='restore_previous_state_from_approval_timeline', dispatch_route='retry_queue', next_transition='retry_execution')},
+                {'item_id': 'playbook::retry_later', 'title': 'Retry later item', 'action_type': 'joint_observe', 'workflow_state': 'execution_failed', 'risk_level': 'low', 'approval_required': False, 'blocking_reasons': [], 'confidence': 'high', 'state_machine': _build_state_machine_semantics(item_id='approval::retry_later', approval_state='pending', workflow_state='execution_failed', execution_status='error', retryable=True, rollback_hint='restore_previous_state_from_approval_timeline', dispatch_route='retry_queue', next_transition='retry_execution')},
+            ], 'summary': {}},
+            'approval_state': {'items': [
+                {'approval_id': 'approval::retry_due', 'playbook_id': 'playbook::retry_due', 'title': 'Retry due item', 'action_type': 'joint_observe', 'approval_state': 'pending', 'decision_state': 'pending', 'risk_level': 'low', 'approval_required': False, 'blocked_by': [], 'auto_approval_eligible': True, 'auto_approval_decision': 'auto_approve'},
+                {'approval_id': 'approval::retry_later', 'playbook_id': 'playbook::retry_later', 'title': 'Retry later item', 'action_type': 'joint_observe', 'approval_state': 'pending', 'decision_state': 'pending', 'risk_level': 'low', 'approval_required': False, 'blocked_by': [], 'auto_approval_eligible': True, 'auto_approval_decision': 'auto_approve'},
+            ], 'summary': {}},
+            'workflow_recovery_view': {'summary': {'retry_queue_count': 2, 'rollback_candidate_count': 0, 'manual_recovery_count': 0}, 'queues': {
+                'retry_queue': [
+                    {'item_id': 'playbook::retry_due', 'approval_id': 'approval::retry_due', 'title': 'Retry due item', 'action_type': 'joint_observe', 'workflow_state': 'execution_failed', 'approval_state': 'pending', 'risk_level': 'low', 'recovery_orchestration': {'queue_bucket': 'retry_queue', 'target_route': 'retry_queue', 'retry_schedule': {'retry_count': 1, 'should_retry_at': '2026-03-29T00:00:00Z'}, 'manual_recovery': {}, 'routing_reason_codes': ['retryable_execution_failure']}},
+                    {'item_id': 'playbook::retry_later', 'approval_id': 'approval::retry_later', 'title': 'Retry later item', 'action_type': 'joint_observe', 'workflow_state': 'execution_failed', 'approval_state': 'pending', 'risk_level': 'low', 'recovery_orchestration': {'queue_bucket': 'retry_queue', 'target_route': 'retry_queue', 'retry_schedule': {'retry_count': 2, 'should_retry_at': '2026-04-02T00:00:00Z'}, 'manual_recovery': {}, 'routing_reason_codes': ['retryable_execution_failure']}},
+                ],
+                'rollback_candidates': [],
+                'manual_recovery': [],
+            }},
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(str(Path(tmpdir) / 'recovery_execution_reenter.db'))
+            db.sync_approval_items(build_workflow_approval_records(payload), replay_source='unit-test')
+            executed = execute_recovery_queue_layer(payload, db, settings={'enabled': True, 'mode': 'controlled', 'actor': 'system:test-recovery', 'source': 'unit_test_recovery', 'retry_executor': {'enabled': True, 'mode': 'controlled', 'allowed_action_types': ['joint_observe']}}, replay_source='unit-test-replay', now='2026-03-30T00:00:00Z')
+            summary = executed['recovery_execution']
+            self.assertEqual(summary['scheduled_retry_count'], 1)
+            self.assertEqual(summary['skipped_count'], 1)
+            self.assertEqual(summary['retry_reentered_executor_count'], 1)
+            self.assertEqual(summary['executor_pass']['eligible_count'], 1)
+            self.assertEqual(summary['executor_pass']['applied_count'], 1)
+            due_item = next(row for row in summary['items'] if row['item_id'] == 'playbook::retry_due')
+            later_item = next(row for row in summary['items'] if row['item_id'] == 'playbook::retry_later')
+            self.assertEqual(due_item['retry_attempt'], 2)
+            self.assertTrue(due_item['reentered_executor'])
+            self.assertEqual(due_item['executor_reentry']['result_code'], 'SAFE_APPLIED')
+            self.assertEqual(later_item['action'], 'skipped')
+            self.assertFalse(later_item['reentered_executor'])
+            self.assertEqual(later_item['reason'], 'retry_not_due')
+            due_row = db.get_approval_state('approval::retry_due')
+            later_row = db.get_approval_state('approval::retry_later')
+            self.assertEqual(due_row['workflow_state'], 'ready')
+            self.assertEqual(due_row['details']['recovery_execution']['retry_attempt'], 2)
+            self.assertEqual(later_row['workflow_state'], 'execution_failed')
 
     def test_auto_promotion_review_queue_filter_view_supports_queue_due_target_and_trigger_filters(self):
         payload = self._make_controlled_auto_promotion_payload()

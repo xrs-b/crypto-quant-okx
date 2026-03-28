@@ -5054,6 +5054,85 @@ def build_auto_promotion_execution_summary(payload: Optional[Dict] = None, *, ma
         'execution': controlled_rollout,
     }
 
+
+def build_auto_promotion_review_queue_consumption(auto_promotion_execution: Optional[Dict[str, Any]] = None, *, max_items: int = 5,
+                                                  label: str = 'auto_promotion_review_queue_consumption') -> Dict[str, Any]:
+    auto_promotion_execution = auto_promotion_execution or {}
+    summary = auto_promotion_execution.get('summary') or {}
+    review_queues = auto_promotion_execution.get('review_queues') or {}
+    post_queue = list(review_queues.get('post_promotion_review_queue') or [])
+    rollback_queue = list(review_queues.get('rollback_review_queue') or [])
+    ordered_items = rollback_queue + [
+        row for row in post_queue
+        if row.get('item_id') not in {item.get('item_id') for item in rollback_queue}
+    ]
+    dominant_queue_kind = 'rollback_review_queue' if rollback_queue else ('post_promotion_review_queue' if post_queue else 'idle')
+    dominant_action = 'prepare_rollback_review' if rollback_queue else ('run_scheduled_review' if post_queue else 'observe_only')
+    review_due_items = [row for row in ordered_items if row.get('review_due_at')]
+    observation_target_counts: Dict[str, int] = {}
+    rollback_trigger_counts: Dict[str, int] = {}
+    for row in ordered_items:
+        for target in row.get('observation_targets') or []:
+            observation_target_counts[str(target)] = observation_target_counts.get(str(target), 0) + 1
+        for trigger in row.get('rollback_triggered') or []:
+            rollback_trigger_counts[str(trigger)] = rollback_trigger_counts.get(str(trigger), 0) + 1
+    dominant_target = None
+    if observation_target_counts:
+        dominant_target = sorted(observation_target_counts.items(), key=lambda item: (-item[1], item[0]))[0][0]
+    dominant_trigger = None
+    if rollback_trigger_counts:
+        dominant_trigger = sorted(rollback_trigger_counts.items(), key=lambda item: (-item[1], item[0]))[0][0]
+    status = 'rollback_attention' if rollback_queue else ('review_due' if review_due_items else ('observe_window' if post_queue else 'idle'))
+    headline = (
+        f"{len(rollback_queue)} rollback review / {len(post_queue)} post-promotion review / "
+        f"{len(review_due_items)} review due"
+    )
+    next_actions = []
+    if rollback_queue:
+        next_actions.append({
+            'kind': 'rollback_review_queue',
+            'priority': 'high',
+            'count': len(rollback_queue),
+            'message': f"{len(rollback_queue)} item(s) escalated into rollback review queue",
+            'route': 'rollback_review_queue',
+            'follow_up': 'prepare_rollback_review',
+            'items': rollback_queue[:max_items],
+        })
+    if post_queue:
+        next_actions.append({
+            'kind': 'post_promotion_review_queue',
+            'priority': 'medium' if review_due_items else 'low',
+            'count': len(post_queue),
+            'message': f"{len(post_queue)} item(s) need post-promotion follow-up review",
+            'route': 'post_promotion_review_queue',
+            'follow_up': 'run_scheduled_review' if review_due_items else 'monitor_post_promotion_window',
+            'items': post_queue[:max_items],
+        })
+    return {
+        'schema_version': 'm5_auto_promotion_review_queue_consumption_v1',
+        'label': label,
+        'status': status,
+        'headline': headline,
+        'summary': {
+            'total_count': len(ordered_items),
+            'post_promotion_review_queue_count': summary.get('post_promotion_review_queue_count', len(post_queue)),
+            'rollback_review_queue_count': summary.get('rollback_review_queue_count', len(rollback_queue)),
+            'review_due_count': len(review_due_items),
+            'dominant_queue_kind': dominant_queue_kind,
+            'dominant_action': dominant_action,
+            'dominant_observation_target': dominant_target,
+            'dominant_rollback_trigger': dominant_trigger,
+            'latest_executed_at': summary.get('latest_executed_at'),
+            'observation_target_counts': observation_target_counts,
+            'rollback_trigger_counts': rollback_trigger_counts,
+        },
+        'items': ordered_items[:max_items],
+        'post_promotion_review_queue': post_queue[:max_items],
+        'rollback_review_queue': rollback_queue[:max_items],
+        'next_actions': next_actions,
+    }
+
+
 def build_workflow_operator_digest(payload: Optional[Dict] = None, *, max_items: int = 5,
                                   transition_journal_overview: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     payload = payload or {}
@@ -6773,6 +6852,11 @@ def build_workbench_governance_view(payload: Optional[Dict] = None, *, max_items
     gate_consumption = _build_gate_consumption_summary(active_items, label='workbench_governance_view', max_items=max_items)
     advisory_consumption = _summarize_rollout_advisories(active_items, label='workbench_governance_view', max_items=max_items)
     auto_promotion_execution = build_auto_promotion_execution_summary(payload, max_items=max_items)
+    auto_promotion_review_queues = build_auto_promotion_review_queue_consumption(
+        auto_promotion_execution,
+        max_items=max_items,
+        label='workbench_governance_view',
+    )
 
     group_summaries = {
         'by_lane': _build_group_summary_rows('lane', [(lane_id, [row for row in active_items if row.get('lane_id') == lane_id]) for lane_id in lane_titles.keys()]),
@@ -6846,6 +6930,7 @@ def build_workbench_governance_view(payload: Optional[Dict] = None, *, max_items
             'gate_consumption': gate_consumption,
             'rollout_advisory': advisory_consumption,
             'auto_promotion_execution': auto_promotion_execution.get('summary') or {},
+            'auto_promotion_review_queues': auto_promotion_review_queues.get('summary') or {},
             'stage_loop': _summarize_stage_loop_rows(unique_active_items, label='workbench_governance_view', max_items=max_items),
             'transition_count': (transition_journal.get('summary') or {}).get('count', 0),
             'latest_transition_at': (transition_journal.get('summary') or {}).get('latest_timestamp'),
@@ -6862,6 +6947,8 @@ def build_workbench_governance_view(payload: Optional[Dict] = None, *, max_items
             'rollout_advisory': advisory_consumption,
             'auto_promotion_candidate_queue': advisory_consumption.get('auto_promotion_candidates') or [],
             'auto_promotion_execution': auto_promotion_execution,
+            'auto_promotion_review_queues': auto_promotion_review_queues,
+            'follow_up_review_queue': auto_promotion_review_queues.get('items') or [],
         },
         'recent_adjustments': recent_adjustments[:max_adjustments],
         'transition_journal': transition_journal,
@@ -6963,6 +7050,11 @@ def build_unified_workbench_overview(payload: Optional[Dict] = None, *, max_item
     gate_consumption = ((workbench_summary.get('gate_consumption') or (operator_digest.get('summary') or {}).get('gate_consumption')) or {})
     rollout_advisory = (workbench_summary.get('rollout_advisory') or (operator_digest.get('summary') or {}).get('rollout_advisory') or _summarize_rollout_advisories(workbench_view.get('rollout', {}).get('items') or [], label='unified_workbench_overview', max_items=max_items))
     auto_promotion_execution = (workbench_view.get('rollout') or {}).get('auto_promotion_execution') or (operator_digest.get('auto_promotion_execution') or {}) or build_auto_promotion_execution_summary(payload, max_items=max_items)
+    auto_promotion_review_queues = (workbench_view.get('rollout') or {}).get('auto_promotion_review_queues') or build_auto_promotion_review_queue_consumption(
+        auto_promotion_execution,
+        max_items=max_items,
+        label='unified_workbench_overview',
+    )
     validation_gate = consumer_view.get('validation_gate') or (operator_digest.get('summary') or {}).get('validation_gate') or _build_validation_gate_snapshot(payload)
     validation_consumption = _collect_validation_gate_consumption((consumer_view.get('workflow_state') or {}).get('item_states') or [])
     workbench_stage_loop = (workbench_summary.get('stage_loop') or workbench_view.get('rollout', {}).get('stage_loop') or _summarize_stage_loop_rows(workbench_view.get('upstreams', {}).get('workflow_operator_digest', {}).get('operator_action_policies') or [], label='unified_workbench_rollout', max_items=max_items))
@@ -6986,6 +7078,7 @@ def build_unified_workbench_overview(payload: Optional[Dict] = None, *, max_item
         row for row in (operator_digest.get('next_actions') or [])
         if row.get('kind') in {'retry', 'freeze_followup', 'observe_only_followup'} or row.get('route') in {'rollout_readiness_queue', 'safe_state_apply', 'review_metadata_apply'}
     ]
+    rollout_next_actions.extend(auto_promotion_review_queues.get('next_actions') or [])
     recovery_next_actions = []
     if manual_recovery:
         recovery_next_actions.append({
@@ -7041,7 +7134,7 @@ def build_unified_workbench_overview(payload: Optional[Dict] = None, *, max_item
             'current_state': rollout_state,
             'headline': {
                 'status': rollout_state,
-                'message': f"{workbench_summary.get('blocked_count', 0)} blocked / {workbench_summary.get('queued_count', 0)} queued / {workbench_summary.get('ready_count', 0)} ready / {workbench_summary.get('auto_batch_count', 0)} auto-batch / {gate_consumption.get('auto_advance_allowed_count', 0)} auto-advance / validation={validation_gate.get('status')}",
+                'message': f"{workbench_summary.get('blocked_count', 0)} blocked / {workbench_summary.get('queued_count', 0)} queued / {workbench_summary.get('ready_count', 0)} ready / {workbench_summary.get('auto_batch_count', 0)} auto-batch / {gate_consumption.get('auto_advance_allowed_count', 0)} auto-advance / review={((auto_promotion_review_queues.get('summary') or {}).get('rollback_review_queue_count', 0))} rollback,{((auto_promotion_review_queues.get('summary') or {}).get('post_promotion_review_queue_count', 0))} post / validation={validation_gate.get('status')}",
             },
             'counts': {
                 'total': workflow_summary.get('item_count', workbench_summary.get('filtered_item_count', 0)),
@@ -7060,16 +7153,21 @@ def build_unified_workbench_overview(payload: Optional[Dict] = None, *, max_item
                 'auto_promotion_candidates': rollout_advisory.get('auto_promotion_candidate_count', 0),
                 'auto_promotion_executed': (auto_promotion_execution.get('summary') or {}).get('executed_count', 0),
                 'auto_promotion_rollback_review_candidates': (auto_promotion_execution.get('summary') or {}).get('rollback_review_candidate_count', 0),
+                'post_promotion_review_queue': (auto_promotion_review_queues.get('summary') or {}).get('post_promotion_review_queue_count', 0),
+                'rollback_review_queue': (auto_promotion_review_queues.get('summary') or {}).get('rollback_review_queue_count', 0),
+                'promotion_review_due': (auto_promotion_review_queues.get('summary') or {}).get('review_due_count', 0),
             },
             'validation_gate': validation_gate,
             'rollout_advisory': rollout_advisory,
             'validation_consumption': validation_consumption,
             'headline_stage_frontier': _take((workbench_view.get('rollout') or {}).get('frontier') or []),
-            'key_alerts': _take(approval_blocked_items + queued_items + ready_items),
+            'key_alerts': _take((auto_promotion_review_queues.get('items') or []) + approval_blocked_items + queued_items + ready_items),
             'next_actions': _take(rollout_next_actions),
             'stage_loop': workbench_stage_loop,
             'auto_promotion_candidate_queue': rollout_advisory.get('auto_promotion_candidates') or [],
             'auto_promotion_execution': auto_promotion_execution,
+            'auto_promotion_review_queues': auto_promotion_review_queues,
+            'follow_up_review_queue': auto_promotion_review_queues.get('items') or [],
         },
         'recovery': {
             'current_state': recovery_state,
@@ -7113,6 +7211,7 @@ def build_unified_workbench_overview(payload: Optional[Dict] = None, *, max_item
             'gate_consumption': gate_consumption,
             'rollout_advisory': rollout_advisory,
             'auto_promotion_execution': auto_promotion_execution.get('summary') or {},
+            'auto_promotion_review_queues': auto_promotion_review_queues.get('summary') or {},
             'validation_gate': validation_gate,
             'validation_gate_consumption': validation_consumption,
             'timeline_group_counts': {

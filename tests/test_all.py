@@ -6028,7 +6028,7 @@ class TestExecutionObservability(unittest.TestCase):
             self.assertIn('recent_decisions', snapshot['summary'])
             self.assertTrue(snapshot['summary']['observe_only_banner'])
 
-from analytics.helper import build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, attach_auto_approval_policy, execute_controlled_rollout_layer, execute_controlled_auto_approval_layer, execute_rollout_executor, build_workflow_consumer_view, build_workflow_recovery_view, build_workflow_attention_view, build_workflow_operator_digest, build_dashboard_summary_cards, build_workbench_governance_view, build_workbench_governance_detail_view, build_workbench_merged_timeline, build_workbench_timeline_summary_aggregation, build_unified_workbench_overview, build_auto_promotion_candidate_view, build_auto_promotion_execution_summary, _build_state_machine_semantics, _build_safe_rollout_action_registry
+from analytics.helper import build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, attach_auto_approval_policy, execute_controlled_rollout_layer, execute_controlled_auto_approval_layer, execute_rollout_executor, build_workflow_consumer_view, build_workflow_recovery_view, build_workflow_attention_view, build_workflow_operator_digest, build_dashboard_summary_cards, build_workbench_governance_view, build_workbench_governance_detail_view, build_workbench_merged_timeline, build_workbench_timeline_summary_aggregation, build_unified_workbench_overview, build_auto_promotion_candidate_view, build_auto_promotion_execution_summary, build_auto_promotion_review_queue_consumption, _build_state_machine_semantics, _build_safe_rollout_action_registry
 
 
 class TestApprovalPersistence(unittest.TestCase):
@@ -9364,6 +9364,43 @@ class TestApprovalPersistence(unittest.TestCase):
             self.assertEqual(summary['summary']['rollback_review_queue_count'], 1)
             self.assertEqual(summary['review_queues']['rollback_review_queue'][0]['recommended_action'], 'prepare_rollback_review')
             self.assertIn('rollback_trigger:review_overdue', summary['review_queues']['rollback_review_queue'][0]['observation_targets'])
+
+    def test_auto_promotion_review_queue_consumption_flows_into_workbench_and_overview(self):
+        payload = self._make_controlled_auto_promotion_payload()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(str(Path(tmpdir) / 'auto_promotion_review_queue_consumption.db'))
+            executed = execute_controlled_rollout_layer(payload, db, settings={
+                'enabled': True,
+                'mode': 'state_apply',
+                'auto_promote_ready_candidates': True,
+                'allowed_action_types': ['joint_stage_prepare'],
+                'actor': 'system:test-auto-promotion-overview',
+                'source': 'unit_test_auto_promotion_overview',
+            })
+            consumer = build_workflow_consumer_view(executed)
+            workflow_item = consumer['workflow_state']['item_states'][0]
+            workflow_item['scheduled_review'] = {'review_due_at': '2026-03-29T00:00:00Z', 'review_after_hours': 24}
+            workflow_item['rollback_gate'] = {'candidate': True, 'triggered': ['review_overdue']}
+            review_queue_consumption = build_auto_promotion_review_queue_consumption(
+                build_auto_promotion_execution_summary(executed, max_items=5),
+                max_items=5,
+                label='unit_test',
+            )
+            self.assertEqual(review_queue_consumption['summary']['rollback_review_queue_count'], 1)
+            self.assertEqual(review_queue_consumption['summary']['post_promotion_review_queue_count'], 0)
+            self.assertEqual(review_queue_consumption['summary']['dominant_action'], 'prepare_rollback_review')
+            workbench = build_workbench_governance_view(executed, max_items=5)
+            self.assertEqual(workbench['summary']['auto_promotion_review_queues']['rollback_review_queue_count'], 1)
+            self.assertEqual(workbench['rollout']['auto_promotion_review_queues']['items'][0]['queue_kind'], 'rollback_review_queue')
+            self.assertEqual(workbench['rollout']['follow_up_review_queue'][0]['recommended_action'], 'prepare_rollback_review')
+            overview = build_unified_workbench_overview(executed, max_items=5)
+            self.assertEqual(overview['summary']['auto_promotion_review_queues']['rollback_review_queue_count'], 1)
+            self.assertEqual(overview['lines']['rollout']['counts']['rollback_review_queue'], 1)
+            self.assertEqual(overview['lines']['rollout']['counts']['promotion_review_due'], 1)
+            self.assertEqual(overview['lines']['rollout']['auto_promotion_review_queues']['summary']['dominant_action'], 'prepare_rollback_review')
+            self.assertEqual(overview['lines']['rollout']['follow_up_review_queue'][0]['queue_kind'], 'rollback_review_queue')
+            self.assertIn('rollback_review_queue', [row['route'] for row in overview['lines']['rollout']['next_actions']])
+            self.assertEqual(overview['lines']['rollout']['key_alerts'][0]['recommended_action'], 'prepare_rollback_review')
 
     def test_controlled_rollout_execution_applies_ready_candidate_with_full_audit(self):
         class StubConfig:

@@ -1,5 +1,18 @@
 # Adaptive Market Regime Backlog
 
+## 2026-03-28 已完成：testnet bridge execution evidence-gated readiness / alert
+- 已新增统一 `m5_testnet_bridge_evidence_gate_v1`，把 `testnet_bridge_execution_evidence` 进一步收口成可直接消费的生产门禁语义：
+  - 最近 testnet execute 是否成功（`recent_execute_succeeded`）
+  - cleanup / reconcile 是否健康（`cleanup_reconcile_healthy`）
+  - 是否仍有 residual / pending exposure（`exposure_clear`、`blocking_issues`）
+  - 当前是否可继续放权（`can_enable_low_intervention`）
+- 该 gate 已直接接入：
+  - `workflow_alert_digest`：当最近 testnet execute 缺失、cleanup/reconcile 未闭合、或残留 exposure 未清时，直接升成更明确 alert；
+  - `unified_workbench_overview`：rollout line / summary 会固定暴露 `testnet_recent_execute_success`、`testnet_bridge_gate_blocked` 与 gate summary；
+  - `production_rollout_readiness`：会直接把 testnet evidence gate 当成 low-intervention readiness blocker / runbook 来源，而唔再只停留喺 evidence 原始字段。
+- 安全边界保持不变：只消费 testnet bridge 证据、只影响后端 gate / alert / workbench 输出，**唔会扩到真实盘执行权限**。
+- 已补 helper + API 相关测试，覆盖 blocked / ready 两种 evidence gate 输出。
+
 ## 2026-03-28 已完成：production rollout readiness / operator-facing gate
 - 已新增统一后端生产门禁入口 `m5_production_rollout_readiness_v1`，把 `unified_workbench_overview + workflow_alert_digest + runtime_orchestration_summary + control_plane_readiness + validation_gate + auto-promotion review queues` 固定收口成一份更适合生产前/低干预前巡检的 readiness gate。
 - 调用方而家可以直接见到：

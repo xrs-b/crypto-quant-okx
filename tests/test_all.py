@@ -10883,6 +10883,170 @@ class TestApprovalPersistence(unittest.TestCase):
         self.assertEqual(cards['summary']['testnet_bridge_execution']['status'], 'error')
         self.assertEqual(cards['card_index']['execution_status']['metrics']['testnet_follow_up'], 1)
 
+    def test_testnet_bridge_evidence_gate_blocks_alerts_and_readiness_on_residual_exposure(self):
+        payload = {
+            'workflow_state': {
+                'item_states': [{
+                    'item_id': 'playbook::ready',
+                    'title': 'Ready observe item',
+                    'action_type': 'joint_observe',
+                    'risk_level': 'low',
+                    'approval_required': False,
+                    'requires_manual': False,
+                    'workflow_state': 'ready',
+                    'blocking_reasons': [],
+                }],
+                'summary': {'item_count': 1},
+            },
+            'approval_state': {
+                'items': [{
+                    'approval_id': 'approval::ready',
+                    'playbook_id': 'playbook::ready',
+                    'title': 'Ready observe item',
+                    'action_type': 'joint_observe',
+                    'approval_state': 'pending',
+                    'decision_state': 'ready',
+                    'risk_level': 'low',
+                    'approval_required': False,
+                    'requires_manual': False,
+                    'blocked_by': [],
+                }],
+                'summary': {'pending_count': 0},
+            },
+            'rollout_executor': {'status': 'controlled', 'summary': {}},
+            'controlled_rollout_execution': {'mode': 'state_apply', 'executed_count': 1, 'items': []},
+            'auto_approval_execution': {'mode': 'controlled', 'executed_count': 1, 'items': []},
+            'validation_gate': {'enabled': False},
+            'testnet_bridge_execution': {
+                'schema_version': 'm5_testnet_bridge_execution_v1',
+                'enabled': True,
+                'mode': 'controlled_execute',
+                'status': 'error',
+                'plan_only': False,
+                'symbol': 'BTC/USDT',
+                'side': 'long',
+                'open_status': 'filled',
+                'close_status': 'submitted',
+                'cleanup_needed': True,
+                'residual_position_detected': True,
+                'failure_compensation_hint': 'manual_testnet_cleanup_required',
+                'blocking_reasons': [],
+                'audit': {'real_trade_execution': True, 'dangerous_live_parameter_change': False},
+                'result': {
+                    'opened': True,
+                    'closed': True,
+                    'open_status': 'filled',
+                    'close_status': 'submitted',
+                    'cleanup_needed': True,
+                    'residual_position_detected': True,
+                    'cleanup_result': {'status': 'manual_required'},
+                    'reconcile_summary': {
+                        'open_order_confirmed': True,
+                        'close_order_confirmed': False,
+                        'residual_position_detected': True,
+                        'cleanup_attempted': True,
+                        'cleanup_succeeded': False,
+                        'residual_quantity': 0.001,
+                    },
+                },
+                'error': 'cleanup_required_but_cleanup_not_confirmed',
+            },
+            'adaptive_rollout_orchestration': {'summary': {'pass_count': 1}},
+        }
+        alert_digest = build_workflow_alert_digest(copy.deepcopy(payload), max_items=10)
+        overview = build_unified_workbench_overview(copy.deepcopy(payload), max_items=5)
+        readiness = build_production_rollout_readiness(copy.deepcopy(payload), max_items=5)
+
+        self.assertTrue(any(row['kind'] == 'testnet_bridge_evidence_gate' and row['severity'] == 'critical' for row in alert_digest['alerts']))
+        self.assertEqual(alert_digest['summary']['testnet_bridge_evidence_gate']['status'], 'blocked')
+        self.assertFalse(readiness['can_enable_low_intervention_runtime'])
+        self.assertIn('testnet_bridge_pending_exposure', readiness['blocking_issues'])
+        self.assertIn('testnet_bridge_residual_exposure', readiness['blocking_issues'])
+        self.assertTrue(any(row['kind'] == 'clear_testnet_residual_exposure' for row in readiness['runbook_actions']))
+        self.assertEqual(overview['summary']['testnet_bridge_evidence_gate']['status'], 'blocked')
+        self.assertEqual(overview['lines']['rollout']['counts']['testnet_bridge_gate_blocked'], 1)
+        self.assertEqual(overview['lines']['rollout']['counts']['testnet_recent_execute_success'], 0)
+
+    def test_testnet_bridge_evidence_gate_marks_recent_clean_execute_ready(self):
+        payload = {
+            'workflow_state': {
+                'item_states': [{
+                    'item_id': 'playbook::ready',
+                    'title': 'Ready observe item',
+                    'action_type': 'joint_observe',
+                    'risk_level': 'low',
+                    'approval_required': False,
+                    'requires_manual': False,
+                    'workflow_state': 'ready',
+                    'blocking_reasons': [],
+                }],
+                'summary': {'item_count': 1},
+            },
+            'approval_state': {
+                'items': [{
+                    'approval_id': 'approval::ready',
+                    'playbook_id': 'playbook::ready',
+                    'title': 'Ready observe item',
+                    'action_type': 'joint_observe',
+                    'approval_state': 'pending',
+                    'decision_state': 'ready',
+                    'risk_level': 'low',
+                    'approval_required': False,
+                    'requires_manual': False,
+                    'blocked_by': [],
+                }],
+                'summary': {'pending_count': 0},
+            },
+            'rollout_executor': {'status': 'controlled', 'summary': {}},
+            'controlled_rollout_execution': {'mode': 'state_apply', 'executed_count': 1, 'items': []},
+            'auto_approval_execution': {'mode': 'controlled', 'executed_count': 1, 'items': []},
+            'validation_gate': {'enabled': False},
+            'testnet_bridge_execution': {
+                'schema_version': 'm5_testnet_bridge_execution_v1',
+                'enabled': True,
+                'mode': 'controlled_execute',
+                'status': 'controlled_execute',
+                'plan_only': False,
+                'symbol': 'BTC/USDT',
+                'side': 'long',
+                'open_status': 'filled',
+                'close_status': 'filled',
+                'cleanup_needed': False,
+                'residual_position_detected': False,
+                'blocking_reasons': [],
+                'audit': {'real_trade_execution': True, 'dangerous_live_parameter_change': False},
+                'result': {
+                    'opened': True,
+                    'closed': True,
+                    'open_status': 'filled',
+                    'close_status': 'filled',
+                    'cleanup_needed': False,
+                    'residual_position_detected': False,
+                    'cleanup_result': {'status': 'flattened'},
+                    'reconcile_summary': {
+                        'open_order_confirmed': True,
+                        'close_order_confirmed': True,
+                        'residual_position_detected': False,
+                        'cleanup_attempted': False,
+                        'cleanup_succeeded': True,
+                        'residual_quantity': 0.0,
+                    },
+                },
+            },
+            'adaptive_rollout_orchestration': {'summary': {'pass_count': 1}},
+        }
+        alert_digest = build_workflow_alert_digest(copy.deepcopy(payload), max_items=10)
+        overview = build_unified_workbench_overview(copy.deepcopy(payload), max_items=5)
+        readiness = build_production_rollout_readiness(copy.deepcopy(payload), max_items=5)
+
+        self.assertFalse(any(row['kind'] == 'testnet_bridge_evidence_gate' for row in alert_digest['alerts']))
+        self.assertEqual(overview['summary']['testnet_bridge_evidence_gate']['status'], 'ready')
+        self.assertTrue(overview['summary']['testnet_bridge_evidence_gate']['recent_execute_succeeded'])
+        self.assertEqual(overview['lines']['rollout']['counts']['testnet_recent_execute_success'], 1)
+        self.assertEqual(overview['lines']['rollout']['counts']['testnet_bridge_gate_blocked'], 0)
+        self.assertTrue(readiness['summary']['testnet_bridge_evidence_gate']['can_enable_low_intervention'])
+        self.assertNotIn('testnet_bridge_no_recent_execution_evidence', readiness['blocking_issues'])
+
     def test_execute_adaptive_rollout_orchestration_runs_testnet_bridge_after_controlled_rollout(self):
         class DummyConfig:
             def __init__(self, mapping):

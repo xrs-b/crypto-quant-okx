@@ -6063,6 +6063,8 @@ class TestApprovalPersistence(unittest.TestCase):
         self.assertIn('gate_consumption', payload['summary'])
         self.assertIn('rollback_candidates', payload['attention'])
         self.assertEqual(payload['next_actions'][0]['summary']['dominant_route'], 'manual_approval_queue')
+        self.assertIn('rollout_advisory', payload['summary'])
+        self.assertIn('auto_promotion_candidates', payload['attention'])
         self.assertEqual(payload['summary']['transition_count'], 2)
         self.assertEqual(payload['transition_journal']['latest']['workflow_transition'], 'pending->ready')
         self.assertEqual(payload['transition_journal']['recent_transitions'][0]['trigger'], 'state_transition')
@@ -6370,6 +6372,8 @@ class TestApprovalPersistence(unittest.TestCase):
         self.assertEqual(payload['lanes']['manual_approval']['stage_loop']['dominant_path'], 'review_pending')
         self.assertEqual(payload['lanes']['manual_approval']['items'][0]['stage_loop']['loop_state'], 'review_pending')
         self.assertEqual(payload['lanes']['manual_approval']['low_intervention_summary']['dominant_follow_up'], 'await_manual_approval')
+        self.assertIn('rollout_advisory', payload['summary'])
+        self.assertIn('auto_promotion_candidate_queue', payload['rollout'])
         self.assertEqual(next(row for row in payload['group_summaries']['by_operator_route'] if row['group_id'] == 'manual_approval_queue')['summary']['dominant_follow_up'], 'await_manual_approval')
 
     def test_build_unified_workbench_overview_summarizes_approval_rollout_and_recovery_lines(self):
@@ -6499,6 +6503,9 @@ class TestApprovalPersistence(unittest.TestCase):
         self.assertEqual(payload['summary']['stage_loop']['rollout']['path_counts']['rollback_prepare'], 2)
         self.assertEqual(payload['summary']['stage_loop']['rollout']['path_counts']['hold'], 0)
         self.assertEqual(payload['lines']['rollout']['stage_loop']['dominant_path'], 'rollback_prepare')
+        self.assertIn('rollout_advisory', payload['summary'])
+        self.assertIn('rollout_advisory', payload['lines']['rollout'])
+        self.assertIn('auto_promotion_candidate_queue', payload['lines']['rollout'])
         self.assertEqual(payload['transition_journal']['latest']['workflow_transition'], 'execution_failed->blocked')
         self.assertEqual(payload['upstreams']['workflow_recovery_view']['summary']['manual_recovery_count'], 1)
 
@@ -6547,6 +6554,73 @@ class TestApprovalPersistence(unittest.TestCase):
         self.assertEqual(payload['summary']['filtered_item_count'], 1)
         self.assertEqual(payload['upstreams']['workbench_governance_view']['applied_filters']['lane_ids'], ['manual_approval'])
         self.assertEqual(payload['lines']['approval']['counts']['manual_approval'], 1)
+
+    def test_rollout_stage_advisory_flows_into_digest_workbench_and_unified_overview(self):
+        payload = {
+            'workflow_state': {
+                'item_states': [
+                    {
+                        'item_id': 'playbook::promo',
+                        'title': 'Promotion ready item',
+                        'action_type': 'joint_stage_prepare',
+                        'risk_level': 'low',
+                        'approval_required': False,
+                        'requires_manual': False,
+                        'workflow_state': 'ready',
+                        'blocking_reasons': [],
+                        'auto_approval_decision': 'auto_approve',
+                        'auto_approval_eligible': True,
+                        'current_rollout_stage': 'guarded_prepare',
+                        'target_rollout_stage': 'controlled_apply',
+                        'stage_handler': {
+                            'stage_key': 'guarded_prepare',
+                            'advisory': {
+                                'recommended_stage': 'controlled_apply',
+                                'recommended_action': 'promote_to_controlled_apply',
+                                'urgency': 'high',
+                                'confidence': 0.93,
+                                'reasons': ['auto_advance_allowed'],
+                                'ready_for_live_promotion': True,
+                            },
+                        },
+                        'state_machine': {
+                            'auto_advance_gate': {'allowed': True, 'readiness_score': 100, 'blockers': []},
+                            'rollback_gate': {'candidate': False, 'triggered': []},
+                        },
+                    },
+                ],
+                'summary': {'item_count': 1},
+            },
+            'approval_state': {
+                'items': [
+                    {
+                        'approval_id': 'approval::promo',
+                        'playbook_id': 'playbook::promo',
+                        'title': 'Promotion ready item',
+                        'action_type': 'joint_stage_prepare',
+                        'approval_state': 'pending',
+                        'decision_state': 'ready',
+                        'risk_level': 'low',
+                        'approval_required': False,
+                        'requires_manual': False,
+                        'blocked_by': [],
+                    },
+                ],
+                'summary': {'pending_count': 1},
+            },
+            'rollout_executor': {'status': 'controlled', 'summary': {}},
+        }
+        digest = build_workflow_operator_digest(payload, max_items=5)
+        self.assertEqual(digest['summary']['rollout_advisory']['auto_promotion_candidate_count'], 1)
+        self.assertTrue(digest['attention']['auto_promotion_candidates'])
+        self.assertEqual(digest['attention']['auto_promotion_candidates'][0]['recommended_action'], 'promote_to_controlled_apply')
+        workbench = build_workbench_governance_view(payload, max_items=5)
+        self.assertEqual(workbench['summary']['rollout_advisory']['dominant_action'], 'promote_to_controlled_apply')
+        self.assertEqual(workbench['rollout']['auto_promotion_candidate_queue'][0]['item_id'], 'playbook::promo')
+        overview = build_unified_workbench_overview(payload, max_items=5)
+        self.assertEqual(overview['summary']['rollout_advisory']['ready_for_live_promotion_count'], 1)
+        self.assertEqual(overview['lines']['rollout']['counts']['ready_for_live_promotion'], 1)
+        self.assertEqual(overview['lines']['rollout']['auto_promotion_candidate_queue'][0]['recommended_stage'], 'controlled_apply')
 
     def test_gate_consumption_flows_into_operator_digest_workbench_and_timeline_layers(self):
         gate_payload = {

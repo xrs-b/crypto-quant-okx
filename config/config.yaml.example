@@ -176,6 +176,12 @@ runtime:
     limit: 20
     approval_type: ''
     actor: system:approval-hygiene
+  adaptive_rollout_orchestration:
+    enabled: false   # 默认关闭；开启后 daemon 每轮会安全执行 workflow_ready -> adaptive rollout orchestration
+    use_cache: true
+    notify_on_activity: true
+    max_items: 5
+    actor: system:runtime-adaptive-rollout-orchestration
 
 runtime_meta:
   current_preset: btc-focused

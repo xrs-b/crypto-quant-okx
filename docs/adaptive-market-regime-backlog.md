@@ -26,6 +26,19 @@
   - `dashboard/api:/api/backtest/calibration-report?view=production_rollout_readiness`
 - 已补 helper + API + calibration-report view 测试覆盖，确保生产门禁输出与相关 summary 稳定存在。
 
+## 2026-03-29 已完成：runtime daemon / CLI adaptive rollout orchestration integration
+- 已把既有 `execute_adaptive_rollout_orchestration(...)` first-class 主调度入口正式接入 `bot/run.py` 运行时：
+  - daemon 每轮会在 `approval_hygiene` 之后尝试执行一轮 safe orchestration pass；
+  - 新增 `runtime.adaptive_rollout_orchestration` 配置（`enabled/use_cache/notify_on_activity/max_items/actor`）；
+  - 新增 CLI：`python bot/run.py --adaptive-rollout-orchestration`，方便人工/agent 单次触发；
+  - 运行结果会持久化进 `runtime_state.adaptive_rollout_orchestration`，保留 `gate_status / gate_blocked / auto_approval_executed_count / controlled_rollout_executed_count / review_queue_queued_count / recovery_* / testnet_bridge_status` 与 runtime summary `next_step / stuck_points / follow_ups`。
+- daily `health_summary` 亦已接入 orchestration 状态，调用方可以直接睇到：
+  - 运行时有没有开启 adaptive rollout orchestration；
+  - 上一次 gate 系 ready 定 blocked；
+  - 最近有冇 auto-approval / controlled rollout / review queue / recovery activity；
+  - 下一步 runtime 预计会做乜。
+- 安全边界保持不变：仍完全复用既有 `production_rollout_readiness` gate、rollout executor allowlist、review-only / metadata-only / queue-only 约束，**冇新增真实盘危险执行权限**。
+
 ## 2026-03-28 已完成：runtime orchestration summary / low-intervention entrypoint
 - 已新增统一后端运行期入口 `m5_runtime_orchestration_summary_v1`，专门把 `adaptive_rollout_orchestration + workflow operator digest + workbench governance + unified workbench overview + recovery/review queues` 收口成一份更直接可巡检的 runtime summary。
 - 调用方而家可以一眼见到：

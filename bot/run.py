@@ -27,7 +27,8 @@ from core.paths import DATA_DIR
 from signals import SignalDetector, SignalValidator, SignalRecorder, EntryDecider
 from trading import TradingExecutor, RiskManager
 from ml.engine import MLEngine, ModelTrainer, DataCollector
-from analytics import StrategyBacktester, SignalQualityAnalyzer, ParameterOptimizer, GovernanceEngine, build_approval_audit_overview
+from analytics import StrategyBacktester, SignalQualityAnalyzer, ParameterOptimizer, GovernanceEngine, build_approval_audit_overview, execute_adaptive_rollout_orchestration, build_runtime_orchestration_summary
+from analytics.backtest import export_calibration_payload
 from validation import format_validation_report_markdown, run_shadow_validation_case, run_shadow_validation_replay
 
 
@@ -244,6 +245,102 @@ def maybe_run_approval_hygiene(cfg: Config, db: Database, notifier: Notification
     return result
 
 
+def maybe_run_adaptive_rollout_orchestration(cfg: Config, db: Database, notifier: NotificationManager = None, force: bool = False) -> dict:
+    runtime = load_runtime_state()
+    orchestrator_cfg = cfg.get('runtime.adaptive_rollout_orchestration', {}) or {}
+    enabled = bool(orchestrator_cfg.get('enabled', False))
+    use_cache = bool(orchestrator_cfg.get('use_cache', True))
+    notify_on_activity = bool(orchestrator_cfg.get('notify_on_activity', True))
+    max_items = max(1, min(int(orchestrator_cfg.get('max_items', 5) or 5), 20))
+    actor = str(orchestrator_cfg.get('actor') or 'system:runtime-adaptive-rollout-orchestration')
+
+    result = {
+        'enabled': enabled,
+        'force': bool(force),
+        'use_cache': use_cache,
+        'max_items': max_items,
+        'ran': False,
+        'summary': None,
+        'workflow_ready': None,
+        'adaptive_rollout_orchestration': None,
+        'runtime_orchestration_summary': None,
+    }
+    if not enabled and not force:
+        result['reason'] = 'disabled'
+        return result
+
+    backtester = StrategyBacktester(cfg)
+    report = backtester.run_all(use_cache=use_cache)
+    workflow_ready = export_calibration_payload(report, view='workflow_ready')
+    payload = execute_adaptive_rollout_orchestration(workflow_ready, db, config=cfg, replay_source='runtime_adaptive_rollout_orchestration')
+    runtime_summary = build_runtime_orchestration_summary(payload, max_items=max_items)
+    orchestration = payload.get('adaptive_rollout_orchestration') or {}
+    orchestration_summary = orchestration.get('summary') or {}
+
+    result.update({
+        'ran': True,
+        'summary': orchestration_summary,
+        'workflow_ready': workflow_ready,
+        'adaptive_rollout_orchestration': orchestration,
+        'runtime_orchestration_summary': runtime_summary,
+    })
+
+    runtime['adaptive_rollout_orchestration'] = {
+        'last_run_at': datetime.now().isoformat(),
+        'enabled': enabled,
+        'use_cache': use_cache,
+        'actor': actor,
+        'summary': {
+            'schema_version': orchestration.get('schema_version'),
+            'pass_count': int(orchestration_summary.get('pass_count', 0) or 0),
+            'rerun_triggered': bool(orchestration_summary.get('rerun_triggered', False)),
+            'rerun_reason': orchestration_summary.get('rerun_reason'),
+            'gate_status': orchestration_summary.get('gate_status'),
+            'gate_blocked': bool(orchestration_summary.get('gate_blocked', False)),
+            'gate_blocking_issues': orchestration_summary.get('gate_blocking_issues') or [],
+            'auto_approval_executed_count': int(orchestration_summary.get('auto_approval_executed_count', 0) or 0),
+            'controlled_rollout_executed_count': int(orchestration_summary.get('controlled_rollout_executed_count', 0) or 0),
+            'review_queue_queued_count': int(orchestration_summary.get('review_queue_queued_count', 0) or 0),
+            'recovery_retry_scheduled_count': int(orchestration_summary.get('recovery_retry_scheduled_count', 0) or 0),
+            'recovery_rollback_queued_count': int(orchestration_summary.get('recovery_rollback_queued_count', 0) or 0),
+            'testnet_bridge_status': orchestration_summary.get('testnet_bridge_status'),
+            'testnet_bridge_follow_up_required': bool(orchestration_summary.get('testnet_bridge_follow_up_required', False)),
+        },
+        'runtime_summary': {
+            'schema_version': runtime_summary.get('schema_version'),
+            'headline': runtime_summary.get('headline') or {},
+            'summary': runtime_summary.get('summary') or {},
+            'next_step': runtime_summary.get('next_step') or {},
+            'stuck_points': (runtime_summary.get('stuck_points') or [])[:max_items],
+            'follow_ups': (runtime_summary.get('follow_ups') or [])[:max_items],
+        },
+    }
+    save_runtime_state(runtime)
+
+    activity_total = sum([
+        int(orchestration_summary.get('auto_approval_executed_count', 0) or 0),
+        int(orchestration_summary.get('controlled_rollout_executed_count', 0) or 0),
+        int(orchestration_summary.get('review_queue_queued_count', 0) or 0),
+        int(orchestration_summary.get('recovery_retry_scheduled_count', 0) or 0),
+        int(orchestration_summary.get('recovery_rollback_queued_count', 0) or 0),
+    ])
+    if notifier is not None and (force or (notify_on_activity and (activity_total > 0 or bool(orchestration_summary.get('gate_blocked', False))))):
+        lines = [
+            f"gate={orchestration_summary.get('gate_status') or '--'} ｜ blocked={'yes' if orchestration_summary.get('gate_blocked') else 'no'} ｜ passes={orchestration_summary.get('pass_count', 0)}",
+            f"auto-approval={orchestration_summary.get('auto_approval_executed_count', 0)} ｜ rollout={orchestration_summary.get('controlled_rollout_executed_count', 0)} ｜ review-queue={orchestration_summary.get('review_queue_queued_count', 0)}",
+            f"recovery retry={orchestration_summary.get('recovery_retry_scheduled_count', 0)} ｜ rollback={orchestration_summary.get('recovery_rollback_queued_count', 0)} ｜ bridge={orchestration_summary.get('testnet_bridge_status') or 'disabled'}",
+        ]
+        next_step = runtime_summary.get('next_step') or {}
+        if next_step:
+            lines.append(f"next-step：{next_step.get('summary') or next_step.get('action') or '--'}")
+        notifier.notify_runtime('adaptive_rollout_orchestration', lines, {
+            'summary': orchestration_summary,
+            'runtime_orchestration_summary': runtime_summary,
+        })
+
+    return result
+
+
 def build_runtime_health_summary(cfg: Config, db: Database) -> dict:
     runtime = load_runtime_state()
     risk = RiskManager(cfg, db).get_risk_status()
@@ -268,6 +365,11 @@ def build_runtime_health_summary(cfg: Config, db: Database) -> dict:
     approval_hygiene = build_approval_hygiene_summary(cfg, db)
     approval_runtime = runtime.get('approval_hygiene', {}) if isinstance(runtime.get('approval_hygiene'), dict) else {}
     approval_mode = 'auto-cleanup' if approval_hygiene.get('auto_cleanup_enabled') else 'audit-only'
+    orchestration_runtime = runtime.get('adaptive_rollout_orchestration', {}) if isinstance(runtime.get('adaptive_rollout_orchestration'), dict) else {}
+    orchestration_cfg = cfg.get('runtime.adaptive_rollout_orchestration', {}) or {}
+    orchestration_enabled = bool(orchestration_cfg.get('enabled', False))
+    orchestration_summary = orchestration_runtime.get('summary', {}) if isinstance(orchestration_runtime.get('summary'), dict) else {}
+    orchestration_runtime_summary = orchestration_runtime.get('runtime_summary', {}) if isinstance(orchestration_runtime.get('runtime_summary'), dict) else {}
     lines = [
         f'环境：{cfg.exchange_mode}',
         f'监听币种：{", ".join(cfg.symbols) or "--"}',
@@ -285,6 +387,10 @@ def build_runtime_health_summary(cfg: Config, db: Database) -> dict:
         f'Approval Hygiene：mode={approval_mode} ｜ stale={approval_hygiene.get("stale_count", 0)} ｜ decision diff={approval_hygiene.get("decision_diff_count", 0)}',
         f'审批卫生：stale>{approval_hygiene.get("stale_after_minutes", 0)} 分钟 ｜ 上次处理 {approval_runtime.get("last_run_at") or "--"} ｜ 上次过期收口 {approval_runtime.get("expired_count", 0)}',
         f'Operator routing：{approval_hygiene.get("operator_action_summary", {}).get("policy_counts") or {}}',
+        '---',
+        f'Adaptive Rollout Orchestration：enabled={"yes" if orchestration_enabled else "no"} ｜ gate={orchestration_summary.get("gate_status") or "--"} ｜ blocked={"yes" if orchestration_summary.get("gate_blocked") else "no"}',
+        f'编排执行：auto-approval {orchestration_summary.get("auto_approval_executed_count", 0)} ｜ rollout {orchestration_summary.get("controlled_rollout_executed_count", 0)} ｜ review {orchestration_summary.get("review_queue_queued_count", 0)}',
+        f'上次编排：{orchestration_runtime.get("last_run_at") or "--"} ｜ next-step {((orchestration_runtime_summary.get("next_step") or {}).get("summary") or (orchestration_runtime_summary.get("next_step") or {}).get("action") or "--")}',
     ]
     if risk.get('loss_streak_locked'):
         lines.extend(['---', f'连亏熔断：{risk.get("consecutive_losses", 0)}/{risk.get("max_consecutive_losses", 0)} ｜ 自动恢复 {risk.get("loss_streak_recover_at") or "--"}'])
@@ -303,6 +409,12 @@ def build_runtime_health_summary(cfg: Config, db: Database) -> dict:
             'mode': mode,
             'models': model_rows,
             'approval_hygiene': approval_hygiene,
+            'adaptive_rollout_orchestration': {
+                'enabled': orchestration_enabled,
+                'runtime': orchestration_runtime,
+                'summary': orchestration_summary,
+                'runtime_summary': orchestration_runtime_summary,
+            },
         }
     }
 
@@ -1131,6 +1243,7 @@ def main():
     parser.add_argument('--daily-summary', action='store_true', help='生成日报摘要')
     parser.add_argument('--health-summary', action='store_true', help='立即生成一份健康汇总并发送通知')
     parser.add_argument('--approval-hygiene', action='store_true', help='执行审批卫生检查；开启 auto_cleanup 时会自动收口 stale 审批')
+    parser.add_argument('--adaptive-rollout-orchestration', action='store_true', help='执行一轮 runtime adaptive rollout orchestration（workflow_ready -> executor/approval/review/recovery）')
     parser.add_argument('--cleanup-runtime-records', action='store_true', help='清理重复的治理/日报运行记录')
     parser.add_argument('--exchange-diagnose', action='store_true', help='只读诊断交易所/合约参数，不执行下单')
     parser.add_argument('--notify-test', action='store_true', help='测试 Discord/webhook 通知链路')
@@ -1206,6 +1319,10 @@ def main():
                 maybe_run_approval_hygiene(cfg, Database(cfg.db_path), notifier)
             except Exception as e:
                 logger.error(f'执行 approval hygiene 失败: {e}')
+            try:
+                maybe_run_adaptive_rollout_orchestration(cfg, Database(cfg.db_path), notifier)
+            except Exception as e:
+                logger.error(f'执行 adaptive rollout orchestration 失败: {e}')
             try:
                 maybe_send_daily_health_summary(cfg, Database(cfg.db_path), notifier)
             except Exception as e:
@@ -1345,6 +1462,14 @@ def main():
         notifier = NotificationManager(cfg, db, logger)
         result = maybe_run_approval_hygiene(cfg, db, notifier, force=True)
         print("\n🧼 审批卫生结果:\n")
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+
+    elif args.adaptive_rollout_orchestration:
+        cfg = Config()
+        db = Database(cfg.db_path)
+        notifier = NotificationManager(cfg, db, logger)
+        result = maybe_run_adaptive_rollout_orchestration(cfg, db, notifier, force=True)
+        print("\n🧭 Adaptive rollout orchestration 结果:\n")
         print(json.dumps(result, ensure_ascii=False, indent=2))
 
     elif args.cleanup_runtime_records:

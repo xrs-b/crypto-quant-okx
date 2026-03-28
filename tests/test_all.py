@@ -28,7 +28,7 @@ from trading import TradingExecutor, RiskManager
 from trading.executor import build_observability_context
 from analytics.backtest import StrategyBacktester, build_regime_policy_calibration_report, build_calibration_report_ready_payload, build_joint_governance_ready_payload, build_governance_workflow_ready_payload, export_calibration_payload
 from strategies.strategy_library import StrategyManager
-from bot.run import build_exchange_diagnostics, build_exchange_smoke_plan, build_approval_hygiene_summary, build_runtime_health_summary, maybe_run_approval_hygiene, maybe_send_daily_health_summary, execute_exchange_smoke, reconcile_exchange_positions
+from bot.run import build_exchange_diagnostics, build_exchange_smoke_plan, build_approval_hygiene_summary, build_runtime_health_summary, maybe_run_approval_hygiene, maybe_run_adaptive_rollout_orchestration, maybe_send_daily_health_summary, execute_exchange_smoke, reconcile_exchange_positions
 from dashboard.api import app
 from core.risk_budget import get_risk_budget_config, compute_entry_plan, summarize_margin_usage, summarize_risk_hint_changes
 from core.presets import PresetManager
@@ -2719,10 +2719,92 @@ class TestHealthSummary(unittest.TestCase):
             self.assertTrue(any('observe-only' in line for line in summary['lines']))
             self.assertTrue(any('Approval Hygiene' in line for line in summary['lines']))
             self.assertTrue(any('Operator routing' in line for line in summary['lines']))
+            self.assertTrue(any('Adaptive Rollout Orchestration' in line for line in summary['lines']))
             self.assertIn('approval_hygiene', summary['details'])
+            self.assertIn('adaptive_rollout_orchestration', summary['details'])
         finally:
             if os.path.exists('data/test_health_summary.db'):
                 os.remove('data/test_health_summary.db')
+
+    def test_maybe_run_adaptive_rollout_orchestration_persists_runtime_summary(self):
+        import bot.run as bot_run
+        cfg = Config()
+        cfg._config.setdefault('runtime', {}).setdefault('adaptive_rollout_orchestration', {}).update({
+            'enabled': True,
+            'use_cache': True,
+            'notify_on_activity': True,
+            'max_items': 3,
+        })
+        db = Database('data/test_runtime_adaptive_rollout.db')
+        notifier = FakeHealthNotifier()
+        old_runtime_path = bot_run.RUNTIME_STATE_PATH
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bot_run.RUNTIME_STATE_PATH = Path(tmpdir) / 'runtime_state.json'
+            original_strategy_backtester = bot_run.StrategyBacktester
+            original_export_calibration_payload = bot_run.export_calibration_payload
+            original_execute_adaptive_rollout_orchestration = bot_run.execute_adaptive_rollout_orchestration
+            original_build_runtime_orchestration_summary = bot_run.build_runtime_orchestration_summary
+
+            class StubBacktester:
+                def __init__(self, config):
+                    self.config = config
+
+                def run_all(self, use_cache=True, **kwargs):
+                    return {'summary': {'symbols': 1}, 'delivery': {'workflow_ready': {'items': []}}}
+
+            try:
+                bot_run.StrategyBacktester = StubBacktester
+                bot_run.export_calibration_payload = lambda report, view='workflow_ready': {
+                    'schema_version': 'm5_governance_workflow_ready_v2',
+                    'summary': {'item_count': 1},
+                    'approval_state': {'items': []},
+                    'workflow_state': {'item_states': []},
+                }
+                bot_run.execute_adaptive_rollout_orchestration = lambda payload, db, config=None, replay_source='workflow_ready': {
+                    **payload,
+                    'adaptive_rollout_orchestration': {
+                        'schema_version': 'm5_adaptive_rollout_orchestration_v2',
+                        'summary': {
+                            'pass_count': 2,
+                            'rerun_triggered': True,
+                            'rerun_reason': 'auto_approval_promoted_ready_items',
+                            'gate_status': 'ready',
+                            'gate_blocked': False,
+                            'gate_blocking_issues': [],
+                            'auto_approval_executed_count': 1,
+                            'controlled_rollout_executed_count': 1,
+                            'review_queue_queued_count': 1,
+                            'recovery_retry_scheduled_count': 1,
+                            'recovery_rollback_queued_count': 0,
+                            'testnet_bridge_status': 'disabled',
+                            'testnet_bridge_follow_up_required': False,
+                        },
+                    },
+                }
+                bot_run.build_runtime_orchestration_summary = lambda payload, max_items=5, **kwargs: {
+                    'schema_version': 'm5_runtime_orchestration_summary_v1',
+                    'headline': {'text': 'runtime orchestration ok'},
+                    'summary': {'recent_progress_count': 1},
+                    'next_step': {'action': 'review_followups', 'summary': 'review queued follow-ups'},
+                    'stuck_points': [],
+                    'follow_ups': [{'item_id': 'item-1'}],
+                }
+                result = maybe_run_adaptive_rollout_orchestration(cfg, db, notifier)
+                self.assertTrue(result['ran'])
+                self.assertEqual(result['summary']['auto_approval_executed_count'], 1)
+                state = json.loads(bot_run.RUNTIME_STATE_PATH.read_text())
+                self.assertIn('adaptive_rollout_orchestration', state)
+                self.assertEqual(state['adaptive_rollout_orchestration']['summary']['controlled_rollout_executed_count'], 1)
+                self.assertEqual(state['adaptive_rollout_orchestration']['runtime_summary']['next_step']['action'], 'review_followups')
+                self.assertTrue(any(call['event_type'] == 'adaptive_rollout_orchestration' for call in notifier.calls))
+            finally:
+                bot_run.StrategyBacktester = original_strategy_backtester
+                bot_run.export_calibration_payload = original_export_calibration_payload
+                bot_run.execute_adaptive_rollout_orchestration = original_execute_adaptive_rollout_orchestration
+                bot_run.build_runtime_orchestration_summary = original_build_runtime_orchestration_summary
+                bot_run.RUNTIME_STATE_PATH = old_runtime_path
+        if os.path.exists('data/test_runtime_adaptive_rollout.db'):
+            os.remove('data/test_runtime_adaptive_rollout.db')
 
     def test_maybe_send_daily_health_summary_force_sends(self):
         import bot.run as bot_run

@@ -9259,6 +9259,39 @@ class TestApprovalPersistence(unittest.TestCase):
             self.assertIn('validation_stale', advisory['reasons'])
             self.assertEqual(result['rollout_executor']['stage_progression']['summary']['by_advisory_stage']['guarded_prepare'], 1)
 
+
+    def test_rollout_executor_stage_prepare_alias_maps_to_canonical_stage_handler(self):
+        class StubConfig:
+            def __init__(self, values=None):
+                self.values = values or {}
+
+            def get(self, key, default=None):
+                return self.values.get(key, default)
+
+        config = StubConfig({'governance.rollout_executor': {'enabled': True, 'mode': 'controlled', 'allowed_action_types': ['joint_stage_prepare']}})
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(str(Path(tmpdir) / 'rollout_executor_stage_alias.db'))
+            payload = {
+                'workflow_state': {'item_states': [
+                    {'item_id': 'playbook::stage', 'title': 'Legacy prepared alias item', 'action_type': 'joint_stage_prepare', 'decision': 'expand', 'governance_mode': 'rollout', 'risk_level': 'low', 'approval_required': False, 'blocking_reasons': [], 'preconditions': [], 'workflow_state': 'pending', 'confidence': 'high', 'current_rollout_stage': 'observe', 'target_rollout_stage': 'prepared'}
+                ], 'summary': {}},
+                'approval_state': {'items': [
+                    {'approval_id': 'approval::stage', 'playbook_id': 'playbook::stage', 'title': 'Legacy prepared alias item', 'action_type': 'joint_stage_prepare', 'approval_state': 'pending', 'decision_state': 'pending', 'risk_level': 'low', 'approval_required': False, 'blocked_by': [], 'target_rollout_stage': 'prepared'}
+                ], 'summary': {}},
+            }
+            payload = attach_auto_approval_policy(payload)
+            db.sync_approval_items(build_workflow_approval_records(payload), replay_source='unit-test')
+            result = execute_rollout_executor(payload, db, config=config, replay_source='unit-test-replay')
+            item = result['rollout_executor']['items'][0]
+            self.assertEqual(item['plan']['stage_handler']['stage_key'], 'guarded_prepare')
+            self.assertEqual(item['plan']['stage_handler']['requested_target_stage'], 'prepared')
+            self.assertEqual(item['plan']['stage_handler']['target_stage'], 'guarded_prepare')
+            self.assertEqual(item['result']['stage_loop']['loop_state'], 'auto_advance')
+            self.assertEqual(item['result']['stage_loop']['recommended_action'], 'auto_advance')
+            self.assertEqual(item['plan']['stage_handler']['next_transition'], 'promote_to_controlled_apply')
+            self.assertEqual(item['plan']['stage_handler']['advisory']['recommended_action'], 'promote_to_controlled_apply')
+            self.assertEqual(result['rollout_executor']['stage_progression']['items'][0]['stage_progression']['stage_handler']['stage_profile']['canonical_stage'], 'guarded_prepare')
+
     def test_rollout_executor_stage_loop_marks_review_schedule_as_review_pending(self):
         class StubConfig:
             def __init__(self, values=None):
@@ -9806,6 +9839,12 @@ class TestApprovalPersistence(unittest.TestCase):
             self.assertEqual(stage_row['details']['stage_transition']['from'], 'observe')
             self.assertEqual(stage_row['details']['stage_transition']['to'], 'prepared')
             self.assertIn('stage_model', stage_row['details'])
+            self.assertEqual(stage_row['details']['canonical_rollout_stage'], 'guarded_prepare')
+            self.assertEqual(stage_row['details']['canonical_target_rollout_stage'], 'guarded_prepare')
+            self.assertEqual(stage_row['details']['stage_transition']['canonical_to'], 'guarded_prepare')
+            self.assertTrue(stage_row['details']['stage_transition']['alias_applied'])
+            self.assertEqual(stage_row['details']['stage_handler']['stage_key'], 'guarded_prepare')
+            self.assertEqual(stage_row['details']['stage_handler']['stage_profile']['canonical_stage'], 'guarded_prepare')
 
             review_row = db.get_approval_state('approval::review')
             self.assertEqual(review_row['state'], 'pending')

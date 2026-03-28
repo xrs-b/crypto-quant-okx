@@ -142,6 +142,14 @@ ROLLOUT_STAGE_FAMILY_TO_STAGES = {
     'unsupported': ['observe'],
 }
 
+ROLLOUT_STAGE_ALIASES = {
+    'prepared': 'guarded_prepare',
+    'guarded': 'guarded_prepare',
+    'apply_ready': 'controlled_apply',
+    'post_apply_review': 'review_pending',
+    'rollback_review': 'rollback_prepare',
+}
+
 ROLLOUT_TRANSITION_POLICY_VERSION = 'm5_rollout_transition_policy_v1'
 ROLLOUT_ACTION_REGISTRY_VERSION = 'm5_safe_rollout_action_registry_v1'
 ROLLOUT_STAGE_HANDLER_REGISTRY_VERSION = 'm5_rollout_stage_handler_registry_v1'
@@ -2221,12 +2229,39 @@ def _recommend_rollout_stage_advisory(*, stage_key: str, current_stage: str, tar
     }
 
 
+def _canonicalize_rollout_stage(stage_key: Optional[str], fallback: str = 'observe') -> str:
+    normalized = str(stage_key or '').strip().lower()
+    if not normalized:
+        return fallback
+    return ROLLOUT_STAGE_ALIASES.get(normalized, normalized)
+
+
+def _build_rollout_stage_identity(stage_key: Optional[str], fallback: str = 'observe') -> Dict[str, Any]:
+    requested = str(stage_key or '').strip().lower()
+    canonical = _canonicalize_rollout_stage(requested, fallback=fallback)
+    if canonical not in ROLLOUT_STAGE_HANDLER_SPECS:
+        canonical = fallback if fallback in ROLLOUT_STAGE_HANDLER_SPECS else 'observe'
+    alias_applied = bool(requested and requested != canonical)
+    return {
+        'requested_stage': requested or canonical,
+        'canonical_stage': canonical,
+        'alias_applied': alias_applied,
+        'stage_profile': _build_rollout_stage_profile(canonical) if canonical in ROLLOUT_STAGE_HANDLER_SPECS else _build_rollout_stage_profile(fallback),
+    }
+
+
 def _build_rollout_stage_profile(stage_key: Optional[str], spec: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    normalized_stage = str(stage_key or '').strip().lower() or 'observe'
+    requested_stage = str(stage_key or '').strip().lower()
+    normalized_stage = _canonicalize_rollout_stage(requested_stage, fallback='observe')
+    if normalized_stage not in ROLLOUT_STAGE_HANDLER_SPECS:
+        normalized_stage = 'observe'
     base_spec = dict(spec or ROLLOUT_STAGE_HANDLER_SPECS.get(normalized_stage) or ROLLOUT_STAGE_HANDLER_SPECS['observe'])
     stage_index = ROLLOUT_STAGE_ORDER.index(normalized_stage) if normalized_stage in ROLLOUT_STAGE_ORDER else 0
     return {
         'stage_key': normalized_stage,
+        'requested_stage': requested_stage or normalized_stage,
+        'canonical_stage': normalized_stage,
+        'alias_applied': bool(requested_stage and requested_stage != normalized_stage),
         'stage_index': stage_index,
         'stage_path': list(ROLLOUT_STAGE_ORDER),
         'owner': base_spec.get('owner') or 'system',
@@ -2309,8 +2344,10 @@ def _resolve_rollout_stage_handler(*, current_stage: Optional[str], target_stage
                                   auto_approve: Optional[bool] = None, low_risk: Optional[bool] = None,
                                   execution_status: Optional[str] = None) -> Dict[str, Any]:
     blocked = _dedupe_strings(blocked_by or [])
-    normalized_current = str(current_stage or '').strip().lower() or 'observe'
-    normalized_target = str(target_stage or '').strip().lower() or normalized_current
+    requested_current = str(current_stage or '').strip().lower() or 'observe'
+    requested_target = str(target_stage or '').strip().lower() or requested_current
+    normalized_current = _canonicalize_rollout_stage(requested_current, fallback='observe')
+    normalized_target = _canonicalize_rollout_stage(requested_target, fallback=normalized_current or 'observe')
     stage_key = normalized_target if normalized_target in ROLLOUT_STAGE_HANDLER_SPECS else normalized_current
     spec = dict(ROLLOUT_STAGE_HANDLER_SPECS.get(stage_key) or ROLLOUT_STAGE_HANDLER_SPECS['observe'])
     owner = spec.get('owner') or ('operator' if rollback_candidate else 'system')
@@ -2371,7 +2408,7 @@ def _resolve_rollout_stage_handler(*, current_stage: Optional[str], target_stage
         low_risk=low_risk,
         execution_status=execution_status,
     )
-    return _build_rollout_stage_handler_snapshot(
+    snapshot = _build_rollout_stage_handler_snapshot(
         stage_key=stage_key,
         current_stage=normalized_current,
         target_stage=normalized_target,
@@ -2387,6 +2424,11 @@ def _resolve_rollout_stage_handler(*, current_stage: Optional[str], target_stage
         rollback_candidate=rollback_candidate,
         advisory=advisory,
     )
+    snapshot['requested_current_stage'] = requested_current
+    snapshot['requested_target_stage'] = requested_target
+    snapshot['current_stage'] = normalized_current
+    snapshot['target_stage'] = normalized_target
+    return snapshot
 
 
 def _build_rollout_gate_policy(spec: Optional[Dict[str, Any]], handler: Optional[Dict[str, Any]], *, allowlisted: bool) -> Dict[str, Any]:
@@ -2654,10 +2696,25 @@ def _build_controlled_rollout_action_details(action_type: str, row: Dict, workfl
     elif action_type == 'joint_stage_prepare':
         target_stage = str(row.get('target_rollout_stage') or workflow_item.get('target_rollout_stage') or 'prepared').strip().lower() or 'prepared'
         previous_stage = str(row.get('current_rollout_stage') or workflow_item.get('current_rollout_stage') or row.get('rollout_stage') or workflow_item.get('rollout_stage') or 'pending').strip().lower() or 'pending'
+        current_identity = _build_rollout_stage_identity(previous_stage, fallback='observe')
+        target_identity = _build_rollout_stage_identity(target_stage, fallback=current_identity.get('canonical_stage') or 'observe')
         details.update({
             'rollout_stage': target_stage,
             'target_rollout_stage': target_stage,
-            'stage_transition': {'from': previous_stage, 'to': target_stage},
+            'canonical_rollout_stage': target_identity.get('canonical_stage'),
+            'canonical_target_rollout_stage': target_identity.get('canonical_stage'),
+            'previous_canonical_rollout_stage': current_identity.get('canonical_stage'),
+            'stage_transition': {
+                'from': previous_stage,
+                'to': target_stage,
+                'canonical_from': current_identity.get('canonical_stage'),
+                'canonical_to': target_identity.get('canonical_stage'),
+                'alias_applied': bool(current_identity.get('alias_applied') or target_identity.get('alias_applied')),
+            },
+            'stage_identity': {
+                'current': current_identity,
+                'target': target_identity,
+            },
             'stage_model': workflow_item.get('stage_model') or row.get('stage_model') or {},
             'queue_progression': workflow_item.get('queue_progression') or row.get('queue_progression') or {},
             'stage_handler': {
@@ -3037,7 +3094,19 @@ def execute_controlled_rollout_layer(payload: Dict, db: Any, *, config: Any = No
         details['previous_rollout_stage'] = before_stage
         details['rollout_stage'] = after_stage
         details['target_rollout_stage'] = after_stage
-        details['stage_transition'] = {'from': before_stage, 'to': after_stage}
+        current_identity = _build_rollout_stage_identity(before_stage, fallback='observe')
+        target_identity = _build_rollout_stage_identity(after_stage, fallback=current_identity.get('canonical_stage') or 'observe')
+        details['previous_canonical_rollout_stage'] = current_identity.get('canonical_stage')
+        details['canonical_rollout_stage'] = target_identity.get('canonical_stage')
+        details['canonical_target_rollout_stage'] = target_identity.get('canonical_stage')
+        details['stage_transition'] = {
+            **dict(details.get('stage_transition') or {}),
+            'from': before_stage,
+            'to': after_stage,
+            'canonical_from': current_identity.get('canonical_stage'),
+            'canonical_to': target_identity.get('canonical_stage'),
+            'alias_applied': bool(current_identity.get('alias_applied') or target_identity.get('alias_applied')),
+        }
         db.upsert_approval_state(
             item_id=approval_id,
             approval_type=row.get('action_type') or workflow_item.get('action_type') or 'workflow_approval',

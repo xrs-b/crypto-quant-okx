@@ -5064,6 +5064,8 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
             self.assertEqual(payload['data']['transition_journal']['latest']['workflow_transition'], 'pending->ready')
             self.assertLessEqual(len(payload['data']['stage_progression']['items']), 3)
             self.assertEqual(payload['summary'], payload['data']['summary'])
+            self.assertIn('related_summary', payload)
+            self.assertIn('control_plane_readiness', payload['related_summary'])
         finally:
             dashboard_api.backtester = old_backtester
             dashboard_api.db.get_recent_transition_journal = old_get_recent_transition_journal
@@ -5424,6 +5426,8 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
             self.assertIn('stage_loop', payload['data']['summary'])
             self.assertIn('stage_loop', payload['data']['lines']['rollout'])
             self.assertEqual(payload['data']['transition_journal']['latest']['workflow_transition'], 'execution_failed->blocked')
+            self.assertIn('related_summary', payload)
+            self.assertIn('control_plane_readiness', payload['related_summary'])
         finally:
             dashboard_api_module.backtester.run_all = original_run_all
             dashboard_api_module._persist_workflow_approval_payload = original_persist
@@ -5609,8 +5613,32 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
             self.assertEqual(payload['data']['schema_version'], 'm5_rollout_control_plane_manifest_v1')
             self.assertTrue(payload['data']['compatibility']['compatible'])
             self.assertIn('joint_review_schedule', payload['data']['registries']['action_types'])
+            self.assertIn('related_summary', payload)
+            self.assertIn('control_plane_readiness', payload['related_summary'])
         finally:
             dashboard_api.backtester = old_backtester
+
+    def test_forward_readiness_api_exposes_control_plane_related_summary(self):
+        import dashboard.api as dashboard_api_module
+        original_get_signals = dashboard_api_module.db.get_signals
+        try:
+            dashboard_api_module.db.get_signals = lambda limit=5000: [
+                {'signal_type': 'buy', 'symbol': 'BTC/USDT', 'filtered': 0, 'created_at': '2026-03-28T08:00:00'},
+                {'signal_type': 'sell', 'symbol': 'ETH/USDT', 'filtered': 0, 'created_at': '2026-03-28T09:00:00'},
+                {'signal_type': 'buy', 'symbol': 'SOL/USDT', 'filtered': 1, 'filter_reason': '风险过高', 'created_at': '2026-03-28T10:00:00'},
+            ]
+            client = dashboard_api_module.app.test_client()
+            response = client.get('/api/forward/readiness?limit=10')
+            self.assertEqual(response.status_code, 200)
+            payload = response.get_json()
+            self.assertTrue(payload['success'])
+            self.assertIn('summary', payload)
+            self.assertIn('control_plane_readiness', payload['summary'])
+            self.assertIn('control_plane_manifest', payload['data'])
+            self.assertIn('related_summary', payload['data'])
+            self.assertEqual(payload['data']['control_plane_readiness']['schema_version'], 'm5_control_plane_readiness_summary_v1')
+        finally:
+            dashboard_api_module.db.get_signals = original_get_signals
 
     def test_backtest_workbench_governance_detail_api_returns_why_and_next_step(self):
         import dashboard.api as dashboard_api
@@ -6062,7 +6090,7 @@ class TestExecutionObservability(unittest.TestCase):
             self.assertIn('recent_decisions', snapshot['summary'])
             self.assertTrue(snapshot['summary']['observe_only_banner'])
 
-from analytics.helper import build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, attach_auto_approval_policy, execute_controlled_rollout_layer, execute_controlled_auto_approval_layer, execute_rollout_executor, build_rollout_control_plane_manifest, build_workflow_consumer_view, build_workflow_recovery_view, build_workflow_attention_view, build_workflow_operator_digest, build_dashboard_summary_cards, build_workbench_governance_view, build_workbench_governance_detail_view, build_workbench_merged_timeline, build_workbench_timeline_summary_aggregation, build_unified_workbench_overview, build_auto_promotion_candidate_view, build_auto_promotion_execution_summary, build_auto_promotion_review_queue_consumption, build_auto_promotion_review_queue_filter_view, build_auto_promotion_review_queue_detail_view, _build_state_machine_semantics, _build_safe_rollout_action_registry
+from analytics.helper import build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, attach_auto_approval_policy, execute_controlled_rollout_layer, execute_controlled_auto_approval_layer, execute_rollout_executor, build_rollout_control_plane_manifest, build_control_plane_readiness_summary, build_workflow_consumer_view, build_workflow_recovery_view, build_workflow_attention_view, build_workflow_operator_digest, build_dashboard_summary_cards, build_workbench_governance_view, build_workbench_governance_detail_view, build_workbench_merged_timeline, build_workbench_timeline_summary_aggregation, build_unified_workbench_overview, build_auto_promotion_candidate_view, build_auto_promotion_execution_summary, build_auto_promotion_review_queue_consumption, build_auto_promotion_review_queue_filter_view, build_auto_promotion_review_queue_detail_view, _build_state_machine_semantics, _build_safe_rollout_action_registry
 
 
 class TestApprovalPersistence(unittest.TestCase):
@@ -6478,6 +6506,47 @@ class TestApprovalPersistence(unittest.TestCase):
         self.assertIn('auto_promotion_candidate_queue', payload['rollout'])
         self.assertEqual(next(row for row in payload['group_summaries']['by_operator_route'] if row['group_id'] == 'manual_approval_queue')['summary']['dominant_follow_up'], 'await_manual_approval')
 
+    def test_build_workflow_operator_digest_exposes_control_plane_readiness(self):
+        digest = build_workflow_operator_digest({
+            'workflow_state': {
+                'item_states': [
+                    {
+                        'item_id': 'playbook::queued',
+                        'title': 'Queued stage item',
+                        'action_type': 'joint_stage_prepare',
+                        'risk_level': 'medium',
+                        'approval_required': False,
+                        'requires_manual': False,
+                        'workflow_state': 'queued',
+                        'blocking_reasons': [],
+                        'auto_approval_decision': 'auto_approve',
+                        'auto_approval_eligible': True,
+                        'current_rollout_stage': 'observe',
+                        'target_rollout_stage': 'guarded',
+                        'state_machine': _build_state_machine_semantics(
+                            item_id='approval::queued',
+                            approval_state='approved',
+                            workflow_state='queued',
+                            validation_gate={
+                                'enabled': True,
+                                'ready': False,
+                                'freeze_auto_advance': True,
+                                'rollback_on_regression': False,
+                                'reasons': ['coverage_gap'],
+                                'missing_required_capabilities': ['transition_policy_contract'],
+                            },
+                        ),
+                    },
+                ],
+                'summary': {'item_count': 1},
+            },
+            'approval_state': {'items': [], 'summary': {}},
+        }, max_items=3)
+        self.assertEqual(digest['control_plane_readiness']['schema_version'], 'm5_control_plane_readiness_summary_v1')
+        self.assertEqual(digest['summary']['control_plane_readiness']['relation'], 'validation_freeze_blocks_auto_promotion')
+        self.assertFalse(digest['control_plane_readiness']['can_continue_auto_promotion'])
+        self.assertIn('control_plane_readiness', digest['related_summary'])
+
     def test_build_unified_workbench_overview_summarizes_approval_rollout_and_recovery_lines(self):
         payload = build_unified_workbench_overview({
             'workflow_state': {
@@ -6585,6 +6654,9 @@ class TestApprovalPersistence(unittest.TestCase):
         })
         self.assertEqual(payload['schema_version'], 'm5_unified_workbench_overview_v1')
         self.assertEqual(payload['headline']['status'], 'attention_required')
+        self.assertIn('control_plane_readiness', payload['summary'])
+        self.assertIn('related_summary', payload)
+        self.assertTrue(payload['control_plane_readiness']['control_plane_compatible'])
         self.assertEqual(payload['headline']['dominant_line'], 'approval')
         self.assertEqual(payload['summary']['line_states']['approval'], 'attention_required')
         self.assertIn('gate_consumption', payload['summary'])
@@ -8692,6 +8764,30 @@ class TestApprovalPersistence(unittest.TestCase):
         self.assertTrue(manifest['compatibility']['compatible'])
         self.assertIn('joint_stage_prepare', manifest['registries']['action_types'])
         self.assertIn('review_schedule_safe', manifest['registries']['stage_handlers'])
+
+    def test_control_plane_readiness_summary_relates_manifest_to_validation_and_readiness(self):
+        manifest = build_rollout_control_plane_manifest()
+        summary = build_control_plane_readiness_summary(
+            control_plane_manifest=manifest,
+            validation_gate={
+                'enabled': True,
+                'ready': False,
+                'freeze_auto_advance': True,
+                'rollback_on_regression': False,
+                'reasons': ['coverage_gap'],
+                'missing_required_capabilities': ['transition_policy_contract'],
+            },
+            readiness={'status': 'WEAK_READY', 'readiness_pct': 56.0},
+        )
+        self.assertEqual(summary['schema_version'], 'm5_control_plane_readiness_summary_v1')
+        self.assertTrue(summary['control_plane_compatible'])
+        self.assertTrue(summary['replay_safe'])
+        self.assertEqual(summary['relation'], 'validation_freeze_blocks_auto_promotion')
+        self.assertFalse(summary['can_continue_auto_promotion'])
+        self.assertEqual(summary['readiness_status'], 'WEAK_READY')
+        self.assertIn('validation_gate_frozen', summary['blocking_issues'])
+        self.assertEqual(summary['upgrade_window'], manifest['contracts']['upgrade_window'])
+        self.assertEqual(summary['rollback_window'], manifest['contracts']['rollback_window'])
 
     def test_rollout_executor_plan_and_stage_progression_expose_transition_policy(self):
         class StubConfig:

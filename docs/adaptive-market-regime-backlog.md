@@ -1,5 +1,22 @@
 # Adaptive Market Regime Backlog
 
+## 2026-03-28 已完成：control-plane manifest 消费层接入
+- 已新增统一后端消费摘要 `m5_control_plane_readiness_summary_v1`，把 rollout control-plane manifest、validation gate readiness、replay-safe、upgrade-window、rollback-window 收敛成一个稳定、可序列化输出。
+- 已落点到：
+  - `analytics/helper.build_workflow_operator_digest()`
+  - `analytics/helper.build_dashboard_summary_cards()`
+  - `analytics/helper.build_unified_workbench_overview()`
+  - `dashboard/api:/api/forward/readiness`
+  - `dashboard/api:/api/backtest/workflow-operator-digest`
+  - `dashboard/api:/api/backtest/unified-workbench-overview`
+  - `dashboard/api:/api/backtest/rollout-control-plane`
+- 调用方现可直接判断：
+  - 当前 control-plane compatibility 是否允许继续自动推进
+  - 当前版本组合是否 `replay_safe`
+  - upgrade / rollback contract window
+  - validation freeze / regression 同 readiness 的阻断关系
+- 已补 helper + API 测试覆盖 direct summary / related_summary 输出。
+
 ## 2026-03-28 已完成：post-promotion / rollback review queue 语义补强
 - 已把 controlled auto-promotion 执行后的 follow-up 明确拆成两条队列：
   - `post_promotion_review_queue`：自动推进后应该继续观察什么、何时复核；

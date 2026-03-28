@@ -62,7 +62,7 @@ from signals.validator import SignalValidator
 from bot.run import execute_exchange_smoke, reconcile_exchange_positions, load_runtime_state
 from ml.engine import MLEngine
 from core.regime import RegimeDetector, detect_regime, Regime
-from analytics import StrategyBacktester, SignalQualityAnalyzer, ParameterOptimizer, GovernanceEngine, build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, build_transition_journal_overview, attach_auto_approval_policy, execute_controlled_rollout_layer, execute_controlled_auto_approval_layer, execute_rollout_executor, build_rollout_control_plane_manifest, build_workflow_consumer_view, build_workflow_recovery_view, build_workflow_attention_view, build_workflow_operator_digest, build_dashboard_summary_cards, build_workbench_governance_view, build_workbench_governance_filter_view, build_workbench_governance_detail_view, build_workbench_merged_timeline, build_workbench_timeline_summary_aggregation, build_unified_workbench_overview, build_auto_promotion_candidate_view, build_auto_promotion_review_queue_filter_view, build_auto_promotion_review_queue_detail_view
+from analytics import StrategyBacktester, SignalQualityAnalyzer, ParameterOptimizer, GovernanceEngine, build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, build_transition_journal_overview, attach_auto_approval_policy, execute_controlled_rollout_layer, execute_controlled_auto_approval_layer, execute_rollout_executor, build_rollout_control_plane_manifest, build_control_plane_readiness_summary, build_workflow_consumer_view, build_workflow_recovery_view, build_workflow_attention_view, build_workflow_operator_digest, build_dashboard_summary_cards, build_workbench_governance_view, build_workbench_governance_filter_view, build_workbench_governance_detail_view, build_workbench_merged_timeline, build_workbench_timeline_summary_aggregation, build_unified_workbench_overview, build_auto_promotion_candidate_view, build_auto_promotion_review_queue_filter_view, build_auto_promotion_review_queue_detail_view
 from analytics.backtest import export_calibration_payload, build_governance_workflow_ready_payload
 from analytics.mfe_mae import MFEAnalyzer, get_mfe_mae_analysis
 from core.regime_policy import summarize_observe_only_collection
@@ -1600,10 +1600,30 @@ def get_forward_readiness():
     
     # 执行就绪检查
     result = check_forward_readiness(db=db, signals=signals)
+    control_plane_manifest = build_rollout_control_plane_manifest()
+    control_plane_readiness = build_control_plane_readiness_summary(
+        control_plane_manifest=control_plane_manifest,
+        readiness=result,
+    )
+    result['control_plane_manifest'] = control_plane_manifest
+    result['control_plane_readiness'] = control_plane_readiness
+    result['related_summary'] = {
+        'control_plane_readiness': control_plane_readiness,
+        'control_plane_manifest': {
+            'schema_version': control_plane_manifest.get('schema_version'),
+            'compatibility': control_plane_manifest.get('compatibility') or {},
+            'contracts': control_plane_manifest.get('contracts') or {},
+        },
+    }
     
     return jsonify({
         'success': True,
-        'data': result
+        'data': result,
+        'summary': {
+            'status': result.get('status'),
+            'readiness_pct': result.get('readiness_pct'),
+            'control_plane_readiness': control_plane_readiness,
+        },
     })
 
 
@@ -2605,6 +2625,7 @@ def get_backtest_workflow_operator_digest():
         'view': 'workflow_operator_digest',
         'data': digest,
         'summary': digest.get('summary') or {},
+        'related_summary': digest.get('related_summary') or {},
     })
 
 
@@ -2699,7 +2720,7 @@ def get_backtest_unified_workbench_overview():
         },
         approval_timeline_fetcher=lambda approval_id, limit: db.get_approval_timeline(item_id=approval_id, limit=limit, ascending=True) if approval_id else [],
     )
-    return jsonify({'success': True, 'view': 'unified_workbench_overview', 'data': overview, 'summary': overview.get('summary') or {}})
+    return jsonify({'success': True, 'view': 'unified_workbench_overview', 'data': overview, 'summary': overview.get('summary') or {}, 'related_summary': overview.get('related_summary') or {}})
 
 
 
@@ -2790,7 +2811,8 @@ def get_backtest_rollout_control_plane():
     payload = export_calibration_payload(calibration_report, view='workflow_ready')
     payload = _persist_workflow_approval_payload(payload, replay_source='rollout_control_plane_manifest_api')
     manifest = build_rollout_control_plane_manifest(payload)
-    return jsonify({'success': True, 'view': 'rollout_control_plane_manifest', 'data': manifest, 'summary': manifest.get('compatibility') or {}})
+    control_plane_readiness = build_control_plane_readiness_summary(control_plane_manifest=manifest)
+    return jsonify({'success': True, 'view': 'rollout_control_plane_manifest', 'data': manifest, 'summary': manifest.get('compatibility') or {}, 'related_summary': {'control_plane_readiness': control_plane_readiness}})
 
 
 @app.route('/api/backtest/auto-promotion-review-detail')

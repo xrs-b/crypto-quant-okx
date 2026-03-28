@@ -3169,6 +3169,98 @@ def build_rollout_control_plane_manifest(payload: Optional[Dict] = None, executo
     }
 
 
+
+
+def build_control_plane_readiness_summary(*, payload: Optional[Dict[str, Any]] = None,
+                                         control_plane_manifest: Optional[Dict[str, Any]] = None,
+                                         validation_gate: Optional[Dict[str, Any]] = None,
+                                         validation_consumption: Optional[Dict[str, Any]] = None,
+                                         readiness: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    payload = payload or {}
+    manifest = control_plane_manifest or payload.get('control_plane_manifest') or build_rollout_control_plane_manifest(payload)
+    validation = _build_validation_gate_snapshot({'validation_gate': validation_gate}) if validation_gate else (
+        payload.get('validation_gate') or _build_validation_gate_snapshot(payload)
+    )
+    if not isinstance(validation, dict) or 'status' not in validation:
+        validation = _build_validation_gate_snapshot({'validation_gate': validation})
+    consumption = validation_consumption or payload.get('validation_gate_consumption') or _collect_validation_gate_consumption(
+        ((payload.get('workflow_state') or {}).get('item_states') or [])
+    )
+    if (not validation.get('enabled')) and isinstance(consumption, dict) and (consumption.get('latest_validation_gate') or {}).get('enabled'):
+        validation = dict(consumption.get('latest_validation_gate') or {})
+    compatibility = (manifest.get('compatibility') or {}) if isinstance(manifest, dict) else {}
+    contracts = (manifest.get('contracts') or {}) if isinstance(manifest, dict) else {}
+    readiness = readiness or {}
+    readiness_status = str(readiness.get('status') or '').strip() or None
+    readiness_pct = readiness.get('readiness_pct')
+    validation_enabled = bool(validation.get('enabled'))
+    validation_ready = bool(validation.get('ready')) if validation_enabled else None
+    validation_frozen = bool(validation_enabled and validation.get('freeze_auto_advance'))
+    validation_regression = bool(validation.get('regression_detected'))
+    compatible = bool(compatibility.get('compatible'))
+    replay_safe = bool(compatibility.get('replay_safe'))
+    can_continue_auto_promotion = compatible and replay_safe and not validation_frozen and not validation_regression and (not validation_enabled or validation_ready)
+    blockers = []
+    blockers.extend(list(compatibility.get('blocking_issues') or []))
+    if validation_frozen:
+        blockers.append('validation_gate_frozen')
+    if validation_regression:
+        blockers.append('validation_gate_regressed')
+    if validation_enabled and validation_ready is False and not validation_frozen:
+        blockers.append('validation_gate_not_ready')
+    relation = 'auto_promotion_ready'
+    if not compatible or not replay_safe:
+        relation = 'control_plane_review_required'
+    elif validation_regression:
+        relation = 'rollback_or_review_required'
+    elif validation_frozen:
+        relation = 'validation_freeze_blocks_auto_promotion'
+    elif validation_enabled and validation_ready is False:
+        relation = 'validation_not_ready'
+    elif readiness_status and readiness_status not in {'READY', 'WEAK_READY'}:
+        relation = 'data_readiness_observe'
+    elif readiness_status == 'WEAK_READY':
+        relation = 'data_readiness_weak_ready'
+    headline = relation
+    if can_continue_auto_promotion:
+        headline = 'control_plane_and_validation_ready'
+    return {
+        'schema_version': 'm5_control_plane_readiness_summary_v1',
+        'status': 'ready' if can_continue_auto_promotion else ('review_required' if relation in {'control_plane_review_required', 'rollback_or_review_required'} else 'blocked'),
+        'headline': headline,
+        'relation': relation,
+        'can_continue_auto_promotion': can_continue_auto_promotion,
+        'control_plane_compatible': compatible,
+        'replay_safe': replay_safe,
+        'requires_manual_review': bool(compatibility.get('requires_manual_review')),
+        'validation_enabled': validation_enabled,
+        'validation_ready': validation_ready,
+        'validation_status': validation.get('status'),
+        'validation_freeze_auto_advance': validation_frozen,
+        'validation_regression_detected': validation_regression,
+        'validation_gap_count': int(validation.get('gap_count') or 0),
+        'validation_affected_item_count': int((consumption or {}).get('item_count') or 0),
+        'readiness_status': readiness_status,
+        'readiness_pct': readiness_pct,
+        'upgrade_window': contracts.get('upgrade_window'),
+        'rollback_window': contracts.get('rollback_window'),
+        'blocking_issues': list(dict.fromkeys([str(item) for item in blockers if item])),
+        'control_plane_manifest': {
+            'schema_version': manifest.get('schema_version'),
+            'generation': manifest.get('generation'),
+            'compatibility_status': compatibility.get('status'),
+            'action_count': ((manifest.get('registries') or {}).get('action_count')),
+            'stage_handler_count': ((manifest.get('registries') or {}).get('stage_handler_count')),
+        },
+        'validation_gate': {
+            'status': validation.get('status'),
+            'headline': validation.get('headline'),
+            'freeze_auto_advance': validation.get('freeze_auto_advance'),
+            'regression_detected': validation.get('regression_detected'),
+            'gap_count': validation.get('gap_count'),
+        },
+    }
+
 def _build_rollout_dispatch_envelope(*, mode: str, executor_class: str, handler_key: str, allowed: bool = False,
                                      status: str = 'pending', reason: Optional[str] = None, code: Optional[str] = None,
                                      queue_name: Optional[str] = None, dispatch_route: Optional[str] = None,
@@ -3990,6 +4082,7 @@ def execute_rollout_executor(payload: Dict, db: Any, *, config: Any = None, sett
     action_registry = _build_safe_rollout_action_registry(execution_settings.get('allowed_action_types'))
 
     validation_gate = _build_validation_gate_snapshot(payload)
+    control_plane_readiness = build_control_plane_readiness_summary(payload=payload, validation_gate=validation_gate)
     result = {
         'schema_version': 'm5_rollout_executor_skeleton_v2',
         'enabled': execution_settings.get('enabled', False),
@@ -4011,6 +4104,7 @@ def execute_rollout_executor(payload: Dict, db: Any, *, config: Any = None, sett
             'by_disposition': {},
             'by_status': {},
             'validation_gate': validation_gate,
+            'control_plane_readiness': control_plane_readiness,
         },
         'supported_action_map': catalog,
         'action_registry': action_registry,
@@ -4591,6 +4685,7 @@ def build_workflow_consumer_view(payload: Optional[Dict] = None) -> Dict[str, An
     stage_progression = build_rollout_stage_progression(payload, rollout_executor)
     recovery_view = payload.get('workflow_recovery_view') or build_workflow_recovery_view(payload)
     validation_gate = _build_validation_gate_snapshot(payload)
+    control_plane_readiness = build_control_plane_readiness_summary(payload=payload, validation_gate=validation_gate)
     approval_items = approval_state.get('items') or []
     workflow_items = workflow_state.get('item_states') or []
     approval_by_playbook = {row.get('playbook_id'): row for row in approval_items if row.get('playbook_id')}
@@ -4636,6 +4731,7 @@ def build_workflow_consumer_view(payload: Optional[Dict] = None) -> Dict[str, An
             'controlled_rollout_executed_count': controlled_rollout.get('executed_count', 0),
             'auto_approval_executed_count': auto_approval.get('executed_count', 0),
             'validation_gate': validation_gate,
+            'control_plane_readiness': control_plane_readiness,
         },
         'workflow_state': workflow_state,
         'approval_state': approval_state,
@@ -5572,6 +5668,13 @@ def build_workflow_operator_digest(payload: Optional[Dict] = None, *, max_items:
 
     gate_consumption = _build_gate_consumption_summary(policy_rows, label='workflow_operator_digest', max_items=max_items)
     advisory_consumption = _summarize_rollout_advisories(policy_rows, label='workflow_operator_digest', max_items=max_items)
+    control_plane_manifest = build_rollout_control_plane_manifest(payload)
+    control_plane_readiness = build_control_plane_readiness_summary(
+        payload=payload,
+        control_plane_manifest=control_plane_manifest,
+        validation_gate=validation_gate,
+        validation_consumption=gate_consumption.get('validation_gate_consumption') if isinstance(gate_consumption, dict) else None,
+    )
 
     group_summaries = {
         'by_lane': [
@@ -5613,6 +5716,7 @@ def build_workflow_operator_digest(payload: Optional[Dict] = None, *, max_items:
             ),
             'rollout_executor_status': rollout_executor.get('status') or 'disabled',
             'validation_gate': validation_gate,
+            'control_plane_readiness': control_plane_readiness,
         },
         'summary': {
             'workflow_item_count': len(workflow_items),
@@ -5642,6 +5746,7 @@ def build_workflow_operator_digest(payload: Optional[Dict] = None, *, max_items:
             'latest_transition_at': (transition_journal.get('summary') or {}).get('latest_timestamp'),
             'latest_transition': transition_journal.get('latest') or {},
             'validation_gate': validation_gate,
+            'control_plane_readiness': control_plane_readiness,
         },
         'attention': {
             'manual_approval': manual_approval_items[:max_items],
@@ -5675,6 +5780,13 @@ def build_workflow_operator_digest(payload: Optional[Dict] = None, *, max_items:
         'stage_loop': _summarize_stage_loop_rows(policy_rows, label='workflow_operator_digest', max_items=max_items),
         'transition_journal': transition_journal,
         'auto_promotion_execution': auto_promotion_execution,
+        'control_plane_manifest': control_plane_manifest,
+        'control_plane_readiness': control_plane_readiness,
+        'related_summary': {
+            'control_plane_readiness': control_plane_readiness,
+            'validation_gate': validation_gate,
+            'validation_gate_consumption': gate_consumption.get('validation_gate_consumption') if isinstance(gate_consumption, dict) else {},
+        },
     }
     payload['operator_digest'] = digest
     return digest
@@ -5695,6 +5807,13 @@ def build_dashboard_summary_cards(payload: Optional[Dict] = None, *, max_items: 
     attention_summary = attention_view.get('summary') or {}
     validation_gate = consumer_view.get('validation_gate') or digest_summary.get('validation_gate') or _build_validation_gate_snapshot(payload)
     validation_consumption = _collect_validation_gate_consumption((consumer_view.get('workflow_state') or {}).get('item_states') or [])
+    control_plane_manifest = operator_digest.get('control_plane_manifest') or build_rollout_control_plane_manifest(payload)
+    control_plane_readiness = (operator_digest.get('control_plane_readiness') or build_control_plane_readiness_summary(
+        payload=payload,
+        control_plane_manifest=control_plane_manifest,
+        validation_gate=validation_gate,
+        validation_consumption=validation_consumption,
+    ))
 
     cards = [
         {
@@ -5754,6 +5873,7 @@ def build_dashboard_summary_cards(payload: Optional[Dict] = None, *, max_items: 
             },
             'details': {
                 'validation_gate': validation_gate,
+            'control_plane_readiness': control_plane_readiness,
                 'consumption': validation_consumption,
             },
             'items': [
@@ -5822,6 +5942,7 @@ def build_dashboard_summary_cards(payload: Optional[Dict] = None, *, max_items: 
             'rollback_candidate_count': digest_summary.get('rollback_candidate_count', 0),
             'gate_consumption': digest_summary.get('gate_consumption') or {},
             'validation_gate': validation_gate,
+            'control_plane_readiness': control_plane_readiness,
             'validation_gate_consumption': validation_consumption,
             'executor_status': rollout_executor.get('status') or 'disabled',
             'bridge_mode': controlled_rollout.get('mode') or 'disabled',
@@ -5854,6 +5975,13 @@ def build_dashboard_summary_cards(payload: Optional[Dict] = None, *, max_items: 
         'workflow_consumer_view': consumer_view,
         'workflow_attention_view': attention_view,
         'workflow_operator_digest': operator_digest,
+        'control_plane_manifest': control_plane_manifest,
+        'control_plane_readiness': control_plane_readiness,
+        'related_summary': {
+            'control_plane_readiness': control_plane_readiness,
+            'validation_gate': validation_gate,
+            'validation_gate_consumption': validation_consumption,
+        },
     }
     payload['dashboard_summary_cards'] = summary_cards
     return summary_cards
@@ -7316,6 +7444,12 @@ def build_unified_workbench_overview(payload: Optional[Dict] = None, *, max_item
     validation_gate = consumer_view.get('validation_gate') or (operator_digest.get('summary') or {}).get('validation_gate') or _build_validation_gate_snapshot(payload)
     validation_consumption = _collect_validation_gate_consumption((consumer_view.get('workflow_state') or {}).get('item_states') or [])
     control_plane_manifest = build_rollout_control_plane_manifest(payload)
+    control_plane_readiness = build_control_plane_readiness_summary(
+        payload=payload,
+        control_plane_manifest=control_plane_manifest,
+        validation_gate=validation_gate,
+        validation_consumption=validation_consumption,
+    )
     workbench_stage_loop = (workbench_summary.get('stage_loop') or workbench_view.get('rollout', {}).get('stage_loop') or _summarize_stage_loop_rows(workbench_view.get('upstreams', {}).get('workflow_operator_digest', {}).get('operator_action_policies') or [], label='unified_workbench_rollout', max_items=max_items))
     retry_queue = _take(((recovery_view.get('queues') or {}).get('retry_queue') or []))
     rollback_candidates = _take(((recovery_view.get('queues') or {}).get('rollback_candidates') or []))
@@ -7417,6 +7551,7 @@ def build_unified_workbench_overview(payload: Optional[Dict] = None, *, max_item
                 'promotion_review_due': (auto_promotion_review_queues.get('summary') or {}).get('review_due_count', 0),
             },
             'validation_gate': validation_gate,
+            'control_plane_readiness': control_plane_readiness,
             'rollout_advisory': rollout_advisory,
             'validation_consumption': validation_consumption,
             'headline_stage_frontier': _take((workbench_view.get('rollout') or {}).get('frontier') or []),
@@ -7472,6 +7607,7 @@ def build_unified_workbench_overview(payload: Optional[Dict] = None, *, max_item
             'auto_promotion_execution': auto_promotion_execution.get('summary') or {},
             'auto_promotion_review_queues': auto_promotion_review_queues.get('summary') or {},
             'validation_gate': validation_gate,
+            'control_plane_readiness': control_plane_readiness,
             'validation_gate_consumption': validation_consumption,
             'control_plane_manifest': {
                 'status': (control_plane_manifest.get('compatibility') or {}).get('status'),
@@ -7498,6 +7634,12 @@ def build_unified_workbench_overview(payload: Optional[Dict] = None, *, max_item
         'top_next_actions': _take(lines['approval']['next_actions'] + lines['recovery']['next_actions'] + lines['rollout']['next_actions']),
         'transition_journal': transition_journal,
         'control_plane_manifest': control_plane_manifest,
+        'control_plane_readiness': control_plane_readiness,
+        'related_summary': {
+            'control_plane_readiness': control_plane_readiness,
+            'validation_gate': validation_gate,
+            'validation_gate_consumption': validation_consumption,
+        },
         'upstreams': {
             'workflow_consumer_view': consumer_view,
             'workflow_operator_digest': operator_digest,

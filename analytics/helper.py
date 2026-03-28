@@ -2972,7 +2972,54 @@ def build_workflow_attention_view(payload: Optional[Dict] = None, *, max_items: 
     return attention
 
 
-def build_workflow_operator_digest(payload: Optional[Dict] = None, *, max_items: int = 5) -> Dict[str, Any]:
+def _build_transition_journal_consumer_view(*, overview: Optional[Dict[str, Any]] = None,
+                                            transition_rows: Optional[List[Dict[str, Any]]] = None,
+                                            summary: Optional[Dict[str, Any]] = None,
+                                            max_items: int = 5) -> Dict[str, Any]:
+    source = overview or build_transition_journal_overview(transition_rows=transition_rows, summary=summary)
+    source_summary = source.get('summary') or {}
+    recent_rows = list(source.get('recent_transitions') or [])[:max_items]
+    latest = recent_rows[0] if recent_rows else {}
+    transitions = []
+    for row in recent_rows:
+        from_state = (row.get('from') or {}).get('workflow_state') or (row.get('from') or {}).get('state') or 'new'
+        to_state = (row.get('to') or {}).get('workflow_state') or (row.get('to') or {}).get('state') or 'unknown'
+        transitions.append({
+            'item_id': row.get('item_id'),
+            'approval_id': row.get('approval_id'),
+            'title': row.get('title') or row.get('item_id'),
+            'timestamp': row.get('timestamp'),
+            'trigger': row.get('trigger') or row.get('event_type') or 'unknown',
+            'actor': row.get('actor') or 'unknown',
+            'source': row.get('source') or 'unknown',
+            'workflow_transition': f'{from_state}->{to_state}',
+            'changed_fields': row.get('changed_fields') or [],
+            'reason': row.get('reason'),
+            'changed': bool(row.get('changed', False)),
+        })
+    return {
+        'schema_version': 'm5_transition_journal_consumer_v1',
+        'headline': {
+            'status': 'recent_activity' if transitions else 'steady',
+            'message': f"{source_summary.get('count', 0)} recent transition(s)",
+            'latest_timestamp': source_summary.get('latest_timestamp'),
+            'latest_transition': transitions[0].get('workflow_transition') if transitions else None,
+        },
+        'summary': {
+            'count': source_summary.get('count', len(source.get('recent_transitions') or [])),
+            'latest_timestamp': source_summary.get('latest_timestamp'),
+            'changed_only': source_summary.get('changed_only', True),
+            'changed_field_counts': source_summary.get('changed_field_counts') or {},
+            'workflow_transition_counts': source_summary.get('workflow_transition_counts') or {},
+        },
+        'recent_transitions': transitions,
+        'latest': transitions[0] if transitions else {},
+        'overview': source,
+    }
+
+
+def build_workflow_operator_digest(payload: Optional[Dict] = None, *, max_items: int = 5,
+                                  transition_journal_overview: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     payload = payload or {}
     consumer_view = payload.get('consumer_view') or build_workflow_consumer_view(payload)
     workflow_items = ((consumer_view.get('workflow_state') or {}).get('item_states') or [])
@@ -2981,6 +3028,16 @@ def build_workflow_operator_digest(payload: Optional[Dict] = None, *, max_items:
     rollout_executor = consumer_view.get('rollout_executor') or {}
     auto_approval = consumer_view.get('auto_approval_execution') or {}
     controlled_rollout = consumer_view.get('controlled_rollout_execution') or {}
+    transition_journal = _build_transition_journal_consumer_view(
+        overview=transition_journal_overview or payload.get('transition_journal')
+    ) if (transition_journal_overview or payload.get('transition_journal')) else {
+        'schema_version': 'm5_transition_journal_consumer_v1',
+        'headline': {'status': 'steady', 'message': '0 recent transition(s)', 'latest_timestamp': None, 'latest_transition': None},
+        'summary': {'count': 0, 'latest_timestamp': None, 'changed_only': True, 'changed_field_counts': {}, 'workflow_transition_counts': {}},
+        'recent_transitions': [],
+        'latest': {},
+        'overview': {'schema_version': 'm5_transition_journal_overview_v1', 'summary': {'count': 0, 'changed_field_counts': {}}, 'recent_transitions': [], 'breakdown': {'changed_field_counts': {}, 'trigger_counts': {}, 'actor_counts': {}, 'source_counts': {}}},
+    }
 
     workflow_lookup = {row.get('item_id'): row for row in workflow_items if row.get('item_id')}
     approval_by_playbook = {row.get('playbook_id'): row for row in approval_items if row.get('playbook_id')}
@@ -3169,6 +3226,9 @@ def build_workflow_operator_digest(payload: Optional[Dict] = None, *, max_items:
             'operator_routes': sorted({row.get('route') for row in next_actions if row.get('route')}),
             'operator_follow_ups': sorted({row.get('follow_up') for row in next_actions if row.get('follow_up')}),
             'group_summaries': group_summaries,
+            'transition_count': (transition_journal.get('summary') or {}).get('count', 0),
+            'latest_transition_at': (transition_journal.get('summary') or {}).get('latest_timestamp'),
+            'latest_transition': transition_journal.get('latest') or {},
         },
         'attention': {
             'manual_approval': manual_approval_items[:max_items],
@@ -3192,6 +3252,7 @@ def build_workflow_operator_digest(payload: Optional[Dict] = None, *, max_items:
             'summary': (consumer_view.get('rollout_stage_progression') or {}).get('summary') or {},
             'items': stage_items[:max_items],
         },
+        'transition_journal': transition_journal,
     }
     payload['operator_digest'] = digest
     return digest
@@ -4465,12 +4526,26 @@ def build_workbench_timeline_summary_aggregation(payload: Optional[Dict] = None,
 
 
 def build_workbench_governance_view(payload: Optional[Dict] = None, *, max_items: int = 5,
-                                    max_adjustments: int = 10, filters: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                                    max_adjustments: int = 10, filters: Optional[Dict[str, Any]] = None,
+                                    transition_journal_overview: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     payload = payload or {}
     catalog = payload.get('workbench_governance_catalog') or _build_workbench_item_catalog(payload)
     consumer_view = (catalog.get('upstreams') or {}).get('workflow_consumer_view') or payload.get('consumer_view') or build_workflow_consumer_view(payload)
     attention_view = (catalog.get('upstreams') or {}).get('workflow_attention_view') or payload.get('attention_view') or build_workflow_attention_view(payload, max_items=max_items)
-    operator_digest = (catalog.get('upstreams') or {}).get('workflow_operator_digest') or payload.get('operator_digest') or build_workflow_operator_digest(payload, max_items=max_items)
+    operator_digest = (catalog.get('upstreams') or {}).get('workflow_operator_digest') or payload.get('operator_digest') or build_workflow_operator_digest(
+        payload,
+        max_items=max_items,
+        transition_journal_overview=transition_journal_overview,
+    )
+    if transition_journal_overview and not ((operator_digest.get('transition_journal') or {}).get('summary') or {}).get('count'):
+        operator_digest = build_workflow_operator_digest(
+            payload,
+            max_items=max_items,
+            transition_journal_overview=transition_journal_overview,
+        )
+    transition_journal = operator_digest.get('transition_journal') or _build_transition_journal_consumer_view(
+        overview=transition_journal_overview or payload.get('transition_journal')
+    )
     stage_progression = consumer_view.get('rollout_stage_progression') or {}
     stage_summary = stage_progression.get('summary') or {}
     rollout_executor = consumer_view.get('rollout_executor') or {}
@@ -4595,6 +4670,8 @@ def build_workbench_governance_view(payload: Optional[Dict] = None, *, max_items
             'rollout_executor_status': rollout_executor.get('status') or 'disabled',
             'stage_progression': stage_summary,
             'group_summaries': {key: len(value) for key, value in group_summaries.items()},
+            'transition_count': (transition_journal.get('summary') or {}).get('count', 0),
+            'latest_transition_at': (transition_journal.get('summary') or {}).get('latest_timestamp'),
         },
         'filters': catalog.get('filters') or {},
         'applied_filters': (filtered_view or {}).get('applied_filters') or {},
@@ -4606,6 +4683,7 @@ def build_workbench_governance_view(payload: Optional[Dict] = None, *, max_items
             'items': (stage_progression.get('items') or [])[:max_items],
         },
         'recent_adjustments': recent_adjustments[:max_adjustments],
+        'transition_journal': transition_journal,
         'upstreams': {
             'workflow_consumer_view': consumer_view,
             'workflow_attention_view': attention_view,
@@ -4620,16 +4698,25 @@ def build_workbench_governance_view(payload: Optional[Dict] = None, *, max_items
 def build_unified_workbench_overview(payload: Optional[Dict] = None, *, max_items: int = 5,
                                      max_adjustments: int = 10, filters: Optional[Dict[str, Any]] = None,
                                      approval_timeline_fetcher: Optional[Any] = None,
-                                     approval_timeline_limit: int = 200) -> Dict[str, Any]:
+                                     approval_timeline_limit: int = 200,
+                                     transition_journal_overview: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     payload = payload or {}
     consumer_view = payload.get('consumer_view') or build_workflow_consumer_view(payload)
     recovery_view = payload.get('workflow_recovery_view') or build_workflow_recovery_view(payload, max_items=max_items)
-    operator_digest = payload.get('workflow_operator_digest') or payload.get('operator_digest') or build_workflow_operator_digest(payload, max_items=max_items)
+    operator_digest = payload.get('workflow_operator_digest') or payload.get('operator_digest') or build_workflow_operator_digest(
+        payload,
+        max_items=max_items,
+        transition_journal_overview=transition_journal_overview,
+    )
     workbench_view = payload.get('workbench_governance_view') or build_workbench_governance_view(
         payload,
         max_items=max_items,
         max_adjustments=max_adjustments,
         filters=filters,
+        transition_journal_overview=transition_journal_overview,
+    )
+    transition_journal = workbench_view.get('transition_journal') or operator_digest.get('transition_journal') or _build_transition_journal_consumer_view(
+        overview=transition_journal_overview or payload.get('transition_journal')
     )
     timeline_summary = payload.get('workbench_timeline_summary_aggregation') or build_workbench_timeline_summary_aggregation(
         payload,
@@ -4798,10 +4885,13 @@ def build_unified_workbench_overview(payload: Optional[Dict] = None, *, max_item
             },
             'timeline_event_count_total': timeline_summary_meta.get('timeline_event_count_total', 0),
             'merged_event_count_total': timeline_summary_meta.get('merged_event_count_total', 0),
+            'transition_count': (transition_journal.get('summary') or {}).get('count', 0),
+            'latest_transition_at': (transition_journal.get('summary') or {}).get('latest_timestamp'),
         },
         'lines': lines,
         'top_key_alerts': _take(lines['approval']['key_alerts'] + [row for row in lines['recovery']['key_alerts'] if row.get('item_id') not in {item.get('item_id') for item in lines['approval']['key_alerts']}] + [row for row in lines['rollout']['key_alerts'] if row.get('item_id') not in {item.get('item_id') for item in lines['approval']['key_alerts'] + lines['recovery']['key_alerts']}]),
         'top_next_actions': _take(lines['approval']['next_actions'] + lines['recovery']['next_actions'] + lines['rollout']['next_actions']),
+        'transition_journal': transition_journal,
         'upstreams': {
             'workflow_consumer_view': consumer_view,
             'workflow_operator_digest': operator_digest,

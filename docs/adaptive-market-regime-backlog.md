@@ -159,6 +159,10 @@
   - analytics helper 暴露 `build_transition_journal_overview(...)`；
   - dashboard/API 暴露 `GET /api/approvals/transition-journal`，并把 transition journal 回挂到 `audit-overview`。
 - **安全边界**：只做状态迁移账本与聚合，不改变真实执行边界。
+- **2026-03-28 consumption-layer follow-up**：继续把 transition journal 从独立审计入口推到主消费层：
+  - helper 新增稳定 `transition_journal` consumer payload（`schema_version = m5_transition_journal_consumer_v1`），统一输出 `headline / summary / recent_transitions / latest / overview`，方便 dashboard / agent / workbench 直接复用；
+  - `workflow_operator_digest / workbench_governance_view / unified_workbench_overview` 现直接回挂最近状态迁移摘要，并在 summary 里补 `transition_count / latest_transition_at`，调用方无需再额外单独请求 `transition-journal` API；
+  - `/api/backtest/workflow-operator-digest`、`/api/backtest/workbench-governance-view`、`/api/backtest/unified-workbench-overview` 以及 `calibration-report?view=operator_digest|workbench_governance_view|unified_workbench_overview` 已统一接入同一份 transition journal 摘要，保持低干预巡检入口一致。
 
 ### AR-M5-10｜workflow attention view / manual approval + blocked follow-up API
 

@@ -5023,7 +5023,32 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
                 }
 
         old_backtester = dashboard_api.backtester
+        old_get_recent_transition_journal = dashboard_api.db.get_recent_transition_journal
+        old_get_transition_journal_summary = dashboard_api.db.get_transition_journal_summary
         dashboard_api.backtester = StubBacktester()
+        dashboard_api.db.get_recent_transition_journal = lambda **kwargs: [
+            {
+                'item_id': 'playbook::ready',
+                'approval_id': 'approval::ready',
+                'title': 'Ready observe item',
+                'timestamp': '2026-03-28T08:30:00',
+                'trigger': 'state_transition',
+                'actor': 'system',
+                'source': 'workflow_loop',
+                'from': {'workflow_state': 'pending'},
+                'to': {'workflow_state': 'ready'},
+                'changed_fields': ['workflow_state'],
+                'reason': 'promoted to ready',
+                'changed': True,
+            }
+        ]
+        dashboard_api.db.get_transition_journal_summary = lambda **kwargs: {
+            'count': 1,
+            'latest_timestamp': '2026-03-28T08:30:00',
+            'changed_only': True,
+            'changed_field_counts': {'workflow_state': 1},
+            'workflow_transition_counts': {'pending->ready': 1},
+        }
         try:
             client = app.test_client()
             response = client.get('/api/backtest/workflow-operator-digest?max_items=3')
@@ -5035,10 +5060,14 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
             self.assertIn('headline', payload['data'])
             self.assertIn('attention', payload['data'])
             self.assertIn('next_actions', payload['data'])
+            self.assertIn('transition_journal', payload['data'])
+            self.assertEqual(payload['data']['transition_journal']['latest']['workflow_transition'], 'pending->ready')
             self.assertLessEqual(len(payload['data']['stage_progression']['items']), 3)
             self.assertEqual(payload['summary'], payload['data']['summary'])
         finally:
             dashboard_api.backtester = old_backtester
+            dashboard_api.db.get_recent_transition_journal = old_get_recent_transition_journal
+            dashboard_api.db.get_transition_journal_summary = old_get_transition_journal_summary
 
     def test_backtest_calibration_report_api_supports_operator_digest_view(self):
         import dashboard.api as dashboard_api
@@ -5066,7 +5095,32 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
                 }
 
         old_backtester = dashboard_api.backtester
+        old_get_recent_transition_journal = dashboard_api.db.get_recent_transition_journal
+        old_get_transition_journal_summary = dashboard_api.db.get_transition_journal_summary
         dashboard_api.backtester = StubBacktester()
+        dashboard_api.db.get_recent_transition_journal = lambda **kwargs: [
+            {
+                'item_id': 'playbook::manual',
+                'approval_id': 'approval::manual',
+                'title': 'Manual gate item',
+                'timestamp': '2026-03-28T08:31:00',
+                'trigger': 'approval_pending',
+                'actor': 'system',
+                'source': 'approval_flow',
+                'from': {'workflow_state': 'pending'},
+                'to': {'workflow_state': 'blocked_by_approval'},
+                'changed_fields': ['workflow_state'],
+                'reason': 'manual gate required',
+                'changed': True,
+            }
+        ]
+        dashboard_api.db.get_transition_journal_summary = lambda **kwargs: {
+            'count': 1,
+            'latest_timestamp': '2026-03-28T08:31:00',
+            'changed_only': True,
+            'changed_field_counts': {'workflow_state': 1},
+            'workflow_transition_counts': {'pending->blocked_by_approval': 1},
+        }
         try:
             client = app.test_client()
             response = client.get('/api/backtest/calibration-report?view=operator_digest')
@@ -5076,8 +5130,11 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
             self.assertEqual(payload['data']['schema_version'], 'm5_workflow_operator_digest_v1')
             self.assertEqual(payload['summary']['operator_digest'], payload['data']['summary'])
             self.assertIn('headline', payload['data'])
+            self.assertEqual(payload['data']['transition_journal']['latest']['workflow_transition'], 'pending->blocked_by_approval')
         finally:
             dashboard_api.backtester = old_backtester
+            dashboard_api.db.get_recent_transition_journal = old_get_recent_transition_journal
+            dashboard_api.db.get_transition_journal_summary = old_get_transition_journal_summary
 
     def test_backtest_dashboard_summary_cards_api_returns_backend_card_payload(self):
         import dashboard.api as dashboard_api
@@ -5186,7 +5243,32 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
                 }
 
         old_backtester = dashboard_api.backtester
+        old_get_recent_transition_journal = dashboard_api.db.get_recent_transition_journal
+        old_get_transition_journal_summary = dashboard_api.db.get_transition_journal_summary
         dashboard_api.backtester = StubBacktester()
+        dashboard_api.db.get_recent_transition_journal = lambda **kwargs: [
+            {
+                'item_id': 'playbook::manual',
+                'approval_id': 'approval::manual',
+                'title': 'Manual gate item',
+                'timestamp': '2026-03-28T08:32:00',
+                'trigger': 'approval_pending',
+                'actor': 'system',
+                'source': 'approval_flow',
+                'from': {'workflow_state': 'pending'},
+                'to': {'workflow_state': 'blocked_by_approval'},
+                'changed_fields': ['workflow_state'],
+                'reason': 'manual gate required',
+                'changed': True,
+            }
+        ]
+        dashboard_api.db.get_transition_journal_summary = lambda **kwargs: {
+            'count': 1,
+            'latest_timestamp': '2026-03-28T08:32:00',
+            'changed_only': True,
+            'changed_field_counts': {'workflow_state': 1},
+            'workflow_transition_counts': {'pending->blocked_by_approval': 1},
+        }
         try:
             client = app.test_client()
             response = client.get('/api/backtest/workbench-governance-view?operator_action=review_schedule&operator_route=manual_approval_queue&follow_up=await_manual_approval&max_items=2&max_adjustments=3')
@@ -5203,15 +5285,20 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
             self.assertEqual(payload['data']['applied_filters']['operator_routes'], ['manual_approval_queue'])
             self.assertEqual(payload['data']['applied_filters']['operator_follow_ups'], ['await_manual_approval'])
             self.assertEqual(payload['data']['lanes']['manual_approval']['operator_action_policy_summary']['dominant_action'], 'review_schedule')
+            self.assertEqual(payload['data']['transition_journal']['latest']['workflow_transition'], 'pending->blocked_by_approval')
             self.assertLessEqual(len(payload['data']['rollout']['items']), 2)
             self.assertLessEqual(len(payload['data']['recent_adjustments']), 3)
         finally:
             dashboard_api.backtester = old_backtester
+            dashboard_api.db.get_recent_transition_journal = old_get_recent_transition_journal
+            dashboard_api.db.get_transition_journal_summary = old_get_transition_journal_summary
 
     def test_backtest_unified_workbench_overview_api_returns_three_line_snapshot(self):
         import dashboard.api as dashboard_api_module
         original_run_all = dashboard_api_module.backtester.run_all
         original_persist = dashboard_api_module._persist_workflow_approval_payload
+        original_get_recent_transition_journal = dashboard_api_module.db.get_recent_transition_journal
+        original_get_transition_journal_summary = dashboard_api_module.db.get_transition_journal_summary
         try:
             dashboard_api_module.backtester.run_all = lambda symbols: {'calibration_report': {'summary': {}, 'workflow_ready': {}}}
             dashboard_api_module.export_calibration_payload = lambda report, view='workflow_ready': {
@@ -5234,6 +5321,29 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
                 'auto_approval_execution': {'mode': 'controlled', 'executed_count': 0, 'items': []},
             }
             dashboard_api_module._persist_workflow_approval_payload = lambda payload, replay_source='unified_workbench_overview_api': payload
+            dashboard_api_module.db.get_recent_transition_journal = lambda **kwargs: [
+                {
+                    'item_id': 'playbook::recover',
+                    'approval_id': 'approval::recover',
+                    'title': 'Recover item',
+                    'timestamp': '2026-03-28T08:33:00',
+                    'trigger': 'recovery_blocked',
+                    'actor': 'system',
+                    'source': 'recovery_loop',
+                    'from': {'workflow_state': 'execution_failed'},
+                    'to': {'workflow_state': 'blocked'},
+                    'changed_fields': ['workflow_state'],
+                    'reason': 'requires guarded recovery',
+                    'changed': True,
+                }
+            ]
+            dashboard_api_module.db.get_transition_journal_summary = lambda **kwargs: {
+                'count': 1,
+                'latest_timestamp': '2026-03-28T08:33:00',
+                'changed_only': True,
+                'changed_field_counts': {'workflow_state': 1},
+                'workflow_transition_counts': {'execution_failed->blocked': 1},
+            }
             client = dashboard_api_module.app.test_client()
             response = client.get('/api/backtest/unified-workbench-overview?max_items=2')
             self.assertEqual(response.status_code, 200)
@@ -5243,15 +5353,20 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
             self.assertIn('approval', payload['data']['lines'])
             self.assertIn('rollout', payload['data']['lines'])
             self.assertIn('recovery', payload['data']['lines'])
+            self.assertEqual(payload['data']['transition_journal']['latest']['workflow_transition'], 'execution_failed->blocked')
         finally:
             dashboard_api_module.backtester.run_all = original_run_all
             dashboard_api_module._persist_workflow_approval_payload = original_persist
+            dashboard_api_module.db.get_recent_transition_journal = original_get_recent_transition_journal
+            dashboard_api_module.db.get_transition_journal_summary = original_get_transition_journal_summary
 
     def test_backtest_calibration_report_api_supports_unified_workbench_overview(self):
         import dashboard.api as dashboard_api_module
         original_run_all = dashboard_api_module.backtester.run_all
         original_persist = dashboard_api_module._persist_workflow_approval_payload
         original_export = dashboard_api_module.export_calibration_payload
+        original_get_recent_transition_journal = dashboard_api_module.db.get_recent_transition_journal
+        original_get_transition_journal_summary = dashboard_api_module.db.get_transition_journal_summary
         try:
             dashboard_api_module.backtester.run_all = lambda symbols: {'symbols': ['BTC-USDT'], 'calibration_report': {'summary': {'trade_count': 1, 'calibration_ready': True}}}
             dashboard_api_module.export_calibration_payload = lambda report, view='workflow_ready': {
@@ -5262,6 +5377,14 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
                 'auto_approval_execution': {'mode': 'disabled', 'items': []},
             }
             dashboard_api_module._persist_workflow_approval_payload = lambda payload, replay_source='calibration_report:unified_workbench_overview': payload
+            dashboard_api_module.db.get_recent_transition_journal = lambda **kwargs: []
+            dashboard_api_module.db.get_transition_journal_summary = lambda **kwargs: {
+                'count': 0,
+                'latest_timestamp': None,
+                'changed_only': True,
+                'changed_field_counts': {},
+                'workflow_transition_counts': {},
+            }
             client = dashboard_api_module.app.test_client()
             response = client.get('/api/backtest/calibration-report?view=unified_workbench_overview')
             self.assertEqual(response.status_code, 200)
@@ -5269,10 +5392,13 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
             self.assertEqual(payload['view'], 'unified_workbench_overview')
             self.assertEqual(payload['data']['schema_version'], 'm5_unified_workbench_overview_v1')
             self.assertEqual(payload['summary']['unified_workbench_overview'], payload['data']['summary'])
+            self.assertIn('transition_journal', payload['data'])
         finally:
             dashboard_api_module.backtester.run_all = original_run_all
             dashboard_api_module._persist_workflow_approval_payload = original_persist
             dashboard_api_module.export_calibration_payload = original_export
+            dashboard_api_module.db.get_recent_transition_journal = original_get_recent_transition_journal
+            dashboard_api_module.db.get_transition_journal_summary = original_get_transition_journal_summary
 
     def test_backtest_calibration_report_api_supports_workbench_governance_view(self):
         import dashboard.api as dashboard_api
@@ -5300,7 +5426,17 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
                 }
 
         old_backtester = dashboard_api.backtester
+        old_get_recent_transition_journal = dashboard_api.db.get_recent_transition_journal
+        old_get_transition_journal_summary = dashboard_api.db.get_transition_journal_summary
         dashboard_api.backtester = StubBacktester()
+        dashboard_api.db.get_recent_transition_journal = lambda **kwargs: []
+        dashboard_api.db.get_transition_journal_summary = lambda **kwargs: {
+            'count': 0,
+            'latest_timestamp': None,
+            'changed_only': True,
+            'changed_field_counts': {},
+            'workflow_transition_counts': {},
+        }
         try:
             client = app.test_client()
             response = client.get('/api/backtest/calibration-report?view=workbench_governance_view')
@@ -5310,8 +5446,11 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
             self.assertEqual(payload['data']['schema_version'], 'm5_workbench_governance_view_v2')
             self.assertEqual(payload['summary']['workbench_governance_view'], payload['data']['summary'])
             self.assertIn('lanes', payload['data'])
+            self.assertIn('transition_journal', payload['data'])
         finally:
             dashboard_api.backtester = old_backtester
+            dashboard_api.db.get_recent_transition_journal = old_get_recent_transition_journal
+            dashboard_api.db.get_transition_journal_summary = old_get_transition_journal_summary
 
 
     def test_backtest_workbench_governance_items_api_supports_lane_and_action_filters(self):
@@ -5881,6 +6020,32 @@ class TestApprovalPersistence(unittest.TestCase):
                 'summary': {},
             },
             'rollout_executor': {'status': 'controlled', 'summary': {}},
+        }, transition_journal_overview={
+            'schema_version': 'm5_transition_journal_overview_v1',
+            'summary': {
+                'count': 2,
+                'latest_timestamp': '2026-03-28T08:00:00',
+                'changed_only': True,
+                'changed_field_counts': {'workflow_state': 2},
+                'workflow_transition_counts': {'pending->ready': 1, 'blocked_by_approval->ready': 1},
+            },
+            'recent_transitions': [
+                {
+                    'item_id': 'playbook::ready',
+                    'approval_id': 'approval::ready',
+                    'title': 'Ready observe item',
+                    'timestamp': '2026-03-28T08:00:00',
+                    'trigger': 'state_transition',
+                    'actor': 'system',
+                    'source': 'workflow_loop',
+                    'from': {'workflow_state': 'pending'},
+                    'to': {'workflow_state': 'ready'},
+                    'changed_fields': ['workflow_state'],
+                    'reason': 'observe item promoted',
+                    'changed': True,
+                }
+            ],
+            'breakdown': {'changed_field_counts': {'workflow_state': 2}, 'trigger_counts': {'state_transition': 1}, 'actor_counts': {'system': 1}, 'source_counts': {'workflow_loop': 1}},
         })
         self.assertEqual(payload['schema_version'], 'm5_workflow_operator_digest_v1')
         self.assertEqual(payload['headline']['status'], 'attention_required')
@@ -5894,6 +6059,9 @@ class TestApprovalPersistence(unittest.TestCase):
         self.assertEqual(payload['group_summaries']['by_lane'][0]['group_id'], 'manual_approval')
         self.assertEqual(payload['group_summaries']['by_lane'][0]['summary']['status_overview']['manual'], 1)
         self.assertEqual(payload['next_actions'][0]['summary']['dominant_route'], 'manual_approval_queue')
+        self.assertEqual(payload['summary']['transition_count'], 2)
+        self.assertEqual(payload['transition_journal']['latest']['workflow_transition'], 'pending->ready')
+        self.assertEqual(payload['transition_journal']['recent_transitions'][0]['trigger'], 'state_transition')
         self.assertTrue(payload['next_actions'])
 
     def test_build_dashboard_summary_cards_aggregates_digest_attention_and_execution(self):
@@ -6088,7 +6256,33 @@ class TestApprovalPersistence(unittest.TestCase):
                     }
                 ],
             },
-        }, max_items=2, max_adjustments=5)
+        }, max_items=2, max_adjustments=5, transition_journal_overview={
+            'schema_version': 'm5_transition_journal_overview_v1',
+            'summary': {
+                'count': 3,
+                'latest_timestamp': '2026-03-28T08:10:00',
+                'changed_only': True,
+                'changed_field_counts': {'workflow_state': 3},
+                'workflow_transition_counts': {'pending->queued': 1, 'queued->ready': 1, 'blocked_by_approval->ready': 1},
+            },
+            'recent_transitions': [
+                {
+                    'item_id': 'playbook::queued',
+                    'approval_id': 'approval::queued',
+                    'title': 'Queued stage item',
+                    'timestamp': '2026-03-28T08:10:00',
+                    'trigger': 'queue_promoted',
+                    'actor': 'system',
+                    'source': 'rollout_executor',
+                    'from': {'workflow_state': 'pending'},
+                    'to': {'workflow_state': 'queued'},
+                    'changed_fields': ['workflow_state'],
+                    'reason': 'queued for guarded rollout',
+                    'changed': True,
+                }
+            ],
+            'breakdown': {'changed_field_counts': {'workflow_state': 3}, 'trigger_counts': {'queue_promoted': 1}, 'actor_counts': {'system': 1}, 'source_counts': {'rollout_executor': 1}},
+        })
         self.assertEqual(payload['schema_version'], 'm5_workbench_governance_view_v2')
         self.assertEqual(payload['summary']['auto_batch_count'], 2)
         self.assertEqual(payload['summary']['blocked_count'], 1)
@@ -6099,6 +6293,8 @@ class TestApprovalPersistence(unittest.TestCase):
         self.assertTrue(payload['rollout']['frontier'])
         self.assertEqual(payload['recent_adjustments'][0]['source'], 'auto_approval_execution')
         self.assertGreaterEqual(payload['summary']['recent_adjustment_count'], 2)
+        self.assertEqual(payload['summary']['transition_count'], 3)
+        self.assertEqual(payload['transition_journal']['latest']['workflow_transition'], 'pending->queued')
         self.assertEqual(payload['lanes']['manual_approval']['low_intervention_summary']['dominant_follow_up'], 'await_manual_approval')
         self.assertEqual(next(row for row in payload['group_summaries']['by_operator_route'] if row['group_id'] == 'manual_approval_queue')['summary']['dominant_follow_up'], 'await_manual_approval')
 
@@ -6179,7 +6375,33 @@ class TestApprovalPersistence(unittest.TestCase):
             'rollout_executor': {'status': 'controlled', 'summary': {'by_status': {'queued': 1}}},
             'controlled_rollout_execution': {'mode': 'state_apply', 'executed_count': 1, 'items': []},
             'auto_approval_execution': {'mode': 'controlled', 'executed_count': 1, 'items': []},
-        }, max_items=2)
+        }, max_items=2, transition_journal_overview={
+            'schema_version': 'm5_transition_journal_overview_v1',
+            'summary': {
+                'count': 2,
+                'latest_timestamp': '2026-03-28T08:20:00',
+                'changed_only': True,
+                'changed_field_counts': {'workflow_state': 2},
+                'workflow_transition_counts': {'blocked_by_approval->ready': 1, 'execution_failed->blocked': 1},
+            },
+            'recent_transitions': [
+                {
+                    'item_id': 'playbook::recover',
+                    'approval_id': 'approval::recover',
+                    'title': 'Recovery item',
+                    'timestamp': '2026-03-28T08:20:00',
+                    'trigger': 'recovery_blocked',
+                    'actor': 'system',
+                    'source': 'recovery_loop',
+                    'from': {'workflow_state': 'execution_failed'},
+                    'to': {'workflow_state': 'blocked'},
+                    'changed_fields': ['workflow_state'],
+                    'reason': 'requires guarded recovery',
+                    'changed': True,
+                }
+            ],
+            'breakdown': {'changed_field_counts': {'workflow_state': 2}, 'trigger_counts': {'recovery_blocked': 1}, 'actor_counts': {'system': 1}, 'source_counts': {'recovery_loop': 1}},
+        })
         self.assertEqual(payload['schema_version'], 'm5_unified_workbench_overview_v1')
         self.assertEqual(payload['headline']['status'], 'attention_required')
         self.assertEqual(payload['headline']['dominant_line'], 'approval')
@@ -6193,6 +6415,8 @@ class TestApprovalPersistence(unittest.TestCase):
         self.assertEqual(payload['lines']['recovery']['next_actions'][0]['kind'], 'manual_recovery')
         self.assertTrue(payload['top_key_alerts'])
         self.assertTrue(payload['top_next_actions'])
+        self.assertEqual(payload['summary']['transition_count'], 2)
+        self.assertEqual(payload['transition_journal']['latest']['workflow_transition'], 'execution_failed->blocked')
         self.assertEqual(payload['upstreams']['workflow_recovery_view']['summary']['manual_recovery_count'], 1)
 
     def test_build_workbench_governance_detail_view_adds_queue_approval_rollout_drilldown(self):

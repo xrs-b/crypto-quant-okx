@@ -2416,6 +2416,26 @@ def get_backtest_summary():
     return jsonify({'success': True, 'data': backtester.run_all(config.symbols)})
 
 
+def _load_recent_transition_journal_overview(*, limit: int = 5, approval_type: str = None,
+                                            item_id: str = None, target: str = None,
+                                            changed_only: bool = True) -> Dict[str, Any]:
+    rows = db.get_recent_transition_journal(
+        limit=limit,
+        approval_type=approval_type,
+        item_id=item_id,
+        target=target,
+        changed_only=changed_only,
+    )
+    summary = db.get_transition_journal_summary(
+        limit=limit,
+        approval_type=approval_type,
+        item_id=item_id,
+        target=target,
+        changed_only=changed_only,
+    )
+    return build_transition_journal_overview(transition_rows=rows, summary=summary)
+
+
 @app.route('/api/backtest/calibration-report')
 def get_backtest_calibration_report():
     """获取 M5 calibration 聚合输出，默认返回 report-ready payload。"""
@@ -2434,22 +2454,23 @@ def get_backtest_calibration_report():
         payload_to_persist = dict(workflow_payload)
         if payload_to_persist:
             persisted_workflow = _persist_workflow_approval_payload(payload_to_persist, replay_source=f'calibration_report:{view}')
+            transition_journal_overview = _load_recent_transition_journal_overview(limit=5)
             if view == 'workflow_ready':
                 payload = persisted_workflow
             elif view == 'operator_digest':
-                payload = build_workflow_operator_digest(persisted_workflow)
+                payload = build_workflow_operator_digest(persisted_workflow, transition_journal_overview=transition_journal_overview)
             elif view == 'dashboard_summary_cards':
                 payload = build_dashboard_summary_cards(persisted_workflow)
             elif view == 'workbench_governance_view':
-                payload = build_workbench_governance_view(persisted_workflow)
+                payload = build_workbench_governance_view(persisted_workflow, transition_journal_overview=transition_journal_overview)
             elif view == 'unified_workbench_overview':
-                payload = build_unified_workbench_overview(persisted_workflow)
+                payload = build_unified_workbench_overview(persisted_workflow, transition_journal_overview=transition_journal_overview)
             else:
                 payload['workflow_ready'] = persisted_workflow
-                payload['operator_digest'] = build_workflow_operator_digest(persisted_workflow)
+                payload['operator_digest'] = build_workflow_operator_digest(persisted_workflow, transition_journal_overview=transition_journal_overview)
                 payload['dashboard_summary_cards'] = build_dashboard_summary_cards(persisted_workflow)
-                payload['workbench_governance_view'] = build_workbench_governance_view(persisted_workflow)
-                payload['unified_workbench_overview'] = build_unified_workbench_overview(persisted_workflow)
+                payload['workbench_governance_view'] = build_workbench_governance_view(persisted_workflow, transition_journal_overview=transition_journal_overview)
+                payload['unified_workbench_overview'] = build_unified_workbench_overview(persisted_workflow, transition_journal_overview=transition_journal_overview)
     summary = calibration_report.get('summary') or {}
     governance_ready = payload if view == 'governance_ready' else (payload.get('governance_ready') or {})
     workflow_ready = {} if view in {'operator_digest', 'dashboard_summary_cards', 'workbench_governance_view', 'unified_workbench_overview'} else (payload if view == 'workflow_ready' else (payload.get('workflow_ready') or {}))
@@ -2546,7 +2567,8 @@ def get_backtest_workflow_operator_digest():
     calibration_report = backtest_result.get('calibration_report') or {}
     payload = export_calibration_payload(calibration_report, view='workflow_ready')
     payload = _persist_workflow_approval_payload(payload, replay_source='workflow_operator_digest_api')
-    digest = build_workflow_operator_digest(payload, max_items=max_items)
+    transition_journal_overview = _load_recent_transition_journal_overview(limit=max_items)
+    digest = build_workflow_operator_digest(payload, max_items=max_items, transition_journal_overview=transition_journal_overview)
     return jsonify({
         'success': True,
         'view': 'workflow_operator_digest',
@@ -2581,10 +2603,12 @@ def get_backtest_workbench_governance_view():
     calibration_report = backtest_result.get('calibration_report') or {}
     payload = export_calibration_payload(calibration_report, view='workflow_ready')
     payload = _persist_workflow_approval_payload(payload, replay_source='workbench_governance_view_api')
+    transition_journal_overview = _load_recent_transition_journal_overview(limit=max_items)
     workbench_view = build_workbench_governance_view(
         payload,
         max_items=max_items,
         max_adjustments=max_adjustments,
+        transition_journal_overview=transition_journal_overview,
         filters={
             'lane_ids': request.args.get('lane') or request.args.get('lane_ids'),
             'action_types': request.args.get('action') or request.args.get('action_types'),
@@ -2620,10 +2644,12 @@ def get_backtest_unified_workbench_overview():
     calibration_report = backtest_result.get('calibration_report') or {}
     payload = export_calibration_payload(calibration_report, view='workflow_ready')
     payload = _persist_workflow_approval_payload(payload, replay_source='unified_workbench_overview_api')
+    transition_journal_overview = _load_recent_transition_journal_overview(limit=max_items)
     overview = build_unified_workbench_overview(
         payload,
         max_items=max_items,
         max_adjustments=max_adjustments,
+        transition_journal_overview=transition_journal_overview,
         filters={
             'lane_ids': request.args.get('lane') or request.args.get('lane_ids'),
             'action_types': request.args.get('action') or request.args.get('action_types'),

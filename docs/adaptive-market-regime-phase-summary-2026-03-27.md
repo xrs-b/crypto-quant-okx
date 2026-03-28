@@ -64,6 +64,7 @@
 - rollout executor skeleton+1（补齐统一 `handler_key`、标准化 `dispatch/apply/result.status+code`、safe apply `idempotency_key` / `idempotent_skip` 语义、queue-only `queue_plan`、`summary.by_disposition/by_status`；仍严格保持 `real_trade_execution=false` / `dangerous_live_parameter_change=false`）
 - recovery orchestration / retry queue policy 首版（把 `execution_timeline + recovery_policy` 继续推进到 `recovery_orchestration`：明确 item 应进 `retry_queue / rollback_candidate / manual_recovery / recovered_monitoring`，补 `retry_stage / retry_schedule / should_retry_at / manual fallback / rollback_route`，并新增 `/api/backtest/workflow-recovery-view` 方便 dashboard / agent / operator 直接回答“边个重试、边个回滚、边个转人工、几时再试”）
 - unified transition journal / state-change audit trail 首版（approval event details 回挂 `transition_journal`，数据库可直接拉最近 `from -> to / trigger / reason / actor / source / timestamp / changed_fields`，dashboard/API 提供独立 recent transition 入口，方便 workbench / agent / 人工巡检直接看“最近发生了哪些状态迁移”）
+- 2026-03-28 消费层续推：transition journal 已进一步接到 `workflow_operator_digest / workbench_governance_view / unified_workbench_overview`，并同步透过 calibration-report 入口输出稳定 `transition_journal` 摘要；低干预巡检时可直接在 workbench/operator digest 看到最近状态迁移，唔使再额外单独请求 transition-journal API。
 
 ---
 

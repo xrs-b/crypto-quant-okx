@@ -74,6 +74,9 @@ governance:
     actor: system:auto-approval
     source: auto_approval_execution
     reason_prefix: controlled auto-approval execution
+  adaptive_rollout_orchestration:
+    enforce_production_gate: true   # 默认保守：production rollout readiness 未过时，只跑 preflight/dry-run，不落真实自动审批/自动推进
+    gate_max_items: 10
 
 logging:
   backup_count: 5

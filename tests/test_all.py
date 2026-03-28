@@ -6,6 +6,7 @@ import os
 import json
 import sqlite3
 import tempfile
+import copy
 from pathlib import Path
 import yaml
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -10611,6 +10612,151 @@ class TestApprovalPersistence(unittest.TestCase):
             finally:
                 dashboard_api.db = old_db
                 dashboard_api.backtester = old_backtester
+
+    def test_execute_adaptive_rollout_orchestration_blocks_mutations_when_production_gate_not_ready(self):
+        class DummyConfig:
+            def __init__(self, mapping):
+                self.mapping = mapping
+            def get(self, key, default=None):
+                parts = key.split('.')
+                value = self.mapping
+                for part in parts:
+                    if isinstance(value, dict) and part in value:
+                        value = value[part]
+                    else:
+                        return default
+                return value
+
+        payload = {
+            'workflow_state': {
+                'item_states': [
+                    {
+                        'item_id': 'playbook::eligible',
+                        'title': 'Eligible low risk item',
+                        'action_type': 'joint_observe',
+                        'risk_level': 'low',
+                        'approval_required': False,
+                        'requires_manual': False,
+                        'workflow_state': 'ready',
+                        'blocking_reasons': [],
+                    },
+                    {
+                        'item_id': 'playbook::manual',
+                        'title': 'Manual gate item',
+                        'action_type': 'joint_expand_guarded',
+                        'risk_level': 'high',
+                        'approval_required': True,
+                        'requires_manual': True,
+                        'workflow_state': 'blocked_by_approval',
+                        'blocking_reasons': [],
+                    },
+                ],
+                'summary': {'item_count': 2},
+            },
+            'approval_state': {
+                'items': [
+                    {'approval_id': 'approval::eligible', 'playbook_id': 'playbook::eligible', 'title': 'Eligible low risk item', 'action_type': 'joint_observe', 'approval_state': 'pending', 'decision_state': 'pending', 'risk_level': 'low', 'approval_required': False, 'requires_manual': False, 'blocked_by': []},
+                    {'approval_id': 'approval::manual', 'playbook_id': 'playbook::manual', 'title': 'Manual gate item', 'action_type': 'joint_expand_guarded', 'approval_state': 'pending', 'decision_state': 'pending', 'risk_level': 'high', 'approval_required': True, 'requires_manual': True, 'blocked_by': []},
+                ],
+                'summary': {'pending_count': 2},
+            },
+        }
+        cfg = DummyConfig({
+            'governance': {
+                'auto_approval_execution': {
+                    'enabled': True,
+                    'mode': 'controlled',
+                },
+                'adaptive_rollout_orchestration': {
+                    'enforce_production_gate': True,
+                },
+            }
+        })
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(str(Path(tmpdir) / 'adaptive_gate_blocked.db'))
+            result = execute_adaptive_rollout_orchestration(copy.deepcopy(payload), db, config=cfg, replay_source='test_gate_blocked')
+            orchestration = result['adaptive_rollout_orchestration']
+            self.assertEqual(orchestration['schema_version'], 'm5_adaptive_rollout_orchestration_v2')
+            self.assertTrue(orchestration['summary']['gate_enforced'])
+            self.assertTrue(orchestration['summary']['gate_blocked'])
+            self.assertEqual(orchestration['summary']['gate_status'], 'review_required')
+            self.assertIn('manual_approval_backlog', orchestration['summary']['gate_blocking_issues'])
+            self.assertEqual(result['auto_approval_execution']['mode'], 'gated_off')
+            self.assertEqual(result['auto_approval_execution']['executed_count'], 0)
+            self.assertIsNone(db.get_approval_state('approval::eligible'))
+            self.assertEqual(result['approval_state']['items'][0]['approval_state'], 'pending')
+
+    def test_execute_adaptive_rollout_orchestration_can_bypass_production_gate_when_disabled(self):
+        class DummyConfig:
+            def __init__(self, mapping):
+                self.mapping = mapping
+            def get(self, key, default=None):
+                parts = key.split('.')
+                value = self.mapping
+                for part in parts:
+                    if isinstance(value, dict) and part in value:
+                        value = value[part]
+                    else:
+                        return default
+                return value
+
+        payload = {
+            'workflow_state': {
+                'item_states': [
+                    {
+                        'item_id': 'playbook::eligible',
+                        'title': 'Eligible low risk item',
+                        'action_type': 'joint_observe',
+                        'risk_level': 'low',
+                        'approval_required': False,
+                        'requires_manual': False,
+                        'workflow_state': 'ready',
+                        'blocking_reasons': [],
+                    },
+                    {
+                        'item_id': 'playbook::manual',
+                        'title': 'Manual gate item',
+                        'action_type': 'joint_expand_guarded',
+                        'risk_level': 'high',
+                        'approval_required': True,
+                        'requires_manual': True,
+                        'workflow_state': 'blocked_by_approval',
+                        'blocking_reasons': [],
+                    },
+                ],
+                'summary': {'item_count': 2},
+            },
+            'approval_state': {
+                'items': [
+                    {'approval_id': 'approval::eligible', 'playbook_id': 'playbook::eligible', 'title': 'Eligible low risk item', 'action_type': 'joint_observe', 'approval_state': 'pending', 'decision_state': 'pending', 'risk_level': 'low', 'approval_required': False, 'requires_manual': False, 'blocked_by': []},
+                    {'approval_id': 'approval::manual', 'playbook_id': 'playbook::manual', 'title': 'Manual gate item', 'action_type': 'joint_expand_guarded', 'approval_state': 'pending', 'decision_state': 'pending', 'risk_level': 'high', 'approval_required': True, 'requires_manual': True, 'blocked_by': []},
+                ],
+                'summary': {'pending_count': 2},
+            },
+        }
+        cfg = DummyConfig({
+            'governance': {
+                'auto_approval_execution': {
+                    'enabled': True,
+                    'mode': 'controlled',
+                },
+                'adaptive_rollout_orchestration': {
+                    'enforce_production_gate': False,
+                },
+            }
+        })
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(str(Path(tmpdir) / 'adaptive_gate_bypass.db'))
+            result = execute_adaptive_rollout_orchestration(copy.deepcopy(payload), db, config=cfg, replay_source='test_gate_bypass')
+            orchestration = result['adaptive_rollout_orchestration']
+            self.assertFalse(orchestration['summary']['gate_enforced'])
+            self.assertFalse(orchestration['summary']['gate_blocked'])
+            self.assertEqual(result['auto_approval_execution']['executed_count'], 1)
+            self.assertEqual(db.get_approval_state('approval::eligible')['state'], 'approved')
+            self.assertIsNone(db.get_approval_state('approval::manual'))
+
 
 class TestUnifiedWorkflowStateMachine(unittest.TestCase):
     def test_merge_persisted_approval_state_builds_state_machine_semantics(self):

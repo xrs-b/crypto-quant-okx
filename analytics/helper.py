@@ -4591,12 +4591,29 @@ def build_runtime_orchestration_summary(payload: Optional[Dict[str, Any]] = None
     }
 
 
+def _get_adaptive_rollout_orchestration_settings(config: Any = None, overrides: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    overrides = dict(overrides or {})
+    getter = getattr(config, 'get', None)
+    raw = getter('governance.adaptive_rollout_orchestration', {}) if callable(getter) else {}
+    raw = dict(raw or {}) if isinstance(raw, dict) else {}
+    settings = {
+        'enforce_production_gate': bool(raw.get('enforce_production_gate', True)),
+        'gate_max_items': max(1, min(int(raw.get('gate_max_items') or 10), 50)),
+    }
+    settings.update({k: v for k, v in overrides.items() if v is not None})
+    settings['enforce_production_gate'] = bool(settings.get('enforce_production_gate', True))
+    settings['gate_max_items'] = max(1, min(int(settings.get('gate_max_items') or 10), 50))
+    return settings
+
+
 def execute_adaptive_rollout_orchestration(payload: Dict[str, Any], db: Any, *, config: Any = None,
                                           replay_source: str = 'workflow_ready') -> Dict[str, Any]:
     payload = payload or {}
+    orchestration_settings = _get_adaptive_rollout_orchestration_settings(config=config)
     orchestration = {
-        'schema_version': 'm5_adaptive_rollout_orchestration_v1',
+        'schema_version': 'm5_adaptive_rollout_orchestration_v2',
         'replay_source': replay_source,
+        'settings': orchestration_settings,
         'passes': [],
         'summary': {
             'pass_count': 0,
@@ -4606,6 +4623,10 @@ def execute_adaptive_rollout_orchestration(payload: Dict[str, Any], db: Any, *, 
             'controlled_rollout_executed_count': 0,
             'auto_approval_executed_count': 0,
             'review_queue_queued_count': 0,
+            'gate_enforced': bool(orchestration_settings.get('enforce_production_gate', True)),
+            'gate_blocked': False,
+            'gate_status': 'not_evaluated',
+            'gate_blocking_issues': [],
         },
     }
 
@@ -4630,6 +4651,64 @@ def execute_adaptive_rollout_orchestration(payload: Dict[str, Any], db: Any, *, 
         return current_payload
 
     payload = _run_executor(payload, label='pre_auto_approval', dry_run=True)
+    readiness = build_production_rollout_readiness(payload, max_items=orchestration_settings.get('gate_max_items', 10))
+    orchestration['production_rollout_readiness'] = {
+        'schema_version': readiness.get('schema_version'),
+        'status': readiness.get('status'),
+        'production_ready': bool(readiness.get('production_ready')),
+        'can_enable_low_intervention_runtime': bool(readiness.get('can_enable_low_intervention_runtime')),
+        'blocking_issues': readiness.get('blocking_issues') or [],
+        'headline': readiness.get('headline') or {},
+        'runbook_actions': (readiness.get('runbook_actions') or [])[:orchestration_settings.get('gate_max_items', 10)],
+    }
+    orchestration['summary']['gate_status'] = readiness.get('status') or 'unknown'
+    orchestration['summary']['gate_blocking_issues'] = readiness.get('blocking_issues') or []
+
+    gate_blocked = bool(orchestration_settings.get('enforce_production_gate', True)) and not bool(readiness.get('can_enable_low_intervention_runtime'))
+    orchestration['summary']['gate_blocked'] = gate_blocked
+
+    if gate_blocked:
+        orchestration['summary']['rerun_reason'] = 'production_rollout_gate_blocked'
+        orchestration['summary']['pass_count'] = len(orchestration['passes'])
+        payload['auto_approval_execution'] = {
+            'enabled': False,
+            'mode': 'gated_off',
+            'actor': 'system:adaptive-rollout-gate',
+            'source': 'production_rollout_readiness_gate',
+            'replay_source': replay_source,
+            'executed_count': 0,
+            'skipped_count': len((payload.get('approval_state') or {}).get('items') or []),
+            'items': [],
+            'gate': orchestration['production_rollout_readiness'],
+            'safety_switch': 'production_rollout_readiness_gate_blocked',
+        }
+        payload['controlled_rollout_execution'] = {
+            'enabled': False,
+            'mode': 'gated_off',
+            'actor': 'system:adaptive-rollout-gate',
+            'source': 'production_rollout_readiness_gate',
+            'replay_source': replay_source,
+            'executed_count': 0,
+            'skipped_count': len((payload.get('approval_state') or {}).get('items') or []),
+            'items': [],
+            'gate': orchestration['production_rollout_readiness'],
+            'safety_switch': 'production_rollout_readiness_gate_blocked',
+        }
+        payload['auto_promotion_review_execution'] = {
+            'enabled': False,
+            'mode': 'gated_off',
+            'actor': 'system:adaptive-rollout-gate',
+            'source': 'production_rollout_readiness_gate',
+            'replay_source': replay_source,
+            'queued_count': 0,
+            'skipped_count': len((payload.get('approval_state') or {}).get('items') or []),
+            'items': [],
+            'gate': orchestration['production_rollout_readiness'],
+            'safety_switch': 'production_rollout_readiness_gate_blocked',
+        }
+        payload['adaptive_rollout_orchestration'] = orchestration
+        return payload
+
     payload = execute_controlled_auto_approval_layer(payload, db, config=config, replay_source=replay_source)
     payload = attach_auto_approval_policy(payload)
 

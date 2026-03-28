@@ -6740,6 +6740,114 @@ def _build_recovery_retry_executor_payload(payload: Dict[str, Any], retry_items:
     return subset
 
 
+
+def _build_recovery_executor_follow_up(recovery_item: Dict[str, Any], executor_item: Optional[Dict[str, Any]], *, retry_attempt: int = 0) -> Dict[str, Any]:
+    outcome = dict((executor_item or {}).get('result') or {})
+    dispatch = dict((executor_item or {}).get('dispatch') or {})
+    plan = dict((executor_item or {}).get('plan') or {})
+    status = str((executor_item or {}).get('status') or outcome.get('status') or 'missing').strip() or 'missing'
+    disposition = str(outcome.get('disposition') or status or 'missing').strip() or 'missing'
+    retryable = bool(outcome.get('retryable', dispatch.get('retryable', True)))
+    rollback_hint = outcome.get('rollback_hint') or dispatch.get('rollback_hint') or plan.get('rollback_hint')
+    dispatch_route = plan.get('dispatch_route') or dispatch.get('dispatch_route') or outcome.get('dispatch_route')
+    next_transition = outcome.get('next_transition') or dispatch.get('next_transition') or plan.get('next_transition')
+    reason = outcome.get('reason') or dispatch.get('reason') or recovery_item.get('reason')
+    severity = 'low'
+    action = 'observe_recovery'
+    route = dispatch_route or 'observe_only_followup'
+    follow_up = next_transition or 'observe_recovery_completion'
+    escalation_policy = 'none'
+    requires_attention = False
+
+    if disposition in {'applied', 'queued', 'dry_run'} or status in {'applied', 'queued', 'dry_run'}:
+        action = 'observe_recovery' if disposition != 'queued' else 'monitor_queue_progression'
+        follow_up = next_transition or ('retry_execution' if disposition == 'queued' else 'observe_recovery_completion')
+        route = dispatch_route or ('retry_queue' if disposition == 'queued' else 'safe_state_apply')
+    elif disposition == 'blocked_by_approval' or status == 'blocked_by_approval':
+        severity = 'medium'
+        action = 'freeze_followup'
+        route = 'freeze_followup_queue'
+        follow_up = 'await_manual_approval'
+        escalation_policy = 'approval_gate'
+        requires_attention = True
+    elif disposition == 'deferred' or status == 'deferred':
+        severity = 'medium'
+        action = 'retry_followup' if retryable else 'review_schedule'
+        route = dispatch_route or ('retry_queue' if retryable else 'review_schedule_queue')
+        follow_up = next_transition or ('retry_after_blockers_clear' if retryable else 'schedule_review')
+        escalation_policy = 'deferred_followup'
+        requires_attention = True
+    elif disposition in {'skipped', 'error', 'missing'} or status in {'skipped', 'error', 'missing'}:
+        severity = 'high'
+        if rollback_hint and not retryable:
+            action = 'escalate_rollback_candidate'
+            route = 'rollback_candidate_queue'
+            follow_up = 'freeze_and_review'
+            escalation_policy = 'rollback_candidate'
+        elif retryable and retry_attempt < 3:
+            action = 'retry_followup'
+            route = 'retry_queue'
+            follow_up = 'retry_execution'
+            escalation_policy = 'retry_again'
+            severity = 'medium'
+        else:
+            action = 'escalate_manual_recovery'
+            route = 'manual_recovery_queue'
+            follow_up = 'operator_review_and_safe_requeue'
+            escalation_policy = 'manual_recovery'
+        requires_attention = True
+
+    return {
+        'executor_status': status,
+        'disposition': disposition,
+        'retryable': retryable,
+        'rollback_hint': rollback_hint,
+        'dispatch_route': dispatch_route,
+        'next_transition': next_transition,
+        'action': action,
+        'route': route,
+        'follow_up': follow_up,
+        'severity': severity,
+        'escalation_policy': escalation_policy,
+        'requires_attention': requires_attention,
+        'reason': reason,
+        'summary': f"{disposition} -> {action} via {route}",
+    }
+
+
+def _summarize_recovery_executor_follow_ups(items: Optional[List[Dict[str, Any]]]) -> Dict[str, Any]:
+    rows = list(items or [])
+    action_counts = {}
+    route_counts = {}
+    severity_counts = {}
+    policy_counts = {}
+    attention_count = 0
+    for row in rows:
+        follow_up = dict(row.get('follow_up_execution') or {})
+        action = str(follow_up.get('action') or 'observe_recovery').strip() or 'observe_recovery'
+        route = str(follow_up.get('route') or 'observe_only_followup').strip() or 'observe_only_followup'
+        severity = str(follow_up.get('severity') or 'low').strip() or 'low'
+        policy = str(follow_up.get('escalation_policy') or 'none').strip() or 'none'
+        action_counts[action] = action_counts.get(action, 0) + 1
+        route_counts[route] = route_counts.get(route, 0) + 1
+        severity_counts[severity] = severity_counts.get(severity, 0) + 1
+        policy_counts[policy] = policy_counts.get(policy, 0) + 1
+        if follow_up.get('requires_attention'):
+            attention_count += 1
+    dominant_action = max(sorted(action_counts.items()), key=lambda item: (item[1], item[0]))[0] if action_counts else None
+    dominant_route = max(sorted(route_counts.items()), key=lambda item: (item[1], item[0]))[0] if route_counts else None
+    return {
+        'item_count': len(rows),
+        'attention_required_count': attention_count,
+        'action_counts': action_counts,
+        'route_counts': route_counts,
+        'severity_counts': severity_counts,
+        'escalation_policy_counts': policy_counts,
+        'dominant_action': dominant_action,
+        'dominant_route': dominant_route,
+        'summary': f"follow_up={dominant_action or 'none'} via {dominant_route or 'none'} / attention={attention_count}",
+    }
+
 def execute_recovery_queue_layer(payload: Dict[str, Any], db: Any, *, config: Any = None,
                                  settings: Optional[Dict[str, Any]] = None,
                                  replay_source: str = 'workflow_ready',
@@ -6775,6 +6883,17 @@ def execute_recovery_queue_layer(payload: Dict[str, Any], db: Any, *, config: An
             'queued_count': 0,
             'skipped_count': 0,
             'error_count': 0,
+            'follow_up_summary': {
+                'item_count': 0,
+                'attention_required_count': 0,
+                'action_counts': {},
+                'route_counts': {},
+                'severity_counts': {},
+                'escalation_policy_counts': {},
+                'dominant_action': None,
+                'dominant_route': None,
+                'summary': 'follow_up=none via none / attention=0',
+            },
             'items': [],
         },
         'summary': {
@@ -7011,6 +7130,11 @@ def execute_recovery_queue_layer(payload: Dict[str, Any], db: Any, *, config: An
                     'result_reason': outcome.get('reason') or dispatch.get('reason'),
                     'disposition': outcome.get('disposition') or executor_item.get('status'),
                 }
+                recovery_item['follow_up_execution'] = _build_recovery_executor_follow_up(
+                    recovery_item,
+                    executor_item,
+                    retry_attempt=int(candidate.get('retry_attempt') or 0),
+                )
                 recovery_item['status_transition']['executor_reentry_status'] = executor_item.get('status')
                 recovery_item['status_transition']['executor_reentry_execution_status'] = executor_item.get('execution_status')
             if approval_id:
@@ -7032,6 +7156,7 @@ def execute_recovery_queue_layer(payload: Dict[str, Any], db: Any, *, config: An
                     existing_recovery_exec['retry_attempt'] = candidate.get('retry_attempt')
                     existing_recovery_exec['retry_source'] = candidate.get('retry_source')
                     existing_recovery_exec['executor_reentry'] = (recovery_item or {}).get('executor_reentry') if recovery_item else {}
+                    existing_recovery_exec['follow_up_execution'] = (recovery_item or {}).get('follow_up_execution') if recovery_item else {}
                     existing_recovery_exec['event_log'] = (existing_recovery_exec.get('event_log') or []) + [event]
                     details['recovery_execution'] = existing_recovery_exec
                     db.upsert_approval_state(
@@ -7053,6 +7178,18 @@ def execute_recovery_queue_layer(payload: Dict[str, Any], db: Any, *, config: An
                     persisted = db.get_approval_state(approval_id)
                     if persisted:
                         persisted_retry_rows.append(persisted)
+        for candidate in retry_executor_candidates:
+            item_id = candidate.get('item_id')
+            recovery_item = recovery_items_by_item.get(item_id)
+            if recovery_item and not recovery_item.get('follow_up_execution'):
+                recovery_item['follow_up_execution'] = _build_recovery_executor_follow_up(
+                    recovery_item,
+                    executor_by_item.get(item_id) or executor_by_item.get(candidate.get('approval_id')),
+                    retry_attempt=int(candidate.get('retry_attempt') or 0),
+                )
+        result['executor_pass']['follow_up_summary'] = _summarize_recovery_executor_follow_ups([
+            row for row in (result.get('items') or []) if row.get('queue_bucket') == 'retry_queue' and row.get('reentered_executor')
+        ])
         if persisted_retry_rows:
             merge_persisted_approval_state(payload, persisted_retry_rows)
     return payload

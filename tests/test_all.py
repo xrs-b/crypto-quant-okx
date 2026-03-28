@@ -10474,6 +10474,41 @@ class TestApprovalPersistence(unittest.TestCase):
             self.assertEqual(due_row['details']['recovery_execution']['retry_attempt'], 2)
             self.assertEqual(later_row['workflow_state'], 'execution_failed')
 
+    def test_recovery_execution_escalates_failed_retry_reentry_into_follow_up_semantics(self):
+        payload = {
+            'workflow_state': {'item_states': [
+                {'item_id': 'playbook::retry_exhausted', 'title': 'Retry exhausted item', 'action_type': 'joint_observe', 'workflow_state': 'execution_failed', 'risk_level': 'low', 'approval_required': False, 'blocking_reasons': [], 'confidence': 'high', 'state_machine': _build_state_machine_semantics(item_id='approval::retry_exhausted', approval_state='pending', workflow_state='execution_failed', execution_status='error', retryable=True, rollback_hint='restore_previous_state_from_approval_timeline', dispatch_route='retry_queue', next_transition='retry_execution')},
+            ], 'summary': {}},
+            'approval_state': {'items': [
+                {'approval_id': 'approval::retry_exhausted', 'playbook_id': 'playbook::retry_exhausted', 'title': 'Retry exhausted item', 'action_type': 'joint_observe', 'approval_state': 'pending', 'decision_state': 'pending', 'risk_level': 'low', 'approval_required': False, 'blocked_by': [], 'auto_approval_eligible': True, 'auto_approval_decision': 'auto_approve'},
+            ], 'summary': {}},
+            'workflow_recovery_view': {'summary': {'retry_queue_count': 1, 'rollback_candidate_count': 0, 'manual_recovery_count': 0}, 'queues': {
+                'retry_queue': [
+                    {'item_id': 'playbook::retry_exhausted', 'approval_id': 'approval::retry_exhausted', 'title': 'Retry exhausted item', 'action_type': 'joint_observe', 'workflow_state': 'execution_failed', 'approval_state': 'pending', 'risk_level': 'low', 'recovery_orchestration': {'queue_bucket': 'retry_queue', 'target_route': 'retry_queue', 'retry_schedule': {'retry_count': 3, 'should_retry_at': '2026-03-29T00:00:00Z'}, 'manual_recovery': {}, 'routing_reason_codes': ['retryable_execution_failure']}},
+                ],
+                'rollback_candidates': [],
+                'manual_recovery': [],
+            }},
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(str(Path(tmpdir) / 'recovery_execution_escalation.db'))
+            db.sync_approval_items(build_workflow_approval_records(payload), replay_source='unit-test')
+            executed = execute_recovery_queue_layer(payload, db, settings={'enabled': True, 'mode': 'controlled', 'actor': 'system:test-recovery', 'source': 'unit_test_recovery', 'retry_executor': {'enabled': True, 'mode': 'controlled', 'allowed_action_types': ['joint_stage_prepare']}}, replay_source='unit-test-replay', now='2026-03-30T00:00:00Z')
+            summary = executed['recovery_execution']
+            self.assertEqual(summary['scheduled_retry_count'], 1)
+            self.assertEqual(summary['retry_reentered_executor_count'], 1)
+            self.assertEqual(summary['executor_pass']['skipped_count'], 1)
+            self.assertEqual(summary['executor_pass']['follow_up_summary']['attention_required_count'], 1)
+            self.assertEqual(summary['executor_pass']['follow_up_summary']['dominant_route'], 'manual_recovery_queue')
+            retry_item = next(row for row in summary['items'] if row['item_id'] == 'playbook::retry_exhausted')
+            self.assertTrue(retry_item['reentered_executor'])
+            self.assertEqual(retry_item['follow_up_execution']['action'], 'escalate_manual_recovery')
+            self.assertEqual(retry_item['follow_up_execution']['route'], 'manual_recovery_queue')
+            self.assertEqual(retry_item['follow_up_execution']['escalation_policy'], 'manual_recovery')
+            persisted = db.get_approval_state('approval::retry_exhausted')
+            self.assertEqual(persisted['details']['recovery_execution']['follow_up_execution']['route'], 'manual_recovery_queue')
+            self.assertEqual(persisted['details']['recovery_execution']['follow_up_execution']['severity'], 'high')
+
     def test_auto_promotion_review_queue_filter_view_supports_queue_due_target_and_trigger_filters(self):
         payload = self._make_controlled_auto_promotion_payload()
         with tempfile.TemporaryDirectory() as tmpdir:

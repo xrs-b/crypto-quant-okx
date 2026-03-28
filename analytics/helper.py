@@ -5632,8 +5632,35 @@ def build_unified_workbench_overview(payload: Optional[Dict] = None, *, max_item
                                      max_adjustments: int = 10, filters: Optional[Dict[str, Any]] = None,
                                      approval_timeline_fetcher: Optional[Any] = None,
                                      approval_timeline_limit: int = 200,
-                                     transition_journal_overview: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                                     transition_journal_overview: Optional[Dict[str, Any]] = None,
+                                     lane_ids: Any = None, action_types: Any = None,
+                                     risk_levels: Any = None, workflow_states: Any = None,
+                                     approval_states: Any = None, current_rollout_stages: Any = None,
+                                     target_rollout_stages: Any = None, bucket_tags: Any = None,
+                                     auto_approval_decisions: Any = None, operator_actions: Any = None,
+                                     operator_routes: Any = None, operator_follow_ups: Any = None,
+                                     owner_hints: Any = None, q: Optional[str] = None) -> Dict[str, Any]:
     payload = payload or {}
+    merged_filters = dict(filters or {})
+    compatibility_filters = {
+        'lane_ids': lane_ids,
+        'action_types': action_types,
+        'risk_levels': risk_levels,
+        'workflow_states': workflow_states,
+        'approval_states': approval_states,
+        'current_rollout_stages': current_rollout_stages,
+        'target_rollout_stages': target_rollout_stages,
+        'bucket_tags': bucket_tags,
+        'auto_approval_decisions': auto_approval_decisions,
+        'operator_actions': operator_actions,
+        'operator_routes': operator_routes,
+        'operator_follow_ups': operator_follow_ups,
+        'owner_hints': owner_hints,
+        'q': q,
+    }
+    for key, value in compatibility_filters.items():
+        if value is not None and key not in merged_filters:
+            merged_filters[key] = value
     consumer_view = payload.get('consumer_view') or build_workflow_consumer_view(payload)
     recovery_view = payload.get('workflow_recovery_view') or build_workflow_recovery_view(payload, max_items=max_items)
     operator_digest = payload.get('workflow_operator_digest') or payload.get('operator_digest') or build_workflow_operator_digest(
@@ -5645,7 +5672,7 @@ def build_unified_workbench_overview(payload: Optional[Dict] = None, *, max_item
         payload,
         max_items=max_items,
         max_adjustments=max_adjustments,
-        filters=filters,
+        filters=merged_filters,
         transition_journal_overview=transition_journal_overview,
     )
     transition_journal = workbench_view.get('transition_journal') or operator_digest.get('transition_journal') or _build_transition_journal_consumer_view(
@@ -5656,7 +5683,7 @@ def build_unified_workbench_overview(payload: Optional[Dict] = None, *, max_item
         approval_timeline_fetcher=approval_timeline_fetcher,
         approval_timeline_limit=approval_timeline_limit,
         max_items_per_group=max_items,
-        **(filters or {}),
+        **merged_filters,
     )
 
     workflow_summary = (consumer_view.get('workflow_state') or {}).get('summary') or {}

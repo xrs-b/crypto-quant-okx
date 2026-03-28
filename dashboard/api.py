@@ -2762,7 +2762,7 @@ def get_backtest_workbench_governance_timeline_summary():
     calibration_report = backtest_result.get('calibration_report') or {}
     payload = export_calibration_payload(calibration_report, view='workflow_ready')
     payload = _persist_workflow_approval_payload(payload, replay_source='workbench_governance_timeline_summary_api')
-    aggregation = build_workbench_timeline_summary_aggregation, build_unified_workbench_overview(
+    aggregation = build_workbench_timeline_summary_aggregation(
         payload,
         lane_ids=request.args.get('lane') or request.args.get('lane_ids'),
         action_types=request.args.get('action') or request.args.get('action_types'),

@@ -6435,6 +6435,52 @@ class TestApprovalPersistence(unittest.TestCase):
         self.assertEqual(payload['transition_journal']['latest']['workflow_transition'], 'execution_failed->blocked')
         self.assertEqual(payload['upstreams']['workflow_recovery_view']['summary']['manual_recovery_count'], 1)
 
+    def test_build_unified_workbench_overview_accepts_legacy_filter_kwargs(self):
+        payload = build_unified_workbench_overview({
+            'workflow_state': {
+                'item_states': [
+                    {
+                        'item_id': 'playbook::manual',
+                        'title': 'Manual gate item',
+                        'action_type': 'joint_expand_guarded',
+                        'risk_level': 'high',
+                        'approval_required': True,
+                        'requires_manual': True,
+                        'workflow_state': 'blocked_by_approval',
+                    },
+                    {
+                        'item_id': 'playbook::ready',
+                        'title': 'Ready item',
+                        'action_type': 'joint_stage_prepare',
+                        'risk_level': 'low',
+                        'approval_required': False,
+                        'requires_manual': False,
+                        'workflow_state': 'ready',
+                    },
+                ],
+                'summary': {'item_count': 2},
+            },
+            'approval_state': {
+                'items': [
+                    {
+                        'approval_id': 'approval::manual',
+                        'playbook_id': 'playbook::manual',
+                        'title': 'Manual gate item',
+                        'action_type': 'joint_expand_guarded',
+                        'approval_state': 'pending',
+                        'decision_state': 'pending',
+                        'risk_level': 'high',
+                        'approval_required': True,
+                        'requires_manual': True,
+                    },
+                ],
+                'summary': {'pending_count': 1},
+            },
+        }, lane_ids='manual_approval')
+        self.assertEqual(payload['summary']['filtered_item_count'], 1)
+        self.assertEqual(payload['upstreams']['workbench_governance_view']['applied_filters']['lane_ids'], ['manual_approval'])
+        self.assertEqual(payload['lines']['approval']['counts']['manual_approval'], 1)
+
     def test_gate_consumption_flows_into_operator_digest_workbench_and_timeline_layers(self):
         gate_payload = {
             'workflow_state': {

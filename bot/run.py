@@ -315,6 +315,7 @@ def maybe_run_adaptive_rollout_orchestration(cfg: Config, db: Database, notifier
     orchestration = payload.get('adaptive_rollout_orchestration') or {}
     orchestration_summary = orchestration.get('summary') or {}
     rerun_observability = ((runtime_summary.get('summary') or {}).get('rerun_observability') or {}) if isinstance(runtime_summary.get('summary'), dict) else {}
+    controlled_rollout_budget = ((runtime_summary.get('summary') or {}).get('controlled_rollout_budget') or {}) if isinstance(runtime_summary.get('summary'), dict) else {}
 
     result.update({
         'ran': True,
@@ -354,6 +355,8 @@ def maybe_run_adaptive_rollout_orchestration(cfg: Config, db: Database, notifier
             'gate_blocking_issues': orchestration_summary.get('gate_blocking_issues') or [],
             'auto_approval_executed_count': int(orchestration_summary.get('auto_approval_executed_count', 0) or 0),
             'controlled_rollout_executed_count': int(orchestration_summary.get('controlled_rollout_executed_count', 0) or 0),
+            'controlled_rollout_budget': controlled_rollout_budget,
+            'controlled_rollout_budget_exhausted': bool(controlled_rollout_budget.get('exhausted', False)),
             'review_queue_queued_count': int(orchestration_summary.get('review_queue_queued_count', 0) or 0),
             'recovery_retry_scheduled_count': int(orchestration_summary.get('recovery_retry_scheduled_count', 0) or 0),
             'recovery_rollback_queued_count': int(orchestration_summary.get('recovery_rollback_queued_count', 0) or 0),
@@ -383,6 +386,7 @@ def maybe_run_adaptive_rollout_orchestration(cfg: Config, db: Database, notifier
         lines = [
             f"gate={orchestration_summary.get('gate_status') or '--'} ｜ blocked={'yes' if orchestration_summary.get('gate_blocked') else 'no'} ｜ passes={orchestration_summary.get('pass_count', 0)}",
             f"auto-approval={orchestration_summary.get('auto_approval_executed_count', 0)} ｜ rollout={orchestration_summary.get('controlled_rollout_executed_count', 0)} ｜ review-queue={orchestration_summary.get('review_queue_queued_count', 0)}",
+            f"rollout-budget limit={controlled_rollout_budget.get('max_executed_per_pass', 0) or 'unlimited'} ｜ remaining={controlled_rollout_budget.get('remaining_slots', '--')} ｜ exhausted={'yes' if controlled_rollout_budget.get('exhausted') else 'no'} ｜ budget-skips={controlled_rollout_budget.get('skipped_by_budget', 0)}",
             f"recovery retry={orchestration_summary.get('recovery_retry_scheduled_count', 0)} ｜ reentered={orchestration_summary.get('recovery_retry_reentered_executor_count', 0)} ｜ rollback={orchestration_summary.get('recovery_rollback_queued_count', 0)} ｜ bridge={orchestration_summary.get('testnet_bridge_status') or 'disabled'}",
         ]
         if rerun_observability.get('triggered'):
@@ -431,6 +435,7 @@ def build_runtime_health_summary(cfg: Config, db: Database) -> dict:
     orchestration_runtime_summary = orchestration_runtime.get('runtime_summary', {}) if isinstance(orchestration_runtime.get('runtime_summary'), dict) else {}
     orchestration_cooldown = orchestration_runtime.get('cooldown', {}) if isinstance(orchestration_runtime.get('cooldown'), dict) else {}
     orchestration_rerun = orchestration_runtime_summary.get('rerun_observability', {}) if isinstance(orchestration_runtime_summary.get('rerun_observability'), dict) else {}
+    controlled_rollout_budget = orchestration_summary.get('controlled_rollout_budget', {}) if isinstance(orchestration_summary.get('controlled_rollout_budget'), dict) else {}
     lines = [
         f'环境：{cfg.exchange_mode}',
         f'监听币种：{", ".join(cfg.symbols) or "--"}',
@@ -451,6 +456,7 @@ def build_runtime_health_summary(cfg: Config, db: Database) -> dict:
         '---',
         f'Adaptive Rollout Orchestration：enabled={"yes" if orchestration_enabled else "no"} ｜ gate={orchestration_summary.get("gate_status") or "--"} ｜ blocked={"yes" if orchestration_summary.get("gate_blocked") else "no"}',
         f'编排执行：auto-approval {orchestration_summary.get("auto_approval_executed_count", 0)} ｜ rollout {orchestration_summary.get("controlled_rollout_executed_count", 0)} ｜ review {orchestration_summary.get("review_queue_queued_count", 0)}',
+        f'Rollout budget：limit={controlled_rollout_budget.get("max_executed_per_pass", 0) or "unlimited"} ｜ remaining={controlled_rollout_budget.get("remaining_slots", "--")} ｜ exhausted={"yes" if controlled_rollout_budget.get("exhausted") else "no"} ｜ skipped={controlled_rollout_budget.get("skipped_by_budget", 0)}',
         f'Recovery rerun：triggered={"yes" if orchestration_rerun.get("recovery_triggered") else "no"} ｜ reason={orchestration_rerun.get("primary_reason") or "--"} ｜ count={((orchestration_rerun.get("result_counts") or {}).get("rerun_pass_count", 0))}',
         f'Recovery lane：retry {orchestration_summary.get("recovery_retry_scheduled_count", 0)} ｜ reentered {orchestration_summary.get("recovery_retry_reentered_executor_count", 0)} ｜ rollback {orchestration_summary.get("recovery_rollback_queued_count", 0)} ｜ manual-note {orchestration_summary.get("recovery_manual_annotation_count", 0)}',
         f'编排节流：interval={orchestration_cooldown.get("min_interval_seconds", 0)}s ｜ cooldown={"active" if orchestration_cooldown.get("active") else "idle"} ｜ remaining={orchestration_cooldown.get("remaining_seconds", 0) or 0}s',

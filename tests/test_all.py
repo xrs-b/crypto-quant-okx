@@ -10348,6 +10348,89 @@ class TestApprovalPersistence(unittest.TestCase):
             self.assertEqual(result['controlled_rollout_execution']['executed_count'], 4)
             self.assertEqual(result['controlled_rollout_execution']['skipped_count'], 0)
 
+    def test_controlled_rollout_execution_honors_pass_budget_and_surfaces_budget_summary(self):
+        class StubConfig:
+            def __init__(self, values=None):
+                self.values = values or {}
+
+            def get(self, key, default=None):
+                return self.values.get(key, default)
+
+        config = StubConfig({
+            'governance.controlled_rollout_execution': {
+                'enabled': True,
+                'mode': 'state_apply',
+                'auto_promote_ready_candidates': True,
+                'allowed_action_types': ['joint_stage_prepare'],
+                'max_executed_per_pass': 1,
+            }
+        })
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(str(Path(tmpdir) / 'controlled_rollout_budget.db'))
+            payload = {
+                'workflow_state': {
+                    'item_states': [
+                        {'item_id': 'playbook::stage-1', 'title': 'Stage prepare item 1', 'action_type': 'joint_stage_prepare', 'decision': 'expand', 'governance_mode': 'rollout', 'risk_level': 'low', 'approval_required': False, 'blocking_reasons': [], 'preconditions': [], 'workflow_state': 'pending', 'confidence': 'high', 'current_rollout_stage': 'observe', 'target_rollout_stage': 'controlled_apply'},
+                        {'item_id': 'playbook::stage-2', 'title': 'Stage prepare item 2', 'action_type': 'joint_stage_prepare', 'decision': 'expand', 'governance_mode': 'rollout', 'risk_level': 'low', 'approval_required': False, 'blocking_reasons': [], 'preconditions': [], 'workflow_state': 'pending', 'confidence': 'high', 'current_rollout_stage': 'observe', 'target_rollout_stage': 'controlled_apply'},
+                    ],
+                    'summary': {},
+                },
+                'approval_state': {
+                    'items': [
+                        {'approval_id': 'approval::stage-1', 'playbook_id': 'playbook::stage-1', 'title': 'Stage prepare item 1', 'action_type': 'joint_stage_prepare', 'approval_state': 'pending', 'decision_state': 'pending', 'risk_level': 'low', 'approval_required': False, 'blocked_by': [], 'current_rollout_stage': 'observe', 'target_rollout_stage': 'controlled_apply'},
+                        {'approval_id': 'approval::stage-2', 'playbook_id': 'playbook::stage-2', 'title': 'Stage prepare item 2', 'action_type': 'joint_stage_prepare', 'approval_state': 'pending', 'decision_state': 'pending', 'risk_level': 'low', 'approval_required': False, 'blocked_by': [], 'current_rollout_stage': 'observe', 'target_rollout_stage': 'controlled_apply'},
+                    ],
+                    'summary': {},
+                },
+            }
+            payload = attach_auto_approval_policy(payload)
+            db.sync_approval_items(build_workflow_approval_records(payload), replay_source='unit-test')
+            result = execute_controlled_rollout_layer(payload, db, config=config, replay_source='unit-test-replay')
+
+            first = db.get_approval_state('approval::stage-1')
+            second = db.get_approval_state('approval::stage-2')
+            self.assertEqual(first['state'], 'ready')
+            self.assertEqual(first['workflow_state'], 'ready')
+            self.assertEqual(second['state'], 'pending')
+            self.assertEqual(second['workflow_state'], 'pending')
+            self.assertEqual(result['controlled_rollout_execution']['executed_count'], 1)
+            self.assertEqual(result['controlled_rollout_execution']['skipped_count'], 1)
+            budget = result['controlled_rollout_execution']['budget']
+            self.assertEqual(budget['max_executed_per_pass'], 1)
+            self.assertEqual(budget['remaining_slots'], 0)
+            self.assertTrue(budget['exhausted'])
+            self.assertEqual(budget['skipped_by_budget'], 1)
+            self.assertEqual(budget['last_executed_item_id'], 'approval::stage-1')
+            reasons = {row['item_id']: row['reason'] for row in result['controlled_rollout_execution']['items'] if row['action'] == 'skipped'}
+            self.assertEqual(reasons['approval::stage-2'], 'pass_budget_exhausted')
+
+            execution_summary = build_auto_promotion_execution_summary(result, max_items=5)
+            self.assertEqual(execution_summary['summary']['budget']['max_executed_per_pass'], 1)
+            self.assertTrue(execution_summary['summary']['budget']['exhausted'])
+            self.assertEqual(execution_summary['summary']['budget']['skipped_by_budget'], 1)
+
+            runtime_summary = build_runtime_orchestration_summary({
+                **result,
+                'adaptive_rollout_orchestration': {
+                    'schema_version': 'm5_adaptive_rollout_orchestration_v2',
+                    'passes': [{'label': 'pre_auto_approval', 'dry_run': True, 'rollout_executor_applied_count': 0}],
+                    'summary': {
+                        'pass_count': 1,
+                        'rerun_triggered': False,
+                        'rerun_reason': None,
+                        'rollout_executor_applied_count': 0,
+                        'controlled_rollout_executed_count': 1,
+                        'auto_approval_executed_count': 0,
+                        'review_queue_queued_count': 0,
+                        'review_queue_completed_count': 0,
+                        'review_queue_rollback_escalated_count': 0,
+                    },
+                },
+            }, max_items=5)
+            self.assertEqual(runtime_summary['summary']['controlled_rollout_budget']['max_executed_per_pass'], 1)
+            self.assertTrue(runtime_summary['summary']['controlled_rollout_budget']['exhausted'])
+            self.assertEqual(runtime_summary['summary']['controlled_rollout_budget']['skipped_by_budget'], 1)
+
     def test_controlled_rollout_execution_respects_extended_action_allowlist_and_manual_gates(self):
         class StubConfig:
             def __init__(self, values=None):

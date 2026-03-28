@@ -2806,6 +2806,7 @@ def _get_controlled_rollout_execution_settings(config: Any = None, overrides: Op
         'target_state': str(raw.get('target_state') or 'ready').strip().lower() or 'ready',
         'default_review_after_hours': int(raw.get('default_review_after_hours') or 24),
         'auto_promote_ready_candidates': bool(raw.get('auto_promote_ready_candidates', False)),
+        'max_executed_per_pass': int(raw.get('max_executed_per_pass') or 0),
     }
     settings.update({k: v for k, v in overrides.items() if v is not None})
     settings['enabled'] = bool(settings.get('enabled', False))
@@ -2814,6 +2815,7 @@ def _get_controlled_rollout_execution_settings(config: Any = None, overrides: Op
     settings['target_workflow_state'] = str(settings.get('target_workflow_state') or 'ready').strip().lower() or 'ready'
     settings['target_state'] = str(settings.get('target_state') or 'ready').strip().lower() or 'ready'
     settings['default_review_after_hours'] = max(1, min(int(settings.get('default_review_after_hours') or 24), 24 * 14))
+    settings['max_executed_per_pass'] = max(0, min(int(settings.get('max_executed_per_pass') or 0), 1000))
     return settings
 
 
@@ -2841,6 +2843,14 @@ def execute_controlled_rollout_layer(payload: Dict, db: Any, *, config: Any = No
         'executed_count': 0,
         'skipped_count': 0,
         'items': [],
+        'budget': {
+            'schema_version': 'm5_controlled_rollout_budget_v1',
+            'max_executed_per_pass': int(execution_settings.get('max_executed_per_pass', 0) or 0),
+            'remaining_slots': None,
+            'exhausted': False,
+            'skipped_by_budget': 0,
+            'last_executed_item_id': None,
+        },
     }
     payload['controlled_rollout_execution'] = result
 
@@ -2848,6 +2858,8 @@ def execute_controlled_rollout_layer(payload: Dict, db: Any, *, config: Any = No
         result['skipped_count'] = len(approval_items)
         if not result['auto_promote_ready_candidates']:
             result['safety_switch'] = 'auto_promote_ready_candidates_disabled'
+        budget_limit = int((result.get('budget') or {}).get('max_executed_per_pass') or 0)
+        result['budget']['remaining_slots'] = None if budget_limit <= 0 else budget_limit
         return payload
 
     validation_gate = _build_validation_gate_snapshot(payload)
@@ -2856,6 +2868,7 @@ def execute_controlled_rollout_layer(payload: Dict, db: Any, *, config: Any = No
     result['execution_gate'] = execution_gate
 
     allowed_action_types = set(execution_settings.get('allowed_action_types') or [])
+    budget_limit = int(execution_settings.get('max_executed_per_pass', 0) or 0)
     executed_rows = []
     for row in approval_items:
         approval_id = row.get('approval_id') or row.get('item_id') or row.get('playbook_id')
@@ -2944,6 +2957,10 @@ def execute_controlled_rollout_layer(payload: Dict, db: Any, *, config: Any = No
             skip_reason = 'manual_fallback_required'
         elif candidate.get('blocked_by') or blocked_by:
             skip_reason = 'blocked_by:' + ','.join(candidate.get('blocked_by') or blocked_by)
+        elif budget_limit > 0 and result['executed_count'] >= budget_limit:
+            skip_reason = 'pass_budget_exhausted'
+            result['budget']['exhausted'] = True
+            result['budget']['skipped_by_budget'] += 1
 
         if skip_reason:
             result['items'].append({
@@ -3139,6 +3156,17 @@ def execute_controlled_rollout_layer(payload: Dict, db: Any, *, config: Any = No
             'reason_codes': candidate_reasons or ['auto_advance_allowed'],
         })
         result['executed_count'] += 1
+        result['budget']['last_executed_item_id'] = approval_id
+        if budget_limit > 0:
+            result['budget']['remaining_slots'] = max(budget_limit - result['executed_count'], 0)
+            result['budget']['exhausted'] = result['executed_count'] >= budget_limit
+
+    if budget_limit > 0 and result['budget']['remaining_slots'] is None:
+        result['budget']['remaining_slots'] = max(budget_limit - result['executed_count'], 0)
+        result['budget']['exhausted'] = result['executed_count'] >= budget_limit or result['budget']['skipped_by_budget'] > 0
+    elif budget_limit <= 0:
+        result['budget']['remaining_slots'] = None
+        result['budget']['exhausted'] = False
 
     if executed_rows:
         merge_persisted_approval_state(payload, executed_rows)
@@ -4736,6 +4764,7 @@ def build_runtime_orchestration_summary(payload: Optional[Dict[str, Any]] = None
         'rerun_reason': orchestration_summary.get('rerun_reason'),
         'rollout_executor_applied_count': orchestration_summary.get('rollout_executor_applied_count', 0),
         'controlled_rollout_executed_count': orchestration_summary.get('controlled_rollout_executed_count', 0),
+        'controlled_rollout_budget': (auto_promotion_execution.get('summary') or {}).get('budget') or ((payload.get('controlled_rollout_execution') or {}).get('budget') or {}),
         'auto_approval_executed_count': orchestration_summary.get('auto_approval_executed_count', 0),
         'review_queue_queued_count': orchestration_summary.get('review_queue_queued_count', 0),
         'review_queue_completed_count': orchestration_summary.get('review_queue_completed_count', 0),
@@ -6782,6 +6811,14 @@ def build_auto_promotion_execution_summary(payload: Optional[Dict] = None, *, ma
         'target_stage_counts': target_stage_counts,
         'reason_code_counts': reason_code_counts,
         'risk_label_counts': risk_label_counts,
+        'budget': controlled_rollout.get('budget') or {
+            'schema_version': 'm5_controlled_rollout_budget_v1',
+            'max_executed_per_pass': 0,
+            'remaining_slots': None,
+            'exhausted': False,
+            'skipped_by_budget': 0,
+            'last_executed_item_id': None,
+        },
     }
     return {
         'schema_version': 'm5_auto_promotion_execution_summary_v3',

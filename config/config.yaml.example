@@ -64,6 +64,7 @@ governance:
     source: controlled_rollout_execution
     reason_prefix: controlled rollout state apply
     auto_promote_ready_candidates: false   # 显式安全开关；只有 true 时先会消费 auto_promotion_candidate_view，把真正 ready/very-safe/low-risk/no-blocker/no-manual-fallback 的 candidate 推进真实 stage/state
+    max_executed_per_pass: 1               # 建议生产低干预先从 1 开始；0=不设上限。用作 blast-radius fence，避免单轮编排推进过多 candidate
     allowed_action_types: [joint_observe]   # 支持的 very-safe 动作：joint_observe/joint_queue_promote_safe/joint_stage_prepare/joint_review_schedule/joint_metadata_annotate；默认仍只开 joint_observe
     target_state: ready
     target_workflow_state: ready

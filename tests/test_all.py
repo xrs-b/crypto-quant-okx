@@ -7656,6 +7656,73 @@ class TestApprovalPersistence(unittest.TestCase):
             self.assertEqual(post_state['workflow_state'], 'ready')
             self.assertFalse(post_state['details'].get('auto_promotion_review_execution'))
 
+
+    def test_execute_adaptive_rollout_orchestration_reruns_executor_after_recovery_transitions(self):
+        import analytics.helper as helper_module
+
+        original_executor = helper_module.execute_rollout_executor
+        original_readiness = helper_module.build_production_rollout_readiness
+        original_auto_approval = helper_module.execute_controlled_auto_approval_layer
+        original_controlled_rollout = helper_module.execute_controlled_rollout_layer
+        original_bridge = helper_module.execute_testnet_bridge_layer
+        original_review = helper_module.execute_auto_promotion_review_queue_layer
+        original_recovery = helper_module.execute_recovery_queue_layer
+        try:
+            executor_calls = []
+
+            def fake_executor(payload, db, config=None, settings=None, replay_source='workflow_ready'):
+                payload = dict(payload)
+                rollout_executor = dict(payload.get('rollout_executor') or {})
+                summary = dict(rollout_executor.get('summary') or {})
+                dry_run = bool((settings or {}).get('dry_run')) if settings else False
+                label = 'dry_run' if dry_run else f"apply_{len(executor_calls)}"
+                executor_calls.append(label)
+                summary['applied_count'] = 0 if dry_run else 1
+                rollout_executor['summary'] = summary
+                payload['rollout_executor'] = rollout_executor
+                return payload
+
+            helper_module.execute_rollout_executor = fake_executor
+            helper_module.build_production_rollout_readiness = lambda payload, max_items=10: {
+                'schema_version': 'm5_production_rollout_readiness_v1',
+                'status': 'ready',
+                'production_ready': True,
+                'can_enable_low_intervention_runtime': True,
+                'blocking_issues': [],
+                'headline': {},
+                'runbook_actions': [],
+            }
+            helper_module.execute_controlled_auto_approval_layer = lambda payload, db, config=None, replay_source='workflow_ready': {**payload, 'auto_approval_execution': {'executed_count': 0, 'items': []}}
+            helper_module.execute_controlled_rollout_layer = lambda payload, db, config=None, replay_source='workflow_ready': {**payload, 'controlled_rollout_execution': {'executed_count': 0, 'items': []}}
+            helper_module.execute_testnet_bridge_layer = lambda payload, db, config=None, replay_source='workflow_ready': {**payload, 'testnet_bridge_execution': {'status': 'disabled', 'audit': {'real_trade_execution': False}}}
+            helper_module.execute_auto_promotion_review_queue_layer = lambda payload, db, config=None, replay_source='workflow_ready': {**payload, 'auto_promotion_review_execution': {'queued_count': 0, 'completed_count': 0, 'rollback_escalated_count': 0, 'items': []}}
+            helper_module.execute_recovery_queue_layer = lambda payload, db, config=None, replay_source='workflow_ready': {**payload, 'recovery_execution': {'scheduled_retry_count': 1, 'rollback_queued_count': 1, 'manual_recovery_annotated_count': 1, 'retry_reentered_executor_count': 1, 'items': []}}
+
+            payload = {'approval_state': {'items': []}, 'workflow_state': {'item_states': []}}
+            executed = execute_adaptive_rollout_orchestration(payload, db=None)
+            summary = executed['adaptive_rollout_orchestration']['summary']
+
+            self.assertEqual(executor_calls, ['dry_run', 'apply_1'])
+            self.assertTrue(summary['rerun_triggered'])
+            self.assertEqual(summary['rerun_reason'], 'post_recovery_state_transition')
+            self.assertIn('recovery_retry_scheduled', summary['rerun_reasons'])
+            self.assertIn('recovery_retry_reentered_executor', summary['rerun_reasons'])
+            self.assertIn('recovery_rollback_candidate_queued', summary['rerun_reasons'])
+            self.assertIn('recovery_manual_follow_up_annotated', summary['rerun_reasons'])
+            self.assertEqual(summary['recovery_retry_scheduled_count'], 1)
+            self.assertEqual(summary['recovery_rollback_queued_count'], 1)
+            self.assertEqual(summary['recovery_manual_annotation_count'], 1)
+            self.assertEqual(summary['pass_count'], 2)
+            self.assertEqual(executed['adaptive_rollout_orchestration']['passes'][-1]['label'], 'post_recovery_queue')
+        finally:
+            helper_module.execute_rollout_executor = original_executor
+            helper_module.build_production_rollout_readiness = original_readiness
+            helper_module.execute_controlled_auto_approval_layer = original_auto_approval
+            helper_module.execute_controlled_rollout_layer = original_controlled_rollout
+            helper_module.execute_testnet_bridge_layer = original_bridge
+            helper_module.execute_auto_promotion_review_queue_layer = original_review
+            helper_module.execute_recovery_queue_layer = original_recovery
+
     def test_execute_adaptive_rollout_orchestration_reruns_executor_after_review_queue_transitions(self):
         import analytics.helper as helper_module
 

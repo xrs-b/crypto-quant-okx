@@ -42,6 +42,7 @@
 ## 2026-03-28 已完成：runtime orchestration summary / low-intervention entrypoint
 - 已新增统一后端运行期入口 `m5_runtime_orchestration_summary_v1`，专门把 `adaptive_rollout_orchestration + workflow operator digest + workbench governance + unified workbench overview + recovery/review queues` 收口成一份更直接可巡检的 runtime summary。
 - 2026-03-29 runtime cadence closure：daemon 侧 `runtime.adaptive_rollout_orchestration` 现补 `min_interval_seconds` 节流门闸；当上次 orchestration 仍在 cooldown 窗口内，会稳定返回/持久化 `cooldown_active + remaining_seconds + next_eligible_run_at`，避免每轮重复重放 safe orchestration pass、重复噪音通知与 follow-up 队列抖动，同时 `force` 单次执行仍可显式绕过节流。
+- 2026-03-29 recovery same-cycle closure：`execute_adaptive_rollout_orchestration(...)` 现会把 `recovery_execution` 当成真正会改变同轮 control-plane 状态的 lane；只要 recovery 产生 `scheduled_retry / retry_reentered_executor / rollback_queued / manual_recovery_annotated` 任一状态迁移，就会追加一次 `post_recovery_queue` rollout executor rerun，并把 `recovery_*` 原因写入统一 `rerun_reasons`。目标系补齐 recovery → executor 的同轮闭环，避免 recovery 只喺本轮尾段落账、要等下一轮 runtime/agent 再消费。
 - 调用方而家可以一眼见到：
   - 最近自动推进了什么（`recent_progress`）
   - 当前卡在哪里（`stuck_points`）

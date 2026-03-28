@@ -5317,6 +5317,26 @@ def execute_adaptive_rollout_orchestration(payload: Dict[str, Any], db: Any, *, 
     payload = execute_recovery_queue_layer(_refresh_payload_from_db(payload), db, config=config, replay_source=replay_source)
     payload = attach_auto_approval_policy(payload)
 
+    recovery_execution = payload.get('recovery_execution') or {}
+    recovery_retry_scheduled = int(recovery_execution.get('scheduled_retry_count', 0) or 0)
+    recovery_rollback_queued = int(recovery_execution.get('rollback_queued_count', 0) or 0)
+    recovery_manual_annotated = int(recovery_execution.get('manual_recovery_annotated_count', 0) or 0)
+    recovery_reentered_executor = int(recovery_execution.get('retry_reentered_executor_count', 0) or 0)
+    if recovery_retry_scheduled > 0 or recovery_rollback_queued > 0 or recovery_manual_annotated > 0 or recovery_reentered_executor > 0:
+        orchestration['summary']['rerun_triggered'] = True
+        rerun_reasons = _dedupe_strings(orchestration['summary'].get('rerun_reasons') or [])
+        if recovery_retry_scheduled > 0:
+            rerun_reasons.append('recovery_retry_scheduled')
+        if recovery_reentered_executor > 0:
+            rerun_reasons.append('recovery_retry_reentered_executor')
+        if recovery_rollback_queued > 0:
+            rerun_reasons.append('recovery_rollback_candidate_queued')
+        if recovery_manual_annotated > 0:
+            rerun_reasons.append('recovery_manual_follow_up_annotated')
+        orchestration['summary']['rerun_reasons'] = _dedupe_strings(rerun_reasons)
+        orchestration['summary']['rerun_reason'] = 'post_recovery_state_transition'
+        payload = _run_executor(payload, label='post_recovery_queue')
+
     orchestration['summary']['pass_count'] = len(orchestration['passes'])
     orchestration['summary']['rollout_executor_applied_count'] = sum(row.get('rollout_executor_applied_count', 0) for row in orchestration['passes'])
     orchestration['summary']['controlled_rollout_executed_count'] = int(((payload.get('controlled_rollout_execution') or {}).get('executed_count', 0) or 0))

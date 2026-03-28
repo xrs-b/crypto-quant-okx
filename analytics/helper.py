@@ -4671,6 +4671,9 @@ def build_runtime_orchestration_summary(payload: Optional[Dict[str, Any]] = None
         'controlled_rollout_executed_count': orchestration_summary.get('controlled_rollout_executed_count', 0),
         'auto_approval_executed_count': orchestration_summary.get('auto_approval_executed_count', 0),
         'review_queue_queued_count': orchestration_summary.get('review_queue_queued_count', 0),
+        'review_queue_completed_count': orchestration_summary.get('review_queue_completed_count', 0),
+        'review_queue_rollback_escalated_count': orchestration_summary.get('review_queue_rollback_escalated_count', 0),
+        'rerun_reasons': orchestration_summary.get('rerun_reasons') or [],
         'recent_progress_count': len(recent_progress),
         'stuck_item_count': len(stuck_items),
         'next_action_count': len(next_actions),
@@ -5163,10 +5166,13 @@ def execute_adaptive_rollout_orchestration(payload: Dict[str, Any], db: Any, *, 
             'pass_count': 0,
             'rerun_triggered': False,
             'rerun_reason': None,
+            'rerun_reasons': [],
             'rollout_executor_applied_count': 0,
             'controlled_rollout_executed_count': 0,
             'auto_approval_executed_count': 0,
             'review_queue_queued_count': 0,
+            'review_queue_completed_count': 0,
+            'review_queue_rollback_escalated_count': 0,
             'testnet_bridge_status': 'disabled',
             'testnet_bridge_real_trade_execution': False,
             'gate_enforced': bool(orchestration_settings.get('enforce_production_gate', True)),
@@ -5293,6 +5299,21 @@ def execute_adaptive_rollout_orchestration(payload: Dict[str, Any], db: Any, *, 
     payload = attach_auto_approval_policy(payload)
     payload = execute_testnet_bridge_layer(_refresh_payload_from_db(payload), db, config=config, replay_source=replay_source)
     payload = execute_auto_promotion_review_queue_layer(_refresh_payload_from_db(payload), db, config=config, replay_source=replay_source)
+
+    review_execution = payload.get('auto_promotion_review_execution') or {}
+    review_completed = int(review_execution.get('completed_count', 0) or 0)
+    review_rollback_escalated = int(review_execution.get('rollback_escalated_count', 0) or 0)
+    if review_completed > 0 or review_rollback_escalated > 0:
+        orchestration['summary']['rerun_triggered'] = True
+        rerun_reasons = _dedupe_strings(orchestration['summary'].get('rerun_reasons') or [])
+        if review_completed > 0:
+            rerun_reasons.append('post_promotion_review_completed')
+        if review_rollback_escalated > 0:
+            rerun_reasons.append('rollback_review_escalated')
+        orchestration['summary']['rerun_reasons'] = _dedupe_strings(rerun_reasons)
+        orchestration['summary']['rerun_reason'] = 'post_review_queue_state_transition'
+        payload = _run_executor(payload, label='post_review_queue')
+
     payload = execute_recovery_queue_layer(_refresh_payload_from_db(payload), db, config=config, replay_source=replay_source)
     payload = attach_auto_approval_policy(payload)
 
@@ -5301,6 +5322,8 @@ def execute_adaptive_rollout_orchestration(payload: Dict[str, Any], db: Any, *, 
     orchestration['summary']['controlled_rollout_executed_count'] = int(((payload.get('controlled_rollout_execution') or {}).get('executed_count', 0) or 0))
     orchestration['summary']['auto_approval_executed_count'] = auto_approval_executed
     orchestration['summary']['review_queue_queued_count'] = int(((payload.get('auto_promotion_review_execution') or {}).get('queued_count', 0) or 0))
+    orchestration['summary']['review_queue_completed_count'] = int(((payload.get('auto_promotion_review_execution') or {}).get('completed_count', 0) or 0))
+    orchestration['summary']['review_queue_rollback_escalated_count'] = int(((payload.get('auto_promotion_review_execution') or {}).get('rollback_escalated_count', 0) or 0))
     orchestration['summary']['recovery_retry_scheduled_count'] = int(((payload.get('recovery_execution') or {}).get('scheduled_retry_count', 0) or 0))
     orchestration['summary']['recovery_rollback_queued_count'] = int(((payload.get('recovery_execution') or {}).get('rollback_queued_count', 0) or 0))
     orchestration['summary']['recovery_manual_annotation_count'] = int(((payload.get('recovery_execution') or {}).get('manual_recovery_annotated_count', 0) or 0))

@@ -27,6 +27,7 @@ from signals import Signal, SignalDetector, SignalValidator, SignalRecorder, Ent
 from trading import TradingExecutor, RiskManager
 from trading.executor import build_observability_context
 from analytics.backtest import StrategyBacktester, build_regime_policy_calibration_report, build_calibration_report_ready_payload, build_joint_governance_ready_payload, build_governance_workflow_ready_payload, export_calibration_payload
+from analytics.helper import build_orchestration_result_digest
 from strategies.strategy_library import StrategyManager
 from bot.run import build_exchange_diagnostics, build_exchange_smoke_plan, build_approval_hygiene_summary, build_runtime_health_summary, maybe_run_approval_hygiene, maybe_run_adaptive_rollout_orchestration, maybe_send_daily_health_summary, execute_exchange_smoke, reconcile_exchange_positions
 from dashboard.api import app
@@ -5684,6 +5685,150 @@ class TestRegimePolicyCalibrationReport(unittest.TestCase):
             self.assertIn('follow_ups', payload['data'])
             self.assertEqual(payload['summary'], payload['data']['summary'])
             self.assertIn('control_plane_readiness', payload['related_summary'])
+        finally:
+            dashboard_api_module.backtester.run_all = original_run_all
+            dashboard_api_module._persist_workflow_approval_payload = original_persist
+            dashboard_api_module.export_calibration_payload = original_export
+            dashboard_api_module.db.get_recent_transition_journal = original_get_recent_transition_journal
+            dashboard_api_module.db.get_transition_journal_summary = original_get_transition_journal_summary
+
+    def test_build_orchestration_result_digest_summarizes_recent_automatic_actions(self):
+        payload = {
+            'adaptive_rollout_orchestration': {
+                'schema_version': 'm5_adaptive_rollout_orchestration_v2',
+                'summary': {
+                    'pass_count': 2,
+                    'auto_approval_executed_count': 1,
+                    'controlled_rollout_executed_count': 1,
+                    'review_queue_completed_count': 1,
+                    'review_queue_rollback_escalated_count': 1,
+                    'recovery_retry_scheduled_count': 1,
+                    'recovery_retry_reentered_executor_count': 1,
+                    'recovery_rollback_queued_count': 1,
+                    'testnet_bridge_status': 'completed',
+                    'testnet_bridge_follow_up_required': True,
+                },
+            },
+            'workflow_state': {'item_states': [], 'summary': {}},
+            'approval_state': {'items': [], 'summary': {}},
+            'auto_approval_execution': {
+                'items': [{'item_id': 'playbook::auto', 'approval_id': 'approval::auto', 'title': 'Auto item', 'action': 'approved', 'workflow_state': 'ready'}],
+            },
+            'controlled_rollout_execution': {
+                'items': [{'item_id': 'playbook::rollout', 'approval_id': 'approval::rollout', 'title': 'Rollout item', 'action': 'applied', 'workflow_state': 'review_pending'}],
+            },
+            'auto_promotion_review_execution': {
+                'items': [
+                    {'item_id': 'playbook::review', 'approval_id': 'approval::review', 'title': 'Review item', 'action': 'completed', 'queue_kind': 'post_promotion_review_queue', 'workflow_state': 'ready'},
+                    {'item_id': 'playbook::rollback', 'approval_id': 'approval::rollback', 'title': 'Rollback item', 'action': 'rollback_escalated', 'queue_kind': 'rollback_review_queue', 'workflow_state': 'rollback_prepare'},
+                ],
+            },
+            'recovery_execution': {
+                'items': [
+                    {'item_id': 'playbook::retry', 'approval_id': 'approval::retry', 'title': 'Retry item', 'action': 'retry_scheduled', 'queue_bucket': 'retry_queue', 'workflow_state': 'queued', 'reentered_executor': True, 'follow_up_execution': {'follow_up': 'retry_execution'}},
+                    {'item_id': 'playbook::manual_recovery', 'approval_id': 'approval::manual_recovery', 'title': 'Manual recovery item', 'action': 'manual_recovery_annotated', 'queue_bucket': 'manual_recovery', 'workflow_state': 'execution_failed'},
+                ],
+            },
+            'testnet_bridge_execution_evidence': {
+                'status': 'completed',
+                'symbol': 'BTC/USDT',
+                'executed_this_round': True,
+                'follow_up_required': True,
+                'summary': {'latest_execution_at': '2026-03-29T09:00:00Z'},
+            },
+            'workflow_operator_digest': {
+                'transition_journal': {
+                    'summary': {'count': 1, 'latest_timestamp': '2026-03-29T09:05:00Z'},
+                    'latest': {'workflow_transition': 'review_pending->ready'},
+                    'recent_transitions': [
+                        {'item_id': 'playbook::review', 'approval_id': 'approval::review', 'title': 'Review item', 'timestamp': '2026-03-29T09:05:00Z', 'trigger': 'review_completed', 'reason': 'review passed', 'changed': True, 'changed_fields': ['workflow_state'], 'from': {'workflow_state': 'review_pending'}, 'to': {'workflow_state': 'ready'}}
+                    ],
+                },
+                'summary': {},
+            },
+            'workbench_governance_view': {'recent_adjustments': [], 'summary': {}},
+            'workflow_recovery_view': {'summary': {'manual_recovery_count': 1}, 'queues': {}},
+            'unified_workbench_overview': {'dominant_line': 'rollout', 'overall_state': 'active', 'transition_journal': {'summary': {'count': 1, 'latest_timestamp': '2026-03-29T09:05:00Z'}, 'latest': {'workflow_transition': 'review_pending->ready'}, 'recent_transitions': []}},
+        }
+        digest = build_orchestration_result_digest(payload, max_items=8)
+        self.assertEqual(digest['schema_version'], 'm5_orchestration_result_digest_v1')
+        self.assertEqual(digest['summary']['auto_approval_executed_count'], 1)
+        self.assertEqual(digest['summary']['controlled_rollout_executed_count'], 1)
+        self.assertEqual(digest['summary']['review_queue_completed_count'], 1)
+        self.assertEqual(digest['summary']['recovery_retry_reentered_executor_count'], 1)
+        self.assertEqual(digest['summary']['testnet_bridge_status'], 'completed')
+        self.assertTrue(any(row['action_type'] == 'review_completed' for row in digest['recent_actions']))
+        self.assertTrue(any(row['action_type'] == 'rollback_escalated' for row in digest['recent_actions']))
+        self.assertTrue(any(row['action_type'] == 'recovery_retry_reentered_executor' for row in digest['recent_actions']))
+        self.assertTrue(any(row['action_type'] == 'testnet_bridge_executed' for row in digest['critical_actions']))
+
+    def test_backtest_orchestration_result_digest_api_returns_recent_actions_lane(self):
+        import dashboard.api as dashboard_api_module
+        original_run_all = dashboard_api_module.backtester.run_all
+        original_persist = dashboard_api_module._persist_workflow_approval_payload
+        original_export = dashboard_api_module.export_calibration_payload
+        original_get_recent_transition_journal = dashboard_api_module.db.get_recent_transition_journal
+        original_get_transition_journal_summary = dashboard_api_module.db.get_transition_journal_summary
+        try:
+            dashboard_api_module.backtester.run_all = lambda symbols: {'calibration_report': {'summary': {'trade_count': 1, 'calibration_ready': True}}}
+            dashboard_api_module.export_calibration_payload = lambda report, view='workflow_ready': {
+                'adaptive_rollout_orchestration': {'schema_version': 'm5_adaptive_rollout_orchestration_v2', 'summary': {'pass_count': 1, 'auto_approval_executed_count': 1, 'controlled_rollout_executed_count': 1, 'review_queue_completed_count': 1, 'review_queue_rollback_escalated_count': 0, 'recovery_retry_scheduled_count': 0, 'recovery_retry_reentered_executor_count': 0, 'recovery_rollback_queued_count': 0, 'testnet_bridge_status': 'completed'}},
+                'workflow_state': {'item_states': [], 'summary': {}},
+                'approval_state': {'items': [], 'summary': {}},
+                'auto_approval_execution': {'items': [{'item_id': 'playbook::auto', 'approval_id': 'approval::auto', 'title': 'Auto item', 'action': 'approved'}]},
+                'controlled_rollout_execution': {'items': [{'item_id': 'playbook::rollout', 'approval_id': 'approval::rollout', 'title': 'Rollout item', 'action': 'applied'}]},
+                'auto_promotion_review_execution': {'items': [{'item_id': 'playbook::review', 'approval_id': 'approval::review', 'title': 'Review item', 'action': 'completed', 'queue_kind': 'post_promotion_review_queue'}]},
+                'recovery_execution': {'items': []},
+                'testnet_bridge_execution_evidence': {'status': 'completed', 'symbol': 'BTC/USDT', 'executed_this_round': True, 'follow_up_required': False, 'summary': {'latest_execution_at': '2026-03-29T09:00:00Z'}},
+            }
+            dashboard_api_module._persist_workflow_approval_payload = lambda payload, replay_source='orchestration_result_digest_api': payload
+            dashboard_api_module.db.get_recent_transition_journal = lambda **kwargs: []
+            dashboard_api_module.db.get_transition_journal_summary = lambda **kwargs: {'count': 0, 'latest_timestamp': None, 'changed_only': True, 'changed_field_counts': {}, 'workflow_transition_counts': {}}
+            client = dashboard_api_module.app.test_client()
+            response = client.get('/api/backtest/orchestration-result-digest?max_items=5')
+            self.assertEqual(response.status_code, 200)
+            payload = response.get_json()
+            self.assertEqual(payload['view'], 'orchestration_result_digest')
+            self.assertEqual(payload['data']['schema_version'], 'm5_orchestration_result_digest_v1')
+            self.assertIn('recent_actions', payload['data'])
+            self.assertTrue(any(row['action_type'] == 'auto_approval_executed' for row in payload['data']['recent_actions']))
+            self.assertEqual(payload['summary'], payload['data']['summary'])
+            self.assertIn('follow_up_summary', payload['related_summary'])
+        finally:
+            dashboard_api_module.backtester.run_all = original_run_all
+            dashboard_api_module._persist_workflow_approval_payload = original_persist
+            dashboard_api_module.export_calibration_payload = original_export
+            dashboard_api_module.db.get_recent_transition_journal = original_get_recent_transition_journal
+            dashboard_api_module.db.get_transition_journal_summary = original_get_transition_journal_summary
+
+    def test_backtest_calibration_report_api_supports_orchestration_result_digest_view(self):
+        import dashboard.api as dashboard_api_module
+        original_run_all = dashboard_api_module.backtester.run_all
+        original_persist = dashboard_api_module._persist_workflow_approval_payload
+        original_export = dashboard_api_module.export_calibration_payload
+        original_get_recent_transition_journal = dashboard_api_module.db.get_recent_transition_journal
+        original_get_transition_journal_summary = dashboard_api_module.db.get_transition_journal_summary
+        try:
+            dashboard_api_module.backtester.run_all = lambda symbols: {'symbols': ['BTC-USDT'], 'calibration_report': {'summary': {'trade_count': 1, 'calibration_ready': True}}}
+            dashboard_api_module.export_calibration_payload = lambda report, view='workflow_ready': {
+                'adaptive_rollout_orchestration': {'schema_version': 'm5_adaptive_rollout_orchestration_v2', 'summary': {'pass_count': 1, 'auto_approval_executed_count': 1, 'controlled_rollout_executed_count': 0, 'review_queue_completed_count': 0, 'review_queue_rollback_escalated_count': 0, 'recovery_retry_scheduled_count': 0, 'recovery_retry_reentered_executor_count': 0, 'recovery_rollback_queued_count': 0, 'testnet_bridge_status': 'disabled'}},
+                'workflow_state': {'item_states': [], 'summary': {}},
+                'approval_state': {'items': [], 'summary': {}},
+                'auto_approval_execution': {'items': [{'item_id': 'playbook::auto', 'approval_id': 'approval::auto', 'title': 'Auto item', 'action': 'approved'}]},
+                'controlled_rollout_execution': {'items': []},
+                'auto_promotion_review_execution': {'items': []},
+                'recovery_execution': {'items': []},
+            }
+            dashboard_api_module._persist_workflow_approval_payload = lambda payload, replay_source='calibration_report:orchestration_result_digest': payload
+            dashboard_api_module.db.get_recent_transition_journal = lambda **kwargs: []
+            dashboard_api_module.db.get_transition_journal_summary = lambda **kwargs: {'count': 0, 'latest_timestamp': None, 'changed_only': True, 'changed_field_counts': {}, 'workflow_transition_counts': {}}
+            client = dashboard_api_module.app.test_client()
+            response = client.get('/api/backtest/calibration-report?view=orchestration_result_digest')
+            self.assertEqual(response.status_code, 200)
+            payload = response.get_json()
+            self.assertEqual(payload['view'], 'orchestration_result_digest')
+            self.assertEqual(payload['data']['schema_version'], 'm5_orchestration_result_digest_v1')
+            self.assertEqual(payload['summary']['orchestration_result_digest'], payload['data']['summary'])
         finally:
             dashboard_api_module.backtester.run_all = original_run_all
             dashboard_api_module._persist_workflow_approval_payload = original_persist

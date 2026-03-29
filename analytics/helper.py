@@ -4670,6 +4670,265 @@ def _build_orchestration_rerun_observability(orchestration: Optional[Dict[str, A
 
 
 
+def build_orchestration_result_digest(payload: Optional[Dict[str, Any]] = None, *, max_items: int = 10,
+                                      transition_journal_overview: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    payload = payload or {}
+    operator_digest = payload.get('workflow_operator_digest') or payload.get('operator_digest') or build_workflow_operator_digest(
+        payload,
+        max_items=max_items,
+        transition_journal_overview=transition_journal_overview,
+    )
+    recovery_view = payload.get('workflow_recovery_view') or build_workflow_recovery_view(payload, max_items=max_items)
+    workbench_view = payload.get('workbench_governance_view') or build_workbench_governance_view(
+        payload,
+        max_items=max_items,
+        max_adjustments=max(max_items, 10),
+        transition_journal_overview=transition_journal_overview,
+    )
+    unified_overview = payload.get('unified_workbench_overview') or build_unified_workbench_overview(
+        payload,
+        max_items=max_items,
+        max_adjustments=max(max_items, 10),
+        transition_journal_overview=transition_journal_overview,
+    )
+    orchestration = payload.get('adaptive_rollout_orchestration') or {}
+    orchestration_summary = orchestration.get('summary') or {}
+    auto_approval_execution = payload.get('auto_approval_execution') or {}
+    controlled_rollout_execution = payload.get('controlled_rollout_execution') or {}
+    review_execution = payload.get('auto_promotion_review_execution') or {}
+    recovery_execution = payload.get('recovery_execution') or {}
+    bridge_evidence = payload.get('testnet_bridge_execution_evidence') or _summarize_testnet_bridge_execution(payload)
+    _attach_testnet_bridge_execution_evidence(payload)
+    transition_journal = operator_digest.get('transition_journal') or unified_overview.get('transition_journal') or {
+        'recent_transitions': [],
+        'summary': {'count': 0, 'latest_timestamp': None},
+        'latest': {},
+    }
+
+    actions = []
+    action_counts: Dict[str, int] = {}
+    sources: Dict[str, int] = {}
+    seen = set()
+
+    def _register(action_type: str, item: Optional[Dict[str, Any]] = None, **extra: Any):
+        row = dict(item or {})
+        item_id = row.get('item_id') or row.get('playbook_id') or extra.get('item_id')
+        approval_id = row.get('approval_id') or extra.get('approval_id')
+        timestamp = (
+            extra.get('timestamp')
+            or row.get('completed_at')
+            or row.get('last_applied_at')
+            or row.get('created_at')
+            or row.get('review_due_at')
+            or row.get('timestamp')
+        )
+        key = (
+            action_type,
+            item_id,
+            approval_id,
+            timestamp,
+            row.get('queue_kind') or row.get('queue_bucket') or extra.get('route'),
+            row.get('action') or row.get('status') or extra.get('status'),
+        )
+        if key in seen:
+            return
+        seen.add(key)
+        status = str(extra.get('status') or row.get('action') or row.get('status') or 'executed')
+        route = extra.get('route') or row.get('route') or row.get('queue_kind') or row.get('queue_bucket')
+        follow_up = extra.get('follow_up') or row.get('follow_up') or row.get('next_step')
+        summary = extra.get('summary')
+        if not summary:
+            title = row.get('title') or item_id or approval_id or action_type
+            summary = f"{action_type} {status} · {title}"
+        action = {
+            'action_type': action_type,
+            'status': status,
+            'timestamp': timestamp,
+            'item_id': item_id,
+            'approval_id': approval_id,
+            'title': row.get('title') or extra.get('title'),
+            'action_family': extra.get('action_family') or row.get('action_type'),
+            'workflow_state': extra.get('workflow_state') or row.get('workflow_state'),
+            'approval_state': extra.get('approval_state') or row.get('approval_state'),
+            'route': route,
+            'follow_up': follow_up,
+            'reason': extra.get('reason') or row.get('reason') or row.get('queue_reason'),
+            'source': extra.get('source') or 'runtime_payload',
+            'summary': summary,
+        }
+        if extra.get('details') is not None:
+            action['details'] = extra.get('details')
+        actions.append(action)
+        action_counts[action_type] = action_counts.get(action_type, 0) + 1
+        sources[action['source']] = sources.get(action['source'], 0) + 1
+
+    for row in (auto_approval_execution.get('items') or []):
+        if str(row.get('action') or '').startswith('skip') or str(row.get('action') or '').startswith('dry_run'):
+            continue
+        _register(
+            'auto_approval_executed', row,
+            status=row.get('action') or 'executed',
+            source='auto_approval_execution',
+            summary=f"auto approval {row.get('action') or 'executed'} · {(row.get('title') or row.get('item_id') or row.get('approval_id') or 'item')}",
+        )
+    for row in (controlled_rollout_execution.get('items') or []):
+        if str(row.get('action') or '').startswith('skip') or str(row.get('action') or '').startswith('dry_run'):
+            continue
+        _register(
+            'controlled_rollout_executed', row,
+            status=row.get('action') or 'executed',
+            source='controlled_rollout_execution',
+            summary=f"controlled rollout {row.get('action') or 'executed'} · {(row.get('title') or row.get('item_id') or row.get('approval_id') or 'item')}",
+        )
+    for row in (review_execution.get('items') or []):
+        action = str(row.get('action') or '')
+        if action.startswith('skip') or action.startswith('dry_run'):
+            continue
+        mapped_type = 'review_completed' if action == 'completed' else ('rollback_escalated' if action == 'rollback_escalated' else 'review_queued')
+        _register(
+            mapped_type, row,
+            status=action or 'executed',
+            route=row.get('queue_kind'),
+            follow_up=row.get('review_status') or row.get('next_step'),
+            source='auto_promotion_review_execution',
+            summary=f"{mapped_type.replace('_', ' ')} · {(row.get('title') or row.get('item_id') or row.get('approval_id') or 'item')}",
+        )
+    for row in (recovery_execution.get('items') or []):
+        action = str(row.get('action') or '')
+        if action.startswith('skip') or action.startswith('dry_run'):
+            continue
+        mapped_type = {
+            'retry_scheduled': 'recovery_retry_scheduled',
+            'rollback_queued': 'rollback_escalated',
+            'manual_recovery_annotated': 'manual_recovery_annotated',
+        }.get(action, 'recovery_progressed')
+        _register(
+            mapped_type, row,
+            status=action or 'executed',
+            route=row.get('queue_bucket'),
+            source='recovery_execution',
+            summary=f"{mapped_type.replace('_', ' ')} · {(row.get('title') or row.get('item_id') or row.get('approval_id') or 'item')}",
+            details={'reentered_executor': bool(row.get('reentered_executor'))},
+        )
+        if row.get('reentered_executor'):
+            _register(
+                'recovery_retry_reentered_executor', row,
+                status='reentered_executor',
+                route=row.get('queue_bucket'),
+                follow_up=((row.get('follow_up_execution') or {}).get('follow_up') if isinstance(row.get('follow_up_execution'), dict) else None),
+                source='recovery_execution',
+                summary=f"recovery retry reentered executor · {(row.get('title') or row.get('item_id') or row.get('approval_id') or 'item')}",
+                details=row.get('follow_up_execution') or {},
+            )
+    if bridge_evidence.get('executed_this_round') or bridge_evidence.get('follow_up_required'):
+        _register(
+            'testnet_bridge_executed',
+            {'item_id': bridge_evidence.get('symbol'), 'title': bridge_evidence.get('symbol')},
+            status=bridge_evidence.get('status') or 'disabled',
+            timestamp=(bridge_evidence.get('summary') or {}).get('latest_execution_at'),
+            route='testnet_bridge',
+            follow_up='review_testnet_bridge' if bridge_evidence.get('follow_up_required') else 'observe_only',
+            source='testnet_bridge_execution',
+            summary=f"testnet bridge {(bridge_evidence.get('status') or 'disabled')} · {bridge_evidence.get('symbol') or '--'}",
+            details=bridge_evidence.get('summary') or {},
+        )
+
+    for row in (transition_journal.get('recent_transitions') or [])[:max_items]:
+        changed = row.get('changed_fields') or []
+        transition_label = row.get('workflow_transition') or row.get('trigger') or 'transition'
+        normalized_type = 'state_transition'
+        reason = str(row.get('reason') or '')
+        if 'auto approval' in reason.lower() or 'approval' in str(row.get('trigger') or '').lower():
+            normalized_type = 'approval_transition'
+        elif 'rollback' in transition_label.lower() or 'rollback' in reason.lower():
+            normalized_type = 'rollback_transition'
+        elif 'review' in transition_label.lower() or 'review' in reason.lower():
+            normalized_type = 'review_transition'
+        _register(
+            normalized_type,
+            row,
+            status='changed' if row.get('changed') else 'observed',
+            timestamp=row.get('timestamp') or row.get('created_at'),
+            source='transition_journal',
+            reason=row.get('reason'),
+            summary=f"{transition_label} · changed={str(bool(row.get('changed'))).lower()} · fields={','.join(changed[:3]) or '--'}",
+            details={'changed_fields': changed, 'trigger': row.get('trigger'), 'actor': row.get('actor'), 'from': row.get('from') or {}, 'to': row.get('to') or {}},
+        )
+
+    def _sort_key(row: Dict[str, Any]):
+        ts = str(row.get('timestamp') or '')
+        return (0 if ts else 1, ts, row.get('action_type') or '', row.get('item_id') or row.get('approval_id') or '')
+
+    ordered_actions = sorted(actions, key=_sort_key, reverse=True)
+    recent_actions = ordered_actions[:max_items]
+    critical_actions = [row for row in ordered_actions if row.get('action_type') in {'rollback_escalated', 'manual_recovery_annotated', 'recovery_retry_reentered_executor', 'testnet_bridge_executed'}][:max_items]
+    latest_action = recent_actions[0] if recent_actions else None
+    digest_status = 'active' if recent_actions else 'steady'
+    if critical_actions:
+        digest_status = 'attention_required'
+    summary = {
+        'action_count': len(actions),
+        'recent_action_count': len(recent_actions),
+        'critical_action_count': len(critical_actions),
+        'action_counts': action_counts,
+        'source_counts': sources,
+        'latest_action_type': (latest_action or {}).get('action_type'),
+        'latest_action_at': (latest_action or {}).get('timestamp'),
+        'latest_transition_at': ((transition_journal.get('summary') or {}).get('latest_timestamp')),
+        'pass_count': int(orchestration_summary.get('pass_count', 0) or 0),
+        'auto_approval_executed_count': int(orchestration_summary.get('auto_approval_executed_count', 0) or 0),
+        'controlled_rollout_executed_count': int(orchestration_summary.get('controlled_rollout_executed_count', 0) or 0),
+        'review_queue_completed_count': int(orchestration_summary.get('review_queue_completed_count', 0) or 0),
+        'review_queue_rollback_escalated_count': int(orchestration_summary.get('review_queue_rollback_escalated_count', 0) or 0),
+        'recovery_retry_scheduled_count': int(orchestration_summary.get('recovery_retry_scheduled_count', 0) or 0),
+        'recovery_retry_reentered_executor_count': int(orchestration_summary.get('recovery_retry_reentered_executor_count', 0) or 0),
+        'recovery_rollback_queued_count': int(orchestration_summary.get('recovery_rollback_queued_count', 0) or 0),
+        'testnet_bridge_status': orchestration_summary.get('testnet_bridge_status') or bridge_evidence.get('status') or 'disabled',
+        'testnet_bridge_follow_up_required': bool(orchestration_summary.get('testnet_bridge_follow_up_required', False) or bridge_evidence.get('follow_up_required')),
+    }
+    headline = {
+        'status': digest_status,
+        'message': (
+            f"latest={summary.get('latest_action_type') or 'none'} / "
+            f"auto={summary.get('auto_approval_executed_count', 0)} / "
+            f"rollout={summary.get('controlled_rollout_executed_count', 0)} / "
+            f"review={summary.get('review_queue_completed_count', 0)} / "
+            f"rollback={summary.get('review_queue_rollback_escalated_count', 0) + summary.get('recovery_rollback_queued_count', 0)} / "
+            f"retry={summary.get('recovery_retry_scheduled_count', 0)} / "
+            f"bridge={summary.get('testnet_bridge_status') or 'disabled'}"
+        ),
+        'latest_action_type': summary.get('latest_action_type'),
+        'latest_action_at': summary.get('latest_action_at'),
+    }
+    return {
+        'schema_version': 'm5_orchestration_result_digest_v1',
+        'headline': headline,
+        'summary': summary,
+        'recent_actions': recent_actions,
+        'critical_actions': critical_actions,
+        'related': {
+            'transition_journal': {
+                'count': (transition_journal.get('summary') or {}).get('count', 0),
+                'latest_timestamp': (transition_journal.get('summary') or {}).get('latest_timestamp'),
+                'latest_transition': (transition_journal.get('latest') or {}).get('workflow_transition'),
+            },
+            'follow_up_summary': {
+                'review_queue_completed_count': int(orchestration_summary.get('review_queue_completed_count', 0) or 0),
+                'review_queue_rollback_escalated_count': int(orchestration_summary.get('review_queue_rollback_escalated_count', 0) or 0),
+                'recovery_retry_scheduled_count': int(orchestration_summary.get('recovery_retry_scheduled_count', 0) or 0),
+                'recovery_retry_reentered_executor_count': int(orchestration_summary.get('recovery_retry_reentered_executor_count', 0) or 0),
+                'recovery_rollback_queued_count': int(orchestration_summary.get('recovery_rollback_queued_count', 0) or 0),
+            },
+            'lines': {
+                'dominant_line': unified_overview.get('dominant_line'),
+                'overall_state': unified_overview.get('overall_state'),
+            },
+            'workbench_recent_adjustment_count': len(workbench_view.get('recent_adjustments') or []),
+            'manual_recovery_count': int((recovery_view.get('summary') or {}).get('manual_recovery_count', 0) or 0),
+        },
+    }
+
+
 def build_runtime_orchestration_summary(payload: Optional[Dict[str, Any]] = None, *, max_items: int = 5,
                                        transition_journal_overview: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     payload = payload or {}
@@ -4712,6 +4971,11 @@ def build_runtime_orchestration_summary(payload: Optional[Dict[str, Any]] = None
         'latest': {},
         'overview': {'schema_version': 'm5_transition_journal_overview_v1', 'summary': {'count': 0, 'changed_field_counts': {}}, 'recent_transitions': [], 'breakdown': {'changed_field_counts': {}, 'trigger_counts': {}, 'actor_counts': {}, 'source_counts': {}}},
     }
+    result_digest = build_orchestration_result_digest(
+        payload,
+        max_items=max_items,
+        transition_journal_overview=transition_journal_overview,
+    )
 
     recent_progress = []
     for row in orchestration.get('passes') or []:
@@ -4876,6 +5140,7 @@ def build_runtime_orchestration_summary(payload: Optional[Dict[str, Any]] = None
         'control_plane_readiness': ((unified_overview.get('summary') or {}).get('control_plane_readiness') or {}),
         'validation_gate': ((unified_overview.get('summary') or {}).get('validation_gate') or {}),
         'testnet_bridge_execution': bridge_evidence.get('summary') or {},
+        'result_digest': result_digest.get('summary') or {},
     }
     return {
         'schema_version': 'm5_runtime_orchestration_summary_v1',
@@ -4891,6 +5156,7 @@ def build_runtime_orchestration_summary(payload: Optional[Dict[str, Any]] = None
             'queues': follow_up_queues,
             'consumption': review_queue_consumption,
         },
+        'result_digest': result_digest,
         'orchestration': orchestration,
         'transition_journal': transition_journal,
         'lines': unified_overview.get('lines') or {},

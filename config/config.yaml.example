@@ -65,6 +65,7 @@ governance:
     reason_prefix: controlled rollout state apply
     auto_promote_ready_candidates: false   # 显式安全开关；只有 true 时先会消费 auto_promotion_candidate_view，把真正 ready/very-safe/low-risk/no-blocker/no-manual-fallback 的 candidate 推进真实 stage/state
     max_executed_per_pass: 1               # 建议生产低干预先从 1 开始；0=不设上限。用作 blast-radius fence，避免单轮编排推进过多 candidate
+    selection_policy: oldest_pending_first  # budget 命中时优先消费最旧 pending/review-due item，避免固定 payload 顺序长期饿死尾部 candidate
     allowed_action_types: [joint_observe]   # 支持的 very-safe 动作：joint_observe/joint_queue_promote_safe/joint_stage_prepare/joint_review_schedule/joint_metadata_annotate；默认仍只开 joint_observe
     target_state: ready
     target_workflow_state: ready
@@ -76,6 +77,7 @@ governance:
     source: auto_approval_execution
     reason_prefix: controlled auto-approval execution
     max_executed_per_pass: 1   # 建议生产低干预先从 1 开始；0=不设上限。先限制上游 auto-approval blast radius，再交给后续 rollout fence 接力
+    selection_policy: oldest_pending_first  # budget 命中时优先放行等待最久的 pending item，避免同一批头部 item 长期霸占名额
   recovery_execution:
     enabled: false
     mode: disabled   # disabled|dry_run|controlled；只消费 recovery queue，做 metadata-only retry/rollback/manual recovery 调度，不做真实交易执行

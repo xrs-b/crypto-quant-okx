@@ -2783,11 +2783,15 @@ def _get_auto_approval_execution_settings(config: Any = None, overrides: Optiona
         'source': str(raw.get('source') or 'auto_approval_execution'),
         'reason_prefix': str(raw.get('reason_prefix') or 'controlled auto-approval execution'),
         'max_executed_per_pass': int(raw.get('max_executed_per_pass') or 0),
+        'selection_policy': str(raw.get('selection_policy') or 'oldest_pending_first'),
     }
     settings.update({k: v for k, v in overrides.items() if v is not None})
     settings['enabled'] = bool(settings.get('enabled', False))
     settings['mode'] = _normalize_auto_approval_execution_mode(settings.get('mode'))
     settings['max_executed_per_pass'] = max(0, min(int(settings.get('max_executed_per_pass') or 0), 1000))
+    settings['selection_policy'] = str(settings.get('selection_policy') or 'oldest_pending_first').strip().lower() or 'oldest_pending_first'
+    if settings['selection_policy'] not in {'oldest_pending_first'}:
+        settings['selection_policy'] = 'oldest_pending_first'
     return settings
 
 
@@ -2809,6 +2813,7 @@ def _get_controlled_rollout_execution_settings(config: Any = None, overrides: Op
         'default_review_after_hours': int(raw.get('default_review_after_hours') or 24),
         'auto_promote_ready_candidates': bool(raw.get('auto_promote_ready_candidates', False)),
         'max_executed_per_pass': int(raw.get('max_executed_per_pass') or 0),
+        'selection_policy': str(raw.get('selection_policy') or 'oldest_pending_first'),
     }
     settings.update({k: v for k, v in overrides.items() if v is not None})
     settings['enabled'] = bool(settings.get('enabled', False))
@@ -2818,6 +2823,9 @@ def _get_controlled_rollout_execution_settings(config: Any = None, overrides: Op
     settings['target_state'] = str(settings.get('target_state') or 'ready').strip().lower() or 'ready'
     settings['default_review_after_hours'] = max(1, min(int(settings.get('default_review_after_hours') or 24), 24 * 14))
     settings['max_executed_per_pass'] = max(0, min(int(settings.get('max_executed_per_pass') or 0), 1000))
+    settings['selection_policy'] = str(settings.get('selection_policy') or 'oldest_pending_first').strip().lower() or 'oldest_pending_first'
+    if settings['selection_policy'] not in {'oldest_pending_first'}:
+        settings['selection_policy'] = 'oldest_pending_first'
     return settings
 
 
@@ -2871,13 +2879,38 @@ def execute_controlled_rollout_layer(payload: Dict, db: Any, *, config: Any = No
 
     allowed_action_types = set(execution_settings.get('allowed_action_types') or [])
     budget_limit = int(execution_settings.get('max_executed_per_pass', 0) or 0)
-    executed_rows = []
+    result['selection_policy'] = {'policy': execution_settings.get('selection_policy') or 'oldest_pending_first', 'review_due_first': True, 'ordered_item_ids': []}
+    order_records = []
     for row in approval_items:
         approval_id = row.get('approval_id') or row.get('item_id') or row.get('playbook_id')
         workflow_item = workflow_lookup.get(row.get('playbook_id')) or {}
         candidate = candidate_by_approval.get(approval_id) or candidate_by_playbook.get(row.get('playbook_id')) or {}
         persisted_row = db.get_approval_state(approval_id) if approval_id else None
+        order_records.append({
+            'row': row,
+            'workflow_item': workflow_item,
+            'candidate': candidate,
+            'persisted_row': persisted_row,
+            'approval_id': approval_id,
+            'item_id': approval_id,
+            'playbook_id': row.get('playbook_id'),
+            'review_due_at': row.get('review_due_at') or workflow_item.get('review_due_at') or candidate.get('review_due_at') or (candidate.get('scheduled_review') or {}).get('review_due_at'),
+            'updated_at': (persisted_row or {}).get('updated_at') or row.get('updated_at') or workflow_item.get('updated_at'),
+            'last_seen_at': (persisted_row or {}).get('last_seen_at') or row.get('last_seen_at') or workflow_item.get('last_seen_at'),
+            'created_at': (persisted_row or {}).get('created_at') or row.get('created_at') or workflow_item.get('created_at'),
+        })
+    ordered_records = _select_oldest_first_execution_order(order_records, review_due_first=True)
+    result['selection_policy']['ordered_item_ids'] = [record.get('item_id') for record in ordered_records if record.get('item_id')]
+    executed_rows = []
+    for ordered in ordered_records:
+        row = ordered.get('row') or {}
+        workflow_item = ordered.get('workflow_item') or {}
+        candidate = ordered.get('candidate') or {}
+        persisted_row = ordered.get('persisted_row') or {}
+        approval_id = ordered.get('approval_id') or row.get('approval_id') or row.get('item_id') or row.get('playbook_id')
         persisted_details = (persisted_row or {}).get('details') or {}
+        selection_rank = int(ordered.get('selection_rank') or 0)
+        selection_reference_at = ordered.get('selection_reference_at')
         action_type = str(row.get('action_type') or workflow_item.get('action_type') or (persisted_row or {}).get('approval_type') or '').strip().lower()
         action_spec = CONTROLLED_ROLLOUT_ACTION_SPECS.get(action_type)
         handler = _resolve_safe_rollout_handler(action_spec or {}, action_type)
@@ -2978,6 +3011,8 @@ def execute_controlled_rollout_layer(payload: Dict, db: Any, *, config: Any = No
                 'candidate': candidate,
                 'validation_gate': execution_gate.get('validation_gate'),
                 'execution_gate': execution_gate,
+                'selection_rank': selection_rank,
+                'selection_reference_at': selection_reference_at,
             })
             result['skipped_count'] += 1
             continue
@@ -3156,6 +3191,8 @@ def execute_controlled_rollout_layer(payload: Dict, db: Any, *, config: Any = No
             'review_due_at': review_due_at,
             'review_after_hours': review_after_hours,
             'reason_codes': candidate_reasons or ['auto_advance_allowed'],
+            'selection_rank': selection_rank,
+            'selection_reference_at': selection_reference_at,
         })
         result['executed_count'] += 1
         result['budget']['last_executed_item_id'] = approval_id
@@ -3216,11 +3253,33 @@ def execute_controlled_auto_approval_layer(payload: Dict, db: Any, *, config: An
     result['execution_gate'] = execution_gate
 
     budget_limit = int(execution_settings.get('max_executed_per_pass', 0) or 0)
-    executed_rows = []
+    result['selection_policy'] = {'policy': execution_settings.get('selection_policy') or 'oldest_pending_first', 'review_due_first': False, 'ordered_item_ids': []}
+    order_records = []
     for row in approval_items:
         approval_id = row.get('approval_id') or row.get('item_id') or row.get('playbook_id')
         workflow_item = workflow_lookup.get(row.get('playbook_id')) or {}
         persisted_row = db.get_approval_state(approval_id) if approval_id else None
+        order_records.append({
+            'row': row,
+            'workflow_item': workflow_item,
+            'persisted_row': persisted_row,
+            'approval_id': approval_id,
+            'item_id': approval_id,
+            'playbook_id': row.get('playbook_id'),
+            'updated_at': (persisted_row or {}).get('updated_at') or row.get('updated_at') or workflow_item.get('updated_at'),
+            'last_seen_at': (persisted_row or {}).get('last_seen_at') or row.get('last_seen_at') or workflow_item.get('last_seen_at'),
+            'created_at': (persisted_row or {}).get('created_at') or row.get('created_at') or workflow_item.get('created_at'),
+        })
+    ordered_records = _select_oldest_first_execution_order(order_records, review_due_first=False)
+    result['selection_policy']['ordered_item_ids'] = [record.get('item_id') for record in ordered_records if record.get('item_id')]
+    executed_rows = []
+    for ordered in ordered_records:
+        row = ordered.get('row') or {}
+        workflow_item = ordered.get('workflow_item') or {}
+        persisted_row = ordered.get('persisted_row') or {}
+        approval_id = ordered.get('approval_id') or row.get('approval_id') or row.get('item_id') or row.get('playbook_id')
+        selection_rank = int(ordered.get('selection_rank') or 0)
+        selection_reference_at = ordered.get('selection_reference_at')
         current_state = str((persisted_row or {}).get('state') or row.get('approval_state') or row.get('persisted_state') or row.get('state') or 'pending').strip().lower()
         auto_decision = _normalize_auto_approval_decision(row.get('auto_approval_decision'))
         blocked_by = _dedupe_strings(row.get('blocked_by') or workflow_item.get('blocked_by') or [])
@@ -3262,6 +3321,8 @@ def execute_controlled_auto_approval_layer(payload: Dict, db: Any, *, config: An
                 'state': current_state,
                 'validation_gate': execution_gate.get('validation_gate'),
                 'execution_gate': execution_gate,
+                'selection_rank': selection_rank,
+                'selection_reference_at': selection_reference_at,
             })
             result['skipped_count'] += 1
             continue
@@ -3301,6 +3362,8 @@ def execute_controlled_auto_approval_layer(payload: Dict, db: Any, *, config: An
             'state': 'approved',
             'workflow_state': 'ready',
             'reason': reason,
+            'selection_rank': selection_rank,
+            'selection_reference_at': selection_reference_at,
         })
         result['executed_count'] += 1
         result['budget']['last_executed_item_id'] = approval_id
@@ -4775,7 +4838,7 @@ def build_runtime_orchestration_summary(payload: Optional[Dict[str, Any]] = None
         'review_followup_budget': ((payload.get('auto_promotion_review_execution') or {}).get('budget') or {}),
         'recovery_followup_budget': ((payload.get('recovery_execution') or {}).get('budget') or {}),
     }
-    follow_up_required = any(v > 0 for v in follow_up_summary.values()) or bool(bridge_evidence.get('follow_up_required'))
+    follow_up_required = any((isinstance(v, (int, float)) and v > 0) or (isinstance(v, dict) and (v.get('exhausted') or v.get('skipped_by_budget', 0) or v.get('remaining_slots', 0) == 0 and v.get('max_executed_per_pass', 0) > 0)) for v in follow_up_summary.values()) or bool(bridge_evidence.get('follow_up_required'))
     status = 'attention_required' if stuck_items or follow_up_required else ('active' if orchestration_summary.get('pass_count', 0) or len(recent_progress) > 1 else 'steady')
     headline = {
         'status': status,
@@ -6518,6 +6581,65 @@ def _build_auto_promotion_review_queue_item(*, row: Optional[Dict[str, Any]] = N
 
 
 
+
+
+def _parse_workflow_timestamp(value: Any) -> Optional[datetime]:
+    if value in (None, ''):
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    try:
+        parsed = datetime.fromisoformat(str(value).replace('Z', '+00:00'))
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    except Exception:
+        return None
+
+
+def _coerce_workflow_iso(value: Any) -> Optional[str]:
+    parsed = _parse_workflow_timestamp(value)
+    if not parsed:
+        return None
+    return parsed.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
+
+
+def _extract_selection_reference_timestamp(*values: Any) -> Optional[datetime]:
+    for value in values:
+        parsed = _parse_workflow_timestamp(value)
+        if parsed:
+            return parsed.astimezone(timezone.utc)
+    return None
+
+
+def _select_oldest_first_execution_order(records: List[Dict[str, Any]], *, review_due_first: bool = False) -> List[Dict[str, Any]]:
+    if not records:
+        return []
+
+    def _sort_key(record: Dict[str, Any]):
+        due_at = _extract_selection_reference_timestamp(record.get('review_due_at')) if review_due_first else None
+        reference = _extract_selection_reference_timestamp(
+            record.get('updated_at'),
+            record.get('last_seen_at'),
+            record.get('created_at'),
+            record.get('selection_reference_at'),
+        )
+        fallback = str(record.get('item_id') or record.get('approval_id') or record.get('playbook_id') or '')
+        due_sort = due_at.timestamp() if due_at else float('inf')
+        reference_sort = reference.timestamp() if reference else float('inf')
+        return (due_sort, reference_sort, fallback) if review_due_first else (reference_sort, fallback)
+
+    ordered = sorted(records, key=_sort_key)
+    for index, record in enumerate(ordered, start=1):
+        reference = _extract_selection_reference_timestamp(
+            record.get('updated_at'),
+            record.get('last_seen_at'),
+            record.get('created_at'),
+            record.get('selection_reference_at'),
+        )
+        record['selection_rank'] = index
+        record['selection_reference_at'] = _coerce_workflow_iso(reference or record.get('selection_reference_at'))
+        if review_due_first:
+            record['selection_review_due_at'] = _coerce_workflow_iso(record.get('review_due_at'))
+    return ordered
 
 
 def _parse_review_timestamp(value: Any) -> Optional[datetime]:

@@ -10890,6 +10890,98 @@ class TestApprovalPersistence(unittest.TestCase):
             self.assertTrue(runtime_summary['summary']['auto_approval_budget']['exhausted'])
             self.assertEqual(runtime_summary['summary']['auto_approval_budget']['skipped_by_budget'], 1)
 
+    def test_controlled_rollout_execution_prioritizes_oldest_pending_candidate_under_budget(self):
+        import sqlite3
+
+        class StubConfig:
+            def __init__(self, values=None):
+                self.values = values or {}
+
+            def get(self, key, default=None):
+                return self.values.get(key, default)
+
+        config = StubConfig({
+            'governance.controlled_rollout_execution': {
+                'enabled': True,
+                'mode': 'state_apply',
+                'auto_promote_ready_candidates': True,
+                'allowed_action_types': ['joint_stage_prepare'],
+                'max_executed_per_pass': 1,
+                'selection_policy': 'oldest_pending_first',
+            }
+        })
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / 'controlled_rollout_oldest_first.db'
+            db = Database(str(db_path))
+            payload = {
+                'workflow_state': {'item_states': [
+                    {'item_id': 'playbook::stage-newer', 'title': 'Stage newer', 'action_type': 'joint_stage_prepare', 'decision': 'expand', 'governance_mode': 'rollout', 'risk_level': 'low', 'approval_required': False, 'blocking_reasons': [], 'preconditions': [], 'workflow_state': 'pending', 'confidence': 'high', 'current_rollout_stage': 'observe', 'target_rollout_stage': 'controlled_apply'},
+                    {'item_id': 'playbook::stage-older', 'title': 'Stage older', 'action_type': 'joint_stage_prepare', 'decision': 'expand', 'governance_mode': 'rollout', 'risk_level': 'low', 'approval_required': False, 'blocking_reasons': [], 'preconditions': [], 'workflow_state': 'pending', 'confidence': 'high', 'current_rollout_stage': 'observe', 'target_rollout_stage': 'controlled_apply'},
+                ], 'summary': {}},
+                'approval_state': {'items': [
+                    {'approval_id': 'approval::stage-newer', 'playbook_id': 'playbook::stage-newer', 'title': 'Stage newer', 'action_type': 'joint_stage_prepare', 'approval_state': 'pending', 'decision_state': 'pending', 'risk_level': 'low', 'approval_required': False, 'blocked_by': [], 'current_rollout_stage': 'observe', 'target_rollout_stage': 'controlled_apply'},
+                    {'approval_id': 'approval::stage-older', 'playbook_id': 'playbook::stage-older', 'title': 'Stage older', 'action_type': 'joint_stage_prepare', 'approval_state': 'pending', 'decision_state': 'pending', 'risk_level': 'low', 'approval_required': False, 'blocked_by': [], 'current_rollout_stage': 'observe', 'target_rollout_stage': 'controlled_apply'},
+                ], 'summary': {}},
+            }
+            payload = attach_auto_approval_policy(payload)
+            db.sync_approval_items(build_workflow_approval_records(payload), replay_source='unit-test')
+            with sqlite3.connect(db_path) as conn:
+                conn.execute("UPDATE approval_state SET updated_at = ?, last_seen_at = ? WHERE item_id = ?", ('2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z', 'approval::stage-older'))
+                conn.execute("UPDATE approval_state SET updated_at = ?, last_seen_at = ? WHERE item_id = ?", ('2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 'approval::stage-newer'))
+                conn.commit()
+
+            result = execute_controlled_rollout_layer(payload, db, config=config, replay_source='unit-test-replay')
+            self.assertEqual(result['controlled_rollout_execution']['budget']['last_executed_item_id'], 'approval::stage-older')
+            self.assertEqual(result['controlled_rollout_execution']['selection_policy']['policy'], 'oldest_pending_first')
+            self.assertEqual(result['controlled_rollout_execution']['selection_policy']['ordered_item_ids'][0], 'approval::stage-older')
+            self.assertEqual(db.get_approval_state('approval::stage-older')['state'], 'ready')
+            self.assertEqual(db.get_approval_state('approval::stage-newer')['state'], 'pending')
+
+    def test_controlled_auto_approval_execution_prioritizes_oldest_pending_item_under_budget(self):
+        import sqlite3
+
+        class StubConfig:
+            def __init__(self, values=None):
+                self.values = values or {}
+
+            def get(self, key, default=None):
+                return self.values.get(key, default)
+
+        config = StubConfig({
+            'governance.auto_approval_execution': {
+                'enabled': True,
+                'mode': 'controlled',
+                'max_executed_per_pass': 1,
+                'selection_policy': 'oldest_pending_first',
+            }
+        })
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / 'auto_approval_oldest_first.db'
+            db = Database(str(db_path))
+            payload = {
+                'workflow_state': {'item_states': [
+                    {'item_id': 'playbook::eligible-newer', 'title': 'Eligible newer', 'action_type': 'joint_observe', 'decision': 'expand', 'governance_mode': 'rollout', 'risk_level': 'low', 'approval_required': False, 'blocking_reasons': [], 'preconditions': [], 'workflow_state': 'pending', 'confidence': 'high'},
+                    {'item_id': 'playbook::eligible-older', 'title': 'Eligible older', 'action_type': 'joint_observe', 'decision': 'expand', 'governance_mode': 'rollout', 'risk_level': 'low', 'approval_required': False, 'blocking_reasons': [], 'preconditions': [], 'workflow_state': 'pending', 'confidence': 'high'},
+                ], 'summary': {}},
+                'approval_state': {'items': [
+                    {'approval_id': 'approval::eligible-newer', 'playbook_id': 'playbook::eligible-newer', 'title': 'Eligible newer', 'action_type': 'joint_observe', 'approval_state': 'pending', 'decision_state': 'pending', 'risk_level': 'low', 'approval_required': False, 'blocked_by': [], 'auto_approval_decision': 'auto_approve', 'auto_approval_eligible': True},
+                    {'approval_id': 'approval::eligible-older', 'playbook_id': 'playbook::eligible-older', 'title': 'Eligible older', 'action_type': 'joint_observe', 'approval_state': 'pending', 'decision_state': 'pending', 'risk_level': 'low', 'approval_required': False, 'blocked_by': [], 'auto_approval_decision': 'auto_approve', 'auto_approval_eligible': True},
+                ], 'summary': {}},
+            }
+            payload = attach_auto_approval_policy(payload)
+            db.sync_approval_items(build_workflow_approval_records(payload), replay_source='unit-test')
+            with sqlite3.connect(db_path) as conn:
+                conn.execute("UPDATE approval_state SET updated_at = ?, last_seen_at = ? WHERE item_id = ?", ('2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z', 'approval::eligible-older'))
+                conn.execute("UPDATE approval_state SET updated_at = ?, last_seen_at = ? WHERE item_id = ?", ('2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 'approval::eligible-newer'))
+                conn.commit()
+
+            result = execute_controlled_auto_approval_layer(payload, db, config=config, replay_source='unit-test-replay')
+            self.assertEqual(result['auto_approval_execution']['budget']['last_executed_item_id'], 'approval::eligible-older')
+            self.assertEqual(result['auto_approval_execution']['selection_policy']['policy'], 'oldest_pending_first')
+            self.assertEqual(result['auto_approval_execution']['selection_policy']['ordered_item_ids'][0], 'approval::eligible-older')
+            self.assertEqual(db.get_approval_state('approval::eligible-older')['state'], 'approved')
+            self.assertEqual(db.get_approval_state('approval::eligible-newer')['state'], 'pending')
+
     def test_adaptive_rollout_orchestration_closes_auto_approval_to_rollout_loop_in_same_cycle(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             db = Database(str(Path(tmpdir) / 'adaptive_rollout_orchestration.db'))

@@ -210,16 +210,16 @@ class PositionSyncExchangeStub:
 
 class TestConfig(unittest.TestCase):
     """配置模块测试"""
-    
+
     def setUp(self):
         self.config = Config()
-    
+
     def test_config_load(self):
         """测试配置加载"""
         self.assertIsNotNone(self.config.all)
         self.assertIsNotNone(self.config.symbols)
         self.assertIsNotNone(self.config.strategies_config)
-    
+
     def test_symbols_list(self):
         """测试币种列表"""
         symbols = self.config.symbols
@@ -229,7 +229,7 @@ class TestConfig(unittest.TestCase):
         self.assertGreaterEqual(len(symbols), 1)
         self.assertTrue(all('/' in symbol for symbol in symbols))
         self.assertGreaterEqual(len(all_symbols), len(symbols))
-    
+
     def test_trading_params(self):
         """测试交易参数"""
         self.assertGreater(self.config.leverage, 0)
@@ -416,13 +416,13 @@ class TestAdaptiveRegimeM0(unittest.TestCase):
         from pathlib import Path
         self._old_enable = os.environ.pop('CRYPTO_QUANT_OKX_ENABLE_HOME_LOCAL', None)
         self._old_path = os.environ.pop('CRYPTO_QUANT_OKX_HOME_LOCAL_CONFIG', None)
-        
+
         # Also temporarily move local config to avoid loading it
         self._local_config_path = Path('config/config.local.yaml')
         self._backup_path = Path('config/config.local.yaml.test_backup')
         if self._local_config_path.exists():
             shutil.move(str(self._local_config_path), str(self._backup_path))
-    
+
     def tearDown(self):
         import os
         import shutil
@@ -430,12 +430,12 @@ class TestAdaptiveRegimeM0(unittest.TestCase):
         # Restore local config
         if self._backup_path.exists():
             shutil.move(str(self._backup_path), str(self._local_config_path))
-        
+
         if self._old_enable is not None:
             os.environ['CRYPTO_QUANT_OKX_ENABLE_HOME_LOCAL'] = self._old_enable
         if self._old_path is not None:
             os.environ['CRYPTO_QUANT_OKX_HOME_LOCAL_CONFIG'] = self._old_path
-    
+
     def test_regime_snapshot_schema_helper_keeps_legacy_fields(self):
         snapshot = normalize_regime_snapshot({
             'regime': 'trend',
@@ -1134,12 +1134,12 @@ class TestEntryDecider(unittest.TestCase):
 
 class TestSignalValidatorRegimeFilter(unittest.TestCase):
     """Regime Layer v1 过滤测试"""
-    
+
     def test_regime_risk_anomaly_blocks_signal(self):
         """风险异常应该拦截信号"""
         cfg = Config()
         validator = SignalValidator(cfg, None)
-        
+
         # 模拟 risk_anomaly regime
         signal = Signal(
             symbol='BTC/USDT',
@@ -1155,17 +1155,17 @@ class TestSignalValidatorRegimeFilter(unittest.TestCase):
                 'regime_details': '价格日内波动异常(12.5%)'
             }
         )
-        
+
         passed, reason, details = validator.validate(signal)
         self.assertFalse(passed)
         self.assertIn('风险异常', reason)
         self.assertEqual(details.get('regime_check', {}).get('regime'), 'risk_anomaly')
-    
+
     def test_regime_low_vol_blocks_by_default(self):
         """低波动默认应该拦截"""
         cfg = Config()
         validator = SignalValidator(cfg, None)
-        
+
         signal = Signal(
             symbol='BTC/USDT',
             signal_type='buy',
@@ -1180,16 +1180,16 @@ class TestSignalValidatorRegimeFilter(unittest.TestCase):
                 'regime_details': '低波动盘整(vol=0.50%)'
             }
         )
-        
+
         passed, reason, details = validator.validate(signal)
         self.assertFalse(passed)
         self.assertIn('低波动', reason)
-    
+
     def test_regime_high_vol_passes_by_default(self):
         """高波动默认放行（但带警告）"""
         cfg = Config()
         validator = SignalValidator(cfg, None)
-        
+
         signal = Signal(
             symbol='BTC/USDT',
             signal_type='buy',
@@ -1204,16 +1204,16 @@ class TestSignalValidatorRegimeFilter(unittest.TestCase):
                 'regime_details': '高波动趋势中(上涨, vol=6.5%)'
             }
         )
-        
+
         passed, reason, details = validator.validate(signal)
         self.assertTrue(passed)  # 默认放行
         self.assertEqual(details.get('regime_check', {}).get('regime'), 'high_vol')
-    
+
     def test_regime_unknown_falls_back(self):
         """regime 未知时回退旧逻辑"""
         cfg = Config()
         validator = SignalValidator(cfg, None)
-        
+
         # regime unknown 或 confidence 低于 0.5 应该跳过过滤
         signal = Signal(
             symbol='BTC/USDT',
@@ -1228,16 +1228,16 @@ class TestSignalValidatorRegimeFilter(unittest.TestCase):
                 'regime_confidence': 0.0
             }
         )
-        
+
         passed, reason, details = validator.validate(signal)
         # 应该跳过 regime 过滤，回退到旧逻辑
         self.assertTrue(details.get('regime_check', {}).get('fallback', False))
-    
+
     def test_regime_trend_passes(self):
         """趋势市场应该放行"""
         cfg = Config()
         validator = SignalValidator(cfg, None)
-        
+
         signal = Signal(
             symbol='BTC/USDT',
             signal_type='buy',
@@ -1252,7 +1252,7 @@ class TestSignalValidatorRegimeFilter(unittest.TestCase):
                 'regime_details': '趋势上涨(gap=2.5%)'
             }
         )
-        
+
         passed, reason, details = validator.validate(signal)
         self.assertTrue(passed)
         self.assertEqual(details.get('regime_check', {}).get('regime'), 'trend')
@@ -1273,15 +1273,15 @@ class TestExchangeAmountLimits(unittest.TestCase):
 
 class TestDatabase(unittest.TestCase):
     """数据库模块测试"""
-    
+
     def setUp(self):
         self.db = Database('data/test_bot.db')
-    
+
     def tearDown(self):
         import os
         if os.path.exists('data/test_bot.db'):
             os.remove('data/test_bot.db')
-    
+
     def test_signal_record(self):
         """测试信号记录"""
         signal_id = self.db.record_signal(
@@ -1294,7 +1294,7 @@ class TestDatabase(unittest.TestCase):
         )
         self.assertIsNotNone(signal_id)
         self.assertGreater(signal_id, 0)
-    
+
     def test_signal_query(self):
         """测试信号查询"""
         # 记录信号
@@ -1306,7 +1306,7 @@ class TestDatabase(unittest.TestCase):
             reasons=[],
             strategies_triggered=['RSI']
         )
-        
+
         # 查询
         signals = self.db.get_signals(limit=10)
         self.assertGreater(len(signals), 0)
@@ -1351,7 +1351,7 @@ class TestDatabase(unittest.TestCase):
         row = next(s for s in signals if s['id'] == signal_id)
         self.assertTrue(row['executed'])
         self.assertEqual(row['trade_id'], 99)
-    
+
     def test_trade_record(self):
         """测试交易记录"""
         trade_id = self.db.record_trade(
@@ -1405,7 +1405,7 @@ class TestDatabase(unittest.TestCase):
         latest = self.db.get_latest_trade_time('BTC/USDT')
         self.assertIsNotNone(latest)
         self.assertLess((datetime.utcnow() - latest).total_seconds(), 120)
-    
+
     def test_position_update(self):
         """测试持仓更新"""
         self.db.update_position(
@@ -1416,11 +1416,11 @@ class TestDatabase(unittest.TestCase):
             leverage=10,
             current_price=51000
         )
-        
+
         positions = self.db.get_positions()
         self.assertEqual(len(positions), 1)
         self.assertEqual(positions[0]['symbol'], 'BTC/USDT')
-    
+
     def test_strategy_analysis(self):
         """测试策略分析记录"""
         signal_id = self.db.record_signal(
@@ -1431,7 +1431,7 @@ class TestDatabase(unittest.TestCase):
             reasons=[],
             strategies_triggered=['RSI']
         )
-        
+
         self.db.record_strategy_analysis(
             signal_id=signal_id,
             strategy_name='RSI',
@@ -1441,25 +1441,25 @@ class TestDatabase(unittest.TestCase):
             action='buy',
             details='RSI=28'
         )
-        
+
         stats = self.db.get_strategy_stats(days=30)
         self.assertGreater(len(stats), 0)
 
 
 class TestSignalDetector(unittest.TestCase):
     """信号检测器测试"""
-    
+
     def setUp(self):
         self.config = Config()
         self.detector = SignalDetector(self.config.all)
         self.df = self._create_test_data()
-    
+
     def _create_test_data(self):
         """创建测试数据"""
         dates = pd.date_range('2024-01-01', periods=50, freq='1h')
         np.random.seed(42)
         close = 50000 + np.random.randn(50).cumsum() * 100
-        
+
         df = pd.DataFrame({
             0: dates,
             1: close + np.random.rand(50) * 100,
@@ -1468,7 +1468,7 @@ class TestSignalDetector(unittest.TestCase):
             4: close,
             5: np.random.randint(1000, 10000, 50)
         })
-        
+
         # 添加指标
         delta = pd.Series(close).diff()
         gain = delta.where(delta > 0, 0)
@@ -1477,34 +1477,34 @@ class TestSignalDetector(unittest.TestCase):
         avg_loss = loss.rolling(14).mean()
         rs = avg_gain / (avg_loss + 1e-10)
         df['RSI'] = 100 - (100 / (1 + rs))
-        
+
         ema12 = pd.Series(close).ewm(span=12).mean()
         ema26 = pd.Series(close).ewm(span=26).mean()
         df['MACD'] = ema12 - ema26
         df['MACD_signal'] = df['MACD'].ewm(span=9).mean()
-        
+
         df['BB_mid'] = pd.Series(close).rolling(20).mean()
         std = pd.Series(close).rolling(20).std()
         df['BB_upper'] = df['BB_mid'] + 2 * std
         df['BB_lower'] = df['BB_mid'] - 2 * std
-        
+
         return df
-    
+
     def test_signal_analysis(self):
         """测试信号分析"""
         current_price = self.df[4].iloc[-1]
         signal = self.detector.analyze('BTC/USDT', self.df, current_price, None)
-        
+
         self.assertIsNotNone(signal)
         self.assertIn(signal.signal_type, ['buy', 'sell', 'hold'])
         self.assertGreaterEqual(signal.strength, 0)
         self.assertLessEqual(signal.strength, 100)
-    
+
     def test_indicators_captured(self):
         """测试指标捕获"""
         current_price = self.df[4].iloc[-1]
         signal = self.detector.analyze('BTC/USDT', self.df, current_price, None)
-        
+
         self.assertIn('RSI', signal.indicators)
         self.assertIn('MACD', signal.indicators)
 
@@ -1521,13 +1521,13 @@ class TestSignalDetector(unittest.TestCase):
         signal = detector.analyze('XRP/USDT', self.df, current_price, None)
         self.assertLess(signal.market_context['volatility'], 0.1)
         self.assertTrue(signal.market_context['volatility_too_low'])
-    
+
     def test_regime_info_populated(self):
         """测试 regime 信息被正确填充"""
         detector = SignalDetector(self.config.all)
         current_price = self.df[4].iloc[-1]
         signal = detector.analyze('BTC/USDT', self.df, current_price, None)
-        
+
         # 验证 regime_info 字段存在
         self.assertIn('regime', signal.regime_info)
         self.assertIn('confidence', signal.regime_info)
@@ -1548,22 +1548,22 @@ class TestSignalDetector(unittest.TestCase):
 
 class TestStrategies(unittest.TestCase):
     """策略测试"""
-    
+
     def setUp(self):
         self.config = Config()
         self.manager = StrategyManager(self.config.all)
-    
+
     def test_strategy_count(self):
         """测试策略数量"""
         strategies = self.manager.get_enabled_strategies()
         self.assertGreaterEqual(len(strategies), 6)
-    
+
     def test_all_strategies(self):
         """测试所有策略"""
         names = self.manager.get_strategy_names()
-        expected = ['RSI', 'MACD', 'MA_Cross', 'Bollinger', 'Volume', 'Pattern', 
+        expected = ['RSI', 'MACD', 'MA_Cross', 'Bollinger', 'Volume', 'Pattern',
                    'TrendStrength', 'Divergence']
-        
+
         for name in expected:
             self.assertIn(name, names)
 
@@ -1769,14 +1769,14 @@ class TestNotifications(unittest.TestCase):
         captured_components = []
         original_send = notifier._send_discord_bot
         notifier._send_discord_bot = lambda content, components=None: (captured_components.append(components) or True)
-        
+
         result = notifier.notify_loss_streak_lock(
             current=3,
             max_count=3,
             recover_at='2024-01-01T12:00:00',
             details={'test': 'data'}
         )
-        
+
         self.assertTrue(result['enabled'])
         self.assertIn('连亏熔断已触发', result['message'])
         self.assertIn('连续亏损：3/3', result['message'])
@@ -1786,7 +1786,7 @@ class TestNotifications(unittest.TestCase):
         self.assertEqual(captured_components[0][0]['components'][0]['type'], 2)  # BUTTON
         self.assertEqual(captured_components[0][0]['components'][0]['style'], 5)  # LINK style
         self.assertIn('Dashboard', captured_components[0][0]['components'][0]['label'])
-        
+
         # Restore original
         notifier._send_discord_bot = original_send
 
@@ -1806,19 +1806,19 @@ class TestNotifications(unittest.TestCase):
         })
         db = FakeLogDB()
         notifier = NotificationManager(cfg, db, None)
-        
+
         result = notifier.notify_loss_streak_lock(
             current=3,
             max_count=3,
             recover_at='2024-01-01T12:00:00',
             details={'test': 'data'}
         )
-        
+
         # Verify approval_actions is in outbox details
         self.assertTrue(len(db.outbox) > 0)
         outbox_item = db.outbox[-1]
         self.assertIn('approval_actions', outbox_item.get('details', {}))
-        
+
         approval_actions = outbox_item['details']['approval_actions']
         self.assertEqual(approval_actions['type'], 'loss_streak_reset')
         self.assertEqual(approval_actions['endpoint'], '/api/risk/loss-streak/reset')
@@ -2461,7 +2461,7 @@ class TestDashboardApi(unittest.TestCase):
             self.assertEqual(eth['latest_status'], 'executed')
             self.assertEqual(summary['symbols'], 2)
             self.assertEqual(summary['executed_symbols'], 1)
-            
+
             # 验证新增的诊断层字段
             self.assertIn('blocker_dimension', btc)
             self.assertIn('dominant_blocker', btc)
@@ -2494,7 +2494,7 @@ class TestDashboardApi(unittest.TestCase):
                 strategies_triggered=[]
             )
             test_db.update_signal(id1, filtered=1, filter_reason='无可执行方向', filter_code='NO_DIRECTION', filter_group='signal', action_hint='等方向明确')
-            
+
             # COUNTER_TREND -> trend
             id2 = test_db.record_signal(
                 symbol='BTC/USDT',
@@ -2505,7 +2505,7 @@ class TestDashboardApi(unittest.TestCase):
                 strategies_triggered=['RSI']
             )
             test_db.update_signal(id2, filtered=1, filter_reason='信号逆大趋势', filter_code='COUNTER_TREND', filter_group='market', action_hint='等趋势一致')
-            
+
             # VOLATILITY_LOW -> volatility
             id3 = test_db.record_signal(
                 symbol='ETH/USDT',
@@ -2516,28 +2516,28 @@ class TestDashboardApi(unittest.TestCase):
                 strategies_triggered=['MACD']
             )
             test_db.update_signal(id3, filtered=1, filter_reason='波动率过低', filter_code='VOLATILITY_LOW', filter_group='market', action_hint='等待波动恢复')
-            
+
             client = app.test_client()
             resp = client.get('/api/signals/coin-breakdown?days=30')
             self.assertEqual(resp.status_code, 200)
             rows = resp.json.get('data') or []
-            
+
             btc = next(row for row in rows if row['symbol'] == 'BTC/USDT')
             eth = next(row for row in rows if row['symbol'] == 'ETH/USDT')
-            
+
             # 验证 BTC 阻塞维度
             self.assertIn('direction', btc['blocker_dimension'])
             self.assertIn('trend', btc['blocker_dimension'])
             self.assertEqual(btc['dominant_blocker'], 'direction')
-            
+
             # 验证 ETH 阻塞维度
             self.assertIn('volatility', eth['blocker_dimension'])
             self.assertEqual(eth['dominant_blocker'], 'volatility')
-            
+
             # 验证 recommendation 包含维度信息
             self.assertIn('等方向明确', btc['recommendation'])
             self.assertIn('等待波动率恢复', eth['recommendation'])
-            
+
         finally:
             dashboard_api.db = old_db
             if os.path.exists('data/test_diagnostic_dimension.db'):
@@ -2559,24 +2559,24 @@ class TestDashboardApi(unittest.TestCase):
                 reasons=[],
                 strategies_triggered=[]
             )
-            
+
             client = app.test_client()
             resp = client.get('/api/signals/coin-breakdown?days=30')
             self.assertEqual(resp.status_code, 200)
             rows = resp.json.get('data') or []
             summary = resp.json.get('summary') or {}
-            
+
             btc = next(row for row in rows if row['symbol'] == 'BTC/USDT')
-            
+
             # 验证样本状态
             self.assertEqual(btc['samples_24h'], 1)
             self.assertEqual(btc['samples_48h'], 1)
             self.assertEqual(btc['sample_status'], 'insufficient')
-            
+
             # 验证全局样本统计
             self.assertIn('sample_status', summary)
             self.assertEqual(summary['sample_status']['insufficient'], 1)
-            
+
         finally:
             dashboard_api.db = old_db
             if os.path.exists('data/test_sample_status.db'):
@@ -3063,21 +3063,28 @@ class TestRiskManagerLock(unittest.TestCase):
 
 class TestTradingExecutor(unittest.TestCase):
     """交易执行器测试"""
-    
+
     def setUp(self):
         self.config = Config()
         self.db = Database('data/test_executor.db')
         self.executor = TradingExecutor(self.config, None, self.db)
-    
+        # Patch balance to avoid real exchange API calls in unit tests
+        self.executor._get_balance_summary = lambda: {'total': 10000.0, 'free': 10000.0, 'used': 0.0}
+        # Also patch RiskManager class for tests that instantiate it directly
+        self._orig_get_balance = RiskManager._get_balance_summary
+        RiskManager._get_balance_summary = lambda self: {'total': 10000.0, 'free': 10000.0, 'used': 0.0}
+
     def tearDown(self):
         import os
+        # Restore patched balance method
+        RiskManager._get_balance_summary = self._orig_get_balance
         if os.path.exists('data/test_executor.db'):
             os.remove('data/test_executor.db')
-    
+
     def test_portfolio_status(self):
         """测试投资组合状态"""
         status = self.executor.get_portfolio_status()
-        
+
         self.assertIn('total_positions', status)
         self.assertIn('trade_stats', status)
         self.assertEqual(status['total_positions'], 0)
@@ -3167,18 +3174,18 @@ class TestTradingExecutor(unittest.TestCase):
         self.executor.trading_config['trailing_stop'] = 0.05  # 5%
         self.executor.trading_config['trailing_activation'] = 0.10  # 10% 盈利才激活
         self.db.update_position(symbol='BTC/USDT', side='long', entry_price=100, quantity=1, leverage=1, current_price=100)
-        
+
         # 5% 盈利，未达到 10% 激活阈值，不触发追踪
         self.assertFalse(self.executor.check_take_profit('BTC/USDT', 105))
         # 但仍然记录最高价
         self.assertEqual(self.executor._trade_cache['BTC/USDT']['highest_price'], 105)
-        
+
         # 15% 盈利，达到激活阈值，激活追踪
         self.assertFalse(self.executor.check_take_profit('BTC/USDT', 115))
-        
+
         # 价格回落，但未触及追踪止损
         self.assertFalse(self.executor.check_take_profit('BTC/USDT', 112))
-        
+
         # 价格继续回落，触发追踪止损 (115 * 0.95 = 109.25)
         self.assertTrue(self.executor.check_take_profit('BTC/USDT', 109))
 
@@ -3188,17 +3195,17 @@ class TestTradingExecutor(unittest.TestCase):
         self.executor.trading_config['trailing_stop'] = 0.05  # 5%
         self.executor.trading_config['trailing_activation'] = 0.10  # 10% 盈利才激活
         self.db.update_position(symbol='BTC/USDT', side='short', entry_price=100, quantity=1, leverage=1, current_price=100)
-        
+
         # 5% 盈利，未达到 10% 激活阈值，不触发追踪
         self.assertFalse(self.executor.check_take_profit('BTC/USDT', 95))
         self.assertEqual(self.executor._trade_cache['BTC/USDT']['lowest_price'], 95)
-        
+
         # 15% 盈利，达到激活阈值，激活追踪
         self.assertFalse(self.executor.check_take_profit('BTC/USDT', 85))
-        
+
         # 价格回升，但未触及追踪止损
         self.assertFalse(self.executor.check_take_profit('BTC/USDT', 88))
-        
+
         # 价格继续回升，触发追踪止损 (85 * 1.05 = 89.25)
         self.assertTrue(self.executor.check_take_profit('BTC/USDT', 90))
 
@@ -3226,7 +3233,7 @@ class TestTradingExecutor(unittest.TestCase):
         self.executor.trading_config['partial_tp_threshold'] = 0.02
         self.executor.trading_config['partial_tp_ratio'] = 0.5
         self.executor.trading_config['take_profit'] = 0.10
-        
+
         # 设置持仓：10张合约，成本 100
         self.db.update_position(
             symbol='BTC/USDT', side='long', entry_price=100,
@@ -3237,22 +3244,22 @@ class TestTradingExecutor(unittest.TestCase):
             symbol='BTC/USDT', side='long', entry_price=100,
             quantity=10, leverage=1
         )
-        
+
         # 价格涨到 102（2%涨幅，杠杆后2%盈利），达到部分止盈阈值
         self.executor.exchange = FakeExchange(price=102)
-        
+
         # 触发部分止盈
         result = self.executor.check_take_profit('BTC/USDT', 102)
         self.assertTrue(result)
-        
+
         # 验证：仓位应该还剩 5 张
         positions = self.db.get_positions()
         self.assertEqual(len(positions), 1)
         self.assertEqual(positions[0]['quantity'], 5)
-        
+
         # 验证：缓存标记已设置
         self.assertTrue(self.executor._trade_cache['BTC/USDT']['partial_tp_executed'])
-        
+
         # 再次检查不应该再触发部分止盈（因为已执行过）
         result = self.executor.check_take_profit('BTC/USDT', 102)
         self.assertFalse(result)
@@ -3262,7 +3269,7 @@ class TestTradingExecutor(unittest.TestCase):
         # 默认不启用部分止盈
         self.executor.trading_config['partial_tp_enabled'] = False
         self.executor.trading_config['take_profit'] = 0.02
-        
+
         self.db.update_position(
             symbol='BTC/USDT', side='long', entry_price=100,
             quantity=10, leverage=1, current_price=100,
@@ -3272,17 +3279,17 @@ class TestTradingExecutor(unittest.TestCase):
             symbol='BTC/USDT', side='long', entry_price=100,
             quantity=10, leverage=1
         )
-        
+
         # 价格涨到 102，触发普通止盈
         self.executor.exchange = FakeExchange(price=102)
-        
+
         result = self.executor.check_take_profit('BTC/USDT', 102)
         # 应该触发止盈（因为 take_profit=0.02）
         self.assertTrue(result)
-        
+
         # 实际执行平仓（模拟 runtime 行为）
         self.executor.close_position('BTC/USDT', '止盈', close_price=102)
-        
+
         # 仓位应该已全部平掉
         positions = self.db.get_positions()
         self.assertEqual(len(positions), 0)
@@ -3293,20 +3300,20 @@ class TestTradingExecutor(unittest.TestCase):
         self.executor.trading_config['partial_tp_enabled'] = True
         self.executor.trading_config['partial_tp_threshold'] = 0.02
         self.executor.trading_config['partial_tp_ratio'] = 0.5
-        
+
         # 模拟之前已有部分止盈标记
         self.executor._trade_cache['BTC/USDT'] = {'partial_tp_executed': True}
-        
+
         # 调用 _seed_trailing_anchor（模拟新开仓）
         self.executor._seed_trailing_anchor('BTC/USDT', 'long', 100)
-        
+
         # 标记应该被清除
         self.assertNotIn('partial_tp_executed', self.executor._trade_cache.get('BTC/USDT', {}))
 
     def test_close_position_partial_updates_remaining(self):
         """测试部分平仓后更新剩余仓位"""
         self.executor.exchange = FakeExchange(price=110)
-        
+
         self.db.update_position(
             symbol='BTC/USDT', side='long', entry_price=100,
             quantity=10, leverage=1, current_price=100,
@@ -3316,14 +3323,14 @@ class TestTradingExecutor(unittest.TestCase):
             symbol='BTC/USDT', side='long', entry_price=100,
             quantity=10, leverage=1
         )
-        
+
         # 部分平仓 5 张
         result = self.executor.close_position(
             'BTC/USDT', reason='partial_tp', close_price=110, close_quantity=5
         )
-        
+
         self.assertTrue(result)
-        
+
         # 验证剩余 5 张
         positions = self.db.get_positions()
         self.assertEqual(len(positions), 1)
@@ -3721,7 +3728,7 @@ class TestRiskBudgetSizing(unittest.TestCase):
         import os
         self._old_enable = os.environ.pop('CRYPTO_QUANT_OKX_ENABLE_HOME_LOCAL', None)
         self._old_path = os.environ.pop('CRYPTO_QUANT_OKX_HOME_LOCAL_CONFIG', None)
-        
+
         # Also temporarily move local config to avoid loading it
         import shutil
         from pathlib import Path
@@ -3729,7 +3736,7 @@ class TestRiskBudgetSizing(unittest.TestCase):
         self._backup_path = Path('config/config.local.yaml.test_backup')
         if self._local_config_path.exists():
             shutil.move(str(self._local_config_path), str(self._backup_path))
-        
+
         self.config = Config()
 
     def _make_signal(self, strength=50, strategies=None):
@@ -3750,12 +3757,12 @@ class TestRiskBudgetSizing(unittest.TestCase):
         from pathlib import Path
         if self._backup_path.exists():
             shutil.move(str(self._backup_path), str(self._local_config_path))
-        
+
         if self._old_enable is not None:
             os.environ['CRYPTO_QUANT_OKX_ENABLE_HOME_LOCAL'] = self._old_enable
         if self._old_path is not None:
             os.environ['CRYPTO_QUANT_OKX_HOME_LOCAL_CONFIG'] = self._old_path
-    
+
     def test_compute_entry_plan_respects_soft_cap_and_min_floor(self):
         cfg = Config()
         risk_budget = get_risk_budget_config(cfg)
@@ -4076,24 +4083,26 @@ class TestRiskBudgetSizing(unittest.TestCase):
 
 class TestRiskManager(unittest.TestCase):
     """风险管理器测试"""
-    
+
     def setUp(self):
         import os
         import shutil
         from pathlib import Path
         self._old_enable = os.environ.pop('CRYPTO_QUANT_OKX_ENABLE_HOME_LOCAL', None)
         self._old_path = os.environ.pop('CRYPTO_QUANT_OKX_HOME_LOCAL_CONFIG', None)
-        
+
         # Temporarily move local config
         self._local_config_path = Path('config/config.local.yaml')
         self._backup_path = Path('config/config.local.yaml.test_backup')
         if self._local_config_path.exists():
             shutil.move(str(self._local_config_path), str(self._backup_path))
-        
+
         self.config = Config()
         self.db = Database('data/test_risk.db')
         self.risk_mgr = RiskManager(self.config, self.db)
-    
+        # Patch balance to avoid real exchange API calls in unit tests
+        self.risk_mgr._get_balance_summary = lambda: {'total': 10000.0, 'free': 10000.0, 'used': 0.0}
+
     def tearDown(self):
         import os
         import shutil
@@ -4101,19 +4110,19 @@ class TestRiskManager(unittest.TestCase):
         # Restore local config
         if self._backup_path.exists():
             shutil.move(str(self._backup_path), str(self._local_config_path))
-        
+
         if self._old_enable is not None:
             os.environ['CRYPTO_QUANT_OKX_ENABLE_HOME_LOCAL'] = self._old_enable
         if self._old_path is not None:
             os.environ['CRYPTO_QUANT_OKX_HOME_LOCAL_CONFIG'] = self._old_path
-        
+
         if os.path.exists('data/test_risk.db'):
             os.remove('data/test_risk.db')
-    
+
     def test_can_open_position(self):
         """测试开仓检查"""
         can_open, reason, details = self.risk_mgr.can_open_position('BTC/USDT')
-        
+
         self.assertTrue(can_open)
         self.assertIsNone(reason)
 
@@ -4138,17 +4147,19 @@ class TestRiskManagerBudgetDetails(unittest.TestCase):
         from pathlib import Path
         self._old_enable = os.environ.pop('CRYPTO_QUANT_OKX_ENABLE_HOME_LOCAL', None)
         self._old_path = os.environ.pop('CRYPTO_QUANT_OKX_HOME_LOCAL_CONFIG', None)
-        
+
         # Temporarily move local config
         self._local_config_path = Path('config/config.local.yaml')
         self._backup_path = Path('config/config.local.yaml.test_backup')
         if self._local_config_path.exists():
             shutil.move(str(self._local_config_path), str(self._backup_path))
-        
+
         self.config = Config()
         self.db = Database('data/test_risk_budget_details.db')
         self.risk_mgr = RiskManager(self.config, self.db)
-
+        # Patch balance to avoid real exchange API calls in unit tests
+        self.risk_mgr._get_balance_summary = lambda: {'total': 10000.0, 'free': 10000.0, 'used': 0.0}
+    
     def _make_signal(self, **overrides):
         from signals import Signal
         defaults = {
@@ -4158,7 +4169,6 @@ class TestRiskManagerBudgetDetails(unittest.TestCase):
             'strength': 55,
             'reasons': ['test signal'],
             'strategies_triggered': ['trend_follow', 'momentum'],
-            'side': 'long',
         }
         defaults.update(overrides)
         return Signal(**defaults)
@@ -4170,27 +4180,27 @@ class TestRiskManagerBudgetDetails(unittest.TestCase):
         # Restore local config
         if self._backup_path.exists():
             shutil.move(str(self._backup_path), str(self._local_config_path))
-        
+
         if self._old_enable is not None:
             os.environ['CRYPTO_QUANT_OKX_ENABLE_HOME_LOCAL'] = self._old_enable
         if self._old_path is not None:
             os.environ['CRYPTO_QUANT_OKX_HOME_LOCAL_CONFIG'] = self._old_path
-        
+
         if os.path.exists('data/test_risk_budget_details.db'):
             os.remove('data/test_risk_budget_details.db')
 
     def test_can_open_position_returns_entry_plan(self):
-        can_open, reason, details = self.risk_mgr.can_open_position('BTC/USDT', signal=self._make_signal())
+        can_open, reason, details = self.risk_mgr.can_open_position('BTC/USDT', signal_id=2001)
         self.assertTrue(can_open)
         self.assertIn('entry_plan', details['exposure_limit'])
         self.assertIn('position_ratio', details['exposure_limit'])
 
 
     def test_can_open_position_step4_keeps_default_observe_only(self):
-        can_open, reason, details = self.risk_mgr.can_open_position('BTC/USDT', side='long', signal=self._make_signal())
+        can_open, reason, details = self.risk_mgr.can_open_position('BTC/USDT', side='long', signal_id=2002)
         self.assertTrue(can_open)
         self.assertEqual(details['adaptive_risk_snapshot']['effective_state'], 'disabled')
-        self.assertEqual(details['exposure_limit']['entry_plan']['risk_budget']['base_entry_margin_ratio'], 0.1)
+        self.assertEqual(details['exposure_limit']['entry_plan']['risk_budget']['base_entry_margin_ratio'], 0.08)
 
     def test_can_open_position_step4_enforces_tighter_budget_when_rollout_matches(self):
         self.config._config['adaptive_regime'] = {
@@ -4253,7 +4263,7 @@ class TestRiskManagerBudgetDetails(unittest.TestCase):
         )
         self.assertTrue(can_open)
         self.assertEqual(details['adaptive_risk_snapshot']['effective_state'], 'effective')
-        self.assertAlmostEqual(details['exposure_limit']['entry_plan']['risk_budget']['base_entry_margin_ratio'], 0.1, places=6)
+        self.assertAlmostEqual(details['exposure_limit']['entry_plan']['risk_budget']['base_entry_margin_ratio'], 0.08, places=6)
         self.assertEqual(details['exposure_limit']['planned_leverage'], 10)
         self.assertTrue(any(row['key'] == 'base_entry_margin_ratio' and row['reason'] == 'non_conservative_override' for row in details['adaptive_risk_snapshot']['ignored_overrides']))
 
@@ -4280,7 +4290,7 @@ class TestRiskManagerBudgetDetails(unittest.TestCase):
         )
         self.assertTrue(can_open)
         self.assertEqual(details['adaptive_risk_snapshot']['effective_state'], 'hints_only')
-        self.assertAlmostEqual(details['exposure_limit']['entry_plan']['risk_budget']['base_entry_margin_ratio'], 0.1, places=6)
+        self.assertAlmostEqual(details['exposure_limit']['entry_plan']['risk_budget']['base_entry_margin_ratio'], 0.08, places=6)
         self.assertFalse(details['adaptive_risk_hints']['rollout_match'])
 
 
@@ -4409,122 +4419,122 @@ class TestDashboardRiskBudgetAPI(unittest.TestCase):
 
 class TestMFEAnalyzer(unittest.TestCase):
     """MFE/MAE 分析器测试"""
-    
+
     def test_sample_data_report(self):
         """测试示例数据报告生成"""
         from analytics.mfe_mae import MFEAnalyzer
-        
+
         analyzer = MFEAnalyzer(db=None)
         report = analyzer.generate_analysis_report()
-        
+
         self.assertEqual(report['status'], 'sample')
         self.assertIn('stop_loss', report)
         self.assertIn('take_profit', report)
         self.assertIn('trailing_stop', report)
         self.assertIsNotNone(report['stop_loss']['recommended_sl_pct'])
         self.assertIsNotNone(report['take_profit']['recommended_tp_pct'])
-    
+
     def test_calculate_mfe_mae_from_positions(self):
         """测试从持仓计算 MFE/MAE"""
         from analytics.mfe_mae import MFEAnalyzer
-        
+
         analyzer = MFEAnalyzer(db=None)
-        
+
         # 测试多头持仓
         positions = [
-            {'symbol': 'BTC/USDT', 'side': 'long', 'entry_price': 50000, 
+            {'symbol': 'BTC/USDT', 'side': 'long', 'entry_price': 50000,
              'peak_price': 55000, 'trough_price': 48000, 'coin_quantity': 0.1},
         ]
-        
+
         results = analyzer.calculate_mfe_mae_from_positions(positions)
-        
+
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]['mfe_pct'], 10.0)  # (55000-50000)/50000 * 100
         self.assertEqual(results[0]['mae_pct'], 4.0)   # (50000-48000)/50000 * 100
-        
+
         # 测试空头持仓
         short_positions = [
-            {'symbol': 'ETH/USDT', 'side': 'short', 'entry_price': 3000, 
+            {'symbol': 'ETH/USDT', 'side': 'short', 'entry_price': 3000,
              'peak_price': 3200, 'trough_price': 2800, 'coin_quantity': 1},
         ]
-        
+
         results = analyzer.calculate_mfe_mae_from_positions(short_positions)
-        
+
         self.assertEqual(results[0]['mfe_pct'], 6.67)  # (3000-2800)/3000 * 100
         self.assertEqual(results[0]['mae_pct'], 6.67)  # (3200-3000)/3000 * 100
-    
+
     def test_stop_loss_recommendation(self):
         """测试止损建议计算"""
         from analytics.mfe_mae import MFEAnalyzer
-        
+
         analyzer = MFEAnalyzer(db=None)
-        
+
         # 测试样本不足
         result = analyzer.get_stop_loss_recommendation([1, 2])
         self.assertIsNone(result['recommended_sl_pct'])
         self.assertIn('样本不足', result['reason'])
-        
+
         # 测试足够样本
         mae_pcts = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]
         result = analyzer.get_stop_loss_recommendation(mae_pcts)
-        
+
         self.assertIsNotNone(result['recommended_sl_pct'])
         self.assertEqual(result['sample_size'], 10)
         # 75% 分位数应该是 7.5% 左右
         self.assertAlmostEqual(result['recommended_sl_pct'], 7.5, delta=1)
-    
+
     def test_take_profit_recommendation(self):
         """测试止盈建议计算"""
         from analytics.mfe_mae import MFEAnalyzer
-        
+
         analyzer = MFEAnalyzer(db=None)
-        
+
         mfe_pcts = [2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0, 20.0]
         result = analyzer.get_take_profit_recommendation(mfe_pcts)
-        
+
         self.assertIsNotNone(result['recommended_tp_pct'])
         self.assertEqual(result['sample_size'], 10)
         # 50% 分位数应该是 12%（索引5，即第6个元素）
         self.assertAlmostEqual(result['recommended_tp_pct'], 12.0, delta=1)
-    
+
     def test_trailing_stop_suggestion(self):
         """测试追踪止损建议"""
         from analytics.mfe_mae import MFEAnalyzer
-        
+
         analyzer = MFEAnalyzer(db=None)
-        
+
         mfe_pcts = [4.0, 8.0, 12.0]
         mae_pcts = [2.0, 4.0, 6.0]
-        
+
         result = analyzer.get_trailing_stop_suggestion(mfe_pcts, mae_pcts)
-        
+
         self.assertIsNotNone(result['activation_threshold_pct'])
         self.assertIsNotNone(result['trailing_distance_pct'])
         # avg_mfe = 8, 50% = 4
         self.assertEqual(result['activation_threshold_pct'], 4.0)
         # avg_mae = 4
         self.assertEqual(result['trailing_distance_pct'], 4.0)
-    
+
     def test_api_endpoint_sample(self):
         """测试 API 端点（示例数据场景）"""
         from dashboard.api import app
-        
+
         with app.test_client() as client:
             resp = client.get('/api/trades/mfe-mae')
             self.assertEqual(resp.status_code, 200)
-            
+
             data = json.loads(resp.data)
             # 因为没有足够数据，应该返回示例
             self.assertIn('status', data)
-    
+
     def test_api_recommendations_endpoint(self):
         """测试建议端点"""
         from dashboard.api import app
-        
+
         with app.test_client() as client:
             resp = client.get('/api/trades/mfe-mae/recommendations')
             self.assertEqual(resp.status_code, 200)
-            
+
             data = json.loads(resp.data)
             self.assertIn('stop_loss', data)
             self.assertIn('take_profit', data)
@@ -4533,58 +4543,58 @@ class TestMFEAnalyzer(unittest.TestCase):
 
 class TestRecommendationProvider(unittest.TestCase):
     """MFE/MAE 建议提供者测试"""
-    
+
     def test_default_values_no_db(self):
         """测试无数据库时的默认值"""
         from analytics.recommendation import RecommendationProvider
-        
+
         provider = RecommendationProvider(db=None, config=None)
-        
+
         self.assertEqual(provider.get_stop_loss(), 0.02)
         self.assertEqual(provider.get_take_profit(), 0.04)
         self.assertIsNotNone(provider.get_trailing_stop())
-    
+
     def test_fallback_with_insufficient_data(self):
         """测试样本不足时的回退"""
         from analytics.recommendation import RecommendationProvider
-        
+
         # 使用真实 db 但样本不足
         test_db = Database('data/trading.db')
         provider = RecommendationProvider(db=test_db, config=None)
-        
+
         rec = provider.get_recommendations_for_symbol('BTC/USDT')
-        
+
         # 应该回退到默认值
         self.assertTrue(rec.get('is_fallback'))
         self.assertEqual(rec.get('source'), 'default')
-    
+
     def test_get_all_recommendations(self):
         """测试获取完整建议"""
         from analytics.recommendation import RecommendationProvider
-        
+
         provider = RecommendationProvider(db=None, config=None)
         result = provider.get_all_recommendations()
-        
+
         self.assertIn('_meta', result)
         self.assertIn('defaults', result['_meta'])
         self.assertEqual(result['_meta']['defaults']['stop_loss'], 0.02)
-    
+
     def test_trading_executor_integration(self):
         """测试交易执行器集成"""
         from core.config import Config
         from core.database import Database
         from trading.executor import TradingExecutor
-        
+
         # 使用内存数据库测试
         test_db = Database(':memory:')
-        
+
         # Mock exchange
         class MockExchange:
             pass
-        
+
         config = Config()
         executor = TradingExecutor(config, MockExchange(), test_db)
-        
+
         # 验证 recommendation provider 已初始化
         self.assertIsNotNone(executor._recommendation_provider)
 
@@ -6927,11 +6937,11 @@ def run_tests():
     print("\n" + "="*60)
     print("🧪 OKX量化交易系统 - 测试套件")
     print("="*60 + "\n")
-    
+
     # 创建测试套件
     loader = unittest.TestLoader()
     suite = unittest.TestSuite()
-    
+
     # 添加测试
     suite.addTests(loader.loadTestsFromTestCase(TestConfig))
     suite.addTests(loader.loadTestsFromTestCase(TestDatabase))
@@ -6942,11 +6952,11 @@ def run_tests():
     suite.addTests(loader.loadTestsFromTestCase(TestRiskBudgetSizing))
     suite.addTests(loader.loadTestsFromTestCase(TestMFEAnalyzer))
     suite.addTests(loader.loadTestsFromTestCase(TestRecommendationProvider))
-    
+
     # 运行测试
     runner = unittest.TextTestRunner(verbosity=2)
     result = runner.run(suite)
-    
+
     # 输出总结
     print("\n" + "="*60)
     if result.wasSuccessful():
@@ -6954,7 +6964,7 @@ def run_tests():
     else:
         print(f"❌ {len(result.failures)} 失败, {len(result.errors)} 错误")
     print("="*60 + "\n")
-    
+
     return result.wasSuccessful()
 
 

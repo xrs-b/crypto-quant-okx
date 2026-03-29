@@ -66,6 +66,40 @@ class Database:
         data['margin'] = margin
         data['notional_value'] = coin_quantity * (exit_price or entry_price or 0.0)
         data['pnl_percent'] = (pnl / margin * 100) if pnl is not None and margin > 0 else None
+        data['return_pct'] = data.get('pnl_percent')
+        plan_context = self._safe_json_dict(data.get('plan_context'))
+        outcome = self._safe_json_dict(data.get('outcome_attribution'))
+        data['plan_context'] = plan_context
+        data['outcome_attribution'] = outcome
+        regime_snapshot = self._safe_json_dict(plan_context.get('regime_snapshot'))
+        policy_snapshot = self._safe_json_dict(plan_context.get('adaptive_policy_snapshot'))
+        observability = self._safe_json_dict(plan_context.get('observability'))
+        strategy_tags = plan_context.get('strategy_tags') or outcome.get('strategy_tags') or []
+        if isinstance(strategy_tags, str):
+            strategy_tags = [strategy_tags]
+        observe_only = normalize_observe_only_view(
+            outcome.get('observe_only') or observability.get('observe_only') or {},
+            regime_snapshot=regime_snapshot,
+            policy_snapshot=policy_snapshot,
+            fallback_summary=(outcome.get('observe_only') or {}).get('summary') or (observability.get('observe_only') or {}).get('summary'),
+        )
+        data.update({
+            'regime_tag': outcome.get('regime_tag') or regime_snapshot.get('name') or regime_snapshot.get('regime') or policy_snapshot.get('regime_name'),
+            'policy_tag': outcome.get('policy_tag') or policy_snapshot.get('policy_version'),
+            'strategy_tags': strategy_tags,
+            'dominant_strategy': outcome.get('dominant_strategy') or (strategy_tags[0] if strategy_tags else 'unknown'),
+            'strategy_count': outcome.get('strategy_count') or len(strategy_tags),
+            'observe_only': observe_only,
+            'close_reason': outcome.get('close_reason'),
+            'close_decision': outcome.get('close_decision'),
+            'close_reason_category': outcome.get('close_reason_category'),
+            'holding_minutes': outcome.get('holding_minutes'),
+            'holding_seconds': outcome.get('holding_seconds'),
+            'pnl_bucket': outcome.get('pnl_bucket'),
+            'outcome_quality': outcome.get('outcome_quality'),
+            'plan_layer_no': outcome.get('plan_layer_no') or plan_context.get('layer_no'),
+            'root_signal_id': outcome.get('root_signal_id') or plan_context.get('root_signal_id') or data.get('root_signal_id'),
+        })
         return data
 
     def _normalize_workflow_state(self, workflow_state: Optional[str], approval_state: Optional[str] = None) -> str:
@@ -443,6 +477,7 @@ class Database:
                 layer_no INTEGER,
                 root_signal_id INTEGER,
                 plan_context TEXT,
+                outcome_attribution TEXT,
                 FOREIGN KEY (signal_id) REFERENCES signals(id)
             )
         """)
@@ -778,6 +813,8 @@ class Database:
             cursor.execute("ALTER TABLE trades ADD COLUMN root_signal_id INTEGER")
         if 'plan_context' not in trade_columns:
             cursor.execute("ALTER TABLE trades ADD COLUMN plan_context TEXT")
+        if 'outcome_attribution' not in trade_columns:
+            cursor.execute("ALTER TABLE trades ADD COLUMN outcome_attribution TEXT")
 
         cursor.execute("PRAGMA table_info(positions)")
         position_columns = {row[1] for row in cursor.fetchall()}
@@ -971,23 +1008,155 @@ class Database:
         conn.commit()
         conn.close()
     
-    def close_trade(self, trade_id: int, exit_price: float, pnl: float, 
-                    pnl_percent: float, notes: str = None, close_source: str = 'local_market_close',
-                    close_time: str = None, close_fill_count: int = 0):
-        """平仓"""
+    def _extract_strategy_tags(self, plan_context: Dict[str, Any], current: Dict[str, Any]) -> List[str]:
+        tags = []
+        seen = set()
+        candidates = [
+            (plan_context or {}).get('strategy_tags'),
+            (plan_context or {}).get('strategies_triggered'),
+            ((plan_context or {}).get('entry_plan') or {}).get('strategy_tags'),
+            current.get('strategy_tags'),
+        ]
+        for candidate in candidates:
+            values = candidate if isinstance(candidate, list) else ([candidate] if candidate else [])
+            for value in values:
+                tag = str(value or '').strip()
+                if tag and tag not in seen:
+                    seen.add(tag)
+                    tags.append(tag)
+        return tags
+
+    def _build_trade_outcome_attribution(self, current: Dict[str, Any], summary: Dict = None, *, reason: str = None,
+                                         exit_price: Any = None, pnl: Any = None, pnl_percent: Any = None,
+                                         close_source: str = None, close_fill_count: Any = None) -> Dict[str, Any]:
+        current = dict(current or {})
+        summary = dict(summary or {})
+        plan_context = self._safe_json_dict(current.get('plan_context'))
+        observability = self._safe_json_dict(plan_context.get('observability'))
+        regime_snapshot = self._safe_json_dict(plan_context.get('regime_snapshot'))
+        policy_snapshot = self._safe_json_dict(plan_context.get('adaptive_policy_snapshot'))
+        strategy_tags = self._extract_strategy_tags(plan_context, current)
+        effective_close_source = close_source or summary.get('source') or current.get('close_source') or 'local_market_close'
+        effective_fill_count = int(close_fill_count if close_fill_count is not None else len(summary.get('fills') or []))
+        entry_price = self._safe_float(current.get('entry_price'))
+        effective_exit_price = self._safe_float(exit_price if exit_price not in (None, '') else summary.get('exit_price') or current.get('exit_price'))
+        effective_pnl = pnl if pnl not in (None, '') else summary.get('pnl', current.get('pnl'))
+        effective_pnl = None if effective_pnl in (None, '') else self._safe_float(effective_pnl)
+        effective_pnl_percent = pnl_percent if pnl_percent not in (None, '') else summary.get('pnl_percent', current.get('pnl_percent'))
+        effective_pnl_percent = None if effective_pnl_percent in (None, '') else self._safe_float(effective_pnl_percent)
+        if effective_pnl_percent is None and effective_pnl is not None:
+            leverage = max(1, int(self._safe_float(current.get('leverage'), 1)))
+            coin_quantity = self._safe_float(summary.get('coin_quantity') or current.get('coin_quantity'))
+            margin = (entry_price * coin_quantity) / leverage if entry_price > 0 and coin_quantity > 0 else 0.0
+            effective_pnl_percent = (effective_pnl / margin * 100) if margin > 0 else None
+        close_time_raw = summary.get('close_time') or current.get('close_time') or datetime.now().isoformat()
+        holding_seconds = None
+        try:
+            opened = datetime.fromisoformat(str(current.get('open_time')).replace('Z', '+00:00'))
+            closed = datetime.fromisoformat(str(close_time_raw).replace('Z', '+00:00'))
+            holding_seconds = max(0, int((closed - opened).total_seconds()))
+        except Exception:
+            holding_seconds = None
+        holding_minutes = round(holding_seconds / 60, 2) if holding_seconds is not None else None
+        reason_text = str(reason or '').strip()
+        reason_lower = reason_text.lower()
+        if 'stop' in reason_lower or '止损' in reason_text:
+            reason_category = 'stop_loss'
+        elif 'tp' in reason_lower or 'take_profit' in reason_lower or '止盈' in reason_text:
+            reason_category = 'take_profit'
+        elif 'reconcile' in reason_lower or '收口' in reason_text or '对账' in reason_text:
+            reason_category = 'reconcile_close'
+        elif 'manual' in reason_lower or '手动' in reason_text:
+            reason_category = 'manual_close'
+        elif 'stale' in reason_lower or '无对应仓位' in reason_text:
+            reason_category = 'stale_close'
+        else:
+            reason_category = 'signal_or_rule_close' if reason_text else 'unknown'
+        close_decision = 'win' if (effective_pnl or 0) > 0 else 'loss' if (effective_pnl or 0) < 0 else 'flat'
+        abs_return = abs(float(effective_pnl_percent or 0.0))
+        pnl_bucket = 'flat' if close_decision == 'flat' else ('large' if abs_return >= 5 else 'medium' if abs_return >= 1 else 'small')
+        outcome_quality = 'positive' if close_decision == 'win' else ('bounded_loss' if reason_category == 'stop_loss' else 'adverse' if close_decision == 'loss' else 'aligned')
+        observe_only = normalize_observe_only_view(
+            observability.get('observe_only') or {},
+            regime_snapshot=regime_snapshot,
+            policy_snapshot=policy_snapshot,
+            fallback_summary=(observability.get('observe_only') or {}).get('summary'),
+        )
+        return {
+            'schema_version': 'trade_outcome_attribution_v1',
+            'close_reason': reason_text or None,
+            'close_reason_category': reason_category,
+            'close_decision': close_decision,
+            'close_source': effective_close_source,
+            'close_fill_count': effective_fill_count,
+            'regime_tag': regime_snapshot.get('name') or regime_snapshot.get('regime') or policy_snapshot.get('regime_name') or 'unknown',
+            'policy_tag': policy_snapshot.get('policy_version') or 'unknown',
+            'strategy_tags': strategy_tags,
+            'dominant_strategy': strategy_tags[0] if strategy_tags else 'unknown',
+            'strategy_count': len(strategy_tags),
+            'observe_only': observe_only,
+            'holding_seconds': holding_seconds,
+            'holding_minutes': holding_minutes,
+            'pnl_bucket': pnl_bucket,
+            'outcome_quality': outcome_quality,
+            'entry_price': entry_price,
+            'exit_price': effective_exit_price,
+            'pnl': effective_pnl,
+            'return_pct': effective_pnl_percent,
+            'plan_layer_no': plan_context.get('layer_no') or current.get('layer_no'),
+            'root_signal_id': plan_context.get('root_signal_id') or current.get('root_signal_id'),
+            'signal_id': current.get('signal_id'),
+            'layer_ratio': plan_context.get('layer_ratio'),
+            'planned_margin': plan_context.get('planned_margin'),
+            'risk_budget': self._safe_json_dict((plan_context.get('entry_plan') or {}).get('risk_budget')),
+        }
+
+    def close_trade_with_outcome_enrichment(self, trade_id: int, exit_price: float, pnl: float,
+                                            pnl_percent: float, notes: str = None, close_source: str = 'local_market_close',
+                                            close_time: str = None, close_fill_count: int = 0) -> bool:
         conn = self._get_connection()
         cursor = conn.cursor()
-        
+        cursor.execute("SELECT * FROM trades WHERE id = ?", (trade_id,))
+        row = cursor.fetchone()
+        if not row:
+            conn.close()
+            return False
+        current = dict(row)
+        outcome = self._build_trade_outcome_attribution(
+            current,
+            reason=notes,
+            exit_price=exit_price,
+            pnl=pnl,
+            pnl_percent=pnl_percent,
+            close_source=close_source,
+            close_fill_count=close_fill_count,
+        )
         cursor.execute("""
             UPDATE trades 
             SET exit_price = ?, pnl = ?, pnl_percent = ?, 
                 status = 'closed', close_time = COALESCE(?, CURRENT_TIMESTAMP), notes = ?,
-                close_source = ?, close_fill_count = ?
+                close_source = ?, close_fill_count = ?, outcome_attribution = ?
             WHERE id = ?
-        """, (exit_price, pnl, pnl_percent, close_time, notes, close_source, int(close_fill_count or 0), trade_id))
-        
+        """, (exit_price, pnl, pnl_percent, close_time, notes, close_source, int(close_fill_count or 0), json.dumps(outcome, ensure_ascii=False), trade_id))
+        changed = cursor.rowcount > 0
         conn.commit()
         conn.close()
+        return changed
+
+    def close_trade(self, trade_id: int, exit_price: float, pnl: float, 
+                    pnl_percent: float, notes: str = None, close_source: str = 'local_market_close',
+                    close_time: str = None, close_fill_count: int = 0):
+        """平仓"""
+        self.close_trade_with_outcome_enrichment(
+            trade_id=trade_id,
+            exit_price=exit_price,
+            pnl=pnl,
+            pnl_percent=pnl_percent,
+            notes=notes,
+            close_source=close_source,
+            close_time=close_time,
+            close_fill_count=close_fill_count,
+        )
 
     def reconcile_trade_close(self, trade_id: int, summary: Dict, reason: str = None) -> bool:
         conn = self._get_connection()
@@ -1025,6 +1194,13 @@ class Database:
             entry_price = self._safe_float(current.get('entry_price'))
             margin = (entry_price * coin_quantity) / leverage if entry_price > 0 and coin_quantity > 0 else 0.0
             pnl_percent = (pnl / margin * 100) if margin > 0 else None
+        outcome = self._build_trade_outcome_attribution(
+            current,
+            summary,
+            reason=final_notes,
+            close_source=source,
+            close_fill_count=fill_count,
+        )
         cursor.execute("""
             UPDATE trades
             SET status = 'closed',
@@ -1037,7 +1213,8 @@ class Database:
                 close_time = COALESCE(?, close_time, CURRENT_TIMESTAMP),
                 notes = ?,
                 close_source = ?,
-                close_fill_count = ?
+                close_fill_count = ?,
+                outcome_attribution = ?
             WHERE id = ?
         """, (
             (summary or {}).get('exit_price'),
@@ -1050,6 +1227,7 @@ class Database:
             final_notes,
             source,
             fill_count,
+            json.dumps(outcome, ensure_ascii=False),
             trade_id,
         ))
         changed = cursor.rowcount > 0

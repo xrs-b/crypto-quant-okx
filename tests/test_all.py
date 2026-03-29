@@ -13382,3 +13382,82 @@ class TestQualityScalingPipeline(unittest.TestCase):
         self.assertIn('quality_bucket', snapshot)
         self.assertEqual(snapshot['quality_bucket'], 'high')
         self.assertIn('quality_scaling_enabled', snapshot)
+
+
+class TestTradeOutcomeAttribution(unittest.TestCase):
+    def setUp(self):
+        self.config = Config()
+        self.db = Database('data/test_trade_outcome_attribution.db')
+        self.executor = TradingExecutor(self.config, None, self.db)
+        self.executor.exchange = FakeExecutorExchange()
+
+    def tearDown(self):
+        if os.path.exists('data/test_trade_outcome_attribution.db'):
+            os.remove('data/test_trade_outcome_attribution.db')
+
+    def test_reconcile_trade_close_persists_structured_outcome_attribution(self):
+        regime_snapshot = build_regime_snapshot('trend', 0.82, {'ema_gap': 0.02}, '趋势上涨')
+        policy_snapshot = resolve_regime_policy(self.config, 'BTC/USDT', regime_snapshot)
+        trade_id = self.db.record_trade(
+            symbol='BTC/USDT', side='long', entry_price=50000, quantity=0.1, leverage=5,
+            signal_id=101, layer_no=1, root_signal_id=101,
+            plan_context={
+                'layer_no': 1,
+                'root_signal_id': 101,
+                'strategy_tags': ['ema_trend'],
+                'regime_snapshot': regime_snapshot,
+                'adaptive_policy_snapshot': policy_snapshot,
+            }
+        )
+        changed = self.db.reconcile_trade_close(trade_id, {'exit_price': 51000, 'pnl': 100, 'close_time': '2026-03-30T00:00:00', 'source': 'exchange_fill', 'fills': [{'id': 'f1'}]}, reason='止盈收口')
+        self.assertTrue(changed)
+        trade = self.db.get_trades(symbol='BTC/USDT', limit=1)[0]
+        outcome = trade['outcome_attribution']
+        self.assertEqual(outcome['schema_version'], 'trade_outcome_attribution_v1')
+        self.assertEqual(outcome['close_source'], 'exchange_fill')
+        self.assertEqual(outcome['close_reason_category'], 'take_profit')
+        self.assertEqual(trade['regime_tag'], 'trend')
+        self.assertEqual(trade['policy_tag'], policy_snapshot.get('policy_version'))
+        self.assertEqual(trade['strategy_tags'], ['ema_trend'])
+        self.assertEqual(trade['close_decision'], 'win')
+        self.assertEqual(trade['return_pct'], trade['pnl_percent'])
+
+    def test_close_trade_with_outcome_enrichment_persists_local_close_attribution(self):
+        trade_id = self.db.record_trade(
+            symbol='BTC/USDT', side='long', entry_price=50000, quantity=0.1, leverage=10,
+            signal_id=201, layer_no=1, root_signal_id=201,
+            plan_context={'layer_no': 1, 'root_signal_id': 201, 'strategy_tags': ['breakout_v1']}
+        )
+        changed = self.db.close_trade_with_outcome_enrichment(
+            trade_id=trade_id, exit_price=49500, pnl=-50, pnl_percent=-10,
+            notes='手动止损', close_source='local_market_close'
+        )
+        self.assertTrue(changed)
+        trade = self.db.get_trades(symbol='BTC/USDT', limit=1)[0]
+        self.assertEqual(trade['outcome_attribution']['close_reason_category'], 'stop_loss')
+        self.assertEqual(trade['close_decision'], 'loss')
+        self.assertEqual(trade['pnl_bucket'], 'large')
+        self.assertEqual(trade['outcome_attribution']['strategy_tags'], ['breakout_v1'])
+
+    def test_executor_close_path_emits_outcome_attribution(self):
+        class CloseCapableExchange(FakeExecutorExchange):
+            def close_order(self, symbol, side, quantity, posSide=None):
+                return {'symbol': symbol, 'side': side, 'quantity': quantity, 'posSide': posSide}
+
+            def fetch_closed_trade_summary(self, trade, fallback_price=None):
+                return None
+
+        self.executor.exchange = CloseCapableExchange()
+        self.db.update_position(symbol='BTC/USDT', side='long', entry_price=100, quantity=1, leverage=2, current_price=100, coin_quantity=1, contract_size=1)
+        self.db.record_trade(
+            symbol='BTC/USDT', side='long', entry_price=100, quantity=1, leverage=2,
+            signal_id=301, layer_no=1, root_signal_id=301,
+            plan_context={'layer_no': 1, 'root_signal_id': 301, 'strategy_tags': ['mean_revert']}
+        )
+        result = self.executor.close_position('BTC/USDT', reason='manual_take_profit', close_price=105)
+        self.assertTrue(result)
+        trade = self.db.get_trades(symbol='BTC/USDT', limit=1)[0]
+        self.assertEqual(trade['status'], 'closed')
+        self.assertEqual(trade['close_decision'], 'win')
+        self.assertEqual(trade['outcome_attribution']['close_source'], 'local_market_close')
+        self.assertEqual(trade['outcome_attribution']['strategy_tags'], ['mean_revert'])

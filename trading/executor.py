@@ -879,7 +879,7 @@ class TradingExecutor:
                     if exchange_close:
                         self.db.reconcile_trade_close(trade_id, exchange_close, reason=close_note)
                     else:
-                        self.db.close_trade(
+                        self.db.close_trade_with_outcome_enrichment(
                             trade_id=trade_id,
                             exit_price=close_price,
                             pnl=pnl,

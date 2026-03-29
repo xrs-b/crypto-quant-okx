@@ -13482,7 +13482,7 @@ class TestCloseOutcomeDigest(unittest.TestCase):
         self.assertEqual(workbench_summary['summary']['close_outcome_digest']['by_policy_tag']['policy_v1'], 2)
 
     def test_close_outcome_feedback_loop_builds_tighten_recommendation_and_runtime_next_action(self):
-        from analytics.helper import build_close_outcome_feedback_loop, build_runtime_orchestration_summary
+        from analytics.helper import build_close_outcome_feedback_loop, build_runtime_orchestration_summary, build_workflow_operator_digest
         close_outcome_digest = {
             'schema_version': 'trade_close_outcome_digest_v1',
             'trade_count': 4,
@@ -13504,6 +13504,9 @@ class TestCloseOutcomeDigest(unittest.TestCase):
         feedback = build_close_outcome_feedback_loop(close_outcome_digest, label='unit-test')
         self.assertEqual(feedback['governance_mode'], 'tighten')
         self.assertEqual(feedback['next_action']['route'], 'review_schedule_queue')
+        self.assertEqual(feedback['control_plane']['line'], 'rollout')
+        self.assertEqual(feedback['control_plane']['action_policy'], 'guarded_tighten_review')
+        self.assertFalse(feedback['control_plane']['safe_execution']['allow_live_execution'])
         self.assertIn('close_outcome_policy_tighten', feedback['reason_codes'])
 
         payload = {
@@ -13515,8 +13518,15 @@ class TestCloseOutcomeDigest(unittest.TestCase):
             'adaptive_rollout_orchestration': {'summary': {}},
             'close_outcome_digest': close_outcome_digest,
         }
+        operator_digest = build_workflow_operator_digest(dict(payload), max_items=2)
+        close_action = next(row for row in operator_digest['next_actions'] if row['kind'] == 'close_outcome_policy_review')
+        self.assertEqual(close_action['line'], 'rollout')
+        self.assertEqual(close_action['action_policy'], 'guarded_tighten_review')
+        self.assertFalse(close_action['safe_execution']['allow_parameter_auto_apply'])
+
         runtime_summary = build_runtime_orchestration_summary(dict(payload), max_items=2)
         self.assertEqual(runtime_summary['close_outcome_feedback_loop']['governance_mode'], 'tighten')
+        self.assertEqual(runtime_summary['close_outcome_control_plane']['line'], 'rollout')
         self.assertEqual(runtime_summary['next_step']['route'], 'review_schedule_queue')
         self.assertEqual(runtime_summary['related_summary']['close_outcome_feedback_loop']['next_action']['follow_up'], 'review_policy_thresholds')
 
@@ -13554,8 +13564,11 @@ class TestCloseOutcomeDigest(unittest.TestCase):
         self.assertEqual(workbench['governance_recommendation']['governance_mode'], 'rollback')
         unified = build_unified_workbench_overview(dict(payload), max_items=2)
         self.assertEqual(unified['close_outcome_feedback_loop']['next_action']['route'], 'rollback_candidate_queue')
+        self.assertEqual(unified['close_outcome_control_plane']['line'], 'recovery')
+        self.assertEqual(unified['close_outcome_control_plane']['action_policy'], 'freeze_and_manual_review')
         readiness = build_production_rollout_readiness(dict(payload), max_items=2)
         self.assertIn('close_outcome_feedback_requires_rollback_review', readiness['blocking_issues'])
+        self.assertEqual(readiness['summary']['close_outcome_control_plane']['route'], 'rollback_candidate_queue')
         self.assertEqual(readiness['runbook_actions'][0]['route'], 'rollback_candidate_queue')
 
 

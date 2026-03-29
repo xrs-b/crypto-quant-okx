@@ -1343,6 +1343,101 @@ def build_close_outcome_digest(trades: Optional[List[Dict[str, Any]]] = None, *,
             f"reason={_top(reason_counts) or 'unknown'} / regime={_top(regime_counts) or 'unknown'} / policy={_top(policy_counts) or 'unknown'}"
         ),
     }
+def _build_close_outcome_control_plane_semantics(*, governance_mode: Optional[str] = None, status: Optional[str] = None,
+                                                 confidence: Optional[str] = None, severity: Optional[str] = None,
+                                                 trade_count: int = 0, recommendation: Optional[str] = None,
+                                                 dominant_policy: Optional[str] = None, dominant_regime: Optional[str] = None,
+                                                 reason_codes: Optional[List[str]] = None, policy_hints: Optional[List[str]] = None,
+                                                 next_action: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    normalized_mode = str(governance_mode or 'observe').strip().lower() or 'observe'
+    normalized_status = str(status or 'observe_only').strip().lower() or 'observe_only'
+    normalized_confidence = str(confidence or 'low').strip().lower() or 'low'
+    normalized_severity = str(severity or 'low').strip().lower() or 'low'
+    base_action = dict(next_action or {})
+
+    line = 'governance'
+    lane = 'observation'
+    action_policy = 'observe_only'
+    dispatch_family = 'close_outcome_feedback'
+    execution_mode = 'advisory_only'
+    safe_execution = {
+        'allow_live_execution': False,
+        'allow_parameter_auto_apply': False,
+        'requires_manual_operator_review': False,
+        'notes': ['close outcome feedback can reroute control-plane queues but must not trigger live trading actions directly'],
+    }
+
+    if normalized_mode == 'rollback':
+        line = 'recovery'
+        lane = 'rollback_candidate'
+        action_policy = 'freeze_and_manual_review'
+        safe_execution['requires_manual_operator_review'] = True
+    elif normalized_mode == 'tighten':
+        line = 'rollout'
+        lane = 'policy_review'
+        action_policy = 'guarded_tighten_review'
+        safe_execution['requires_manual_operator_review'] = True
+    elif normalized_mode == 'rollout':
+        line = 'rollout'
+        lane = 'rollout_readiness'
+        action_policy = 'guarded_rollout_review'
+        safe_execution['requires_manual_operator_review'] = True
+    elif normalized_mode == 'review':
+        line = 'rollout'
+        lane = 'policy_review'
+        action_policy = 'manual_policy_review'
+        safe_execution['requires_manual_operator_review'] = True
+
+    route = base_action.get('route') or 'observe_only_followup'
+    owner = base_action.get('owner') or ('operator' if safe_execution['requires_manual_operator_review'] else 'runtime')
+    priority = base_action.get('priority') or ('high' if normalized_mode == 'rollback' else 'medium' if normalized_mode in {'tighten', 'review', 'rollout'} else 'low')
+    follow_up = base_action.get('follow_up') or ('collect_more_close_outcomes' if normalized_mode == 'observe' else 'review_close_outcome_feedback')
+    action = base_action.get('action') or ('freeze_followup' if normalized_mode == 'rollback' else 'review_schedule' if normalized_mode in {'tighten', 'review', 'rollout'} else 'observe_only_followup')
+
+    normalized_next_action = {
+        **base_action,
+        'kind': base_action.get('kind') or f'close_outcome_{normalized_mode}',
+        'priority': priority,
+        'owner': owner,
+        'action': action,
+        'route': route,
+        'follow_up': follow_up,
+        'line': base_action.get('line') or line,
+        'lane': base_action.get('lane') or lane,
+        'family': dispatch_family,
+        'action_policy': base_action.get('action_policy') or action_policy,
+        'execution_mode': base_action.get('execution_mode') or execution_mode,
+        'governance_mode': normalized_mode,
+        'status': normalized_status,
+        'confidence': normalized_confidence,
+        'severity': normalized_severity,
+        'trade_count': max(int(trade_count or 0), 0),
+        'target_policy_tag': dominant_policy,
+        'target_regime_tag': dominant_regime,
+        'reason_codes': _dedupe_strings(list(base_action.get('reason_codes') or []) + list(reason_codes or [])),
+        'policy_hints': _dedupe_strings(list(base_action.get('policy_hints') or []) + list(policy_hints or [])),
+        'message': base_action.get('message') or recommendation,
+        'safe_execution': safe_execution,
+    }
+    return {
+        'schema_version': 'trade_close_outcome_control_plane_v1',
+        'line': line,
+        'lane': lane,
+        'dispatch_family': dispatch_family,
+        'action_policy': action_policy,
+        'execution_mode': execution_mode,
+        'priority': priority,
+        'owner': owner,
+        'route': route,
+        'follow_up': follow_up,
+        'safe_execution': safe_execution,
+        'reason_codes': normalized_next_action.get('reason_codes') or [],
+        'policy_hints': normalized_next_action.get('policy_hints') or [],
+        'summary_line': f"{normalized_mode} -> {line}/{lane} via {route} ({action_policy})",
+        'next_action': normalized_next_action,
+    }
+
+
 def build_close_outcome_feedback_loop(close_outcome_digest: Optional[Dict[str, Any]] = None, *, label: Optional[str] = None,
                                     min_sample_size: int = 3, max_policy_hints: int = 5) -> Dict[str, Any]:
     digest = dict(close_outcome_digest or {})
@@ -1472,6 +1567,20 @@ def build_close_outcome_feedback_loop(close_outcome_digest: Optional[Dict[str, A
 
     policy_hints = _dedupe_strings(policy_hints)[:max_policy_hints]
     reason_codes = _dedupe_strings(reason_codes)
+    control_plane = _build_close_outcome_control_plane_semantics(
+        governance_mode=governance_mode,
+        status=status,
+        confidence=confidence,
+        severity=severity,
+        trade_count=trade_count,
+        recommendation=recommendation,
+        dominant_policy=dominant_policy,
+        dominant_regime=dominant_regime,
+        reason_codes=reason_codes,
+        policy_hints=policy_hints,
+        next_action=next_action,
+    )
+    next_action = control_plane.get('next_action') or next_action
     return {
         'schema_version': 'trade_close_outcome_feedback_loop_v1',
         'label': label,
@@ -1483,6 +1592,7 @@ def build_close_outcome_feedback_loop(close_outcome_digest: Optional[Dict[str, A
         'min_sample_size': min_sample_size,
         'recommendation': recommendation,
         'next_action': next_action,
+        'control_plane': control_plane,
         'policy_hints': policy_hints,
         'reason_codes': reason_codes,
         'evidence': {
@@ -5447,6 +5557,7 @@ def build_runtime_orchestration_summary(payload: Optional[Dict[str, Any]] = None
         close_outcome_digest,
         label='runtime_orchestration_summary',
     )
+    close_outcome_control_plane = close_outcome_feedback.get('control_plane') or {}
     review_queue_consumption = payload.get('auto_promotion_review_queue_consumption') or build_auto_promotion_review_queue_consumption(
         auto_promotion_execution,
         max_items=max_items,
@@ -5569,7 +5680,7 @@ def build_runtime_orchestration_summary(payload: Optional[Dict[str, Any]] = None
                 'follow_up': row.get('follow_up'),
                 'items': row.get('items') or [],
             })
-    close_outcome_next_action = dict(close_outcome_feedback.get('next_action') or {})
+    close_outcome_next_action = dict(close_outcome_control_plane.get('next_action') or close_outcome_feedback.get('next_action') or {})
     if close_outcome_next_action:
         close_outcome_next_action.setdefault('line', 'governance')
         close_outcome_next_action.setdefault('count', close_outcome_feedback.get('trade_count', 0))
@@ -5643,6 +5754,7 @@ def build_runtime_orchestration_summary(payload: Optional[Dict[str, Any]] = None
         'result_digest': result_digest.get('summary') or {},
         'close_outcome_digest': close_outcome_digest,
         'close_outcome_feedback_loop': close_outcome_feedback,
+        'close_outcome_control_plane': close_outcome_control_plane,
     }
     return {
         'schema_version': 'm5_runtime_orchestration_summary_v1',
@@ -5659,6 +5771,7 @@ def build_runtime_orchestration_summary(payload: Optional[Dict[str, Any]] = None
             'consumption': review_queue_consumption,
         },
         'close_outcome_feedback_loop': close_outcome_feedback,
+        'close_outcome_control_plane': close_outcome_control_plane,
         'result_digest': result_digest,
         'orchestration': orchestration,
         'transition_journal': transition_journal,
@@ -8844,6 +8957,11 @@ def build_workflow_operator_digest(payload: Optional[Dict] = None, *, max_items:
     bridge_gate = _build_testnet_bridge_evidence_gate(bridge_evidence)
     validation_gate = consumer_view.get('validation_gate') or _build_validation_gate_snapshot(payload)
     close_outcome_digest = payload.get('close_outcome_digest') or build_close_outcome_digest(payload.get('closed_trades') or payload.get('trades') or [], label='workflow_operator_digest')
+    close_outcome_feedback = payload.get('close_outcome_feedback_loop') or build_close_outcome_feedback_loop(
+        close_outcome_digest,
+        label='workflow_operator_digest',
+    )
+    close_outcome_control_plane = close_outcome_feedback.get('control_plane') or {}
     auto_promotion_execution = build_auto_promotion_execution_summary(payload, max_items=max_items)
     transition_journal = _build_transition_journal_consumer_view(
         overview=transition_journal_overview or payload.get('transition_journal')
@@ -9040,6 +9158,15 @@ def build_workflow_operator_digest(payload: Optional[Dict] = None, *, max_items:
             'items': sorted_items[:max_items],
         })
 
+    close_outcome_next_action = dict(close_outcome_control_plane.get('next_action') or close_outcome_feedback.get('next_action') or {})
+    if close_outcome_next_action and close_outcome_feedback.get('governance_mode') in {'rollback', 'tighten', 'review', 'rollout'}:
+        close_outcome_next_action.setdefault('count', close_outcome_feedback.get('trade_count', 0))
+        close_outcome_next_action.setdefault('items', (close_outcome_digest.get('recent_closes') or [])[:max_items])
+        close_outcome_next_action.setdefault('summary', close_outcome_control_plane)
+        next_actions.append(close_outcome_next_action)
+
+    next_actions.sort(key=lambda row: ({'critical': -1, 'high': 0, 'medium': 1, 'low': 2}.get(row.get('priority'), 9), -(row.get('count') or 0), str(row.get('kind') or '')))
+
     follow_up_policy_gate_summary = _summarize_follow_up_policy_gates(policy_rows, label='workflow_operator_digest')
 
     gate_consumption = _build_gate_consumption_summary(policy_rows, label='workflow_operator_digest', max_items=max_items)
@@ -9134,6 +9261,8 @@ def build_workflow_operator_digest(payload: Optional[Dict] = None, *, max_items:
             'control_plane_contract_drift': contract_drift_summary,
             'testnet_bridge_evidence_gate': bridge_gate.get('summary') or {},
             'close_outcome_digest': close_outcome_digest,
+            'close_outcome_feedback_loop': close_outcome_feedback,
+            'close_outcome_control_plane': close_outcome_control_plane,
         },
         'attention': {
             'manual_approval': manual_approval_items[:max_items],
@@ -9151,6 +9280,8 @@ def build_workflow_operator_digest(payload: Optional[Dict] = None, *, max_items:
         },
         'next_actions': next_actions,
         'group_summaries': group_summaries,
+        'close_outcome_feedback_loop': close_outcome_feedback,
+        'close_outcome_control_plane': close_outcome_control_plane,
         'operator_action_policies': policy_rows[:max_items],
         'execution': {
             'rollout_executor': {
@@ -11089,6 +11220,7 @@ def build_unified_workbench_overview(payload: Optional[Dict] = None, *, max_item
         workbench_view.get('close_outcome_digest') or workbench_summary.get('close_outcome_digest') or payload.get('close_outcome_digest') or {},
         label='unified_workbench_overview',
     )
+    close_outcome_control_plane = close_outcome_feedback.get('control_plane') or {}
     timeline_groups = (timeline_summary.get('groups') or {}) if isinstance(timeline_summary, dict) else {}
     timeline_summary_meta = timeline_summary.get('summary') or {} if isinstance(timeline_summary, dict) else {}
     follow_up_policy_gate_summary = (operator_digest.get('summary') or {}).get('follow_up_policy_gate_summary') or {}
@@ -11156,7 +11288,7 @@ def build_unified_workbench_overview(payload: Optional[Dict] = None, *, max_item
     ]
     rollout_next_actions.extend(auto_promotion_review_queues.get('next_actions') or [])
     recovery_next_actions = []
-    close_outcome_next_action = dict(close_outcome_feedback.get('next_action') or {})
+    close_outcome_next_action = dict(close_outcome_control_plane.get('next_action') or close_outcome_feedback.get('next_action') or {})
     if close_outcome_next_action:
         close_outcome_next_action.setdefault('count', close_outcome_feedback.get('trade_count', 0))
         close_outcome_next_action.setdefault('items', (workbench_view.get('close_outcome_digest') or {}).get('recent_closes') or [])
@@ -11330,6 +11462,7 @@ def build_unified_workbench_overview(payload: Optional[Dict] = None, *, max_item
             'testnet_bridge_evidence_gate': bridge_gate.get('summary') or {},
             'follow_up_policy_gate_summary': follow_up_policy_gate_summary,
             'close_outcome_feedback_loop': close_outcome_feedback,
+            'close_outcome_control_plane': close_outcome_control_plane,
         },
         'follow_up_policy_gate_summary': follow_up_policy_gate_summary,
         'lines': lines,
@@ -11350,6 +11483,7 @@ def build_unified_workbench_overview(payload: Optional[Dict] = None, *, max_item
             'close_outcome_feedback_loop': close_outcome_feedback,
         },
         'close_outcome_feedback_loop': close_outcome_feedback,
+        'close_outcome_control_plane': close_outcome_control_plane,
         'upstreams': {
             'workflow_consumer_view': consumer_view,
             'workflow_operator_digest': operator_digest,
@@ -11401,6 +11535,7 @@ def build_production_rollout_readiness(payload: Optional[Dict[str, Any]] = None,
     rollout_counts = rollout_line.get('counts') or summary.get('rollout') or {}
     recovery_counts = recovery_line.get('counts') or summary.get('recovery') or {}
     close_outcome_feedback = runtime_summary.get('close_outcome_feedback_loop') or unified_overview.get('close_outcome_feedback_loop') or {}
+    close_outcome_control_plane = runtime_summary.get('close_outcome_control_plane') or unified_overview.get('close_outcome_control_plane') or (close_outcome_feedback.get('control_plane') if isinstance(close_outcome_feedback, dict) else {}) or {}
 
     blocking_issues = []
     blocking_issues.extend(control_plane_readiness.get('blocking_issues') or [])
@@ -11457,7 +11592,7 @@ def build_production_rollout_readiness(payload: Optional[Dict[str, Any]] = None,
     for row in (bridge_gate.get('runbook_actions') or []):
         if row.get('kind') not in {item.get('kind') for item in runbook_actions}:
             runbook_actions.append(row)
-    close_outcome_next_action = dict(close_outcome_feedback.get('next_action') or {})
+    close_outcome_next_action = dict(close_outcome_control_plane.get('next_action') or close_outcome_feedback.get('next_action') or {})
     if close_outcome_next_action and close_outcome_feedback.get('governance_mode') in {'rollback', 'tighten', 'rollout', 'review'}:
         runbook_actions.append(close_outcome_next_action)
     if not runbook_actions and runtime_summary.get('next_actions'):
@@ -11489,6 +11624,7 @@ def build_production_rollout_readiness(payload: Optional[Dict[str, Any]] = None,
             'testnet_bridge_execution': bridge_evidence.get('summary') or {},
             'testnet_bridge_evidence_gate': bridge_gate.get('summary') or {},
             'close_outcome_feedback_loop': close_outcome_feedback,
+            'close_outcome_control_plane': close_outcome_control_plane,
         },
         'runbook_actions': runbook_actions[:max_items],
         'top_alerts': (alert_digest.get('alerts') or [])[:max_items],

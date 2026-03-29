@@ -1311,6 +1311,22 @@ class Database:
         summary = {'exit_price': close_price, 'source': close_source, 'fills': []}
         return self.reconcile_trade_close(trade_id, summary, reason=f"自动收口: {reason}")
     
+    def get_close_outcome_digest(self, symbol: str = None, limit: int = 200) -> Dict[str, Any]:
+        """获取平仓 outcome 聚合摘要"""
+        conn = self._get_connection()
+        query = "SELECT * FROM trades WHERE status = 'closed'"
+        params = []
+        if symbol:
+            query += " AND symbol = ?"
+            params.append(symbol)
+        query += " ORDER BY close_time DESC, open_time DESC, id DESC LIMIT ?"
+        params.append(limit)
+        df = pd.read_sql_query(query, conn, params=params)
+        conn.close()
+        rows = [self._recalculate_trade_metrics(row) for row in df.to_dict('records')]
+        from analytics.helper import build_close_outcome_digest
+        return build_close_outcome_digest(rows, label='database_trade_close_outcomes')
+
     def get_trade_stats(self, days: int = 30) -> Dict:
         """获取交易统计"""
         conn = self._get_connection()

@@ -13384,6 +13384,104 @@ class TestQualityScalingPipeline(unittest.TestCase):
         self.assertIn('quality_scaling_enabled', snapshot)
 
 
+class TestCloseOutcomeDigest(unittest.TestCase):
+    def setUp(self):
+        self.db = Database('data/test_close_outcome_digest.db')
+
+    def tearDown(self):
+        if os.path.exists('data/test_close_outcome_digest.db'):
+            os.remove('data/test_close_outcome_digest.db')
+
+    def _record_closed_trade(self, *, symbol, entry_price, exit_price, pnl, signal_id, reason, strategy_tag='ema'):
+        trade_id = self.db.record_trade(
+            symbol=symbol, side='long', entry_price=entry_price, quantity=0.1, leverage=5,
+            signal_id=signal_id, layer_no=1, root_signal_id=signal_id,
+            plan_context={'layer_no': 1, 'root_signal_id': signal_id, 'strategy_tags': [strategy_tag]}
+        )
+        self.db.reconcile_trade_close(
+            trade_id,
+            {'exit_price': exit_price, 'pnl': pnl, 'close_time': f'2026-03-30T00:0{signal_id % 10}:00', 'source': 'exchange_fill', 'fills': [{'id': f'f{signal_id}'}]},
+            reason=reason,
+        )
+
+    def test_build_close_outcome_digest_aggregates_core_dimensions(self):
+        from analytics.helper import build_close_outcome_digest
+        trades = [
+            {'id': 1, 'symbol': 'BTC/USDT', 'status': 'closed', 'close_time': '2026-03-30T00:02:00', 'close_decision': 'win', 'outcome_quality': 'positive', 'close_reason_category': 'take_profit', 'regime_tag': 'trend', 'policy_tag': 'policy_v1', 'pnl': 12.5, 'return_pct': 1.2},
+            {'id': 2, 'symbol': 'ETH/USDT', 'status': 'closed', 'close_time': '2026-03-30T00:03:00', 'close_decision': 'loss', 'outcome_quality': 'bounded_loss', 'close_reason_category': 'stop_loss', 'regime_tag': 'range', 'policy_tag': 'policy_v2', 'pnl': -5.0, 'return_pct': -0.4},
+            {'id': 3, 'symbol': 'BTC/USDT', 'status': 'closed', 'close_time': '2026-03-30T00:04:00', 'close_decision': 'win', 'outcome_quality': 'positive', 'close_reason_category': 'take_profit', 'regime_tag': 'trend', 'policy_tag': 'policy_v1', 'pnl': 8.0, 'return_pct': 0.9},
+        ]
+        digest = build_close_outcome_digest(trades, label='unit-test')
+        self.assertEqual(digest['schema_version'], 'trade_close_outcome_digest_v1')
+        self.assertEqual(digest['trade_count'], 3)
+        self.assertEqual(digest['by_close_decision']['win'], 2)
+        self.assertEqual(digest['by_close_reason_category']['take_profit'], 2)
+        self.assertEqual(digest['dominant_regime_tag'], 'trend')
+        self.assertEqual(digest['dominant_policy_tag'], 'policy_v1')
+        self.assertAlmostEqual(digest['net_pnl'], 15.5)
+        self.assertEqual(digest['recent_closes'][0]['trade_id'], 3)
+
+    def test_database_close_outcome_digest_rolls_up_closed_trades(self):
+        self._record_closed_trade(symbol='BTC/USDT', entry_price=50000, exit_price=51000, pnl=100, signal_id=11, reason='止盈收口')
+        self._record_closed_trade(symbol='BTC/USDT', entry_price=50000, exit_price=49500, pnl=-50, signal_id=12, reason='止损离场')
+        digest = self.db.get_close_outcome_digest(symbol='BTC/USDT', limit=10)
+        self.assertEqual(digest['trade_count'], 2)
+        self.assertEqual(digest['by_close_decision']['win'], 1)
+        self.assertEqual(digest['by_close_decision']['loss'], 1)
+        self.assertEqual(digest['by_close_reason_category']['take_profit'], 1)
+        self.assertEqual(digest['by_close_reason_category']['stop_loss'], 1)
+
+    def test_trades_api_returns_close_outcome_digest_summary(self):
+        import dashboard.api as dashboard_api
+        test_db = Database('data/test_dashboard_close_outcome_digest.db')
+        old_db = dashboard_api.db
+        dashboard_api.db = test_db
+        try:
+            trade_id = test_db.record_trade(symbol='BTC/USDT', side='long', entry_price=50000, quantity=0.1, leverage=5, signal_id=21, layer_no=1, root_signal_id=21, plan_context={'layer_no': 1, 'root_signal_id': 21, 'strategy_tags': ['ema']})
+            test_db.reconcile_trade_close(trade_id, {'exit_price': 51000, 'pnl': 100, 'close_time': '2026-03-30T00:21:00', 'source': 'exchange_fill', 'fills': [{'id': 'f21'}]}, reason='止盈收口')
+            client = dashboard_api.app.test_client()
+            response = client.get('/api/trades?symbol=BTC/USDT&limit=10')
+            payload = response.get_json()
+            self.assertTrue(payload['success'])
+            self.assertIn('summary', payload)
+            self.assertEqual(payload['summary']['close_outcome_digest']['trade_count'], 1)
+            self.assertEqual(payload['summary']['close_outcome_digest']['by_close_decision']['win'], 1)
+        finally:
+            dashboard_api.db = old_db
+            if os.path.exists('data/test_dashboard_close_outcome_digest.db'):
+                os.remove('data/test_dashboard_close_outcome_digest.db')
+
+    def test_close_outcome_digest_flows_into_runtime_dashboard_and_workbench_summaries(self):
+        from analytics.helper import build_dashboard_summary_cards, build_runtime_orchestration_summary, build_workbench_governance_view
+        close_outcome_digest = {
+            'schema_version': 'trade_close_outcome_digest_v1',
+            'trade_count': 2,
+            'by_close_decision': {'win': 1, 'loss': 1},
+            'by_outcome_quality': {'positive': 1, 'bounded_loss': 1},
+            'by_close_reason_category': {'take_profit': 1, 'stop_loss': 1},
+            'by_regime_tag': {'trend': 2},
+            'by_policy_tag': {'policy_v1': 2},
+            'recent_closes': [],
+            'headline': 'closed=2',
+        }
+        payload = {
+            'consumer_view': {'workflow_state': {'summary': {}, 'item_states': []}, 'approval_state': {'summary': {}, 'items': []}, 'rollout_stage_progression': {'summary': {}, 'items': []}, 'rollout_executor': {}, 'auto_approval_execution': {}, 'controlled_rollout_execution': {}, 'validation_gate': {'enabled': False, 'ready': None, 'headline': 'validation_gate_disabled', 'gap_count': 0, 'failing_case_count': 0, 'regression_detected': False}},
+            'attention_view': {'summary': {}, 'headline': {}, 'items': []},
+            'operator_digest': {'headline': {'status': 'steady', 'message': 'ok'}, 'summary': {}, 'next_actions': [], 'attention': {}, 'control_plane_manifest': {}, 'control_plane_readiness': {}},
+            'workflow_alert_digest': {'headline': {'status': 'steady', 'message': 'ok'}, 'summary': {}, 'alerts': []},
+            'workflow_recovery_view': {'summary': {}, 'queues': {'rollback_candidates': [], 'manual_recovery': []}},
+            'unified_workbench_overview': {'dominant_line': 'approval', 'overall_state': 'steady', 'headline': {}, 'summary': {}, 'lines': {}, 'transition_journal': {'summary': {'count': 0, 'latest_timestamp': None}, 'latest': {}, 'recent_transitions': []}},
+            'adaptive_rollout_orchestration': {'summary': {}},
+            'close_outcome_digest': close_outcome_digest,
+        }
+        dashboard_summary = build_dashboard_summary_cards(dict(payload), max_items=2)
+        runtime_summary = build_runtime_orchestration_summary(dict(payload), max_items=2)
+        workbench_summary = build_workbench_governance_view(dict(payload), max_items=2)
+        self.assertEqual(dashboard_summary['summary']['close_outcome_digest']['trade_count'], 2)
+        self.assertEqual(runtime_summary['summary']['close_outcome_digest']['by_close_reason_category']['take_profit'], 1)
+        self.assertEqual(workbench_summary['summary']['close_outcome_digest']['by_policy_tag']['policy_v1'], 2)
+
+
 class TestTradeOutcomeAttribution(unittest.TestCase):
     def setUp(self):
         self.config = Config()

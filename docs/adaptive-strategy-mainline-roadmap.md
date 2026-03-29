@@ -345,6 +345,7 @@
 - 把 operator digest / workbench / transition journal 的优先级与告警级别做分层
 - 减少噪音，突出必须人工介入项
 - **2026-03-28 implementation update (workflow alert digest)**：新增 `m5_workflow_alert_digest_v1`，把 validation gate、control-plane readiness、manual approval、blocked follow-up、rollback candidate、recent transition activity 收口成统一 severity-based alert contract（`critical/high/medium/info`）；并接入 `/api/backtest/workflow-alert-digest`、`calibration-report?view=workflow_alert_digest`、dashboard summary cards、unified workbench overview。目标系令系统直接分得清“边啲要即刻人工介入、边啲只需继续低干预观察”，为生产级低干预运行收口。
+- **2026-03-30 implementation update (close outcome digest loop)**：新增 `trade_close_outcome_digest_v1`，把 closed trades 的 `close_decision / outcome_quality / close_reason_category / regime_tag / policy_tag` 连同 `net_pnl / win_rate / avg_return_pct / recent_closes` 聚合成稳定、可序列化摘要；并接入 `Database.get_close_outcome_digest()`、`/api/trades/close-outcome-digest`、`/api/trades` summary、`workflow_operator_digest`、`dashboard_summary_cards`、`runtime_orchestration_summary`、`orchestration_result_digest` 同 `workbench_governance_view`。而家 runtime / dashboard / governance/operator digest 可以直接消费平仓反馈闭环，唔使再逐笔 trade 自己拼 close attribution。
 
 #### F3. 实盘前验证矩阵
 - baseline / decision_only / guarded_execute / controlled rollout 各模式建立固定验收矩阵

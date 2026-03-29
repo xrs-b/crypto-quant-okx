@@ -1223,6 +1223,126 @@ def _attach_unified_event_metadata(event: Dict[str, Any], *, normalized_event_ty
     return payload
 
 
+
+
+def _safe_close_outcome_float(value: Any, default: float = 0.0) -> float:
+    try:
+        if value in (None, ''):
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def _normalize_close_outcome_trade_row(row: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    trade = dict(row or {})
+    outcome = trade.get('outcome_attribution') or {}
+    if not isinstance(outcome, dict):
+        outcome = {}
+    close_time = trade.get('close_time') or outcome.get('close_time') or trade.get('updated_at') or trade.get('open_time')
+    close_decision = str(trade.get('close_decision') or outcome.get('close_decision') or 'unknown').strip().lower() or 'unknown'
+    outcome_quality = str(trade.get('outcome_quality') or outcome.get('outcome_quality') or 'unknown').strip().lower() or 'unknown'
+    close_reason_category = str(trade.get('close_reason_category') or outcome.get('close_reason_category') or 'unknown').strip().lower() or 'unknown'
+    regime_tag = str(trade.get('regime_tag') or outcome.get('regime_tag') or 'unknown').strip() or 'unknown'
+    policy_tag = str(trade.get('policy_tag') or outcome.get('policy_tag') or 'unknown').strip() or 'unknown'
+    pnl = _safe_close_outcome_float(trade.get('pnl'))
+    return_pct = trade.get('return_pct')
+    if return_pct in (None, ''):
+        return_pct = trade.get('pnl_percent')
+    return_pct = _safe_close_outcome_float(return_pct)
+    return {
+        'trade_id': trade.get('id') or trade.get('trade_id'),
+        'symbol': trade.get('symbol') or '--',
+        'side': trade.get('side') or 'unknown',
+        'status': str(trade.get('status') or 'closed').strip().lower() or 'closed',
+        'close_time': close_time,
+        'close_decision': close_decision,
+        'outcome_quality': outcome_quality,
+        'close_reason_category': close_reason_category,
+        'regime_tag': regime_tag,
+        'policy_tag': policy_tag,
+        'pnl': pnl,
+        'return_pct': return_pct,
+        'holding_minutes': _safe_close_outcome_float(trade.get('holding_minutes') or outcome.get('holding_minutes')),
+        'close_reason': trade.get('close_reason') or outcome.get('close_reason'),
+        'pnl_bucket': trade.get('pnl_bucket') or outcome.get('pnl_bucket') or 'unknown',
+    }
+
+
+def build_close_outcome_digest(trades: Optional[List[Dict[str, Any]]] = None, *, max_recent: int = 5, label: Optional[str] = None) -> Dict[str, Any]:
+    rows = []
+    for row in list(trades or []):
+        normalized = _normalize_close_outcome_trade_row(row)
+        if normalized.get('status') != 'closed':
+            continue
+        rows.append(normalized)
+
+    def _sorted_counts(bucket: Dict[str, int]) -> Dict[str, int]:
+        return dict(sorted(bucket.items(), key=lambda item: (-item[1], item[0])))
+
+    def _top(bucket: Dict[str, int]) -> Optional[str]:
+        return sorted(bucket.items(), key=lambda item: (-item[1], item[0]))[0][0] if bucket else None
+
+    decision_counts: Dict[str, int] = {}
+    quality_counts: Dict[str, int] = {}
+    reason_counts: Dict[str, int] = {}
+    regime_counts: Dict[str, int] = {}
+    policy_counts: Dict[str, int] = {}
+    symbol_counts: Dict[str, int] = {}
+    pnl_sum = 0.0
+    return_sum = 0.0
+    wins = 0
+    losses = 0
+    flats = 0
+
+    for row in rows:
+        for bucket, key in (
+            (decision_counts, row.get('close_decision') or 'unknown'),
+            (quality_counts, row.get('outcome_quality') or 'unknown'),
+            (reason_counts, row.get('close_reason_category') or 'unknown'),
+            (regime_counts, row.get('regime_tag') or 'unknown'),
+            (policy_counts, row.get('policy_tag') or 'unknown'),
+            (symbol_counts, row.get('symbol') or '--'),
+        ):
+            bucket[str(key)] = bucket.get(str(key), 0) + 1
+        pnl_sum += _safe_close_outcome_float(row.get('pnl'))
+        return_sum += _safe_close_outcome_float(row.get('return_pct'))
+        if row.get('close_decision') == 'win':
+            wins += 1
+        elif row.get('close_decision') == 'loss':
+            losses += 1
+        else:
+            flats += 1
+
+    recent_closes = sorted(rows, key=lambda item: (str(item.get('close_time') or ''), str(item.get('trade_id') or '')), reverse=True)[:max_recent]
+    return {
+        'schema_version': 'trade_close_outcome_digest_v1',
+        'label': label,
+        'trade_count': len(rows),
+        'win_count': wins,
+        'loss_count': losses,
+        'flat_count': flats,
+        'win_rate': round((wins / len(rows)) * 100, 4) if rows else 0.0,
+        'net_pnl': round(pnl_sum, 8),
+        'avg_return_pct': round((return_sum / len(rows)), 8) if rows else 0.0,
+        'by_close_decision': _sorted_counts(decision_counts),
+        'by_outcome_quality': _sorted_counts(quality_counts),
+        'by_close_reason_category': _sorted_counts(reason_counts),
+        'by_regime_tag': _sorted_counts(regime_counts),
+        'by_policy_tag': _sorted_counts(policy_counts),
+        'by_symbol': _sorted_counts(symbol_counts),
+        'dominant_close_decision': _top(decision_counts),
+        'dominant_outcome_quality': _top(quality_counts),
+        'dominant_close_reason_category': _top(reason_counts),
+        'dominant_regime_tag': _top(regime_counts),
+        'dominant_policy_tag': _top(policy_counts),
+        'latest_close_time': recent_closes[0].get('close_time') if recent_closes else None,
+        'recent_closes': recent_closes,
+        'headline': (
+            f"closed={len(rows)} / win={wins} / loss={losses} / net_pnl={round(pnl_sum, 4)} / "
+            f"reason={_top(reason_counts) or 'unknown'} / regime={_top(regime_counts) or 'unknown'} / policy={_top(policy_counts) or 'unknown'}"
+        ),
+    }
 def _dedupe_strings(values: Optional[List[Any]]) -> List[str]:
     seen = set()
     deduped: List[str] = []
@@ -4904,6 +5024,7 @@ def build_orchestration_result_digest(payload: Optional[Dict[str, Any]] = None, 
     recovery_execution = payload.get('recovery_execution') or {}
     bridge_evidence = payload.get('testnet_bridge_execution_evidence') or _summarize_testnet_bridge_execution(payload)
     _attach_testnet_bridge_execution_evidence(payload)
+    close_outcome_digest = payload.get('close_outcome_digest') or build_close_outcome_digest(payload.get('closed_trades') or payload.get('trades') or [], label='orchestration_result_digest')
     transition_journal = operator_digest.get('transition_journal') or unified_overview.get('transition_journal') or {
         'recent_transitions': [],
         'summary': {'count': 0, 'latest_timestamp': None},
@@ -5090,6 +5211,7 @@ def build_orchestration_result_digest(payload: Optional[Dict[str, Any]] = None, 
         'recovery_rollback_queued_count': int(orchestration_summary.get('recovery_rollback_queued_count', 0) or 0),
         'testnet_bridge_status': orchestration_summary.get('testnet_bridge_status') or bridge_evidence.get('status') or 'disabled',
         'testnet_bridge_follow_up_required': bool(orchestration_summary.get('testnet_bridge_follow_up_required', False) or bridge_evidence.get('follow_up_required')),
+        'close_outcome_digest': close_outcome_digest,
     }
     headline = {
         'status': digest_status,
@@ -5159,6 +5281,7 @@ def build_runtime_orchestration_summary(payload: Optional[Dict[str, Any]] = None
     auto_promotion_execution = payload.get('auto_promotion_execution_summary') or build_auto_promotion_execution_summary(payload, max_items=max_items)
     bridge_evidence = payload.get('testnet_bridge_execution_evidence') or _summarize_testnet_bridge_execution(payload)
     _attach_testnet_bridge_execution_evidence(payload)
+    close_outcome_digest = payload.get('close_outcome_digest') or build_close_outcome_digest(payload.get('closed_trades') or payload.get('trades') or [], label='runtime_orchestration_summary')
     review_queue_consumption = payload.get('auto_promotion_review_queue_consumption') or build_auto_promotion_review_queue_consumption(
         auto_promotion_execution,
         max_items=max_items,
@@ -5346,6 +5469,7 @@ def build_runtime_orchestration_summary(payload: Optional[Dict[str, Any]] = None
         'validation_gate': ((unified_overview.get('summary') or {}).get('validation_gate') or {}),
         'testnet_bridge_execution': bridge_evidence.get('summary') or {},
         'result_digest': result_digest.get('summary') or {},
+        'close_outcome_digest': close_outcome_digest,
     }
     return {
         'schema_version': 'm5_runtime_orchestration_summary_v1',
@@ -5377,6 +5501,7 @@ def build_runtime_orchestration_summary(payload: Optional[Dict[str, Any]] = None
             'workbench_governance_view': workbench_view.get('summary') or {},
             'control_plane_readiness': ((unified_overview.get('summary') or {}).get('control_plane_readiness') or {}),
             'testnet_bridge_execution': bridge_evidence.get('summary') or {},
+            'close_outcome_digest': close_outcome_digest,
         },
     }
 
@@ -8543,6 +8668,7 @@ def build_workflow_operator_digest(payload: Optional[Dict] = None, *, max_items:
     bridge_evidence = consumer_view.get('testnet_bridge_execution_evidence') or payload.get('testnet_bridge_execution_evidence') or _summarize_testnet_bridge_execution(payload)
     bridge_gate = _build_testnet_bridge_evidence_gate(bridge_evidence)
     validation_gate = consumer_view.get('validation_gate') or _build_validation_gate_snapshot(payload)
+    close_outcome_digest = payload.get('close_outcome_digest') or build_close_outcome_digest(payload.get('closed_trades') or payload.get('trades') or [], label='workflow_operator_digest')
     auto_promotion_execution = build_auto_promotion_execution_summary(payload, max_items=max_items)
     transition_journal = _build_transition_journal_consumer_view(
         overview=transition_journal_overview or payload.get('transition_journal')
@@ -8832,6 +8958,7 @@ def build_workflow_operator_digest(payload: Optional[Dict] = None, *, max_items:
             'control_plane_readiness': control_plane_readiness,
             'control_plane_contract_drift': contract_drift_summary,
             'testnet_bridge_evidence_gate': bridge_gate.get('summary') or {},
+            'close_outcome_digest': close_outcome_digest,
         },
         'attention': {
             'manual_approval': manual_approval_items[:max_items],
@@ -8877,6 +9004,7 @@ def build_workflow_operator_digest(payload: Optional[Dict] = None, *, max_items:
             'validation_gate': validation_gate,
             'validation_gate_consumption': gate_consumption.get('validation_gate_consumption') if isinstance(gate_consumption, dict) else {},
             'control_plane_contract_drift': contract_drift_summary,
+            'close_outcome_digest': close_outcome_digest,
         },
     }
     payload['operator_digest'] = digest
@@ -8892,6 +9020,7 @@ def build_workflow_alert_digest(payload: Optional[Dict] = None, *, max_items: in
     bridge_evidence = consumer_view.get('testnet_bridge_execution_evidence') or payload.get('testnet_bridge_execution_evidence') or _summarize_testnet_bridge_execution(payload)
     testnet_bridge_execution = consumer_view.get('testnet_bridge_execution') or payload.get('testnet_bridge_execution') or {}
     bridge_gate = _build_testnet_bridge_evidence_gate(bridge_evidence)
+    close_outcome_digest = payload.get('close_outcome_digest') or build_close_outcome_digest(payload.get('closed_trades') or payload.get('trades') or [], label='workflow_alert_digest')
     control_plane_readiness = operator_digest.get('control_plane_readiness') or build_control_plane_readiness_summary(
         payload=payload,
         control_plane_manifest=operator_digest.get('control_plane_manifest') or build_rollout_control_plane_manifest(payload),
@@ -9098,6 +9227,7 @@ def build_workflow_alert_digest(payload: Optional[Dict] = None, *, max_items: in
             'medium': [row for row in alerts if row.get('severity') == 'medium'][:max_items],
             'info': [row for row in alerts if row.get('severity') == 'info'][:max_items],
         },
+        'close_outcome_digest': close_outcome_digest,
         'upstreams': {
             'workflow_attention_view': attention_view,
             'workflow_operator_digest': operator_digest,
@@ -9130,6 +9260,7 @@ def build_dashboard_summary_cards(payload: Optional[Dict] = None, *, max_items: 
     testnet_bridge_execution = consumer_view.get('testnet_bridge_execution') or payload.get('testnet_bridge_execution') or {}
     bridge_evidence = consumer_view.get('testnet_bridge_execution_evidence') or payload.get('testnet_bridge_execution_evidence') or _summarize_testnet_bridge_execution(payload)
     bridge_gate = _build_testnet_bridge_evidence_gate(bridge_evidence)
+    close_outcome_digest = payload.get('close_outcome_digest') or build_close_outcome_digest(payload.get('closed_trades') or payload.get('trades') or [], label='dashboard_summary_cards')
     digest_summary = operator_digest.get('summary') or {}
     attention_summary = attention_view.get('summary') or {}
     validation_gate = consumer_view.get('validation_gate') or digest_summary.get('validation_gate') or _build_validation_gate_snapshot(payload)
@@ -9294,6 +9425,7 @@ def build_dashboard_summary_cards(payload: Optional[Dict] = None, *, max_items: 
             'operator_routes': digest_summary.get('operator_routes') or [],
             'operator_follow_ups': digest_summary.get('operator_follow_ups') or [],
             'auto_promotion_execution': digest_summary.get('auto_promotion_execution') or {},
+            'close_outcome_digest': close_outcome_digest,
         },
         'cards': cards,
         'card_index': payload_cards,
@@ -10514,6 +10646,7 @@ def build_workbench_governance_view(payload: Optional[Dict] = None, *, max_items
     controlled_rollout = consumer_view.get('controlled_rollout_execution') or {}
     testnet_bridge_execution = consumer_view.get('testnet_bridge_execution') or payload.get('testnet_bridge_execution') or {}
     bridge_evidence = consumer_view.get('testnet_bridge_execution_evidence') or payload.get('testnet_bridge_execution_evidence') or _summarize_testnet_bridge_execution(payload)
+    close_outcome_digest = payload.get('close_outcome_digest') or build_close_outcome_digest(payload.get('closed_trades') or payload.get('trades') or [], label='workbench_governance_view')
     workflow_items = ((consumer_view.get('workflow_state') or {}).get('item_states') or [])
     approval_items = ((consumer_view.get('approval_state') or {}).get('items') or [])
 
@@ -10672,6 +10805,7 @@ def build_workbench_governance_view(payload: Optional[Dict] = None, *, max_items
             'transition_count': (transition_journal.get('summary') or {}).get('count', 0),
             'latest_transition_at': (transition_journal.get('summary') or {}).get('latest_timestamp'),
             'control_plane_contract_drift': contract_drift_summary,
+            'close_outcome_digest': close_outcome_digest,
         },
         'filters': catalog.get('filters') or {},
         'applied_filters': (filtered_view or {}).get('applied_filters') or {},
@@ -10693,6 +10827,7 @@ def build_workbench_governance_view(payload: Optional[Dict] = None, *, max_items
         'recent_adjustments': recent_adjustments[:max_adjustments],
         'transition_journal': transition_journal,
         'control_plane_contract_drift': contract_drift_summary,
+        'close_outcome_digest': close_outcome_digest,
         'upstreams': {
             'workflow_consumer_view': consumer_view,
             'workflow_attention_view': attention_view,

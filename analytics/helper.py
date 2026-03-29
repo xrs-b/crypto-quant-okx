@@ -4772,6 +4772,8 @@ def build_runtime_orchestration_summary(payload: Optional[Dict[str, Any]] = None
         'retry_queue_count': (recovery_view.get('summary') or {}).get('retry_queue_count', 0),
         'manual_recovery_count': (recovery_view.get('summary') or {}).get('manual_recovery_count', 0),
         'rollback_candidate_count': (recovery_view.get('summary') or {}).get('rollback_candidate_count', 0),
+        'review_followup_budget': ((payload.get('auto_promotion_review_execution') or {}).get('budget') or {}),
+        'recovery_followup_budget': ((payload.get('recovery_execution') or {}).get('budget') or {}),
     }
     follow_up_required = any(v > 0 for v in follow_up_summary.values()) or bool(bridge_evidence.get('follow_up_required'))
     status = 'attention_required' if stuck_items or follow_up_required else ('active' if orchestration_summary.get('pass_count', 0) or len(recent_progress) > 1 else 'steady')
@@ -6967,6 +6969,10 @@ def _get_recovery_execution_settings(config: Any = None, overrides: Optional[Dic
         'execute_retry_queue': bool(raw.get('execute_retry_queue', True)),
         'execute_rollback_candidates': bool(raw.get('execute_rollback_candidates', True)),
         'annotate_manual_recovery': bool(raw.get('annotate_manual_recovery', True)),
+        'max_mutations_per_round': int(raw.get('max_mutations_per_round') or 0),
+        'max_mutations_per_queue_per_round': int(raw.get('max_mutations_per_queue_per_round') or 1),
+        'fairness_mode': str(raw.get('fairness_mode') or 'round_robin'),
+        'fairness_queue_order': _normalize_follow_up_lane_order(raw.get('fairness_queue_order'), ['rollback_candidates', 'retry_queue', 'manual_recovery']),
         'retry_executor': {
             'enabled': bool(executor_raw.get('enabled', True)),
             'mode': _normalize_rollout_executor_mode(executor_raw.get('mode') or raw.get('mode')),
@@ -6981,6 +6987,10 @@ def _get_recovery_execution_settings(config: Any = None, overrides: Optional[Dic
     settings['execute_retry_queue'] = bool(settings.get('execute_retry_queue', True))
     settings['execute_rollback_candidates'] = bool(settings.get('execute_rollback_candidates', True))
     settings['annotate_manual_recovery'] = bool(settings.get('annotate_manual_recovery', True))
+    settings['max_mutations_per_round'] = max(0, min(int(settings.get('max_mutations_per_round') or 0), 1000))
+    settings['max_mutations_per_queue_per_round'] = max(0, min(int(settings.get('max_mutations_per_queue_per_round') or 1), 1000))
+    settings['fairness_mode'] = str(settings.get('fairness_mode') or 'round_robin').strip().lower() or 'round_robin'
+    settings['fairness_queue_order'] = _normalize_follow_up_lane_order(settings.get('fairness_queue_order'), ['rollback_candidates', 'retry_queue', 'manual_recovery'])
     retry_executor = dict(settings.get('retry_executor') or {})
     retry_executor['enabled'] = bool(retry_executor.get('enabled', True))
     retry_mode = _normalize_rollout_executor_mode(retry_executor.get('mode'))
@@ -6992,6 +7002,98 @@ def _get_recovery_execution_settings(config: Any = None, overrides: Optional[Dic
     retry_executor['allowed_action_types'] = _dedupe_strings(retry_executor.get('allowed_action_types') or [])
     settings['retry_executor'] = retry_executor
     return settings
+
+
+def _normalize_follow_up_lane_order(raw_order: Any, default_order: List[str]) -> List[str]:
+    requested = [str(row).strip() for row in (raw_order or []) if str(row).strip()]
+    ordered = []
+    for key in requested + list(default_order):
+        if key not in ordered:
+            ordered.append(key)
+    return ordered
+
+
+def _build_follow_up_budget_and_fairness(settings: Dict[str, Any], *, schema_version: str,
+                                         default_order: List[str], default_budget: int = 0,
+                                         default_per_queue_limit: int = 1) -> Dict[str, Any]:
+    budget_limit = max(0, min(int(settings.get('max_mutations_per_round') or default_budget), 1000))
+    per_queue_limit = max(0, min(int(settings.get('max_mutations_per_queue_per_round') or default_per_queue_limit), 1000))
+    queue_order = _normalize_follow_up_lane_order(settings.get('fairness_queue_order'), default_order)
+    fairness_mode = str(settings.get('fairness_mode') or 'round_robin').strip().lower() or 'round_robin'
+    return {
+        'schema_version': schema_version,
+        'fairness_mode': fairness_mode,
+        'queue_order': queue_order,
+        'max_mutations_per_round': budget_limit,
+        'max_mutations_per_queue_per_round': per_queue_limit,
+        'remaining_slots': None if budget_limit <= 0 else budget_limit,
+        'exhausted': False,
+        'skipped_by_budget': 0,
+        'skipped_by_fairness': 0,
+        'executed_by_queue': {key: 0 for key in queue_order},
+        'selected_counts': {key: 0 for key in queue_order},
+        'deferred_counts': {key: 0 for key in queue_order},
+        'last_executed_item_id': None,
+        'summary': 'budget=idle / fairness=round_robin',
+    }
+
+
+def _plan_follow_up_round(queue_items: List[Dict[str, Any]], *, queue_key: str,
+                          queue_order: List[str], budget_limit: int,
+                          per_queue_limit: int) -> Dict[str, Any]:
+    grouped = {key: [] for key in queue_order}
+    for item in queue_items:
+        key = str(item.get(queue_key) or 'unknown')
+        grouped.setdefault(key, []).append(item)
+    effective_order = [key for key in queue_order if grouped.get(key)] + [key for key in grouped.keys() if key not in queue_order and grouped.get(key)]
+    selected_ids = set()
+    deferred_by_item = {}
+    selected_counts = {key: 0 for key in effective_order}
+    unlimited_budget = budget_limit <= 0
+    budget_remaining = None if unlimited_budget else budget_limit
+    while effective_order and (unlimited_budget or budget_remaining > 0):
+        progress = False
+        for key in effective_order:
+            bucket = grouped.get(key) or []
+            if not bucket:
+                continue
+            if per_queue_limit > 0 and selected_counts.get(key, 0) >= per_queue_limit:
+                continue
+            item = bucket.pop(0)
+            marker = item.get('approval_id') or item.get('item_id') or id(item)
+            selected_ids.add(marker)
+            selected_counts[key] = selected_counts.get(key, 0) + 1
+            if not unlimited_budget:
+                budget_remaining -= 1
+            progress = True
+            if (not unlimited_budget) and budget_remaining <= 0:
+                break
+        if not progress:
+            break
+    deferred_counts = {key: len(grouped.get(key) or []) for key in effective_order}
+    fairness_queue_keys = {key for key, count in deferred_counts.items() if count > 0 and (per_queue_limit > 0 and selected_counts.get(key, 0) >= per_queue_limit)}
+    budget_exhausted = budget_limit > 0 and (budget_remaining or 0) <= 0
+    for key in effective_order:
+        for item in grouped.get(key) or []:
+            marker = item.get('approval_id') or item.get('item_id') or id(item)
+            deferred_by_item[marker] = 'fairness_queue_cap_reached' if key in fairness_queue_keys else ('pass_budget_exhausted' if budget_exhausted else 'deferred_to_next_round')
+    return {
+        'selected_ids': selected_ids,
+        'selected_counts': selected_counts,
+        'deferred_counts': deferred_counts,
+        'deferred_by_item': deferred_by_item,
+        'queue_order': effective_order,
+        'budget_remaining': (None if unlimited_budget else budget_remaining),
+        'budget_exhausted': budget_exhausted,
+    }
+
+
+def _finalize_follow_up_budget_summary(budget: Dict[str, Any], *, queue_label: str) -> None:
+    budget['summary'] = (
+        f"budget={budget.get('max_mutations_per_round', 0)} executed={sum((budget.get('executed_by_queue') or {}).values())} "
+        f"remaining={budget.get('remaining_slots') if budget.get('remaining_slots') is not None else 'unlimited'} exhausted={str(bool(budget.get('exhausted'))).lower()} / "
+        f"fairness={budget.get('fairness_mode') or 'round_robin'} per_{queue_label}_cap={budget.get('max_mutations_per_queue_per_round', 0)}"
+    )
 
 
 def _build_recovery_retry_executor_payload(payload: Dict[str, Any], retry_items: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -7195,6 +7297,11 @@ def execute_recovery_queue_layer(payload: Dict[str, Any], db: Any, *, config: An
             'rollback_candidate_count': len(queue_groups.get('rollback_candidates') or []),
             'manual_recovery_count': len(queue_groups.get('manual_recovery') or []),
         },
+        'budget': _build_follow_up_budget_and_fairness(
+            execution_settings,
+            schema_version='m5_recovery_followup_budget_v1',
+            default_order=['rollback_candidates', 'retry_queue', 'manual_recovery'],
+        ),
     }
     payload['recovery_execution'] = result
     if not result['enabled'] or result['mode'] not in {'controlled', 'dry_run'} or not queue_items:
@@ -7202,6 +7309,17 @@ def execute_recovery_queue_layer(payload: Dict[str, Any], db: Any, *, config: An
         return payload
 
     dry_run = result['mode'] == 'dry_run'
+    follow_up_plan = _plan_follow_up_round(
+        queue_items,
+        queue_key='queue_bucket',
+        queue_order=result['budget'].get('queue_order') or ['rollback_candidates', 'retry_queue', 'manual_recovery'],
+        budget_limit=int(result['budget'].get('max_mutations_per_round') or 0),
+        per_queue_limit=int(result['budget'].get('max_mutations_per_queue_per_round') or 0),
+    )
+    result['budget']['selected_counts'] = follow_up_plan.get('selected_counts') or {}
+    result['budget']['deferred_counts'] = follow_up_plan.get('deferred_counts') or {}
+    result['budget']['remaining_slots'] = follow_up_plan.get('budget_remaining')
+    result['budget']['exhausted'] = bool(follow_up_plan.get('budget_exhausted'))
     workflow_lookup = {row.get('item_id'): row for row in ((payload.get('workflow_state') or {}).get('item_states') or []) if row.get('item_id')}
     executed_rows = []
     retry_executor_candidates = []
@@ -7217,6 +7335,16 @@ def execute_recovery_queue_layer(payload: Dict[str, Any], db: Any, *, config: An
         approval_id = item.get('approval_id') or item_id
         if not approval_id:
             result['skipped_count'] += 1
+            continue
+        marker = approval_id or item_id
+        if marker not in (follow_up_plan.get('selected_ids') or set()):
+            deferred_reason = (follow_up_plan.get('deferred_by_item') or {}).get(marker, 'deferred_to_next_round')
+            result['items'].append({'item_id': item_id, 'approval_id': approval_id, 'queue_bucket': str(item.get('queue_bucket') or 'observe'), 'action': 'skipped', 'reason': deferred_reason, 'reentered_executor': False, 'fairness': {'queue_bucket': str(item.get('queue_bucket') or 'observe'), 'budget_status': 'exhausted' if deferred_reason == 'pass_budget_exhausted' else 'deferred', 'why_skipped': deferred_reason}})
+            result['skipped_count'] += 1
+            if deferred_reason == 'pass_budget_exhausted':
+                result['budget']['skipped_by_budget'] += 1
+            elif deferred_reason == 'fairness_queue_cap_reached':
+                result['budget']['skipped_by_fairness'] += 1
             continue
         persisted_row = db.get_approval_state(approval_id)
         workflow_item = workflow_lookup.get(item_id) or {}
@@ -7302,6 +7430,12 @@ def execute_recovery_queue_layer(payload: Dict[str, Any], db: Any, *, config: An
                 'to_workflow_state': desired_workflow_state,
                 'to_execution_status': desired_execution_status,
             },
+            'fairness': {
+                'queue_bucket': bucket,
+                'budget_status': 'scheduled',
+                'selected_by_round_robin': True,
+                'queue_position_limit': int(result['budget'].get('max_mutations_per_queue_per_round') or 0),
+            },
         }
         result['items'].append(result_item)
         if dry_run:
@@ -7355,6 +7489,11 @@ def execute_recovery_queue_layer(payload: Dict[str, Any], db: Any, *, config: An
             append_event=True,
         )
         executed_rows.append(db.get_approval_state(approval_id))
+        result['budget']['executed_by_queue'][bucket] = int((result['budget'].get('executed_by_queue') or {}).get(bucket, 0) or 0) + 1
+        result['budget']['last_executed_item_id'] = approval_id
+        budget_limit = int(result['budget'].get('max_mutations_per_round') or 0)
+        result['budget']['remaining_slots'] = None if budget_limit <= 0 else max(budget_limit - sum((result['budget'].get('executed_by_queue') or {}).values()), 0)
+        result['budget']['exhausted'] = bool(budget_limit > 0 and (result['budget']['remaining_slots'] or 0) <= 0)
         if bucket == 'retry_queue':
             result['scheduled_retry_count'] += 1
             retry_executor_candidates.append({
@@ -7485,6 +7624,10 @@ def execute_recovery_queue_layer(payload: Dict[str, Any], db: Any, *, config: An
         ])
         if persisted_retry_rows:
             merge_persisted_approval_state(payload, persisted_retry_rows)
+    _finalize_follow_up_budget_summary(result['budget'], queue_label='queue')
+    result['summary']['budget'] = result.get('budget') or {}
+    result['summary']['executed_count'] = result['scheduled_retry_count'] + result['rollback_queued_count'] + result['manual_recovery_annotated_count']
+    result['summary']['fairness_skipped_count'] = int((result.get('budget') or {}).get('skipped_by_fairness', 0) or 0)
     return payload
 
 
@@ -7502,6 +7645,10 @@ def _get_auto_promotion_review_execution_settings(config: Any = None, overrides:
         'execute_due_post_promotion_reviews': bool(raw.get('execute_due_post_promotion_reviews', True)),
         'complete_due_post_promotion_reviews': bool(raw.get('complete_due_post_promotion_reviews', True)),
         'escalate_rollback_review_queue': bool(raw.get('escalate_rollback_review_queue', True)),
+        'max_mutations_per_round': int(raw.get('max_mutations_per_round') or 0),
+        'max_mutations_per_queue_per_round': int(raw.get('max_mutations_per_queue_per_round') or 1),
+        'fairness_mode': str(raw.get('fairness_mode') or 'round_robin'),
+        'fairness_queue_order': _normalize_follow_up_lane_order(raw.get('fairness_queue_order'), ['rollback_review_queue', 'post_promotion_review_queue']),
     }
     settings.update({k: v for k, v in overrides.items() if v is not None})
     settings['enabled'] = bool(settings.get('enabled', False))
@@ -7509,6 +7656,10 @@ def _get_auto_promotion_review_execution_settings(config: Any = None, overrides:
     settings['execute_due_post_promotion_reviews'] = bool(settings.get('execute_due_post_promotion_reviews', True))
     settings['complete_due_post_promotion_reviews'] = bool(settings.get('complete_due_post_promotion_reviews', True))
     settings['escalate_rollback_review_queue'] = bool(settings.get('escalate_rollback_review_queue', True))
+    settings['max_mutations_per_round'] = max(0, min(int(settings.get('max_mutations_per_round') or 0), 1000))
+    settings['max_mutations_per_queue_per_round'] = max(0, min(int(settings.get('max_mutations_per_queue_per_round') or 1), 1000))
+    settings['fairness_mode'] = str(settings.get('fairness_mode') or 'round_robin').strip().lower() or 'round_robin'
+    settings['fairness_queue_order'] = _normalize_follow_up_lane_order(settings.get('fairness_queue_order'), ['rollback_review_queue', 'post_promotion_review_queue'])
     return settings
 
 
@@ -7537,6 +7688,11 @@ def execute_auto_promotion_review_queue_layer(payload: Dict[str, Any], db: Any, 
             'rollback_review_queue_count': queue_view.get('summary', {}).get('rollback_review_queue_count', 0),
             'review_due_count': queue_view.get('summary', {}).get('review_due_count', 0),
         },
+        'budget': _build_follow_up_budget_and_fairness(
+            execution_settings,
+            schema_version='m5_review_followup_budget_v1',
+            default_order=['rollback_review_queue', 'post_promotion_review_queue'],
+        ),
     }
     payload['auto_promotion_review_execution'] = result
     if not result['enabled'] or result['mode'] not in {'controlled', 'dry_run'} or not queue_items:
@@ -7546,6 +7702,17 @@ def execute_auto_promotion_review_queue_layer(payload: Dict[str, Any], db: Any, 
     workflow_lookup = {row.get('item_id'): row for row in ((payload.get('workflow_state') or {}).get('item_states') or []) if row.get('item_id')}
     executed_rows = []
     dry_run = result['mode'] == 'dry_run'
+    follow_up_plan = _plan_follow_up_round(
+        queue_items,
+        queue_key='queue_kind',
+        queue_order=result['budget'].get('queue_order') or ['rollback_review_queue', 'post_promotion_review_queue'],
+        budget_limit=int(result['budget'].get('max_mutations_per_round') or 0),
+        per_queue_limit=int(result['budget'].get('max_mutations_per_queue_per_round') or 0),
+    )
+    result['budget']['selected_counts'] = follow_up_plan.get('selected_counts') or {}
+    result['budget']['deferred_counts'] = follow_up_plan.get('deferred_counts') or {}
+    result['budget']['remaining_slots'] = follow_up_plan.get('budget_remaining')
+    result['budget']['exhausted'] = bool(follow_up_plan.get('budget_exhausted'))
     for item in queue_items:
         item_id = item.get('item_id')
         approval_id = item.get('approval_id') or item_id
@@ -7553,6 +7720,16 @@ def execute_auto_promotion_review_queue_layer(payload: Dict[str, Any], db: Any, 
             result['skipped_count'] += 1
             continue
         queue_kind = str(item.get('queue_kind') or 'post_promotion_review_queue')
+        marker = approval_id or item_id
+        if marker not in (follow_up_plan.get('selected_ids') or set()):
+            deferred_reason = (follow_up_plan.get('deferred_by_item') or {}).get(marker, 'deferred_to_next_round')
+            result['items'].append({'item_id': item_id, 'approval_id': approval_id, 'queue_kind': queue_kind, 'action': 'skipped', 'reason': deferred_reason, 'fairness': {'queue_kind': queue_kind, 'budget_status': 'exhausted' if deferred_reason == 'pass_budget_exhausted' else 'deferred', 'why_skipped': deferred_reason}})
+            result['skipped_count'] += 1
+            if deferred_reason == 'pass_budget_exhausted':
+                result['budget']['skipped_by_budget'] += 1
+            elif deferred_reason == 'fairness_queue_cap_reached':
+                result['budget']['skipped_by_fairness'] += 1
+            continue
         if queue_kind == 'rollback_review_queue' and not execution_settings.get('escalate_rollback_review_queue', True):
             result['items'].append({'item_id': item_id, 'approval_id': approval_id, 'queue_kind': queue_kind, 'action': 'skipped', 'reason': 'rollback_review_queue_disabled'})
             result['skipped_count'] += 1
@@ -7617,6 +7794,12 @@ def execute_auto_promotion_review_queue_layer(payload: Dict[str, Any], db: Any, 
             'workflow_state': desired_workflow_state,
             'reason': item.get('queue_reason'),
             'due_status': item.get('due_status'),
+            'fairness': {
+                'queue_kind': queue_kind,
+                'budget_status': 'scheduled',
+                'selected_by_round_robin': True,
+                'queue_position_limit': int(result['budget'].get('max_mutations_per_queue_per_round') or 0),
+            },
         }
         result['items'].append(result_row)
         if dry_run:
@@ -7663,6 +7846,11 @@ def execute_auto_promotion_review_queue_layer(payload: Dict[str, Any], db: Any, 
             append_event=True,
         )
         executed_rows.append(db.get_approval_state(approval_id))
+        result['budget']['executed_by_queue'][queue_kind] = int((result['budget'].get('executed_by_queue') or {}).get(queue_kind, 0) or 0) + 1
+        result['budget']['last_executed_item_id'] = approval_id
+        budget_limit = int(result['budget'].get('max_mutations_per_round') or 0)
+        result['budget']['remaining_slots'] = None if budget_limit <= 0 else max(budget_limit - sum((result['budget'].get('executed_by_queue') or {}).values()), 0)
+        result['budget']['exhausted'] = bool(budget_limit > 0 and (result['budget']['remaining_slots'] or 0) <= 0)
         if should_complete:
             result['completed_count'] += 1
         elif queue_kind == 'rollback_review_queue':
@@ -7673,6 +7861,10 @@ def execute_auto_promotion_review_queue_layer(payload: Dict[str, Any], db: Any, 
     if executed_rows:
         merge_persisted_approval_state(payload, executed_rows)
 
+    _finalize_follow_up_budget_summary(result['budget'], queue_label='queue')
+    result['summary']['budget'] = result.get('budget') or {}
+    result['summary']['executed_count'] = result['queued_count'] + result['completed_count'] + result['rollback_escalated_count']
+    result['summary']['fairness_skipped_count'] = int((result.get('budget') or {}).get('skipped_by_fairness', 0) or 0)
     return payload
 
 

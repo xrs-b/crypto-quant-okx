@@ -7722,6 +7722,129 @@ class TestApprovalPersistence(unittest.TestCase):
             self.assertFalse(post_state['details'].get('auto_promotion_review_execution'))
 
 
+
+    def test_execute_auto_promotion_review_queue_layer_applies_budget_and_fairness_fence(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(os.path.join(tmpdir, 'auto_promotion_review_budget.db'))
+            payload = {
+                'workflow_state': {
+                    'item_states': [
+                        {'item_id': 'playbook::post-a', 'title': 'Post review A', 'action_type': 'joint_stage_prepare', 'workflow_state': 'ready', 'risk_level': 'low', 'scheduled_review': {'review_due_at': '2024-03-28T08:00:00+00:00', 'review_after_hours': 24}, 'auto_promotion_execution': {'reason_codes': ['auto_advance_allowed'], 'after': {'rollout_stage': 'controlled_apply'}}, 'rollback_gate': {'candidate': False, 'triggered': []}},
+                        {'item_id': 'playbook::post-b', 'title': 'Post review B', 'action_type': 'joint_stage_prepare', 'workflow_state': 'ready', 'risk_level': 'low', 'scheduled_review': {'review_due_at': '2024-03-28T08:00:00+00:00', 'review_after_hours': 24}, 'auto_promotion_execution': {'reason_codes': ['auto_advance_allowed'], 'after': {'rollout_stage': 'controlled_apply'}}, 'rollback_gate': {'candidate': False, 'triggered': []}},
+                        {'item_id': 'playbook::rollback', 'title': 'Rollback review', 'action_type': 'joint_stage_prepare', 'workflow_state': 'queued', 'risk_level': 'low', 'scheduled_review': {'review_due_at': '2026-03-29T08:00:00+00:00', 'review_after_hours': 24}, 'auto_promotion_execution': {'reason_codes': ['auto_advance_allowed'], 'after': {'rollout_stage': 'controlled_apply'}}, 'rollback_gate': {'candidate': True, 'triggered': ['validation_gate_regressed']}},
+                    ],
+                    'summary': {'item_count': 3},
+                },
+                'approval_state': {
+                    'items': [
+                        {'approval_id': 'approval::post-a', 'playbook_id': 'playbook::post-a', 'title': 'Post review A', 'action_type': 'joint_stage_prepare', 'approval_state': 'pending', 'decision_state': 'ready', 'risk_level': 'low', 'approval_required': False, 'requires_manual': False, 'blocked_by': []},
+                        {'approval_id': 'approval::post-b', 'playbook_id': 'playbook::post-b', 'title': 'Post review B', 'action_type': 'joint_stage_prepare', 'approval_state': 'pending', 'decision_state': 'ready', 'risk_level': 'low', 'approval_required': False, 'requires_manual': False, 'blocked_by': []},
+                        {'approval_id': 'approval::rollback', 'playbook_id': 'playbook::rollback', 'title': 'Rollback review', 'action_type': 'joint_stage_prepare', 'approval_state': 'pending', 'decision_state': 'queued', 'risk_level': 'low', 'approval_required': False, 'requires_manual': False, 'blocked_by': []},
+                    ],
+                    'summary': {'pending_count': 3},
+                },
+            }
+            db.sync_approval_items([
+                {'item_id': 'approval::post-a', 'approval_type': 'joint_stage_prepare', 'target': 'playbook::post-a', 'title': 'Post review A', 'approval_state': 'pending', 'workflow_state': 'ready'},
+                {'item_id': 'approval::post-b', 'approval_type': 'joint_stage_prepare', 'target': 'playbook::post-b', 'title': 'Post review B', 'approval_state': 'pending', 'workflow_state': 'ready'},
+                {'item_id': 'approval::rollback', 'approval_type': 'joint_stage_prepare', 'target': 'playbook::rollback', 'title': 'Rollback review', 'approval_state': 'pending', 'workflow_state': 'queued'},
+            ], replay_source='unit-test')
+            executed = execute_auto_promotion_review_queue_layer(
+                payload,
+                db,
+                settings={'enabled': True, 'mode': 'controlled', 'max_mutations_per_round': 2, 'max_mutations_per_queue_per_round': 1},
+                replay_source='unit-test',
+            )
+            result = executed['auto_promotion_review_execution']
+            self.assertEqual(result['completed_count'], 1)
+            self.assertEqual(result['rollback_escalated_count'], 1)
+            self.assertEqual(result['summary']['executed_count'], 2)
+            self.assertEqual(result['summary']['fairness_skipped_count'], 1)
+            self.assertTrue(result['budget']['exhausted'])
+            self.assertEqual(result['budget']['executed_by_queue']['rollback_review_queue'], 1)
+            self.assertEqual(result['budget']['executed_by_queue']['post_promotion_review_queue'], 1)
+            skipped = [row for row in result['items'] if row['action'] == 'skipped']
+            self.assertEqual(skipped[0]['reason'], 'fairness_queue_cap_reached')
+            self.assertEqual(skipped[0]['fairness']['queue_kind'], 'post_promotion_review_queue')
+            self.assertIn('fairness=round_robin', result['summary']['budget']['summary'])
+
+    def test_execute_recovery_queue_layer_applies_budget_and_fairness_fence(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(os.path.join(tmpdir, 'recovery_budget.db'))
+            payload = {
+                'workflow_state': {
+                    'item_states': [
+                        {'item_id': 'playbook::retry', 'title': 'Retry item', 'action_type': 'joint_stage_prepare', 'workflow_state': 'execution_failed', 'risk_level': 'low'},
+                        {'item_id': 'playbook::rollback', 'title': 'Rollback item', 'action_type': 'joint_stage_prepare', 'workflow_state': 'queued', 'risk_level': 'low'},
+                        {'item_id': 'playbook::manual', 'title': 'Manual item', 'action_type': 'joint_stage_prepare', 'workflow_state': 'execution_failed', 'risk_level': 'low'},
+                    ],
+                },
+                'approval_state': {
+                    'items': [
+                        {'approval_id': 'approval::retry', 'playbook_id': 'playbook::retry', 'title': 'Retry item', 'action_type': 'joint_stage_prepare', 'approval_state': 'pending'},
+                        {'approval_id': 'approval::rollback', 'playbook_id': 'playbook::rollback', 'title': 'Rollback item', 'action_type': 'joint_stage_prepare', 'approval_state': 'pending'},
+                        {'approval_id': 'approval::manual', 'playbook_id': 'playbook::manual', 'title': 'Manual item', 'action_type': 'joint_stage_prepare', 'approval_state': 'pending'},
+                    ],
+                },
+                'workflow_recovery_view': {
+                    'queues': {
+                        'retry_queue': [
+                            {'item_id': 'playbook::retry', 'approval_id': 'approval::retry', 'title': 'Retry item', 'action_type': 'joint_stage_prepare', 'recovery_orchestration': {'retry_schedule': {'retry_count': 0}, 'target_route': 'retry_queue', 'routing_reason': ['retry']}}
+                        ],
+                        'rollback_candidates': [
+                            {'item_id': 'playbook::rollback', 'approval_id': 'approval::rollback', 'title': 'Rollback item', 'action_type': 'joint_stage_prepare', 'recovery_orchestration': {'rollback_route': 'rollback_candidate_queue', 'routing_reason': ['rollback']}}
+                        ],
+                        'manual_recovery': [
+                            {'item_id': 'playbook::manual', 'approval_id': 'approval::manual', 'title': 'Manual item', 'action_type': 'joint_stage_prepare', 'recovery_orchestration': {'manual_recovery': {'required': True}, 'routing_reason': ['manual']}}
+                        ],
+                    },
+                    'summary': {'retry_queue_count': 1, 'rollback_candidate_count': 1, 'manual_recovery_count': 1},
+                },
+            }
+            db.sync_approval_items([
+                {'item_id': 'approval::retry', 'approval_type': 'joint_stage_prepare', 'target': 'playbook::retry', 'title': 'Retry item', 'approval_state': 'pending', 'workflow_state': 'execution_failed'},
+                {'item_id': 'approval::rollback', 'approval_type': 'joint_stage_prepare', 'target': 'playbook::rollback', 'title': 'Rollback item', 'approval_state': 'pending', 'workflow_state': 'queued'},
+                {'item_id': 'approval::manual', 'approval_type': 'joint_stage_prepare', 'target': 'playbook::manual', 'title': 'Manual item', 'approval_state': 'pending', 'workflow_state': 'execution_failed'},
+            ], replay_source='unit-test')
+            executed = execute_recovery_queue_layer(
+                payload,
+                db,
+                settings={'enabled': True, 'mode': 'controlled', 'max_mutations_per_round': 2, 'max_mutations_per_queue_per_round': 1, 'retry_executor': {'enabled': False}},
+                replay_source='unit-test',
+                now='2026-03-29T09:00:00+00:00',
+            )
+            result = executed['recovery_execution']
+            self.assertEqual(result['scheduled_retry_count'], 1)
+            self.assertEqual(result['rollback_queued_count'], 1)
+            self.assertEqual(result['manual_recovery_annotated_count'], 0)
+            self.assertEqual(result['summary']['executed_count'], 2)
+            self.assertEqual(result['summary']['fairness_skipped_count'], 0)
+            self.assertTrue(result['budget']['exhausted'])
+            self.assertEqual(result['budget']['executed_by_queue']['retry_queue'], 1)
+            self.assertEqual(result['budget']['executed_by_queue']['rollback_candidates'], 1)
+            skipped = next(row for row in result['items'] if row['action'] == 'skipped')
+            self.assertEqual(skipped['queue_bucket'], 'manual_recovery')
+            self.assertEqual(skipped['reason'], 'pass_budget_exhausted')
+            self.assertEqual(skipped['fairness']['why_skipped'], 'pass_budget_exhausted')
+
+    def test_build_runtime_orchestration_summary_surfaces_followup_budget_fairness(self):
+        payload = build_runtime_orchestration_summary({
+            'adaptive_rollout_orchestration': {'summary': {'pass_count': 1, 'rerun_triggered': True, 'rerun_reason': 'post_review_queue_state_transition', 'rollout_executor_applied_count': 1}},
+            'auto_promotion_review_execution': {'budget': {'summary': 'budget=2 executed=2 remaining=0 exhausted=true / fairness=round_robin per_queue_cap=1', 'exhausted': True, 'skipped_by_fairness': 1}},
+            'recovery_execution': {'budget': {'summary': 'budget=2 executed=2 remaining=0 exhausted=true / fairness=round_robin per_queue_cap=1', 'exhausted': True, 'skipped_by_budget': 1}},
+            'workflow_operator_digest': {'transition_journal': {'schema_version': 'm5_transition_journal_consumer_v1', 'headline': {'status': 'steady', 'message': '0 recent transition(s)', 'latest_timestamp': None, 'latest_transition': None}, 'summary': {'count': 0, 'latest_timestamp': None, 'changed_only': True, 'changed_field_counts': {}, 'workflow_transition_counts': {}}, 'recent_transitions': [], 'latest': {}, 'overview': {'schema_version': 'm5_transition_journal_overview_v1', 'summary': {'count': 0, 'changed_field_counts': {}}, 'recent_transitions': [], 'breakdown': {'changed_field_counts': {}, 'trigger_counts': {}, 'actor_counts': {}, 'source_counts': {}}}}, 'attention': {'manual_approval': [], 'blocked': []}},
+            'workflow_recovery_view': {'queues': {'rollback_candidates': [], 'manual_recovery': []}, 'summary': {'retry_queue_count': 1, 'manual_recovery_count': 0, 'rollback_candidate_count': 0}},
+            'unified_workbench_overview': {'lines': {'approval': {'next_actions': []}, 'rollout': {'next_actions': []}, 'recovery': {'next_actions': []}}, 'dominant_line': 'recovery', 'overall_state': 'active'},
+            'workbench_governance_view': {'recent_adjustments': []},
+            'approval_state': {'items': []},
+            'workflow_state': {'item_states': []},
+        }, max_items=3)
+        self.assertIn('review_followup_budget', payload['follow_ups']['summary'])
+        self.assertIn('recovery_followup_budget', payload['follow_ups']['summary'])
+        self.assertTrue(payload['follow_ups']['summary']['review_followup_budget']['exhausted'])
+        self.assertEqual(payload['follow_ups']['summary']['review_followup_budget']['skipped_by_fairness'], 1)
+
+
     def test_execute_adaptive_rollout_orchestration_reruns_executor_after_recovery_transitions(self):
         import analytics.helper as helper_module
 

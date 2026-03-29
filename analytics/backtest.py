@@ -3180,7 +3180,7 @@ class SignalQualityAnalyzer:
         valid.sort(key=lambda x: x['created_at'], reverse=True)
         observe_only_summary_view = summarize_observe_only_collection([
             trade
-            for row in symbol_results
+            for row in valid
             for trade in (row.get('recent_trades') or [])
             if trade.get('observe_only')
         ])
@@ -3189,6 +3189,7 @@ class SignalQualityAnalyzer:
                 'signals_scored': len(valid),
                 'positive_rate': round((positive / len(valid) * 100), 2) if valid else 0.0,
                 'avg_quality_pct': round(sum(r['avg_quality_pct'] for r in valid) / len(valid), 4) if valid else 0.0,
+                'observe_only_summary_view': observe_only_summary_view,
             },
             'by_symbol': symbol_stats,
             'recent': valid[:50],

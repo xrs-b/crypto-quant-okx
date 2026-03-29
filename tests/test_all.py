@@ -4339,6 +4339,34 @@ class TestBacktestObserveOnlyTags(unittest.TestCase):
         self.assertTrue(summary['summary']['calibration_ready'])
 
 
+    def test_signal_quality_summarize_includes_observe_only_summary_view(self):
+        from analytics.backtest import SignalQualityAnalyzer
+        analyzer = SignalQualityAnalyzer.__new__(SignalQualityAnalyzer)
+        summary = analyzer._summarize([
+            {
+                'symbol': 'BTC/USDT',
+                'created_at': '2026-03-29T10:00:00',
+                'avg_quality_pct': 1.25,
+                'recent_trades': [
+                    {
+                        'observe_only': {
+                            'summary': 'high_vol[up] conf=0.88 stable=0.35 risk=0.84 | policy=adaptive_policy_v1_m4_testnet_live state=effective',
+                            'tags': ['observe_only', 'adaptive_regime', 'regime:high_vol', 'adaptive_policy'],
+                            'snapshots': {
+                                'regime_snapshot': {'name': 'high_vol', 'family': 'vol', 'direction': 'up', 'confidence': 0.88},
+                                'adaptive_policy_snapshot': {'mode': 'guarded_execute', 'policy_version': 'adaptive_policy_v1_m4_testnet_live', 'policy_source': 'adaptive_regime.defaults', 'state': 'effective'},
+                            },
+                        }
+                    }
+                ],
+            }
+        ])
+        self.assertIn('observe_only_summary_view', summary['summary'])
+        self.assertEqual(summary['summary']['signals_scored'], 1)
+        self.assertEqual(summary['summary']['observe_only_summary_view']['count'], 1)
+        self.assertTrue(any('observe_only' in row['value'] for row in summary['summary']['observe_only_summary_view']['top_tags']))
+
+
 class TestRegimePolicyCalibrationReport(unittest.TestCase):
     def test_calibration_report_groups_trades_by_regime_and_policy(self):
         report = build_regime_policy_calibration_report([

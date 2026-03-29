@@ -40,3 +40,82 @@ trading:
     allow_same_bar_multiple_adds: false
     max_layers_per_signal: 1
     strict_ratio_sum_check: false
+
+# ---------------------------------------------------------------------------
+# Testnet adaptive guarded-live 模板（建议只放本地，不提交 Git）
+# 目标：先把 validator / risk / execution / layering guardrails 接到 testnet，
+# 保持 conservative-only、强审计、强回滚；decision / governance 先继续保守。
+# ---------------------------------------------------------------------------
+# runtime:
+#   interval_seconds: 180
+#   health_summary:
+#     enabled: true
+#     hour: 20
+#   approval_hygiene:
+#     enabled: true
+#     auto_cleanup_enabled: false
+#     stale_after_minutes: 180
+# adaptive_regime:
+#   enabled: true
+#   mode: guarded_execute
+#   guarded_execute:
+#     validator_snapshot_enabled: true
+#     validator_hints_enabled: true
+#     validator_enforcement_enabled: true
+#     validator_enforcement_categories: [thresholds, market_guards, regime_guards]
+#     risk_hints_enabled: true
+#     risk_enforcement_enabled: true
+#     execution_profile_hints_enabled: true
+#     execution_profile_enforcement_enabled: true
+#     layering_profile_hints_enabled: true
+#     layering_profile_enforcement_enabled: true
+#     layering_plan_shape_enforcement_enabled: true
+#     layering_plan_shape_rollout_symbols: [BTC/USDT]
+#     layering_plan_shape_rollout_fraction: 1.0
+#     layering_plan_shape_require_guardrails_live: true
+#     layering_plan_shape_fail_closed: true
+#     layering_plan_shape_force_baseline_on_invalid: true
+#     conservative_only: true
+#     rollout_symbols: [BTC/USDT]
+#   defaults:
+#     policy_version: adaptive_policy_v1_m4_testnet_live
+#   regimes:
+#     high_vol:
+#       validation_overrides:
+#         min_strength: 32
+#       risk_overrides:
+#         total_margin_cap_ratio: 0.22
+#         total_margin_soft_cap_ratio: 0.18
+#         symbol_margin_cap_ratio: 0.08
+#         base_entry_margin_ratio: 0.05
+#         max_entry_margin_ratio: 0.06
+#         leverage_cap: 2
+#       execution_overrides:
+#         layer_max_total_ratio: 0.12
+#         max_layers_per_signal: 1
+#         min_add_interval_seconds: 900
+#         profit_only_add: true
+#         allow_same_bar_multiple_adds: false
+#         layer_ratios: [0.05, 0.04, 0.03]
+#     risk_anomaly:
+#       validation_overrides:
+#         min_strength: 40
+#         block_high_volatility: true
+#       risk_overrides:
+#         total_margin_cap_ratio: 0.12
+#         total_margin_soft_cap_ratio: 0.10
+#         symbol_margin_cap_ratio: 0.04
+#         base_entry_margin_ratio: 0.03
+#         max_entry_margin_ratio: 0.04
+#         leverage_cap: 1
+#       execution_overrides:
+#         layer_max_total_ratio: 0.06
+#         max_layers_per_signal: 1
+#         min_add_interval_seconds: 1800
+#         profit_only_add: true
+#         allow_same_bar_multiple_adds: false
+#         layer_ratios: [0.03, 0.02, 0.01]
+# 回滚：
+# 1) 先关 layering_plan_shape_enforcement_enabled
+# 2) 再关 layering_profile_enforcement_enabled / risk_enforcement_enabled
+# 3) 必要时把 mode 改回 decision_only / observe_only

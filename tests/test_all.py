@@ -13508,6 +13508,9 @@ class TestCloseOutcomeDigest(unittest.TestCase):
         self.assertEqual(feedback['control_plane']['action_policy'], 'guarded_tighten_review')
         self.assertFalse(feedback['control_plane']['safe_execution']['allow_live_execution'])
         self.assertIn('close_outcome_policy_tighten', feedback['reason_codes'])
+        self.assertEqual(feedback['decision_contract']['operator_action_policy']['action'], 'review_schedule')
+        self.assertEqual(feedback['decision_contract']['follow_up_policy_gate']['decision'], 'review')
+        self.assertEqual(feedback['decision_contract']['routing_contract']['route'], 'review_schedule_queue')
 
         payload = {
             'consumer_view': {'workflow_state': {'summary': {}, 'item_states': []}, 'approval_state': {'summary': {}, 'items': []}, 'rollout_stage_progression': {'summary': {}, 'items': []}, 'rollout_executor': {}, 'auto_approval_execution': {}, 'controlled_rollout_execution': {}, 'validation_gate': {'enabled': False, 'ready': None, 'headline': 'validation_gate_disabled', 'gap_count': 0, 'failing_case_count': 0, 'regression_detected': False}},
@@ -13529,6 +13532,8 @@ class TestCloseOutcomeDigest(unittest.TestCase):
         self.assertEqual(runtime_summary['close_outcome_control_plane']['line'], 'rollout')
         self.assertEqual(runtime_summary['next_step']['route'], 'review_schedule_queue')
         self.assertEqual(runtime_summary['related_summary']['close_outcome_feedback_loop']['next_action']['follow_up'], 'review_policy_thresholds')
+        self.assertEqual(runtime_summary['close_outcome_decision_contract']['operator_action_policy']['route'], 'review_schedule_queue')
+        self.assertEqual(runtime_summary['close_outcome_decision_contract']['follow_up_policy_gate']['decision'], 'review')
 
     def test_close_outcome_feedback_loop_flows_into_governance_and_production_readiness(self):
         from analytics.helper import build_workbench_governance_view, build_unified_workbench_overview, build_production_rollout_readiness
@@ -13569,6 +13574,8 @@ class TestCloseOutcomeDigest(unittest.TestCase):
         readiness = build_production_rollout_readiness(dict(payload), max_items=2)
         self.assertIn('close_outcome_feedback_requires_rollback_review', readiness['blocking_issues'])
         self.assertEqual(readiness['summary']['close_outcome_control_plane']['route'], 'rollback_candidate_queue')
+        self.assertEqual(readiness['close_outcome_decision_contract']['operator_action_policy']['action'], 'freeze_followup')
+        self.assertEqual(readiness['close_outcome_decision_contract']['follow_up_policy_gate']['decision'], 'rollback')
         self.assertEqual(readiness['runbook_actions'][0]['route'], 'rollback_candidate_queue')
 
 

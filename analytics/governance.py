@@ -304,6 +304,9 @@ class GovernanceEngine:
         executed_today = sum(1 for s in today_signals if s.get('executed'))
         filtered_today = sum(1 for s in today_signals if s.get('filtered'))
         quality = self.signal_quality.analyze(use_cache=False)
+        from analytics.helper import build_close_outcome_digest, build_close_outcome_feedback_loop
+        close_outcome_digest = build_close_outcome_digest(self.db.get_trades(limit=200), label='daily_summary')
+        close_outcome_feedback = build_close_outcome_feedback_loop(close_outcome_digest, label='daily_summary')
         report = {
             'date': today,
             'preset': mode.get('current_preset'),
@@ -315,6 +318,9 @@ class GovernanceEngine:
             'filtered_today': filtered_today,
             'candidate_reviews': governance.get('alerts', []),
             'quality_summary': quality.get('summary', {}),
+            'close_outcome_digest': close_outcome_digest,
+            'close_outcome_feedback_loop': close_outcome_feedback,
+            'close_outcome_decision_contract': close_outcome_feedback.get('decision_contract') or {},
             'generated_at': datetime.now().isoformat(),
         }
         self.db.record_daily_report(today, report)

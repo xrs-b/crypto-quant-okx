@@ -13285,3 +13285,100 @@ class TestUnifiedWorkbenchOverviewAPI(unittest.TestCase):
             dashboard_api_module.backtester.run_all = original_run_all
             dashboard_api_module._persist_workflow_approval_payload = original_persist
             dashboard_api_module.export_calibration_payload = original_export
+
+
+class TestQualityScalingPipeline(unittest.TestCase):
+    """Integration tests for end-to-end quality scaling pipeline."""
+
+    def setUp(self):
+        self.config = Config()
+        self.db = Database('data/test_quality.db')
+
+    def tearDown(self):
+        if os.path.exists('data/test_quality.db'):
+            os.remove('data/test_quality.db')
+
+    def test_risk_manager_can_open_accepts_signal_kwarg(self):
+        """can_open_position now accepts signal= kwarg for quality scaling."""
+        risk_mgr = RiskManager(self.config, self.db)
+        from signals import Signal
+        sig = Signal(symbol='BTC/USDT', signal_type='buy', price=50000, strength=75, reasons=['test'], strategies_triggered=['x', 'y', 'z'])
+        # Should not raise TypeError about unexpected keyword argument
+        can_open, reason, details = risk_mgr.can_open_position('BTC/USDT', side='long', signal_id=901, signal=sig)
+        self.assertIsNotNone(details)
+        # adaptive_risk_snapshot should be present even on early-return
+        self.assertIn('adaptive_risk_snapshot', details)
+
+    def test_quality_bucket_high_boosts_entry_ratio(self):
+        """High quality signal (strength>=60, strategies>=3) uses high_quality_multiplier."""
+        from core.risk_budget import compute_entry_plan, derive_quality_bucket
+        from signals import Signal
+        sig = Signal(symbol='BTC/USDT', signal_type='buy', price=50000, strength=75, reasons=['ma'], strategies_triggered=['a', 'b', 'c'])
+        self.assertEqual(derive_quality_bucket(sig), 'high')
+        plan = compute_entry_plan(
+            total_balance=10000, free_balance=9000,
+            current_total_margin=0, current_symbol_margin=0,
+            risk_budget={
+                'base_entry_margin_ratio': 0.08,
+                'quality_scaling_enabled': True,
+                'high_quality_multiplier': 1.15,
+                'low_quality_multiplier': 0.75,
+            },
+            signal=sig
+        )
+        # 0.08 * 1.15 = 0.092
+        self.assertAlmostEqual(plan['effective_entry_margin_ratio'], 0.092, places=4)
+        self.assertEqual(plan['quality_bucket'], 'high')
+        self.assertEqual(plan['quality_multiplier'], 1.15)
+
+    def test_quality_bucket_low_reduces_entry_ratio(self):
+        """Low quality signal (strength<=30, strategies<=1) uses low_quality_multiplier."""
+        from core.risk_budget import compute_entry_plan, derive_quality_bucket
+        from signals import Signal
+        sig = Signal(symbol='BTC/USDT', signal_type='buy', price=50000, strength=20, reasons=['test'], strategies_triggered=['test'])
+        self.assertEqual(derive_quality_bucket(sig), 'low')
+        plan = compute_entry_plan(
+            total_balance=10000, free_balance=9000,
+            current_total_margin=0, current_symbol_margin=0,
+            risk_budget={
+                'base_entry_margin_ratio': 0.08,
+                'quality_scaling_enabled': True,
+                'high_quality_multiplier': 1.15,
+                'low_quality_multiplier': 0.75,
+            },
+            signal=sig
+        )
+        # 0.08 * 0.75 = 0.06
+        self.assertAlmostEqual(plan['effective_entry_margin_ratio'], 0.06, places=4)
+        self.assertEqual(plan['quality_bucket'], 'low')
+        self.assertEqual(plan['quality_multiplier'], 0.75)
+
+    def test_quality_scaling_disabled_uses_base_entry(self):
+        """When quality_scaling_enabled=False, always uses base_entry_margin_ratio."""
+        from core.risk_budget import compute_entry_plan
+        from signals import Signal
+        sig = Signal(symbol='BTC/USDT', signal_type='buy', price=50000, strength=75, reasons=['x'], strategies_triggered=['a', 'b', 'c'])
+        plan = compute_entry_plan(
+            total_balance=10000, free_balance=9000,
+            current_total_margin=0, current_symbol_margin=0,
+            risk_budget={
+                'base_entry_margin_ratio': 0.08,
+                'quality_scaling_enabled': False,
+                'high_quality_multiplier': 1.15,
+                'low_quality_multiplier': 0.75,
+            },
+            signal=sig
+        )
+        # No multiplier applied
+        self.assertAlmostEqual(plan['effective_entry_margin_ratio'], 0.08, places=4)
+        self.assertEqual(plan['quality_bucket'], 'high')
+
+    def test_adaptive_risk_snapshot_includes_quality_bucket(self):
+        """build_risk_effective_snapshot surfaces quality_bucket in its output."""
+        from core.regime_policy import build_risk_effective_snapshot
+        from signals import Signal
+        sig = Signal(symbol='BTC/USDT', signal_type='buy', price=50000, strength=75, reasons=['x'], strategies_triggered=['a', 'b', 'c'])
+        snapshot = build_risk_effective_snapshot(self.config, 'BTC/USDT', signal=sig)
+        self.assertIn('quality_bucket', snapshot)
+        self.assertEqual(snapshot['quality_bucket'], 'high')
+        self.assertIn('quality_scaling_enabled', snapshot)

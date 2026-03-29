@@ -1444,6 +1444,30 @@ class RiskManager:
     def _loss_guard_hours(self) -> int:
         return int(self.trading_config.get('loss_streak_cooldown_hours', 12) or 12)
 
+    def _build_adaptive_risk_snapshot(self, symbol: str, plan_context: Dict[str, Any] = None, signal: Any = None) -> Optional[Dict[str, Any]]:
+        """Build adaptive risk snapshot early for use in guards and observability."""
+        try:
+            from core.regime_policy import (
+                build_observe_only_payload,
+                build_risk_effective_snapshot,
+            )
+            payload = build_observe_only_payload(
+                self.config,
+                symbol,
+                signal=signal,
+                regime_snapshot=(plan_context or {}).get('regime_snapshot'),
+                policy_snapshot=(plan_context or {}).get('adaptive_policy_snapshot'),
+            )
+            return build_risk_effective_snapshot(
+                self.config,
+                symbol,
+                signal=signal,
+                regime_snapshot=payload.get('regime_snapshot'),
+                policy_snapshot=payload.get('adaptive_policy_snapshot'),
+            )
+        except Exception:
+            return None
+
     def _sync_loss_streak_guard(self) -> Dict[str, Any]:
         state = self.db.get_risk_guard_state('loss_streak')
         now = datetime.now()
@@ -1535,16 +1559,22 @@ class RiskManager:
             'action': 'reset'
         }
 
-    def can_open_position(self, symbol: str, side: str = None, signal_id: int = None, plan_context: Dict[str, Any] = None) -> tuple:
+    def can_open_position(self, symbol: str, side: str = None, signal_id: int = None, plan_context: Dict[str, Any] = None, *, signal: Any = None) -> tuple:
         """检查是否可以开仓"""
         details = {}
         normalized_side = side or 'long'
+        adaptive_risk_snapshot: Optional[Dict[str, Any]] = None
+
+        # Build adaptive risk snapshot early so it flows into executor_probe guards
+        if hasattr(self, '_build_adaptive_risk_snapshot'):
+            adaptive_risk_snapshot = self._build_adaptive_risk_snapshot(symbol, plan_context=plan_context, signal=signal)
 
         executor_probe = TradingExecutor(self.config, None, self.db)
         runtime_ok, runtime_reason, runtime_details = executor_probe._check_layering_runtime_guards(symbol, normalized_side, signal_id=signal_id, plan_context=plan_context or {})
         if not runtime_ok:
             details['hard_intercept'] = {'passed': False, 'reason': runtime_reason, 'details': runtime_details}
             details['observability'] = dict((runtime_details or {}).get('observability') or {})
+            details['adaptive_risk_snapshot'] = dict(adaptive_risk_snapshot or {})
             return False, runtime_reason, details
 
         lock_symbol, lock_side = executor_probe._get_direction_lock_scope_key(symbol, normalized_side)
@@ -1552,6 +1582,7 @@ class RiskManager:
         if direction_lock:
             details['hard_intercept'] = {'passed': False, 'reason': '方向锁占用中', 'lock': direction_lock}
             details['observability'] = enrich_observability_with_snapshots(self.config, symbol, build_observability_context(symbol=symbol, side=normalized_side, signal_id=signal_id, root_signal_id=signal_id, deny_reason='direction_lock'), plan_context=plan_context)
+            details['adaptive_risk_snapshot'] = dict(adaptive_risk_snapshot or {})
             return False, '方向锁占用中', details
         details['hard_intercept'] = {'passed': True, 'lock_scope': {'symbol': lock_symbol, 'side': lock_side}}
 
@@ -1568,6 +1599,7 @@ class RiskManager:
             diff_seconds = (datetime.utcnow() - last_trade).total_seconds()
             if diff_seconds < min_interval:
                 details['global_cooldown'] = {'passed': False, 'remaining': int(min_interval - diff_seconds)}
+                details['adaptive_risk_snapshot'] = dict(adaptive_risk_snapshot or {})
                 return False, f"全局冷却中({int(diff_seconds)}s)", details
         details['global_cooldown'] = {'passed': True}
 
@@ -1586,6 +1618,7 @@ class RiskManager:
                 'just_triggered': bool(loss_guard.get('just_triggered')),
                 'auto_recovered': bool(loss_guard.get('auto_recovered')),
             }
+            details['adaptive_risk_snapshot'] = dict(adaptive_risk_snapshot or {})
             return False, f"连续亏损熔断冷却中({consecutive_losses}/{max_consecutive_losses})", details
         details['loss_streak_limit'] = {
             'passed': True,
@@ -1607,6 +1640,7 @@ class RiskManager:
                 'current': round(daily_drawdown_ratio, 4),
                 'max': max_daily_drawdown
             }
+            details['adaptive_risk_snapshot'] = dict(adaptive_risk_snapshot or {})
             return False, f"日内回撤熔断({daily_drawdown_ratio*100:.2f}%/{max_daily_drawdown*100:.2f}%)", details
         details['daily_drawdown_limit'] = {
             'passed': True,

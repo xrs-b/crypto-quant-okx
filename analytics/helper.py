@@ -1343,6 +1343,167 @@ def build_close_outcome_digest(trades: Optional[List[Dict[str, Any]]] = None, *,
             f"reason={_top(reason_counts) or 'unknown'} / regime={_top(regime_counts) or 'unknown'} / policy={_top(policy_counts) or 'unknown'}"
         ),
     }
+def build_close_outcome_feedback_loop(close_outcome_digest: Optional[Dict[str, Any]] = None, *, label: Optional[str] = None,
+                                    min_sample_size: int = 3, max_policy_hints: int = 5) -> Dict[str, Any]:
+    digest = dict(close_outcome_digest or {})
+    trade_count = max(int(digest.get('trade_count', 0) or 0), 0)
+    win_rate = float(digest.get('win_rate', 0.0) or 0.0)
+    net_pnl = _safe_close_outcome_float(digest.get('net_pnl'))
+    avg_return_pct = _safe_close_outcome_float(digest.get('avg_return_pct'))
+    by_reason = dict(digest.get('by_close_reason_category') or {})
+    by_quality = dict(digest.get('by_outcome_quality') or {})
+    dominant_policy = digest.get('dominant_policy_tag') or 'unknown'
+    dominant_regime = digest.get('dominant_regime_tag') or 'unknown'
+    dominant_reason = digest.get('dominant_close_reason_category') or 'unknown'
+
+    loss_count = max(int(digest.get('loss_count', 0) or 0), 0)
+    stop_loss_count = max(int(by_reason.get('stop_loss', 0) or 0), 0)
+    take_profit_count = max(int(by_reason.get('take_profit', 0) or 0), 0)
+    adverse_count = max(int(by_quality.get('adverse', 0) or 0), 0)
+    bounded_loss_count = max(int(by_quality.get('bounded_loss', 0) or 0), 0)
+    loss_rate = round((loss_count / trade_count) * 100, 4) if trade_count else 0.0
+    stop_loss_share = round((stop_loss_count / trade_count) * 100, 4) if trade_count else 0.0
+    take_profit_share = round((take_profit_count / trade_count) * 100, 4) if trade_count else 0.0
+    adverse_share = round((adverse_count / trade_count) * 100, 4) if trade_count else 0.0
+    bounded_loss_share = round((bounded_loss_count / trade_count) * 100, 4) if trade_count else 0.0
+
+    status = 'observe_only'
+    governance_mode = 'observe'
+    confidence = 'low'
+    severity = 'low'
+    reason_codes = []
+    recommendation = 'Close outcomes remain in observation window; keep collecting structured feedback.'
+    policy_hints = []
+    next_action = {
+        'kind': 'observe_only_followup',
+        'priority': 'low',
+        'owner': 'runtime',
+        'action': 'observe_only_followup',
+        'route': 'observe_only_followup',
+        'follow_up': 'collect_more_close_outcomes',
+        'message': recommendation,
+    }
+
+    if trade_count < min_sample_size:
+        reason_codes.append('close_outcome_sample_too_small')
+        recommendation = f"Need >= {min_sample_size} closed trades before changing governance policy; current sample={trade_count}."
+        next_action['message'] = recommendation
+        next_action['follow_up'] = 'collect_more_close_outcomes'
+    elif loss_rate >= 80 or net_pnl < 0 and adverse_share >= 50 and stop_loss_share >= 50:
+        status = 'rollback_candidate'
+        governance_mode = 'rollback'
+        confidence = 'high'
+        severity = 'high'
+        reason_codes.extend(['close_outcome_loss_cluster', 'close_outcome_policy_freeze_candidate'])
+        recommendation = f"Close outcomes show concentrated losses under {dominant_policy}/{dominant_regime}; freeze further promotion and route to rollback review."
+        policy_hints.extend([
+            f"freeze_or_pause policy={dominant_policy}",
+            f"review stop-loss / exit logic for regime={dominant_regime}",
+            'require manual review before any new rollout stage change',
+        ])
+        next_action.update({
+            'kind': 'close_outcome_rollback_review',
+            'priority': 'high',
+            'owner': 'operator',
+            'action': 'freeze_followup',
+            'route': 'rollback_candidate_queue',
+            'follow_up': 'freeze_and_review',
+            'message': recommendation,
+        })
+    elif loss_rate >= 65 or net_pnl < 0 or adverse_share >= 40:
+        status = 'tighten_required'
+        governance_mode = 'tighten'
+        confidence = 'medium'
+        severity = 'medium'
+        reason_codes.extend(['close_outcome_underperforming', 'close_outcome_policy_tighten'])
+        if stop_loss_share >= 40:
+            reason_codes.append('close_outcome_stop_loss_dominant')
+            policy_hints.append(f"tighten entry / risk budget for regime={dominant_regime}")
+        if dominant_policy != 'unknown':
+            policy_hints.append(f"de-risk policy={dominant_policy} until close outcome win-rate recovers")
+        policy_hints.append('keep execution guarded; no live parameter auto-apply')
+        recommendation = f"Close outcomes are underperforming (win_rate={round(win_rate, 2)}%, net_pnl={round(net_pnl, 4)}); tighten governance and review policy thresholds before next rollout step."
+        next_action.update({
+            'kind': 'close_outcome_policy_review',
+            'priority': 'high' if net_pnl < 0 else 'medium',
+            'owner': 'operator',
+            'action': 'review_schedule',
+            'route': 'review_schedule_queue',
+            'follow_up': 'review_policy_thresholds',
+            'message': recommendation,
+        })
+    elif win_rate >= 65 and net_pnl > 0 and take_profit_share >= 40:
+        status = 'promotion_candidate'
+        governance_mode = 'rollout'
+        confidence = 'medium'
+        severity = 'low'
+        reason_codes.extend(['close_outcome_positive_feedback', 'close_outcome_rollout_candidate'])
+        policy_hints.extend([
+            f"keep policy={dominant_policy} as preferred candidate in regime={dominant_regime}",
+            'allow guarded rollout review only after validation / approval gates stay clear',
+        ])
+        recommendation = f"Close outcomes are supportive (win_rate={round(win_rate, 2)}%, net_pnl={round(net_pnl, 4)}); consider guarded rollout readiness review for the dominant policy/regime pair."
+        next_action.update({
+            'kind': 'close_outcome_rollout_review',
+            'priority': 'medium',
+            'owner': 'operator',
+            'action': 'review_schedule',
+            'route': 'rollout_readiness_queue',
+            'follow_up': 'review_ready_for_rollout',
+            'message': recommendation,
+        })
+    else:
+        status = 'review_required'
+        governance_mode = 'review'
+        confidence = 'medium'
+        severity = 'medium'
+        reason_codes.append('close_outcome_mixed_feedback')
+        policy_hints.append('keep current policy guarded and review close reason mix before further promotion')
+        recommendation = f"Close outcomes are mixed (win_rate={round(win_rate, 2)}%, dominant_reason={dominant_reason}); keep runtime guarded and schedule a policy review."
+        next_action.update({
+            'kind': 'close_outcome_review',
+            'priority': 'medium',
+            'owner': 'operator',
+            'action': 'review_schedule',
+            'route': 'review_schedule_queue',
+            'follow_up': 'review_close_outcome_mix',
+            'message': recommendation,
+        })
+
+    policy_hints = _dedupe_strings(policy_hints)[:max_policy_hints]
+    reason_codes = _dedupe_strings(reason_codes)
+    return {
+        'schema_version': 'trade_close_outcome_feedback_loop_v1',
+        'label': label,
+        'status': status,
+        'governance_mode': governance_mode,
+        'confidence': confidence,
+        'severity': severity,
+        'trade_count': trade_count,
+        'min_sample_size': min_sample_size,
+        'recommendation': recommendation,
+        'next_action': next_action,
+        'policy_hints': policy_hints,
+        'reason_codes': reason_codes,
+        'evidence': {
+            'trade_count': trade_count,
+            'win_rate': win_rate,
+            'loss_rate': loss_rate,
+            'net_pnl': round(net_pnl, 8),
+            'avg_return_pct': round(avg_return_pct, 8),
+            'stop_loss_share': stop_loss_share,
+            'take_profit_share': take_profit_share,
+            'adverse_share': adverse_share,
+            'bounded_loss_share': bounded_loss_share,
+            'dominant_policy_tag': dominant_policy,
+            'dominant_regime_tag': dominant_regime,
+            'dominant_close_reason_category': dominant_reason,
+        },
+        'close_outcome_digest': digest,
+        'summary_line': f"{governance_mode} / {status} / trades={trade_count} / win_rate={round(win_rate, 2)} / net_pnl={round(net_pnl, 4)}",
+    }
+
+
 def _dedupe_strings(values: Optional[List[Any]]) -> List[str]:
     seen = set()
     deduped: List[str] = []
@@ -5282,6 +5443,10 @@ def build_runtime_orchestration_summary(payload: Optional[Dict[str, Any]] = None
     bridge_evidence = payload.get('testnet_bridge_execution_evidence') or _summarize_testnet_bridge_execution(payload)
     _attach_testnet_bridge_execution_evidence(payload)
     close_outcome_digest = payload.get('close_outcome_digest') or build_close_outcome_digest(payload.get('closed_trades') or payload.get('trades') or [], label='runtime_orchestration_summary')
+    close_outcome_feedback = payload.get('close_outcome_feedback_loop') or build_close_outcome_feedback_loop(
+        close_outcome_digest,
+        label='runtime_orchestration_summary',
+    )
     review_queue_consumption = payload.get('auto_promotion_review_queue_consumption') or build_auto_promotion_review_queue_consumption(
         auto_promotion_execution,
         max_items=max_items,
@@ -5404,7 +5569,14 @@ def build_runtime_orchestration_summary(payload: Optional[Dict[str, Any]] = None
                 'follow_up': row.get('follow_up'),
                 'items': row.get('items') or [],
             })
-    next_actions.sort(key=lambda row: ({'high': 0, 'medium': 1, 'low': 2}.get(row.get('priority'), 9), -(row.get('count') or 0), row.get('line') or ''))
+    close_outcome_next_action = dict(close_outcome_feedback.get('next_action') or {})
+    if close_outcome_next_action:
+        close_outcome_next_action.setdefault('line', 'governance')
+        close_outcome_next_action.setdefault('count', close_outcome_feedback.get('trade_count', 0))
+        close_outcome_next_action.setdefault('items', (close_outcome_digest.get('recent_closes') or [])[:max_items])
+        close_outcome_next_action.setdefault('governance_mode', close_outcome_feedback.get('governance_mode'))
+        next_actions.append(close_outcome_next_action)
+    next_actions.sort(key=lambda row: ({'critical': -1, 'high': 0, 'medium': 1, 'low': 2}.get(row.get('priority'), 9), -(row.get('count') or 0), row.get('line') or ''))
     next_step = next_actions[0] if next_actions else {
         'line': unified_overview.get('dominant_line') or 'approval',
         'kind': 'observe_only',
@@ -5470,6 +5642,7 @@ def build_runtime_orchestration_summary(payload: Optional[Dict[str, Any]] = None
         'testnet_bridge_execution': bridge_evidence.get('summary') or {},
         'result_digest': result_digest.get('summary') or {},
         'close_outcome_digest': close_outcome_digest,
+        'close_outcome_feedback_loop': close_outcome_feedback,
     }
     return {
         'schema_version': 'm5_runtime_orchestration_summary_v1',
@@ -5485,6 +5658,7 @@ def build_runtime_orchestration_summary(payload: Optional[Dict[str, Any]] = None
             'queues': follow_up_queues,
             'consumption': review_queue_consumption,
         },
+        'close_outcome_feedback_loop': close_outcome_feedback,
         'result_digest': result_digest,
         'orchestration': orchestration,
         'transition_journal': transition_journal,
@@ -5502,6 +5676,7 @@ def build_runtime_orchestration_summary(payload: Optional[Dict[str, Any]] = None
             'control_plane_readiness': ((unified_overview.get('summary') or {}).get('control_plane_readiness') or {}),
             'testnet_bridge_execution': bridge_evidence.get('summary') or {},
             'close_outcome_digest': close_outcome_digest,
+            'close_outcome_feedback_loop': close_outcome_feedback,
         },
     }
 
@@ -10647,6 +10822,10 @@ def build_workbench_governance_view(payload: Optional[Dict] = None, *, max_items
     testnet_bridge_execution = consumer_view.get('testnet_bridge_execution') or payload.get('testnet_bridge_execution') or {}
     bridge_evidence = consumer_view.get('testnet_bridge_execution_evidence') or payload.get('testnet_bridge_execution_evidence') or _summarize_testnet_bridge_execution(payload)
     close_outcome_digest = payload.get('close_outcome_digest') or build_close_outcome_digest(payload.get('closed_trades') or payload.get('trades') or [], label='workbench_governance_view')
+    close_outcome_feedback = payload.get('close_outcome_feedback_loop') or build_close_outcome_feedback_loop(
+        close_outcome_digest,
+        label='workbench_governance_view',
+    )
     workflow_items = ((consumer_view.get('workflow_state') or {}).get('item_states') or [])
     approval_items = ((consumer_view.get('approval_state') or {}).get('items') or [])
 
@@ -10806,6 +10985,7 @@ def build_workbench_governance_view(payload: Optional[Dict] = None, *, max_items
             'latest_transition_at': (transition_journal.get('summary') or {}).get('latest_timestamp'),
             'control_plane_contract_drift': contract_drift_summary,
             'close_outcome_digest': close_outcome_digest,
+            'close_outcome_feedback_loop': close_outcome_feedback,
         },
         'filters': catalog.get('filters') or {},
         'applied_filters': (filtered_view or {}).get('applied_filters') or {},
@@ -10828,6 +11008,8 @@ def build_workbench_governance_view(payload: Optional[Dict] = None, *, max_items
         'transition_journal': transition_journal,
         'control_plane_contract_drift': contract_drift_summary,
         'close_outcome_digest': close_outcome_digest,
+        'close_outcome_feedback_loop': close_outcome_feedback,
+        'governance_recommendation': close_outcome_feedback,
         'upstreams': {
             'workflow_consumer_view': consumer_view,
             'workflow_attention_view': attention_view,
@@ -10903,6 +11085,10 @@ def build_unified_workbench_overview(payload: Optional[Dict] = None, *, max_item
     approval_summary = (consumer_view.get('approval_state') or {}).get('summary') or {}
     recovery_summary = recovery_view.get('summary') or {}
     workbench_summary = workbench_view.get('summary') or {}
+    close_outcome_feedback = workbench_view.get('close_outcome_feedback_loop') or workbench_summary.get('close_outcome_feedback_loop') or build_close_outcome_feedback_loop(
+        workbench_view.get('close_outcome_digest') or workbench_summary.get('close_outcome_digest') or payload.get('close_outcome_digest') or {},
+        label='unified_workbench_overview',
+    )
     timeline_groups = (timeline_summary.get('groups') or {}) if isinstance(timeline_summary, dict) else {}
     timeline_summary_meta = timeline_summary.get('summary') or {} if isinstance(timeline_summary, dict) else {}
     follow_up_policy_gate_summary = (operator_digest.get('summary') or {}).get('follow_up_policy_gate_summary') or {}
@@ -10970,6 +11156,10 @@ def build_unified_workbench_overview(payload: Optional[Dict] = None, *, max_item
     ]
     rollout_next_actions.extend(auto_promotion_review_queues.get('next_actions') or [])
     recovery_next_actions = []
+    close_outcome_next_action = dict(close_outcome_feedback.get('next_action') or {})
+    if close_outcome_next_action:
+        close_outcome_next_action.setdefault('count', close_outcome_feedback.get('trade_count', 0))
+        close_outcome_next_action.setdefault('items', (workbench_view.get('close_outcome_digest') or {}).get('recent_closes') or [])
     if manual_recovery:
         recovery_next_actions.append({
             'kind': 'manual_recovery',
@@ -11060,7 +11250,7 @@ def build_unified_workbench_overview(payload: Optional[Dict] = None, *, max_item
             'validation_consumption': validation_consumption,
             'headline_stage_frontier': _take((workbench_view.get('rollout') or {}).get('frontier') or []),
             'key_alerts': _take((contract_drift_summary.get('items') or []) + (auto_promotion_review_queues.get('items') or []) + approval_blocked_items + queued_items + ready_items),
-            'next_actions': _take(rollout_next_actions),
+            'next_actions': _take(([close_outcome_next_action] if close_outcome_next_action and close_outcome_feedback.get('governance_mode') in {'rollout', 'tighten', 'review'} else []) + rollout_next_actions),
             'stage_loop': workbench_stage_loop,
             'auto_promotion_candidate_queue': rollout_advisory.get('auto_promotion_candidates') or [],
             'auto_promotion_execution': auto_promotion_execution,
@@ -11082,7 +11272,7 @@ def build_unified_workbench_overview(payload: Optional[Dict] = None, *, max_item
                 'gate_rollback_candidates': gate_consumption.get('rollback_candidate_count', 0),
             },
             'key_alerts': _take(manual_recovery + rollback_candidates + retry_queue),
-            'next_actions': _take(recovery_next_actions),
+            'next_actions': _take(recovery_next_actions + ([close_outcome_next_action] if close_outcome_next_action and close_outcome_feedback.get('governance_mode') == 'rollback' else [])),
             'next_retry_at': recovery_summary.get('next_retry_at'),
         },
     }
@@ -11139,6 +11329,7 @@ def build_unified_workbench_overview(payload: Optional[Dict] = None, *, max_item
             'testnet_bridge_execution': bridge_evidence.get('summary') or {},
             'testnet_bridge_evidence_gate': bridge_gate.get('summary') or {},
             'follow_up_policy_gate_summary': follow_up_policy_gate_summary,
+            'close_outcome_feedback_loop': close_outcome_feedback,
         },
         'follow_up_policy_gate_summary': follow_up_policy_gate_summary,
         'lines': lines,
@@ -11156,7 +11347,9 @@ def build_unified_workbench_overview(payload: Optional[Dict] = None, *, max_item
             'workflow_alert_digest': alert_digest.get('summary') or {},
             'testnet_bridge_execution': bridge_evidence.get('summary') or {},
             'testnet_bridge_evidence_gate': bridge_gate.get('summary') or {},
+            'close_outcome_feedback_loop': close_outcome_feedback,
         },
+        'close_outcome_feedback_loop': close_outcome_feedback,
         'upstreams': {
             'workflow_consumer_view': consumer_view,
             'workflow_operator_digest': operator_digest,
@@ -11207,6 +11400,7 @@ def build_production_rollout_readiness(payload: Optional[Dict[str, Any]] = None,
     approval_counts = approval_line.get('counts') or summary.get('approval') or {}
     rollout_counts = rollout_line.get('counts') or summary.get('rollout') or {}
     recovery_counts = recovery_line.get('counts') or summary.get('recovery') or {}
+    close_outcome_feedback = runtime_summary.get('close_outcome_feedback_loop') or unified_overview.get('close_outcome_feedback_loop') or {}
 
     blocking_issues = []
     blocking_issues.extend(control_plane_readiness.get('blocking_issues') or [])
@@ -11224,6 +11418,10 @@ def build_production_rollout_readiness(payload: Optional[Dict[str, Any]] = None,
         blocking_issues.append('validation_gate_not_ready')
     if not bridge_gate.get('can_enable_low_intervention', False):
         blocking_issues.extend(bridge_gate.get('blocking_issues') or ['testnet_bridge_evidence_gate_blocked'])
+    if close_outcome_feedback.get('governance_mode') == 'rollback':
+        blocking_issues.append('close_outcome_feedback_requires_rollback_review')
+    elif close_outcome_feedback.get('governance_mode') == 'tighten':
+        blocking_issues.append('close_outcome_feedback_requires_policy_tighten')
     blocking_issues = _dedupe_strings(blocking_issues)
 
     gate_ready = bool(control_plane_readiness.get('can_continue_auto_promotion'))
@@ -11259,6 +11457,9 @@ def build_production_rollout_readiness(payload: Optional[Dict[str, Any]] = None,
     for row in (bridge_gate.get('runbook_actions') or []):
         if row.get('kind') not in {item.get('kind') for item in runbook_actions}:
             runbook_actions.append(row)
+    close_outcome_next_action = dict(close_outcome_feedback.get('next_action') or {})
+    if close_outcome_next_action and close_outcome_feedback.get('governance_mode') in {'rollback', 'tighten', 'rollout', 'review'}:
+        runbook_actions.append(close_outcome_next_action)
     if not runbook_actions and runtime_summary.get('next_actions'):
         runbook_actions.extend((runtime_summary.get('next_actions') or [])[:max_items])
 
@@ -11287,6 +11488,7 @@ def build_production_rollout_readiness(payload: Optional[Dict[str, Any]] = None,
             'runtime_follow_ups': runtime_followups.get('summary') or runtime_followups,
             'testnet_bridge_execution': bridge_evidence.get('summary') or {},
             'testnet_bridge_evidence_gate': bridge_gate.get('summary') or {},
+            'close_outcome_feedback_loop': close_outcome_feedback,
         },
         'runbook_actions': runbook_actions[:max_items],
         'top_alerts': (alert_digest.get('alerts') or [])[:max_items],

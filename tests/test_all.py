@@ -13481,6 +13481,83 @@ class TestCloseOutcomeDigest(unittest.TestCase):
         self.assertEqual(runtime_summary['summary']['close_outcome_digest']['by_close_reason_category']['take_profit'], 1)
         self.assertEqual(workbench_summary['summary']['close_outcome_digest']['by_policy_tag']['policy_v1'], 2)
 
+    def test_close_outcome_feedback_loop_builds_tighten_recommendation_and_runtime_next_action(self):
+        from analytics.helper import build_close_outcome_feedback_loop, build_runtime_orchestration_summary
+        close_outcome_digest = {
+            'schema_version': 'trade_close_outcome_digest_v1',
+            'trade_count': 4,
+            'win_count': 1,
+            'loss_count': 3,
+            'win_rate': 25.0,
+            'net_pnl': -12.5,
+            'avg_return_pct': -1.8,
+            'by_close_decision': {'loss': 3, 'win': 1},
+            'by_outcome_quality': {'adverse': 1, 'bounded_loss': 2, 'positive': 1},
+            'by_close_reason_category': {'stop_loss': 2, 'manual_close': 1, 'take_profit': 1},
+            'by_regime_tag': {'trend': 4},
+            'by_policy_tag': {'policy_v2': 4},
+            'dominant_regime_tag': 'trend',
+            'dominant_policy_tag': 'policy_v2',
+            'dominant_close_reason_category': 'stop_loss',
+            'recent_closes': [{'trade_id': 4, 'symbol': 'BTC/USDT'}],
+        }
+        feedback = build_close_outcome_feedback_loop(close_outcome_digest, label='unit-test')
+        self.assertEqual(feedback['governance_mode'], 'tighten')
+        self.assertEqual(feedback['next_action']['route'], 'review_schedule_queue')
+        self.assertIn('close_outcome_policy_tighten', feedback['reason_codes'])
+
+        payload = {
+            'consumer_view': {'workflow_state': {'summary': {}, 'item_states': []}, 'approval_state': {'summary': {}, 'items': []}, 'rollout_stage_progression': {'summary': {}, 'items': []}, 'rollout_executor': {}, 'auto_approval_execution': {}, 'controlled_rollout_execution': {}, 'validation_gate': {'enabled': False, 'ready': None, 'headline': 'validation_gate_disabled', 'gap_count': 0, 'failing_case_count': 0, 'regression_detected': False}},
+            'attention_view': {'summary': {}, 'headline': {}, 'items': []},
+            'operator_digest': {'headline': {'status': 'steady', 'message': 'ok'}, 'summary': {}, 'next_actions': [], 'attention': {}, 'control_plane_manifest': {}, 'control_plane_readiness': {}},
+            'workflow_alert_digest': {'headline': {'status': 'steady', 'message': 'ok'}, 'summary': {}, 'alerts': []},
+            'workflow_recovery_view': {'summary': {}, 'queues': {'rollback_candidates': [], 'manual_recovery': []}},
+            'adaptive_rollout_orchestration': {'summary': {}},
+            'close_outcome_digest': close_outcome_digest,
+        }
+        runtime_summary = build_runtime_orchestration_summary(dict(payload), max_items=2)
+        self.assertEqual(runtime_summary['close_outcome_feedback_loop']['governance_mode'], 'tighten')
+        self.assertEqual(runtime_summary['next_step']['route'], 'review_schedule_queue')
+        self.assertEqual(runtime_summary['related_summary']['close_outcome_feedback_loop']['next_action']['follow_up'], 'review_policy_thresholds')
+
+    def test_close_outcome_feedback_loop_flows_into_governance_and_production_readiness(self):
+        from analytics.helper import build_workbench_governance_view, build_unified_workbench_overview, build_production_rollout_readiness
+        close_outcome_digest = {
+            'schema_version': 'trade_close_outcome_digest_v1',
+            'trade_count': 5,
+            'win_count': 0,
+            'loss_count': 5,
+            'win_rate': 0.0,
+            'net_pnl': -30.0,
+            'avg_return_pct': -3.2,
+            'by_close_decision': {'loss': 5},
+            'by_outcome_quality': {'adverse': 4, 'bounded_loss': 1},
+            'by_close_reason_category': {'stop_loss': 5},
+            'by_regime_tag': {'range': 5},
+            'by_policy_tag': {'policy_v3': 5},
+            'dominant_regime_tag': 'range',
+            'dominant_policy_tag': 'policy_v3',
+            'dominant_close_reason_category': 'stop_loss',
+            'recent_closes': [{'trade_id': 5, 'symbol': 'ETH/USDT'}],
+        }
+        payload = {
+            'consumer_view': {'workflow_state': {'summary': {}, 'item_states': []}, 'approval_state': {'summary': {}, 'items': []}, 'rollout_stage_progression': {'summary': {}, 'items': []}, 'rollout_executor': {}, 'auto_approval_execution': {}, 'controlled_rollout_execution': {}, 'validation_gate': {'enabled': False, 'ready': True, 'headline': 'validation_gate_ready', 'gap_count': 0, 'failing_case_count': 0, 'regression_detected': False}},
+            'attention_view': {'summary': {}, 'headline': {}, 'items': []},
+            'operator_digest': {'headline': {'status': 'steady', 'message': 'ok'}, 'summary': {}, 'next_actions': [], 'attention': {}, 'control_plane_manifest': {}, 'control_plane_readiness': {'can_continue_auto_promotion': True, 'blocking_issues': []}},
+            'workflow_alert_digest': {'headline': {'status': 'steady', 'message': 'ok'}, 'summary': {'severity_counts': {}}, 'alerts': []},
+            'workflow_recovery_view': {'summary': {}, 'queues': {'rollback_candidates': [], 'manual_recovery': [], 'retry_queue': []}},
+            'adaptive_rollout_orchestration': {'summary': {}},
+            'close_outcome_digest': close_outcome_digest,
+            'testnet_bridge_execution_evidence': {'summary': {}, 'status': 'disabled', 'follow_up_required': False},
+        }
+        workbench = build_workbench_governance_view(dict(payload), max_items=2)
+        self.assertEqual(workbench['governance_recommendation']['governance_mode'], 'rollback')
+        unified = build_unified_workbench_overview(dict(payload), max_items=2)
+        self.assertEqual(unified['close_outcome_feedback_loop']['next_action']['route'], 'rollback_candidate_queue')
+        readiness = build_production_rollout_readiness(dict(payload), max_items=2)
+        self.assertIn('close_outcome_feedback_requires_rollback_review', readiness['blocking_issues'])
+        self.assertEqual(readiness['runbook_actions'][0]['route'], 'rollback_candidate_queue')
+
 
 class TestTradeOutcomeAttribution(unittest.TestCase):
     def setUp(self):

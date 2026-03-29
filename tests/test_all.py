@@ -6877,7 +6877,7 @@ class TestExecutionObservability(unittest.TestCase):
             self.assertIn('recent_decisions', snapshot['summary'])
             self.assertTrue(snapshot['summary']['observe_only_banner'])
 
-from analytics.helper import build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, attach_auto_approval_policy, execute_controlled_rollout_layer, execute_controlled_auto_approval_layer, execute_auto_promotion_review_queue_layer, execute_recovery_queue_layer, execute_testnet_bridge_layer, execute_adaptive_rollout_orchestration, execute_rollout_executor, build_rollout_control_plane_manifest, build_control_plane_readiness_summary, build_workflow_consumer_view, build_workflow_recovery_view, build_workflow_attention_view, build_workflow_operator_digest, build_workflow_alert_digest, build_dashboard_summary_cards, build_runtime_orchestration_summary, build_production_rollout_readiness, build_workbench_governance_view, build_workbench_governance_detail_view, build_workbench_merged_timeline, build_workbench_timeline_summary_aggregation, build_unified_workbench_overview, build_auto_promotion_candidate_view, build_auto_promotion_execution_summary, build_auto_promotion_review_queue_consumption, build_auto_promotion_review_queue_filter_view, build_auto_promotion_review_queue_detail_view, _build_state_machine_semantics, _build_safe_rollout_action_registry
+from analytics.helper import build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, attach_auto_approval_policy, execute_controlled_rollout_layer, execute_controlled_auto_approval_layer, execute_auto_promotion_review_queue_layer, execute_recovery_queue_layer, execute_testnet_bridge_layer, execute_adaptive_rollout_orchestration, execute_rollout_executor, build_rollout_control_plane_manifest, build_control_plane_readiness_summary, build_workflow_consumer_view, build_workflow_recovery_view, build_workflow_attention_view, build_workflow_operator_digest, build_workflow_alert_digest, build_dashboard_summary_cards, build_runtime_orchestration_summary, build_production_rollout_readiness, build_workbench_governance_view, build_workbench_governance_detail_view, build_workbench_merged_timeline, build_workbench_timeline_summary_aggregation, build_unified_workbench_overview, build_auto_promotion_candidate_view, build_auto_promotion_execution_summary, build_auto_promotion_review_queue_consumption, build_auto_promotion_review_queue_filter_view, build_auto_promotion_review_queue_detail_view, _build_follow_up_policy_gate, _build_state_machine_semantics, _build_safe_rollout_action_registry
 
 
 class TestApprovalPersistence(unittest.TestCase):
@@ -11584,9 +11584,79 @@ class TestApprovalPersistence(unittest.TestCase):
             self.assertEqual(retry_item['follow_up_execution']['action'], 'escalate_manual_recovery')
             self.assertEqual(retry_item['follow_up_execution']['route'], 'manual_recovery_queue')
             self.assertEqual(retry_item['follow_up_execution']['escalation_policy'], 'manual_recovery')
+            self.assertEqual(retry_item['follow_up_execution']['policy_gate']['decision'], 'review')
             persisted = db.get_approval_state('approval::retry_exhausted')
             self.assertEqual(persisted['details']['recovery_execution']['follow_up_execution']['route'], 'manual_recovery_queue')
             self.assertEqual(persisted['details']['recovery_execution']['follow_up_execution']['severity'], 'high')
+            self.assertEqual(persisted['details']['recovery_execution']['follow_up_execution']['policy_gate']['family'], 'recovery_executor')
+
+    def test_follow_up_policy_gate_unifies_review_retry_and_rollback_decisions(self):
+        rollback_gate = _build_follow_up_policy_gate(
+            item_id='playbook::rollback',
+            family='auto_promotion_review',
+            current_phase='post_promotion_follow_up',
+            queue_kind='rollback_review_queue',
+            disposition='rollback_review',
+            rollback_candidate=True,
+            reason_codes=['validation_gate_regressed'],
+        )
+        self.assertEqual(rollback_gate['decision'], 'rollback')
+        self.assertEqual(rollback_gate['action'], 'prepare_rollback_review')
+        self.assertEqual(rollback_gate['route'], 'rollback_review_queue')
+        retry_gate = _build_follow_up_policy_gate(
+            item_id='playbook::retry',
+            family='recovery_executor',
+            current_phase='recovery_follow_up',
+            queue_kind='retry_queue',
+            disposition='error',
+            retryable=True,
+            retry_attempt=1,
+            reason_codes=['retryable_execution_failure'],
+        )
+        self.assertEqual(retry_gate['decision'], 'retry')
+        self.assertEqual(retry_gate['route'], 'retry_queue')
+        review_gate = _build_follow_up_policy_gate(
+            item_id='playbook::review',
+            family='auto_promotion_review',
+            current_phase='post_promotion_follow_up',
+            queue_kind='post_promotion_review_queue',
+            disposition='review_due',
+            review_due={'due_status': 'overdue', 'is_due': True},
+            is_due=True,
+            observation_targets=['post_apply_samples'],
+        )
+        self.assertEqual(review_gate['decision'], 'review')
+        self.assertEqual(review_gate['action'], 'run_scheduled_review')
+        self.assertIn('scheduled_follow_up_review', review_gate['reason_codes'])
+
+    def test_auto_promotion_review_queue_execution_persists_follow_up_policy_gate(self):
+        payload = self._make_controlled_auto_promotion_payload()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(str(Path(tmpdir) / 'auto_promotion_review_policy_gate.db'))
+            executed = execute_controlled_rollout_layer(payload, db, settings={
+                'enabled': True,
+                'mode': 'state_apply',
+                'auto_promote_ready_candidates': True,
+                'allowed_action_types': ['joint_stage_prepare'],
+                'actor': 'system:test-auto-promotion-policy-gate',
+                'source': 'unit_test_auto_promotion_policy_gate',
+            })
+            consumer = build_workflow_consumer_view(executed)
+            workflow_item = consumer['workflow_state']['item_states'][0]
+            workflow_item['scheduled_review'] = {'review_due_at': '2026-03-29T00:00:00Z', 'review_after_hours': 24}
+            reviewed = execute_auto_promotion_review_queue_layer(
+                executed,
+                db,
+                settings={'enabled': True, 'mode': 'controlled'},
+                replay_source='unit-test-review-policy-gate',
+            )
+            summary_item = reviewed['auto_promotion_review_execution']['items'][0]
+            persisted = db.get_approval_state(summary_item['approval_id'])
+            policy_gate = persisted['details']['auto_promotion_review_execution']['follow_up_policy_gate']
+            self.assertEqual(policy_gate['family'], 'auto_promotion_review_execution')
+            self.assertEqual(policy_gate['decision'], 'review')
+            self.assertIn(policy_gate['action'], {'run_scheduled_review', 'monitor_post_promotion_window'})
+            self.assertTrue(policy_gate['summary'])
 
     def test_auto_promotion_review_queue_filter_view_supports_queue_due_target_and_trigger_filters(self):
         payload = self._make_controlled_auto_promotion_payload()

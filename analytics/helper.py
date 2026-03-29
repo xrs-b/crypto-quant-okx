@@ -760,6 +760,120 @@ def _resolve_validation_gate_context(*rows: Any) -> Dict[str, Any]:
     return _build_validation_gate_snapshot({})
 
 
+def _build_follow_up_policy_gate(*, item_id: Optional[str] = None, family: Optional[str] = None,
+                                 current_phase: Optional[str] = None, queue_kind: Optional[str] = None,
+                                 status: Optional[str] = None, disposition: Optional[str] = None,
+                                 retryable: Optional[bool] = None, retry_attempt: int = 0,
+                                 retry_limit: int = 3, rollback_candidate: bool = False,
+                                 rollback_hint: Optional[str] = None, review_due: Optional[Dict[str, Any]] = None,
+                                 is_due: Optional[bool] = None, blocked_by: Optional[List[str]] = None,
+                                 observation_targets: Optional[List[str]] = None, reason_codes: Optional[List[str]] = None,
+                                 dispatch_route: Optional[str] = None, next_transition: Optional[str] = None) -> Dict[str, Any]:
+    normalized_family = str(family or 'follow_up').strip().lower() or 'follow_up'
+    normalized_phase = str(current_phase or 'follow_up').strip().lower() or 'follow_up'
+    normalized_queue = str(queue_kind or '').strip().lower() or None
+    normalized_status = str(status or '').strip().lower() or None
+    normalized_disposition = str(disposition or normalized_status or 'observed').strip().lower() or 'observed'
+    retry_flag = bool(retryable)
+    rollback_flag = bool(rollback_candidate)
+    due_snapshot = dict(review_due or {}) if isinstance(review_due, dict) else {}
+    due_flag = bool(is_due if is_due is not None else due_snapshot.get('is_due'))
+    due_status = str(due_snapshot.get('due_status') or '').strip().lower() or None
+    blockers = _dedupe_strings(blocked_by or [])
+    targets = _dedupe_strings(observation_targets or [])
+    reasons = _dedupe_strings(reason_codes or [])
+
+    decision = 'observe'
+    action = 'observe_only_followup'
+    route = dispatch_route or 'observe_only_followup'
+    follow_up = next_transition or 'observe_only'
+    owner = 'runtime'
+    severity = 'low'
+    audit_codes = []
+
+    if normalized_queue == 'rollback_review_queue' or rollback_flag:
+        decision = 'rollback'
+        action = 'prepare_rollback_review'
+        route = 'rollback_candidate_queue' if normalized_queue != 'rollback_review_queue' else 'rollback_review_queue'
+        follow_up = next_transition or 'rollback_candidate_review'
+        owner = 'operator'
+        severity = 'high'
+        audit_codes.extend(['rollback_candidate', 'follow_up_gate_rollback'])
+    elif normalized_queue == 'manual_recovery' or normalized_disposition in {'blocked_by_approval'} or 'manual_approval_required' in reasons:
+        decision = 'review'
+        action = 'review_schedule'
+        route = 'manual_approval_queue'
+        follow_up = next_transition or 'await_manual_approval'
+        owner = 'operator'
+        severity = 'high'
+        audit_codes.extend(['manual_review_required', 'follow_up_gate_review'])
+    elif normalized_queue == 'retry_queue' or (normalized_disposition in {'deferred'} and retry_flag) or (normalized_disposition in {'skipped', 'error', 'missing'} and retry_flag and retry_attempt < retry_limit):
+        decision = 'retry'
+        action = 'retry_followup'
+        route = 'retry_queue'
+        follow_up = next_transition or 'retry_execution'
+        owner = 'runtime'
+        severity = 'medium'
+        audit_codes.extend(['retry_window_open', 'follow_up_gate_retry'])
+    elif normalized_disposition in {'skipped', 'error', 'missing'} and retry_flag and retry_attempt >= retry_limit:
+        decision = 'review'
+        action = 'review_schedule'
+        route = 'manual_recovery_queue'
+        follow_up = next_transition or 'operator_review_and_safe_requeue'
+        owner = 'operator'
+        severity = 'high'
+        audit_codes.extend(['retry_window_exhausted', 'follow_up_gate_review'])
+    elif normalized_queue == 'post_promotion_review_queue' or due_flag or due_status in {'due_now', 'overdue'}:
+        decision = 'review'
+        action = 'run_scheduled_review' if due_flag else 'monitor_post_promotion_window'
+        route = normalized_queue or 'post_promotion_review_queue'
+        follow_up = next_transition or ('scheduled_review' if due_flag else 'monitor_post_promotion_window')
+        owner = 'runtime' if not due_flag else 'operator'
+        severity = 'medium' if due_flag else 'low'
+        audit_codes.extend(['scheduled_follow_up_review', 'follow_up_gate_review' if due_flag else 'follow_up_gate_observe'])
+    elif normalized_disposition in {'blocked_by_approval', 'deferred'} or blockers:
+        decision = 'review'
+        action = 'review_schedule'
+        route = 'operator_escalation'
+        follow_up = next_transition or 'escalate_blocked_state'
+        owner = 'operator'
+        severity = 'high' if blockers else 'medium'
+        audit_codes.extend(['blocked_follow_up', 'follow_up_gate_review'])
+    else:
+        audit_codes.append('follow_up_gate_observe')
+
+    audit_codes = _dedupe_strings(audit_codes + reasons + blockers + targets)
+    requires_attention = decision in {'review', 'rollback'} or (decision == 'retry' and severity in {'medium', 'high'} and normalized_disposition in {'skipped', 'error', 'missing', 'deferred'})
+    return {
+        'schema_version': 'm5_follow_up_policy_gate_v1',
+        'item_id': item_id,
+        'family': normalized_family,
+        'current_phase': normalized_phase,
+        'queue_kind': normalized_queue,
+        'status': normalized_status,
+        'disposition': normalized_disposition,
+        'decision': decision,
+        'action': action,
+        'route': route,
+        'follow_up': follow_up,
+        'owner': owner,
+        'severity': severity,
+        'retryable': retry_flag,
+        'retry_attempt': max(int(retry_attempt or 0), 0),
+        'retry_limit': max(int(retry_limit or 0), 0),
+        'rollback_candidate': rollback_flag,
+        'rollback_hint': rollback_hint,
+        'review_due': due_snapshot,
+        'is_due': due_flag,
+        'blocked_by': blockers,
+        'observation_targets': targets,
+        'reason_codes': audit_codes,
+        'requires_attention': requires_attention,
+        'audit_summary': f"{decision} -> {action} via {route}",
+        'summary': f"{normalized_family}:{decision} -> {action} via {route}",
+    }
+
+
 def _build_operator_action_policy(*, item_id: Optional[str] = None, approval_state: Optional[str] = None, workflow_state: Optional[str] = None, queue_status: Optional[str] = None, dispatch_route: Optional[str] = None, next_transition: Optional[str] = None, blocked_by: Optional[List[str]] = None, retryable: Optional[bool] = None, rollout_stage: Optional[str] = None, target_rollout_stage: Optional[str] = None, terminal: bool = False, validation_gate: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     normalized_approval = str(approval_state or 'pending').strip().lower() or 'pending'
     normalized_workflow = str(workflow_state or 'pending').strip().lower() or 'pending'
@@ -6958,6 +7072,21 @@ def _normalize_auto_promotion_review_queue_item(item: Dict[str, Any], *, now: Op
     rollback_triggered = _dedupe_strings(item.get('rollback_triggered') or [])
     observation_targets = _dedupe_strings(item.get('observation_targets') or [])
     why = _dedupe_strings(item.get('why') or [])
+    gate = _build_follow_up_policy_gate(
+        item_id=item.get('item_id'),
+        family='auto_promotion_review',
+        current_phase='post_promotion_follow_up',
+        queue_kind=queue_kind,
+        status=item.get('queue_state') or queue_kind,
+        disposition=item.get('queue_state') or queue_kind,
+        rollback_candidate=bool(item.get('rollback_candidate')),
+        review_due=due,
+        is_due=due.get('is_due'),
+        observation_targets=observation_targets,
+        reason_codes=why + rollback_triggered,
+        dispatch_route=queue_kind,
+        next_transition=item.get('recommended_action'),
+    )
     why_in_queue = []
     if queue_kind == 'rollback_review_queue':
         why_in_queue.append('rollback_candidate')
@@ -6968,8 +7097,9 @@ def _normalize_auto_promotion_review_queue_item(item: Dict[str, Any], *, now: Op
     why_in_queue.extend(rollback_triggered)
     why_in_queue.extend(observation_targets)
     why_in_queue.extend(why)
+    why_in_queue.extend(gate.get('reason_codes') or [])
     why_in_queue = _dedupe_strings(why_in_queue)
-    next_step = item.get('recommended_action') or ('prepare_rollback_review' if queue_kind == 'rollback_review_queue' else 'monitor_post_promotion_window')
+    next_step = gate.get('action') or item.get('recommended_action') or ('prepare_rollback_review' if queue_kind == 'rollback_review_queue' else 'monitor_post_promotion_window')
     queue_reason = 'rollback trigger observed; item escalated into rollback review queue' if queue_kind == 'rollback_review_queue' else 'auto-promotion completed; item remains in post-promotion review window'
     if due.get('due_status') == 'overdue':
         queue_reason += '; scheduled review is overdue'
@@ -6989,6 +7119,7 @@ def _normalize_auto_promotion_review_queue_item(item: Dict[str, Any], *, now: Op
         'next_step': next_step,
         'next_action': next_step,
         'what_to_do_next': next_step,
+        'follow_up_policy_gate': gate,
     })
     return item
 
@@ -7535,50 +7666,61 @@ def _build_recovery_executor_follow_up(recovery_item: Dict[str, Any], executor_i
     dispatch_route = plan.get('dispatch_route') or dispatch.get('dispatch_route') or outcome.get('dispatch_route')
     next_transition = outcome.get('next_transition') or dispatch.get('next_transition') or plan.get('next_transition')
     reason = outcome.get('reason') or dispatch.get('reason') or recovery_item.get('reason')
-    severity = 'low'
-    action = 'observe_recovery'
-    route = dispatch_route or 'observe_only_followup'
-    follow_up = next_transition or 'observe_recovery_completion'
-    escalation_policy = 'none'
-    requires_attention = False
-
-    if disposition in {'applied', 'queued', 'dry_run'} or status in {'applied', 'queued', 'dry_run'}:
-        action = 'observe_recovery' if disposition != 'queued' else 'monitor_queue_progression'
-        follow_up = next_transition or ('retry_execution' if disposition == 'queued' else 'observe_recovery_completion')
-        route = dispatch_route or ('retry_queue' if disposition == 'queued' else 'safe_state_apply')
-    elif disposition == 'blocked_by_approval' or status == 'blocked_by_approval':
-        severity = 'medium'
-        action = 'freeze_followup'
-        route = 'freeze_followup_queue'
-        follow_up = 'await_manual_approval'
-        escalation_policy = 'approval_gate'
-        requires_attention = True
-    elif disposition == 'deferred' or status == 'deferred':
-        severity = 'medium'
-        action = 'retry_followup' if retryable else 'review_schedule'
-        route = dispatch_route or ('retry_queue' if retryable else 'review_schedule_queue')
-        follow_up = next_transition or ('retry_after_blockers_clear' if retryable else 'schedule_review')
-        escalation_policy = 'deferred_followup'
-        requires_attention = True
-    elif disposition in {'skipped', 'error', 'missing'} or status in {'skipped', 'error', 'missing'}:
-        severity = 'high'
-        if rollback_hint and not retryable:
-            action = 'escalate_rollback_candidate'
-            route = 'rollback_candidate_queue'
-            follow_up = 'freeze_and_review'
-            escalation_policy = 'rollback_candidate'
-        elif retryable and retry_attempt < 3:
-            action = 'retry_followup'
-            route = 'retry_queue'
-            follow_up = 'retry_execution'
-            escalation_policy = 'retry_again'
-            severity = 'medium'
+    gate = _build_follow_up_policy_gate(
+        item_id=recovery_item.get('item_id'),
+        family='recovery_executor',
+        current_phase='recovery_follow_up',
+        queue_kind=(recovery_item.get('queue_bucket') if disposition not in {'skipped', 'error', 'missing'} else None),
+        status=status,
+        disposition=disposition,
+        retryable=retryable,
+        retry_attempt=retry_attempt,
+        retry_limit=3,
+        rollback_candidate=bool(rollback_hint and not retryable),
+        rollback_hint=rollback_hint,
+        blocked_by=recovery_item.get('blocked_by') or [],
+        reason_codes=[reason] if reason else [],
+        dispatch_route=dispatch_route,
+        next_transition=next_transition,
+    )
+    action = gate.get('action') or 'observe_only_followup'
+    route = gate.get('route') or dispatch_route or 'observe_only_followup'
+    follow_up = gate.get('follow_up') or next_transition or 'observe_recovery_completion'
+    decision = gate.get('decision') or 'observe'
+    severity = gate.get('severity') or 'low'
+    escalation_policy = {
+        'rollback': 'rollback_candidate',
+        'retry': 'retry_again',
+        'review': 'manual_recovery' if route == 'manual_recovery_queue' else 'approval_gate' if route == 'manual_approval_queue' else 'deferred_followup',
+        'observe': 'none',
+    }.get(decision, 'none')
+    if decision == 'observe':
+        if disposition == 'queued':
+            action = 'monitor_queue_progression'
+            route = dispatch_route or 'retry_queue'
+            follow_up = next_transition or 'retry_execution'
         else:
-            action = 'escalate_manual_recovery'
-            route = 'manual_recovery_queue'
-            follow_up = 'operator_review_and_safe_requeue'
-            escalation_policy = 'manual_recovery'
-        requires_attention = True
+            action = 'observe_recovery'
+            route = dispatch_route or 'safe_state_apply'
+            follow_up = next_transition or 'observe_recovery_completion'
+    elif decision == 'rollback':
+        action = 'escalate_rollback_candidate'
+        route = 'rollback_candidate_queue'
+        follow_up = 'freeze_and_review'
+    elif decision == 'review' and route == 'manual_recovery_queue':
+        action = 'escalate_manual_recovery'
+        follow_up = 'operator_review_and_safe_requeue'
+    elif decision == 'review' and route == 'manual_approval_queue':
+        action = 'freeze_followup'
+        follow_up = 'await_manual_approval'
+    elif decision == 'review' and disposition == 'deferred' and not retryable:
+        action = 'review_schedule'
+        route = dispatch_route or 'review_schedule_queue'
+        follow_up = next_transition or 'schedule_review'
+    elif decision == 'retry':
+        action = 'retry_followup'
+        route = 'retry_queue'
+        follow_up = next_transition or 'retry_execution'
 
     return {
         'executor_status': status,
@@ -7587,13 +7729,15 @@ def _build_recovery_executor_follow_up(recovery_item: Dict[str, Any], executor_i
         'rollback_hint': rollback_hint,
         'dispatch_route': dispatch_route,
         'next_transition': next_transition,
+        'decision': decision,
         'action': action,
         'route': route,
         'follow_up': follow_up,
         'severity': severity,
         'escalation_policy': escalation_policy,
-        'requires_attention': requires_attention,
+        'requires_attention': bool(gate.get('requires_attention')),
         'reason': reason,
+        'policy_gate': gate,
         'summary': f"{disposition} -> {action} via {route}",
     }
 
@@ -8171,6 +8315,21 @@ def execute_auto_promotion_review_queue_layer(payload: Dict[str, Any], db: Any, 
             result['skipped_count'] += 1
             continue
         reason_codes = _dedupe_strings((item.get('why_in_queue') or []) + (item.get('rollback_triggered') or []))
+        follow_up_gate = _build_follow_up_policy_gate(
+            item_id=item_id,
+            family='auto_promotion_review_execution',
+            current_phase='post_promotion_follow_up_execution',
+            queue_kind=queue_kind,
+            status=desired_status,
+            disposition=desired_status,
+            rollback_candidate=(queue_kind == 'rollback_review_queue'),
+            review_due=item.get('review_due') or {},
+            is_due=item.get('is_due'),
+            observation_targets=item.get('observation_targets') or [],
+            reason_codes=reason_codes,
+            dispatch_route=queue_kind,
+            next_transition='continue_guarded_observe' if should_complete else item.get('next_step'),
+        )
         review_event = {
             'event_type': event_type,
             'actor': execution_settings['actor'],
@@ -8178,6 +8337,7 @@ def execute_auto_promotion_review_queue_layer(payload: Dict[str, Any], db: Any, 
             'queue_kind': queue_kind,
             'review_status': desired_status,
             'reason_codes': reason_codes,
+            'follow_up_policy_decision': follow_up_gate.get('decision'),
             'created_at': _utc_now_iso(),
         }
         review_details = {
@@ -8191,6 +8351,7 @@ def execute_auto_promotion_review_queue_layer(payload: Dict[str, Any], db: Any, 
             'observation_targets': item.get('observation_targets') or [],
             'rollback_triggered': item.get('rollback_triggered') or [],
             'reason_codes': reason_codes,
+            'follow_up_policy_gate': follow_up_gate,
             'completed_at': review_event['created_at'] if should_complete else None,
             'event_log': (existing_review.get('event_log') or []) + [review_event],
         }

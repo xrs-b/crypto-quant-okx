@@ -6,7 +6,7 @@ dashboard:
   auto_refresh_seconds: 30
   enabled: true
   host: 0.0.0.0
-  port: 5555
+  port: 8050
   theme: dark
   title: OKX量化交易仪表盘
 database:
@@ -25,6 +25,61 @@ governance:
   pool_switch:
     min_hold_hours: 6
     score_margin: 1.0
+  rollout_executor:
+    enabled: false
+    mode: disabled
+    dry_run: false
+    actor: system:rollout-executor
+    source: rollout_executor
+    reason_prefix: rollout executor skeleton apply
+    allowed_action_types:
+    - joint_observe
+    default_review_after_hours: 24
+  controlled_rollout_execution:
+    enabled: false
+    mode: disabled
+    actor: system:controlled-rollout
+    source: controlled_rollout_execution
+    reason_prefix: controlled rollout state apply
+    auto_promote_ready_candidates: false
+    max_executed_per_pass: 1
+    selection_policy: oldest_pending_first
+    allowed_action_types:
+    - joint_observe
+    target_state: ready
+    target_workflow_state: ready
+    default_review_after_hours: 24
+  auto_approval_execution:
+    enabled: false
+    mode: disabled
+    actor: system:auto-approval
+    source: auto_approval_execution
+    reason_prefix: controlled auto-approval execution
+    max_executed_per_pass: 1
+    selection_policy: oldest_pending_first
+  recovery_execution:
+    enabled: false
+    mode: disabled
+    actor: system:recovery-execution
+    source: recovery_execution
+    reason_prefix: workflow recovery execution
+    execute_retry_queue: true
+    execute_rollback_candidates: true
+    annotate_manual_recovery: true
+  adaptive_rollout_orchestration:
+    enforce_production_gate: true
+    gate_max_items: 10
+  testnet_bridge_execution:
+    enabled: false
+    mode: disabled
+    actor: system:testnet-bridge
+    source: testnet_bridge_execution
+    symbol: null
+    side: long
+    execute_profile: minimal_smoke
+    require_no_pending_approvals: true
+    require_controlled_rollout_execution: true
+    cleanup_required: true
 logging:
   backup_count: 5
   file: logs/trading.log
@@ -63,7 +118,10 @@ ml:
     min_return_threshold: 0.002
 notification:
   discord:
+    channel_id: '1468582455660515350'
+    webhook_url: ''
     webhook_username: OKX量化机器人
+    bot_token: '
     enabled: true
     notify_errors: true
     notify_signals: true
@@ -76,12 +134,31 @@ notification:
     to_address: your_email@gmail.com
     username: your_email@gmail.com
   telegram:
+    bot_token: '
+    chat_id: your_chat_id
     enabled: false
 runtime:
-  interval_seconds: 300
+  interval_seconds: 180
   max_runtime_minutes: 30
   mode: interval
   schedule: 0 * * * *
+  health_summary:
+    enabled: true
+    hour: 20
+  approval_hygiene:
+    enabled: true
+    auto_cleanup_enabled: false
+    stale_after_minutes: 180
+    limit: 20
+    approval_type: ''
+    actor: system:approval-hygiene
+  adaptive_rollout_orchestration:
+    enabled: false
+    use_cache: true
+    notify_on_activity: true
+    min_interval_seconds: 0
+    max_items: 5
+    actor: system:runtime-adaptive-rollout-orchestration
 runtime_meta:
   current_preset: safe-mode
 strategies:
@@ -141,10 +218,25 @@ symbols:
   selection_mode: focused
   watch_list:
   - BTC/USDT
+symbol_overrides:
+  BTC/USDT:
+    strategies:
+      composite:
+        min_strategy_count: 2
+    market_filters:
+      block_counter_trend: true
+  XRP/USDT:
+    strategies:
+      composite:
+        min_strength: 26
+    market_filters:
+      min_volatility: 0.0038
 trading:
   cooldown_minutes: 15
   leverage: 3
   max_consecutive_losses: 3
+  loss_streak_lock_enabled: true
+  loss_streak_cooldown_hours: 12
   max_daily_drawdown: 0.03
   max_exposure: 0.3
   max_position_per_symbol: 0.15
@@ -165,9 +257,6 @@ trading:
   take_profit: 0.04
   trailing_stop: 0.015
   trailing_activation: 0.01
-  partial_tp_enabled: false
-  partial_tp_threshold: 0.015
-  partial_tp_ratio: 0.5
   layering:
     layer_count: 3
     layer_ratios:
@@ -187,3 +276,89 @@ trading:
     allow_same_bar_multiple_adds: false
     require_position_exists: true
     strict_ratio_sum_check: false
+adaptive_regime:
+  enabled: true
+  mode: guarded_execute
+  detector:
+    version: regime_v1_m0
+    min_confidence: 0.5
+    min_stability_score: 0.0
+    cooloff_bars_after_switch: 0
+  defaults:
+    policy_version: adaptive_policy_v1_m4_testnet_live
+  guarded_execute:
+    validator_snapshot_enabled: true
+    validator_hints_enabled: true
+    validator_enforcement_enabled: true
+    validator_enforcement_categories:
+    - thresholds
+    - market_guards
+    - regime_guards
+    risk_hints_enabled: true
+    risk_enforcement_enabled: true
+    risk_enforcement_fields:
+    - total_margin_cap_ratio
+    - total_margin_soft_cap_ratio
+    - symbol_margin_cap_ratio
+    - base_entry_margin_ratio
+    - max_entry_margin_ratio
+    - leverage_cap
+    execution_profile_hints_enabled: true
+    execution_profile_enforcement_enabled: true
+    layering_profile_hints_enabled: true
+    layering_profile_enforcement_enabled: true
+    layering_plan_shape_enforcement_enabled: true
+    layering_plan_shape_rollout_symbols:
+    - BTC/USDT
+    layering_plan_shape_rollout_fraction: 1.0
+    layering_plan_shape_require_guardrails_live: true
+    layering_plan_shape_fail_closed: true
+    layering_plan_shape_force_baseline_on_invalid: true
+    exit_profile_hints_enabled: false
+    exit_profile_enforcement_enabled: false
+    enforce_conservative_only: true
+    rollout_symbols:
+    - BTC/USDT
+    conservative_only: true
+  regimes:
+    high_vol:
+      execution_overrides:
+        layer_max_total_ratio: 0.12
+        max_layers_per_signal: 1
+        min_add_interval_seconds: 900
+        profit_only_add: true
+        allow_same_bar_multiple_adds: false
+        layer_ratios:
+        - 0.05
+        - 0.04
+        - 0.03
+      validation_overrides:
+        min_strength: 32
+      risk_overrides:
+        total_margin_cap_ratio: 0.22
+        total_margin_soft_cap_ratio: 0.18
+        symbol_margin_cap_ratio: 0.08
+        base_entry_margin_ratio: 0.05
+        max_entry_margin_ratio: 0.06
+        leverage_cap: 2
+    risk_anomaly:
+      validation_overrides:
+        min_strength: 40
+        block_high_volatility: true
+      risk_overrides:
+        total_margin_cap_ratio: 0.12
+        total_margin_soft_cap_ratio: 0.1
+        symbol_margin_cap_ratio: 0.04
+        base_entry_margin_ratio: 0.03
+        max_entry_margin_ratio: 0.04
+        leverage_cap: 1
+      execution_overrides:
+        layer_max_total_ratio: 0.06
+        max_layers_per_signal: 1
+        min_add_interval_seconds: 1800
+        profit_only_add: true
+        allow_same_bar_multiple_adds: false
+        layer_ratios:
+        - 0.03
+        - 0.02
+        - 0.01

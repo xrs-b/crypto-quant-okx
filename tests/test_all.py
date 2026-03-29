@@ -6986,6 +6986,22 @@ class TestApprovalPersistence(unittest.TestCase):
         self.assertEqual(payload['transition_journal']['latest']['workflow_transition'], 'pending->ready')
         self.assertEqual(payload['transition_journal']['recent_transitions'][0]['trigger'], 'state_transition')
         self.assertTrue(payload['next_actions'])
+        # follow_up_policy_gate integration
+        self.assertIn('follow_up_policy_gate_summary', payload['summary'])
+        gate_sum = payload['summary']['follow_up_policy_gate_summary']
+        self.assertEqual(gate_sum['item_count'], 2)
+        self.assertIn(gate_sum['dominant_decision'], {'review', 'observe', 'retry', 'rollback', 'escalate'})
+        self.assertIn('headline', gate_sum)
+        self.assertIn('dominant_action', gate_sum)
+        self.assertIn('dominant_route', gate_sum)
+        # each attention item has follow_up_policy_gate attached
+        for item in payload['attention'].get('manual_approval', []) + payload['attention'].get('ready', []):
+            self.assertIn('follow_up_policy_gate', item, f"item {item.get('item_id')} missing follow_up_policy_gate")
+            self.assertEqual(item['follow_up_policy_gate']['schema_version'], 'm5_follow_up_policy_gate_v1')
+            self.assertIn('decision', item['follow_up_policy_gate'])
+        # operator_digest headline exposes follow_up_decision
+        self.assertIn('follow_up_decision', payload['headline'])
+        self.assertIn('follow_up_action', payload['headline'])
 
     def test_build_workflow_operator_digest_surfaces_validation_gate_freeze(self):
         payload = build_workflow_operator_digest({
@@ -7469,6 +7485,17 @@ class TestApprovalPersistence(unittest.TestCase):
         self.assertIn('auto_promotion_candidate_queue', payload['lines']['rollout'])
         self.assertEqual(payload['transition_journal']['latest']['workflow_transition'], 'execution_failed->blocked')
         self.assertEqual(payload['upstreams']['workflow_recovery_view']['summary']['manual_recovery_count'], 1)
+        # follow_up_policy_gate_summary flows through unified_overview
+        self.assertIn('follow_up_policy_gate_summary', payload)
+        gate_sum = payload['follow_up_policy_gate_summary']
+        self.assertEqual(gate_sum['item_count'], 3)
+        self.assertIn('dominant_decision', gate_sum)
+        self.assertIn('dominant_action', gate_sum)
+        self.assertIn('dominant_route', gate_sum)
+        self.assertIn('headline', gate_sum)
+        self.assertIn('summary', gate_sum)
+        self.assertIn('follow_up_policy_gate_summary', payload['summary'])
+        self.assertEqual(payload['summary']['follow_up_policy_gate_summary']['item_count'], 3)
 
     def test_build_production_rollout_readiness_surfaces_fixed_gate_and_runbook_actions(self):
         payload = build_production_rollout_readiness({
@@ -8669,6 +8696,14 @@ class TestApprovalPersistence(unittest.TestCase):
         self.assertTrue(any(row['kind'] == 'validation_gate' and row['severity'] == 'critical' for row in payload['alerts']))
         self.assertGreaterEqual(payload['summary']['severity_counts']['critical'], 1)
         self.assertIn('manual_approval', payload['summary']['kind_counts'])
+        # follow_up_policy_gate flows through alert_digest via operator_digest upstream
+        self.assertIn('follow_up_policy_gate_summary', payload['summary'])
+        gate_sum = payload['summary']['follow_up_policy_gate_summary']
+        self.assertIn('item_count', gate_sum)
+        self.assertIn('dominant_decision', gate_sum)
+        self.assertIn('headline', gate_sum)
+        self.assertIn('follow_up_decision', payload['headline'])
+        self.assertIn('follow_up_action', payload['headline'])
 
     def test_state_machine_semantics_exposes_execution_timeline_and_recovery_policy(self):
         semantics = _build_state_machine_semantics(

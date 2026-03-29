@@ -5,7 +5,7 @@ import hashlib
 from typing import Any, Dict, List, Optional
 
 from core.regime import build_regime_snapshot, normalize_regime_snapshot
-from core.risk_budget import DEFAULT_RISK_BUDGET, get_risk_budget_config
+from core.risk_budget import DEFAULT_RISK_BUDGET, get_risk_budget_config, derive_quality_bucket
 
 
 ADAPTIVE_POLICY_VERSION = "adaptive_policy_v1_m1"
@@ -1087,6 +1087,8 @@ def build_risk_effective_snapshot(config_helper: Any, symbol: Optional[str], *, 
         'enforced_fields': enforced_fields,
         'hint_codes': hint_codes,
         'field_decisions': field_decisions,
+        'quality_scaling_enabled': baseline.get('quality_scaling_enabled', False),
+        'quality_bucket': derive_quality_bucket(signal),
     }
 
 

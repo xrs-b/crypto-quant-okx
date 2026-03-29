@@ -7431,8 +7431,35 @@ def execute_recovery_queue_layer(payload: Dict[str, Any], db: Any, *, config: An
         return payload
 
     dry_run = result['mode'] == 'dry_run'
+    now_dt = None
+    if now:
+        try:
+            now_dt = datetime.fromisoformat(str(now).replace('Z', '+00:00'))
+        except Exception:
+            now_dt = None
+
+    eligible_queue_items = []
+    for item in queue_items:
+        bucket = str(item.get('queue_bucket') or 'observe')
+        orchestration = dict(item.get('recovery_orchestration') or {})
+        retry_schedule = dict(orchestration.get('retry_schedule') or {})
+        should_retry_at = retry_schedule.get('should_retry_at')
+        retry_due = True
+        if bucket == 'retry_queue' and should_retry_at and now_dt is not None:
+            try:
+                retry_due = datetime.fromisoformat(str(should_retry_at).replace('Z', '+00:00')) <= now_dt
+            except Exception:
+                retry_due = True
+        # Keep not-due retry items out of fairness selection so lane caps only apply to
+        # mutations that are actually executable in this round.
+        if bucket == 'retry_queue' and not retry_due:
+            result['items'].append({'item_id': item.get('item_id'), 'approval_id': item.get('approval_id') or item.get('item_id'), 'queue_bucket': bucket, 'action': 'skipped', 'reason': 'retry_not_due', 'should_retry_at': should_retry_at, 'reentered_executor': False})
+            result['skipped_count'] += 1
+            continue
+        eligible_queue_items.append(item)
+
     follow_up_plan = _plan_follow_up_round(
-        queue_items,
+        eligible_queue_items,
         queue_key='queue_bucket',
         queue_order=result['budget'].get('queue_order') or ['rollback_candidates', 'retry_queue', 'manual_recovery'],
         budget_limit=int(result['budget'].get('max_mutations_per_round') or 0),
@@ -7445,14 +7472,8 @@ def execute_recovery_queue_layer(payload: Dict[str, Any], db: Any, *, config: An
     workflow_lookup = {row.get('item_id'): row for row in ((payload.get('workflow_state') or {}).get('item_states') or []) if row.get('item_id')}
     executed_rows = []
     retry_executor_candidates = []
-    now_dt = None
-    if now:
-        try:
-            now_dt = datetime.fromisoformat(str(now).replace('Z', '+00:00'))
-        except Exception:
-            now_dt = None
 
-    for item in queue_items:
+    for item in eligible_queue_items:
         item_id = item.get('item_id')
         approval_id = item.get('approval_id') or item_id
         if not approval_id:

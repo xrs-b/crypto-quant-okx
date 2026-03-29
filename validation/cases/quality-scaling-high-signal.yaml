@@ -1,0 +1,45 @@
+case_id: quality-scaling-high-signal
+case_type: shadow_signal
+mode: guarded_execute
+description: High-quality signal should get high_quality_multiplier on entry ratio
+expect:
+  risk_would_tighten: false
+  decision: allow
+
+input:
+  signal:
+    case_id: quality-scaling-high-signal
+    signal_type: buy
+    symbol: BTC/USDT
+    price: 50000
+    strength: 65
+    strategies_triggered:
+      - trend_follow
+      - momentum
+      - breakout
+    reasons:
+      - trend following momentum confirmed
+      - breakout above resistance
+    market_context:
+      regime: trending_up
+      regime_confidence: 0.85
+      volatility: medium
+      trend: bullish
+    adaptive_policy_snapshot: {}
+
+baseline_config_overrides:
+  trading:
+    base_entry_margin_ratio: 0.08
+    quality_scaling_enabled: false
+    high_quality_multiplier: 1.15
+    low_quality_multiplier: 0.75
+
+config_overrides:
+  adaptive_regime:
+    enabled: true
+    mode: guarded_execute
+  trading:
+    base_entry_margin_ratio: 0.08
+    quality_scaling_enabled: true
+    high_quality_multiplier: 1.15
+    low_quality_multiplier: 0.75

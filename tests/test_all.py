@@ -409,6 +409,33 @@ class TestConfig(unittest.TestCase):
 
 
 class TestAdaptiveRegimeM0(unittest.TestCase):
+    def setUp(self):
+        # Disable local config override to ensure test isolation
+        import os
+        import shutil
+        from pathlib import Path
+        self._old_enable = os.environ.pop('CRYPTO_QUANT_OKX_ENABLE_HOME_LOCAL', None)
+        self._old_path = os.environ.pop('CRYPTO_QUANT_OKX_HOME_LOCAL_CONFIG', None)
+        
+        # Also temporarily move local config to avoid loading it
+        self._local_config_path = Path('config/config.local.yaml')
+        self._backup_path = Path('config/config.local.yaml.test_backup')
+        if self._local_config_path.exists():
+            shutil.move(str(self._local_config_path), str(self._backup_path))
+    
+    def tearDown(self):
+        import os
+        import shutil
+        from pathlib import Path
+        # Restore local config
+        if self._backup_path.exists():
+            shutil.move(str(self._backup_path), str(self._local_config_path))
+        
+        if self._old_enable is not None:
+            os.environ['CRYPTO_QUANT_OKX_ENABLE_HOME_LOCAL'] = self._old_enable
+        if self._old_path is not None:
+            os.environ['CRYPTO_QUANT_OKX_HOME_LOCAL_CONFIG'] = self._old_path
+    
     def test_regime_snapshot_schema_helper_keeps_legacy_fields(self):
         snapshot = normalize_regime_snapshot({
             'regime': 'trend',
@@ -3689,6 +3716,46 @@ class TestTradingExecutor(unittest.TestCase):
 
 
 class TestRiskBudgetSizing(unittest.TestCase):
+    def setUp(self):
+        # Disable local config override to ensure test isolation
+        import os
+        self._old_enable = os.environ.pop('CRYPTO_QUANT_OKX_ENABLE_HOME_LOCAL', None)
+        self._old_path = os.environ.pop('CRYPTO_QUANT_OKX_HOME_LOCAL_CONFIG', None)
+        
+        # Also temporarily move local config to avoid loading it
+        import shutil
+        from pathlib import Path
+        self._local_config_path = Path('config/config.local.yaml')
+        self._backup_path = Path('config/config.local.yaml.test_backup')
+        if self._local_config_path.exists():
+            shutil.move(str(self._local_config_path), str(self._backup_path))
+        
+        self.config = Config()
+
+    def _make_signal(self, strength=50, strategies=None):
+        from signals import Signal
+        return Signal(
+            symbol='BTC/USDT',
+            signal_type='buy',
+            price=50000,
+            strength=strength,
+            reasons=[],
+            strategies_triggered=strategies or [],
+        )
+
+    def tearDown(self):
+        import os
+        # Restore local config
+        import shutil
+        from pathlib import Path
+        if self._backup_path.exists():
+            shutil.move(str(self._backup_path), str(self._local_config_path))
+        
+        if self._old_enable is not None:
+            os.environ['CRYPTO_QUANT_OKX_ENABLE_HOME_LOCAL'] = self._old_enable
+        if self._old_path is not None:
+            os.environ['CRYPTO_QUANT_OKX_HOME_LOCAL_CONFIG'] = self._old_path
+    
     def test_compute_entry_plan_respects_soft_cap_and_min_floor(self):
         cfg = Config()
         risk_budget = get_risk_budget_config(cfg)
@@ -3715,6 +3782,190 @@ class TestRiskBudgetSizing(unittest.TestCase):
         )
         self.assertTrue(plan['blocked'])
         self.assertIn('最小开仓门槛', plan['block_reason'])
+
+
+    def test_derive_quality_bucket_high_strength(self):
+        """Signal with strength >= 60 returns high bucket."""
+        from signals import Signal
+        from core.risk_budget import derive_quality_bucket
+        sig = Signal(symbol='BTC/USDT', signal_type='buy', price=100, strength=65, reasons=[], strategies_triggered=[])
+        self.assertEqual(derive_quality_bucket(sig), 'high')
+
+    def test_derive_quality_bucket_high_strategies(self):
+        """Signal with >= 3 strategies returns high bucket regardless of strength."""
+        from signals import Signal
+        from core.risk_budget import derive_quality_bucket
+        sig = Signal(symbol='BTC/USDT', signal_type='buy', price=100, strength=50, reasons=[], strategies_triggered=['a', 'b', 'c'])
+        self.assertEqual(derive_quality_bucket(sig), 'high')
+
+    def test_derive_quality_bucket_low_strength_one_strategy(self):
+        """Signal with strength <= 30 and <= 1 strategies returns low bucket."""
+        from signals import Signal
+        from core.risk_budget import derive_quality_bucket
+        sig = Signal(symbol='BTC/USDT', signal_type='buy', price=100, strength=25, reasons=[], strategies_triggered=['momentum'])
+        self.assertEqual(derive_quality_bucket(sig), 'low')
+
+    def test_derive_quality_bucket_normal_middle(self):
+        """Signal with strength between 30-60 and 2 strategies returns normal."""
+        from signals import Signal
+        from core.risk_budget import derive_quality_bucket
+        sig = Signal(symbol='BTC/USDT', signal_type='buy', price=100, strength=45, reasons=[], strategies_triggered=['a', 'b'])
+        self.assertEqual(derive_quality_bucket(sig), 'normal')
+
+    def test_derive_quality_bucket_none_signal(self):
+        """No signal object returns normal bucket."""
+        from core.risk_budget import derive_quality_bucket
+        self.assertEqual(derive_quality_bucket(None), 'normal')
+
+    def test_compute_entry_plan_quality_scaling_high_boosts_ratio(self):
+        """High quality signal gets high_quality_multiplier applied to entry ratio."""
+        plan = compute_entry_plan(
+            total_balance=10000,
+            free_balance=8000,
+            current_total_margin=0,
+            current_symbol_margin=0,
+            risk_budget={
+                'base_entry_margin_ratio': 0.08,
+                'min_entry_margin_ratio': 0.04,
+                'max_entry_margin_ratio': 0.10,
+                'total_margin_cap_ratio': 0.30,
+                'symbol_margin_cap_ratio': 0.12,
+                'total_margin_soft_cap_ratio': 0.25,
+                'quality_scaling_enabled': True,
+                'high_quality_multiplier': 1.15,
+                'low_quality_multiplier': 0.75,
+            },
+            signal=self._make_signal(strength=65, strategies=['a', 'b', 'c']),
+        )
+        self.assertEqual(plan['quality_bucket'], 'high')
+        self.assertAlmostEqual(plan['quality_multiplier'], 1.15, places=4)
+        self.assertFalse(plan['blocked'])
+        self.assertFalse(plan['soft_cap_reached'])
+        # target ratio: 0.08 * 1.15 = 0.092
+        self.assertAlmostEqual(plan['target_entry_margin_ratio'], 0.092, places=3)
+
+    def test_compute_entry_plan_quality_scaling_low_reduces_ratio(self):
+        """Low quality signal gets low_quality_multiplier applied to entry ratio."""
+        plan = compute_entry_plan(
+            total_balance=10000,
+            free_balance=8000,
+            current_total_margin=0,
+            current_symbol_margin=0,
+            risk_budget={
+                'base_entry_margin_ratio': 0.08,
+                'min_entry_margin_ratio': 0.04,
+                'max_entry_margin_ratio': 0.10,
+                'total_margin_cap_ratio': 0.30,
+                'symbol_margin_cap_ratio': 0.12,
+                'total_margin_soft_cap_ratio': 0.25,
+                'quality_scaling_enabled': True,
+                'high_quality_multiplier': 1.15,
+                'low_quality_multiplier': 0.75,
+            },
+            signal=self._make_signal(strength=25, strategies=['a']),
+        )
+        self.assertEqual(plan['quality_bucket'], 'low')
+        self.assertAlmostEqual(plan['quality_multiplier'], 0.75, places=4)
+        self.assertFalse(plan['blocked'])
+        # target ratio: 0.08 * 0.75 = 0.06
+        self.assertAlmostEqual(plan['target_entry_margin_ratio'], 0.06, places=3)
+
+    def test_compute_entry_plan_quality_scaling_disabled_uses_base(self):
+        """Quality scaling disabled ignores multiplier, uses base ratio."""
+        plan = compute_entry_plan(
+            total_balance=10000,
+            free_balance=8000,
+            current_total_margin=0,
+            current_symbol_margin=0,
+            risk_budget={
+                'base_entry_margin_ratio': 0.08,
+                'min_entry_margin_ratio': 0.04,
+                'max_entry_margin_ratio': 0.10,
+                'total_margin_cap_ratio': 0.30,
+                'symbol_margin_cap_ratio': 0.12,
+                'total_margin_soft_cap_ratio': 0.25,
+                'quality_scaling_enabled': False,
+                'high_quality_multiplier': 1.15,
+                'low_quality_multiplier': 0.75,
+            },
+            signal=self._make_signal(strength=65, strategies=['a', 'b', 'c']),
+        )
+        self.assertEqual(plan['quality_bucket'], 'high')
+        self.assertAlmostEqual(plan['quality_multiplier'], 1.0, places=4)
+        self.assertAlmostEqual(plan['target_entry_margin_ratio'], 0.08, places=3)
+
+    def test_compute_entry_plan_quality_scaling_high_capped_by_max(self):
+        """High quality multiplier respecting max_entry_margin_ratio cap."""
+        plan = compute_entry_plan(
+            total_balance=10000,
+            free_balance=8000,
+            current_total_margin=0,
+            current_symbol_margin=0,
+            risk_budget={
+                'base_entry_margin_ratio': 0.10,
+                'min_entry_margin_ratio': 0.04,
+                'max_entry_margin_ratio': 0.10,
+                'total_margin_cap_ratio': 0.30,
+                'symbol_margin_cap_ratio': 0.12,
+                'total_margin_soft_cap_ratio': 0.25,
+                'quality_scaling_enabled': True,
+                'high_quality_multiplier': 1.15,
+                'low_quality_multiplier': 0.75,
+            },
+            signal=self._make_signal(strength=65, strategies=['a', 'b', 'c']),
+        )
+        self.assertEqual(plan['quality_bucket'], 'high')
+        # 0.10 * 1.15 = 0.115, but max is 0.10, so capped to 0.10
+        self.assertAlmostEqual(plan['target_entry_margin_ratio'], 0.10, places=3)
+
+    def test_compute_entry_plan_quality_scaling_soft_cap_still_applies(self):
+        """Soft cap override still applies after quality multiplier."""
+        plan = compute_entry_plan(
+            total_balance=10000,
+            free_balance=8000,
+            current_total_margin=2600,
+            current_symbol_margin=0,
+            risk_budget={
+                'base_entry_margin_ratio': 0.08,
+                'min_entry_margin_ratio': 0.04,
+                'max_entry_margin_ratio': 0.10,
+                'total_margin_cap_ratio': 0.30,
+                'symbol_margin_cap_ratio': 0.12,
+                'total_margin_soft_cap_ratio': 0.25,
+                'quality_scaling_enabled': True,
+                'high_quality_multiplier': 1.15,
+                'low_quality_multiplier': 0.75,
+            },
+            signal=self._make_signal(strength=65, strategies=['a', 'b', 'c']),
+        )
+        # 0.08 * 1.15 = 0.092, but soft cap reached (2600/10000=0.26 > 0.25)
+        # should be capped to min 0.04
+        self.assertTrue(plan['soft_cap_reached'])
+        self.assertAlmostEqual(plan['target_entry_margin_ratio'], 0.04, places=3)
+
+    def test_compute_entry_plan_normal_quality_no_multiplier(self):
+        """Normal quality signal gets multiplier 1.0."""
+        plan = compute_entry_plan(
+            total_balance=10000,
+            free_balance=8000,
+            current_total_margin=0,
+            current_symbol_margin=0,
+            risk_budget={
+                'base_entry_margin_ratio': 0.08,
+                'min_entry_margin_ratio': 0.04,
+                'max_entry_margin_ratio': 0.10,
+                'total_margin_cap_ratio': 0.30,
+                'symbol_margin_cap_ratio': 0.12,
+                'total_margin_soft_cap_ratio': 0.25,
+                'quality_scaling_enabled': True,
+                'high_quality_multiplier': 1.15,
+                'low_quality_multiplier': 0.75,
+            },
+            signal=self._make_signal(strength=45, strategies=['a', 'b']),
+        )
+        self.assertEqual(plan['quality_bucket'], 'normal')
+        self.assertAlmostEqual(plan['quality_multiplier'], 1.0, places=4)
+        self.assertAlmostEqual(plan['target_entry_margin_ratio'], 0.08, places=3)
 
 
     def test_build_risk_effective_snapshot_defaults_to_disabled_hints(self):
@@ -3827,12 +4078,35 @@ class TestRiskManager(unittest.TestCase):
     """风险管理器测试"""
     
     def setUp(self):
+        import os
+        import shutil
+        from pathlib import Path
+        self._old_enable = os.environ.pop('CRYPTO_QUANT_OKX_ENABLE_HOME_LOCAL', None)
+        self._old_path = os.environ.pop('CRYPTO_QUANT_OKX_HOME_LOCAL_CONFIG', None)
+        
+        # Temporarily move local config
+        self._local_config_path = Path('config/config.local.yaml')
+        self._backup_path = Path('config/config.local.yaml.test_backup')
+        if self._local_config_path.exists():
+            shutil.move(str(self._local_config_path), str(self._backup_path))
+        
         self.config = Config()
         self.db = Database('data/test_risk.db')
         self.risk_mgr = RiskManager(self.config, self.db)
     
     def tearDown(self):
         import os
+        import shutil
+        from pathlib import Path
+        # Restore local config
+        if self._backup_path.exists():
+            shutil.move(str(self._backup_path), str(self._local_config_path))
+        
+        if self._old_enable is not None:
+            os.environ['CRYPTO_QUANT_OKX_ENABLE_HOME_LOCAL'] = self._old_enable
+        if self._old_path is not None:
+            os.environ['CRYPTO_QUANT_OKX_HOME_LOCAL_CONFIG'] = self._old_path
+        
         if os.path.exists('data/test_risk.db'):
             os.remove('data/test_risk.db')
     
@@ -3859,23 +4133,61 @@ class TestRiskManager(unittest.TestCase):
 
 class TestRiskManagerBudgetDetails(unittest.TestCase):
     def setUp(self):
+        import os
+        import shutil
+        from pathlib import Path
+        self._old_enable = os.environ.pop('CRYPTO_QUANT_OKX_ENABLE_HOME_LOCAL', None)
+        self._old_path = os.environ.pop('CRYPTO_QUANT_OKX_HOME_LOCAL_CONFIG', None)
+        
+        # Temporarily move local config
+        self._local_config_path = Path('config/config.local.yaml')
+        self._backup_path = Path('config/config.local.yaml.test_backup')
+        if self._local_config_path.exists():
+            shutil.move(str(self._local_config_path), str(self._backup_path))
+        
         self.config = Config()
         self.db = Database('data/test_risk_budget_details.db')
         self.risk_mgr = RiskManager(self.config, self.db)
 
+    def _make_signal(self, **overrides):
+        from signals import Signal
+        defaults = {
+            'symbol': 'BTC/USDT',
+            'signal_type': 'buy',
+            'price': 50000,
+            'strength': 55,
+            'reasons': ['test signal'],
+            'strategies_triggered': ['trend_follow', 'momentum'],
+            'side': 'long',
+        }
+        defaults.update(overrides)
+        return Signal(**defaults)
+
     def tearDown(self):
+        import os
+        import shutil
+        from pathlib import Path
+        # Restore local config
+        if self._backup_path.exists():
+            shutil.move(str(self._backup_path), str(self._local_config_path))
+        
+        if self._old_enable is not None:
+            os.environ['CRYPTO_QUANT_OKX_ENABLE_HOME_LOCAL'] = self._old_enable
+        if self._old_path is not None:
+            os.environ['CRYPTO_QUANT_OKX_HOME_LOCAL_CONFIG'] = self._old_path
+        
         if os.path.exists('data/test_risk_budget_details.db'):
             os.remove('data/test_risk_budget_details.db')
 
     def test_can_open_position_returns_entry_plan(self):
-        can_open, reason, details = self.risk_mgr.can_open_position('BTC/USDT')
+        can_open, reason, details = self.risk_mgr.can_open_position('BTC/USDT', signal=self._make_signal())
         self.assertTrue(can_open)
         self.assertIn('entry_plan', details['exposure_limit'])
         self.assertIn('position_ratio', details['exposure_limit'])
 
 
     def test_can_open_position_step4_keeps_default_observe_only(self):
-        can_open, reason, details = self.risk_mgr.can_open_position('BTC/USDT', side='long')
+        can_open, reason, details = self.risk_mgr.can_open_position('BTC/USDT', side='long', signal=self._make_signal())
         self.assertTrue(can_open)
         self.assertEqual(details['adaptive_risk_snapshot']['effective_state'], 'disabled')
         self.assertEqual(details['exposure_limit']['entry_plan']['risk_budget']['base_entry_margin_ratio'], 0.1)
@@ -6627,6 +6939,7 @@ def run_tests():
     suite.addTests(loader.loadTestsFromTestCase(TestStrategies))
     suite.addTests(loader.loadTestsFromTestCase(TestTradingExecutor))
     suite.addTests(loader.loadTestsFromTestCase(TestRiskManager))
+    suite.addTests(loader.loadTestsFromTestCase(TestRiskBudgetSizing))
     suite.addTests(loader.loadTestsFromTestCase(TestMFEAnalyzer))
     suite.addTests(loader.loadTestsFromTestCase(TestRecommendationProvider))
     

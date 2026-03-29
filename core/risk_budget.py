@@ -130,6 +130,8 @@ def summarize_margin_usage(positions: List[Dict[str, Any]], symbol: str, mark_pr
 
 
 def derive_quality_bucket(signal: Any = None) -> str:
+    if signal is None:
+        return 'normal'
     strength = float(getattr(signal, 'strength', 0) or 0)
     strategies = len(getattr(signal, 'strategies_triggered', []) or [])
     if strength >= 60 or strategies >= 3:

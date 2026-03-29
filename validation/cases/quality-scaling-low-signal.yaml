@@ -1,0 +1,42 @@
+case_id: quality-scaling-low-signal
+case_type: shadow_signal
+mode: guarded_execute
+description: Low-quality signal should get low_quality_multiplier on entry ratio
+expect:
+  risk_would_tighten: false
+  decision: allow
+
+input:
+  signal:
+    case_id: quality-scaling-low-signal
+    signal_type: buy
+    symbol: BTC/USDT
+    price: 50000
+    strength: 25
+    strategies_triggered:
+      - momentum
+    reasons:
+      - weak momentum signal
+    market_context:
+      regime: ranging
+      regime_confidence: 0.5
+      volatility: low
+      trend: neutral
+    adaptive_policy_snapshot: {}
+
+baseline_config_overrides:
+  trading:
+    base_entry_margin_ratio: 0.08
+    quality_scaling_enabled: false
+    high_quality_multiplier: 1.15
+    low_quality_multiplier: 0.75
+
+config_overrides:
+  adaptive_regime:
+    enabled: true
+    mode: guarded_execute
+  trading:
+    base_entry_margin_ratio: 0.08
+    quality_scaling_enabled: true
+    high_quality_multiplier: 1.15
+    low_quality_multiplier: 0.75

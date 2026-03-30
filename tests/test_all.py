@@ -13754,6 +13754,55 @@ class TestUnifiedWorkbenchOverviewAPI(unittest.TestCase):
             dashboard_api_module.export_calibration_payload = original_export
 
 
+class TestTradingBotAdaptiveExecutionContext(unittest.TestCase):
+    def setUp(self):
+        self.db_path = 'data/test_bot_adaptive_execution_context.db'
+        if os.path.exists(self.db_path):
+            os.remove(self.db_path)
+        self.bot = TradingBot()
+        self.bot.db = Database(self.db_path)
+        self.bot.risk_mgr = RiskManager(self.bot.config, self.bot.db)
+
+    def tearDown(self):
+        if os.path.exists(self.db_path):
+            os.remove(self.db_path)
+
+    def test_build_execution_plan_context_preserves_adaptive_snapshots(self):
+        from signals import Signal
+        signal = Signal(symbol='BTC/USDT', signal_type='buy', price=50000, strength=80, reasons=['test'], strategies_triggered=['a', 'b', 'c'])
+        signal.regime_snapshot = {'name': 'high_vol', 'regime': 'high_vol'}
+        signal.adaptive_policy_snapshot = {
+            'mode': 'guarded_execute',
+            'execution_overrides': {'layer_max_total_ratio': 0.12},
+            'risk_overrides': {'base_entry_margin_ratio': 0.05},
+        }
+        row = {
+            'symbol': 'BTC/USDT',
+            'signal_id': 101,
+            'current_price': 50000,
+            'signal': signal,
+            'risk_details': {
+                'layer_eligibility': {'layer_plan': {'layer_no': 1, 'layer_ratio': 0.06}},
+                'exposure_limit': {'entry_plan': {'allowed_margin': 250, 'effective_entry_margin_ratio': 0.05}},
+                'adaptive_risk_snapshot': {'effective_state': 'effective', 'enforced_budget': {'base_entry_margin_ratio': 0.05}},
+                'observability': {
+                    'regime_snapshot': {'name': 'high_vol', 'regime': 'high_vol'},
+                    'adaptive_policy_snapshot': {'mode': 'guarded_execute', 'execution_overrides': {'layer_max_total_ratio': 0.12}},
+                },
+            },
+        }
+
+        plan = self.bot._build_execution_plan_context(row)
+        self.assertEqual(plan['signal_id'], 101)
+        self.assertEqual(plan['root_signal_id'], 101)
+        self.assertEqual(plan['regime_snapshot']['name'], 'high_vol')
+        self.assertEqual(plan['adaptive_policy_snapshot']['mode'], 'guarded_execute')
+        self.assertEqual(plan['adaptive_risk_snapshot']['enforced_budget']['base_entry_margin_ratio'], 0.05)
+        self.assertEqual(plan['entry_plan']['allowed_margin'], 250)
+        self.assertEqual(plan['planned_margin'], 250)
+        self.assertEqual(plan['layer_ratio'], 0.05)
+
+
 class TestQualityScalingPipeline(unittest.TestCase):
     """Integration tests for end-to-end quality scaling pipeline."""
 

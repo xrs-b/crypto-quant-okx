@@ -1460,6 +1460,49 @@ class TradingBot:
             'items': items,
             'skip_contracts': skip_items,
         }
+
+    def _build_execution_plan_context(self, row: dict) -> dict:
+        """把风控阶段算出的 adaptive/live context 原样带进 executor。"""
+        row = dict(row or {})
+        risk_details = dict(row.get('risk_details') or {})
+        signal = row.get('signal')
+
+        layer_plan = dict((risk_details.get('exposure_limit') or {}).get('layer_plan') or (risk_details.get('layer_eligibility') or {}).get('layer_plan') or {})
+        observability = dict(risk_details.get('observability') or {})
+        adaptive_risk_snapshot = dict(risk_details.get('adaptive_risk_snapshot') or observability.get('adaptive_risk_snapshot') or {})
+        entry_plan = dict((risk_details.get('exposure_limit') or {}).get('entry_plan') or layer_plan.get('entry_plan') or {})
+
+        regime_snapshot = dict(
+            layer_plan.get('regime_snapshot')
+            or observability.get('regime_snapshot')
+            or getattr(signal, 'regime_snapshot', {})
+            or getattr(signal, 'regime_info', {})
+            or {}
+        )
+        adaptive_policy_snapshot = dict(
+            layer_plan.get('adaptive_policy_snapshot')
+            or observability.get('adaptive_policy_snapshot')
+            or getattr(signal, 'adaptive_policy_snapshot', {})
+            or {}
+        )
+
+        plan_context = dict(layer_plan)
+        plan_context.update({
+            'current_price': row.get('current_price'),
+            'signal_id': row.get('signal_id'),
+            'root_signal_id': row.get('signal_id'),
+            'regime_snapshot': regime_snapshot,
+            'adaptive_policy_snapshot': adaptive_policy_snapshot,
+        })
+        if adaptive_risk_snapshot:
+            plan_context['adaptive_risk_snapshot'] = adaptive_risk_snapshot
+        if entry_plan:
+            plan_context['entry_plan'] = entry_plan
+            plan_context.setdefault('planned_margin', entry_plan.get('allowed_margin'))
+            plan_context.setdefault('layer_ratio', entry_plan.get('effective_entry_margin_ratio') or plan_context.get('layer_ratio'))
+        if observability:
+            plan_context['observability'] = observability
+        return plan_context
     
     def run(self):
         """运行交易循环"""
@@ -1693,10 +1736,11 @@ class TradingBot:
             signal_id = row.get('signal_id')
             side = row.get('side')
             risk_details = row.get('risk_details') or {}
+            execution_plan_context = self._build_execution_plan_context(row)
 
             trade_id = self.executor.open_position(
                 symbol, side, current_price, signal_id,
-                plan_context=(risk_details or {}).get('exposure_limit', {}).get('layer_plan') or (risk_details or {}).get('layer_eligibility', {}).get('layer_plan'),
+                plan_context=execution_plan_context,
                 root_signal_id=signal_id
             )
             if trade_id:

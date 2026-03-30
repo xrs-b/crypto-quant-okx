@@ -83,6 +83,11 @@ class Database:
             policy_snapshot=policy_snapshot,
             fallback_summary=(outcome.get('observe_only') or {}).get('summary') or (observability.get('observe_only') or {}).get('summary'),
         )
+        final_execution_permit = self._normalize_final_execution_permit(plan_context.get('final_execution_permit'))
+        data['final_execution_permit'] = final_execution_permit
+        data['final_execution_reason_code'] = final_execution_permit.get('reason_code')
+        data['final_execution_allowed'] = bool(final_execution_permit.get('allowed', False)) if final_execution_permit else None
+        data['final_execution_guardrail_evidence'] = self._safe_json_dict(final_execution_permit.get('guardrail_evidence')) if final_execution_permit else {}
         data.update({
             'regime_tag': outcome.get('regime_tag') or regime_snapshot.get('name') or regime_snapshot.get('regime') or policy_snapshot.get('regime_name'),
             'policy_tag': outcome.get('policy_tag') or policy_snapshot.get('policy_version'),
@@ -2833,6 +2838,38 @@ class Database:
                 pass
         return self._recalculate_trade_metrics(row)
 
+    def _normalize_final_execution_permit(self, permit: Any) -> Dict[str, Any]:
+        payload = self._safe_json_dict(permit)
+        if not payload:
+            return {}
+        guardrail = self._safe_json_dict(payload.get('guardrail_evidence'))
+        reason_codes = []
+        for code in [payload.get('reason_code')]:
+            if code not in (None, ''):
+                reason_codes.append(str(code))
+        for code in (self._safe_json_dict(guardrail.get('close_outcome_guard')).get('reason_codes') or []):
+            code = str(code or '').strip()
+            if code and code not in reason_codes:
+                reason_codes.append(code)
+        payload['allowed'] = bool(payload.get('allowed', False))
+        payload['status'] = payload.get('status') or ('permit' if payload['allowed'] else 'deny')
+        payload['reason_code'] = str(payload.get('reason_code') or ('FINAL_EXECUTION_PERMIT_GRANTED' if payload['allowed'] else 'FINAL_EXECUTION_PERMIT_UNKNOWN'))
+        payload['reason_codes'] = reason_codes
+        payload['guardrail_evidence'] = guardrail
+        payload['diagnose_replay'] = {
+            'schema_version': 'final_execution_permit_replay_v1',
+            'status': payload['status'],
+            'allowed': payload['allowed'],
+            'reason_code': payload['reason_code'],
+            'reason_codes': reason_codes,
+            'exchange_mode': payload.get('exchange_mode'),
+            'action': payload.get('action'),
+            'selected_for_execution': bool(payload.get('selected_for_execution', False)),
+            'testnet_only': bool(payload.get('testnet_only', True)),
+            'guardrail_evidence': guardrail,
+        }
+        return payload
+
     def create_open_intent(self, *, symbol: str, side: str, signal_id: int = None, root_signal_id: int = None,
                            planned_margin: float = 0.0, leverage: int = 1, layer_no: int = None,
                            plan_context: Dict = None, notes: str = None, status: str = 'pending') -> int:
@@ -2890,6 +2927,10 @@ class Database:
         row = df.iloc[0].to_dict()
         if row.get('plan_context'):
             row['plan_context'] = json.loads(row['plan_context'])
+        permit = self._normalize_final_execution_permit((row.get('plan_context') or {}).get('final_execution_permit'))
+        row['final_execution_permit'] = permit
+        row['final_execution_reason_code'] = permit.get('reason_code') if permit else None
+        row['final_execution_allowed'] = bool(permit.get('allowed', False)) if permit else None
         return row
 
     def get_active_open_intents(self, symbol: str = None, side: str = None) -> List[Dict]:
@@ -2907,7 +2948,13 @@ class Database:
         conn.close()
         if not df.empty and 'plan_context' in df.columns:
             df['plan_context'] = df['plan_context'].apply(lambda x: json.loads(x) if x else {})
-        return df.to_dict('records')
+        rows = df.to_dict('records')
+        for row in rows:
+            permit = self._normalize_final_execution_permit((row.get('plan_context') or {}).get('final_execution_permit'))
+            row['final_execution_permit'] = permit
+            row['final_execution_reason_code'] = permit.get('reason_code') if permit else None
+            row['final_execution_allowed'] = bool(permit.get('allowed', False)) if permit else None
+        return rows
 
     def get_direction_lock(self, symbol: str, side: str) -> Optional[Dict]:
         conn = self._get_connection()

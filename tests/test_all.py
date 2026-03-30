@@ -3353,6 +3353,36 @@ class TestTradingExecutor(unittest.TestCase):
         self.assertEqual(self.executor.exchange.closed_orders[-1]['posSide'], 'long')
 
 
+    def test_database_surfaces_final_execution_permit_for_open_intents_and_trades(self):
+        permit = {
+            'allowed': True,
+            'status': 'permit',
+            'reason_code': 'FINAL_EXECUTION_PERMIT_GRANTED',
+            'reason': 'selected_candidate_ready_for_testnet_execution',
+            'exchange_mode': 'testnet',
+            'testnet_only': True,
+            'selected_for_execution': True,
+            'guardrail_evidence': {'close_outcome_guard': {'reason_codes': ['close_outcome_observe_only']}},
+        }
+        intent_id = self.db.create_open_intent(
+            symbol='BTC/USDT', side='long', signal_id=9001, planned_margin=50, leverage=5,
+            plan_context={'final_execution_permit': permit}
+        )
+        intent = self.db.get_open_intent_by_signal_id(9001)
+        self.assertEqual(intent['final_execution_reason_code'], 'FINAL_EXECUTION_PERMIT_GRANTED')
+        self.assertTrue(intent['final_execution_allowed'])
+        self.assertIn('close_outcome_observe_only', intent['final_execution_permit']['reason_codes'])
+        trade_id = self.db.record_trade(
+            symbol='BTC/USDT', side='long', entry_price=50000, quantity=1, leverage=5, signal_id=9001,
+            plan_context={'final_execution_permit': permit}
+        )
+        latest = self.db.get_latest_open_trade('BTC/USDT', 'long')
+        self.assertEqual(latest['id'], trade_id)
+        self.assertEqual(latest['final_execution_reason_code'], 'FINAL_EXECUTION_PERMIT_GRANTED')
+        self.assertTrue(latest['final_execution_allowed'])
+        self.assertEqual(latest['final_execution_permit']['diagnose_replay']['schema_version'], 'final_execution_permit_replay_v1')
+        self.db.delete_open_intent(intent_id)
+
     def test_open_position_short_circuits_when_final_execution_permit_denied(self):
         self.executor.exchange = FakeExecutorExchange()
         trade_id = self.executor.open_position(
@@ -4817,6 +4847,35 @@ class TestOpenCandidateRanking(unittest.TestCase):
         self.assertEqual(permit['reason_code'], 'SCOPED_WINDOW_FREEZE')
         self.assertTrue(permit['guardrail_evidence']['close_outcome_guard']['freeze_auto_promotion'])
         self.assertEqual(permit['guardrail_evidence']['close_outcome_decision_contract']['operator_action_policy']['action'], 'freeze_followup')
+
+    def test_build_final_execution_permit_contract_emits_reason_codes_and_replay_digest(self):
+        signal = self._make_signal(symbol='BTC/USDT')
+        row = self.bot._build_candidate_contract(
+            symbol='BTC/USDT',
+            current_price=50000,
+            signal=signal,
+            signal_id=703,
+            passed=True,
+            reason=None,
+            details={},
+            entry_decision=type('EntryDecisionStub', (), {'decision': 'allow', 'score': 80, 'to_dict': lambda self: {'decision': 'allow', 'score': 80}})(),
+            can_open=False,
+            risk_reason='平仓反馈风控阻止开仓(rollback)',
+            risk_details={
+                'close_outcome_guard': {
+                    'passed': False,
+                    'enabled': True,
+                    'mode': 'rollback',
+                    'reason_codes': ['close_outcome_policy_freeze_candidate'],
+                    'feedback_loop': {'decision_contract': {'operator_action_policy': {'action': 'freeze_followup'}}},
+                }
+            },
+        )
+        permit = self.bot._build_final_execution_permit_contract(row)
+        self.assertEqual(permit['reason_codes'][0], permit['reason_code'])
+        self.assertIn('close_outcome_policy_freeze_candidate', permit['reason_codes'])
+        self.assertEqual(permit['diagnose_replay']['schema_version'], 'final_execution_permit_replay_v1')
+        self.assertEqual(permit['diagnose_replay']['reason_code'], permit['reason_code'])
 
     def test_build_execution_plan_context_embeds_final_execution_permit(self):
         signal = self._make_signal(symbol='ETH/USDT', strength=75)

@@ -1559,6 +1559,32 @@ class TradingBot:
                 },
             },
         }
+        reason_codes = []
+        for code in [contract.get('reason_code')]:
+            if code not in (None, ''):
+                reason_codes.append(str(code))
+        for code in guard_reason_codes:
+            code = str(code or '').strip()
+            if code and code not in reason_codes:
+                reason_codes.append(code)
+        contract['reason_codes'] = reason_codes
+        contract['diagnose_replay'] = {
+            'schema_version': 'final_execution_permit_replay_v1',
+            'symbol': contract.get('symbol'),
+            'signal_id': contract.get('signal_id'),
+            'side': contract.get('side'),
+            'status': contract.get('status'),
+            'allowed': contract.get('allowed'),
+            'reason_code': contract.get('reason_code'),
+            'reason_codes': reason_codes,
+            'reason': contract.get('reason'),
+            'action': contract.get('action'),
+            'exchange_mode': contract.get('exchange_mode'),
+            'testnet_only': contract.get('testnet_only'),
+            'selected_for_execution': contract.get('selected_for_execution'),
+            'scope_mode': contract.get('scope_mode'),
+            'guardrail_evidence': dict(contract.get('guardrail_evidence') or {}),
+        }
         return contract
 
     def _build_execution_plan_context(self, row: dict) -> dict:
@@ -1898,6 +1924,13 @@ class TradingBot:
             'deny_count': sum(1 for item in final_execution_permits if not item.get('allowed')),
             'reason_code_counts': dict(permit_reason_counts),
             'items': final_execution_permits,
+        }
+        summary['final_execution_permit_replay'] = {
+            'schema_version': 'final_execution_permit_replay_collection_v1',
+            'count': len(final_execution_permits),
+            'reason_code_counts': dict(permit_reason_counts),
+            'items': [dict((item.get('diagnose_replay') or {})) for item in final_execution_permits],
+            'denied_items': [dict((item.get('diagnose_replay') or {})) for item in final_execution_permits if not item.get('allowed')],
         }
 
         # 检查现有持仓的止盈止损

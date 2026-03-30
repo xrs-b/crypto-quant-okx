@@ -246,34 +246,90 @@ class NotificationManager:
         breakdown = entry_decision.get('breakdown') if isinstance(entry_decision.get('breakdown'), dict) else {}
         policy_snapshot = details.get('adaptive_policy_snapshot') if isinstance(details.get('adaptive_policy_snapshot'), dict) else {}
         regime_snapshot = details.get('regime_snapshot') if isinstance(details.get('regime_snapshot'), dict) else {}
+        regime_info = details.get('regime_info') if isinstance(details.get('regime_info'), dict) else {}
+        market_context = details.get('market_context') if isinstance(details.get('market_context'), dict) else {}
+        observe_only = details.get('observe_only') if isinstance(details.get('observe_only'), dict) else {}
+
+        if not observe and observe_only:
+            observe = {
+                'phase': observe_only.get('phase'),
+                'state': observe_only.get('state'),
+                'summary': observe_only.get('summary'),
+                'tags': list(observe_only.get('tags') or []),
+                'notes': list(observe_only.get('notes') or []),
+            }
+        if not regime_snapshot:
+            regime_snapshot = market_context.get('regime_snapshot') if isinstance(market_context.get('regime_snapshot'), dict) else {}
+        if not policy_snapshot:
+            policy_snapshot = market_context.get('adaptive_policy_snapshot') if isinstance(market_context.get('adaptive_policy_snapshot'), dict) else {}
+        if not regime_snapshot and regime_info:
+            regime_snapshot = regime_info
 
         if signal is not None:
+            signal_market_context = getattr(signal, 'market_context', None) or {}
             if not regime_snapshot:
-                regime_snapshot = getattr(signal, 'regime_snapshot', None) or getattr(signal, 'regime_info', None) or {}
+                regime_snapshot = (
+                    getattr(signal, 'regime_snapshot', None)
+                    or getattr(signal, 'regime_info', None)
+                    or (signal_market_context.get('regime_snapshot') if isinstance(signal_market_context, dict) else None)
+                    or {}
+                )
             if not policy_snapshot:
-                policy_snapshot = getattr(signal, 'adaptive_policy_snapshot', None) or {}
+                policy_snapshot = (
+                    getattr(signal, 'adaptive_policy_snapshot', None)
+                    or (signal_market_context.get('adaptive_policy_snapshot') if isinstance(signal_market_context, dict) else None)
+                    or {}
+                )
+            if not regime_info:
+                regime_info = getattr(signal, 'regime_info', None) or {}
+            if not market_context and isinstance(signal_market_context, dict):
+                market_context = signal_market_context
 
-        tags = list(observe.get('tags') or breakdown.get('observe_only_tags') or policy_snapshot.get('tags') or [])
+        tags = list(
+            observe.get('tags')
+            or breakdown.get('observe_only_tags')
+            or observe_only.get('tags')
+            or policy_snapshot.get('tags')
+            or []
+        )
         summary = (
             observe.get('summary')
             or breakdown.get('observe_only_summary')
+            or observe_only.get('summary')
             or policy_snapshot.get('summary')
             or '--'
         )
         phase = (
             observe.get('phase')
             or breakdown.get('observe_only_phase')
+            or observe_only.get('phase')
             or policy_snapshot.get('phase')
             or '--'
         )
         state = (
             observe.get('state')
             or breakdown.get('observe_only_state')
+            or observe_only.get('state')
             or policy_snapshot.get('state')
             or '--'
         )
-        regime_name = regime_snapshot.get('name') or regime_snapshot.get('regime') or policy_snapshot.get('regime_name') or '--'
-        confidence = regime_snapshot.get('confidence', policy_snapshot.get('regime_confidence'))
+        regime_name = (
+            regime_snapshot.get('name')
+            or regime_snapshot.get('regime')
+            or regime_info.get('name')
+            or regime_info.get('regime')
+            or market_context.get('regime_name')
+            or market_context.get('regime')
+            or policy_snapshot.get('regime_name')
+            or '--'
+        )
+        confidence = regime_snapshot.get('confidence')
+        if confidence is None:
+            confidence = regime_info.get('confidence')
+        if confidence is None:
+            confidence = market_context.get('regime_confidence')
+        if confidence is None:
+            confidence = policy_snapshot.get('regime_confidence')
         confidence_text = '--'
         try:
             if confidence is not None:

@@ -1084,6 +1084,50 @@ class TradingBot:
             'scope_mode': str(((risk_details or {}).get('close_outcome_guard') or {}).get('mode') or 'observe').strip().lower() or 'observe',
         }
 
+    def _notification_context(self, signal=None, details: dict = None) -> dict:
+        payload = dict(details or {})
+        if signal is None:
+            return payload
+
+        market_context = getattr(signal, 'market_context', None)
+        if isinstance(market_context, dict) and market_context and not isinstance(payload.get('market_context'), dict):
+            payload['market_context'] = dict(market_context)
+
+        regime_info = getattr(signal, 'regime_info', None)
+        if isinstance(regime_info, dict) and regime_info and not isinstance(payload.get('regime_info'), dict):
+            payload['regime_info'] = dict(regime_info)
+
+        regime_snapshot = payload.get('regime_snapshot') if isinstance(payload.get('regime_snapshot'), dict) else {}
+        if not regime_snapshot:
+            signal_regime_snapshot = getattr(signal, 'regime_snapshot', None)
+            if isinstance(signal_regime_snapshot, dict) and signal_regime_snapshot:
+                payload['regime_snapshot'] = dict(signal_regime_snapshot)
+            elif isinstance(regime_info, dict) and regime_info:
+                payload['regime_snapshot'] = dict(regime_info)
+            elif isinstance(market_context, dict) and isinstance(market_context.get('regime_snapshot'), dict) and market_context.get('regime_snapshot'):
+                payload['regime_snapshot'] = dict(market_context.get('regime_snapshot') or {})
+
+        policy_snapshot = payload.get('adaptive_policy_snapshot') if isinstance(payload.get('adaptive_policy_snapshot'), dict) else {}
+        if not policy_snapshot:
+            signal_policy_snapshot = getattr(signal, 'adaptive_policy_snapshot', None)
+            if isinstance(signal_policy_snapshot, dict) and signal_policy_snapshot:
+                payload['adaptive_policy_snapshot'] = dict(signal_policy_snapshot)
+            elif isinstance(market_context, dict) and isinstance(market_context.get('adaptive_policy_snapshot'), dict) and market_context.get('adaptive_policy_snapshot'):
+                payload['adaptive_policy_snapshot'] = dict(market_context.get('adaptive_policy_snapshot') or {})
+
+        if not isinstance(payload.get('adaptive_regime_observe_only'), dict):
+            observe_only = payload.get('observe_only') if isinstance(payload.get('observe_only'), dict) else {}
+            if observe_only:
+                payload['adaptive_regime_observe_only'] = {
+                    'phase': observe_only.get('phase'),
+                    'state': observe_only.get('state'),
+                    'summary': observe_only.get('summary'),
+                    'tags': list(observe_only.get('tags') or []),
+                    'notes': list(observe_only.get('notes') or []),
+                }
+
+        return payload
+
     def _candidate_diversification_history(self) -> list:
         state = load_runtime_state()
         history = state.get('candidate_selection_history') or []
@@ -1546,6 +1590,7 @@ class TradingBot:
                 
                 if not passed:
                     print(f"   ❌ 信号过滤: {reason}")
+                details = self._notification_context(signal, details)
                 self.notifier.notify_signal(signal, passed, reason, details)
                 
                 # 记录信号
@@ -1574,6 +1619,7 @@ class TradingBot:
                         merged_filter_details = dict(signal.filter_details or {})
                         merged_filter_details['observability'] = {**dict(merged_filter_details.get('observability') or {}), **risk_obs, 'deny_reason': None if can_open else (risk_reason or risk_obs.get('deny_reason'))}
                         self.db.update_signal(signal_id, filter_details=json.dumps(merged_filter_details, ensure_ascii=False), filter_reason=(None if can_open else risk_reason))
+                    risk_details = self._notification_context(signal, risk_details)
                     self.notifier.notify_decision(signal, can_open, risk_reason, risk_details)
                     lock_info = (risk_details or {}).get('loss_streak_limit', {}) if isinstance(risk_details, dict) else {}
                     if lock_info.get('just_triggered'):
@@ -1673,7 +1719,14 @@ class TradingBot:
                 self.notifier.notify_trade_open(symbol, side, current_price, contracts, trade_id, signal, quantity_details=quantity_details)
                 print(f"   ✅ 开{'多' if side == 'long' else '空'}成功! Trade ID: {trade_id}")
             else:
-                self.notifier.notify_trade_open_failed(symbol, side, current_price, '交易所拒绝或执行器返回空结果', signal, {'signal_id': signal_id})
+                self.notifier.notify_trade_open_failed(
+                    symbol,
+                    side,
+                    current_price,
+                    '交易所拒绝或执行器返回空结果',
+                    signal,
+                    self._notification_context(signal, {'signal_id': signal_id}),
+                )
                 print(f"   ❌ 开仓失败: {symbol}")
         
         # 检查现有持仓的止盈止损

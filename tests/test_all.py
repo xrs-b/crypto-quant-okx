@@ -1663,6 +1663,55 @@ class TestNotifications(unittest.TestCase):
         self.assertFalse(probe['delivered'])
         self.assertEqual(probe['outbox_status'], 'disabled')
 
+    def test_notify_signal_observe_only_uses_market_context_fallback(self):
+        cfg = Config()
+        cfg._config.setdefault('notification', {}).setdefault('discord', {})
+        cfg._config['notification']['discord'].update({'enabled': False, 'bot_token': '', 'channel_id': '', 'webhook_url': ''})
+        db = FakeLogDB()
+        notifier = NotificationManager(cfg, db, None)
+        from signals.detector import Signal
+        signal = Signal(
+            symbol='BTC/USDT', signal_type='buy', price=50000, strength=88, strategies_triggered=['RSI'],
+            market_context={
+                'regime': 'trend',
+                'regime_name': 'trend_up',
+                'regime_confidence': 0.81,
+                'adaptive_policy_snapshot': {
+                    'mode': 'observe_only',
+                    'phase': 'm1',
+                    'state': 'shadow',
+                    'summary': 'market-context fallback summary',
+                    'tags': ['observe_only', 'market_context'],
+                },
+            },
+        )
+        notifier.notify_signal(signal, False, '测试回退', {'passed': False})
+        message = db.logs[-1]['details']['message']
+        self.assertIn('Regime：trend_up ｜ 置信度：81%', message)
+        self.assertIn('Policy：observe_only ｜ Phase/State：m1 / shadow', message)
+        self.assertIn('摘要：market-context fallback summary', message)
+
+    def test_trading_bot_notification_context_backfills_snapshots(self):
+        bot = TradingBot.__new__(TradingBot)
+        from signals.detector import Signal
+        signal = Signal(
+            symbol='BTC/USDT', signal_type='buy', price=50000, strength=88,
+            market_context={
+                'regime': 'trend',
+                'regime_name': 'trend_up',
+                'regime_confidence': 0.83,
+                'regime_snapshot': {'regime': 'trend', 'name': 'trend_up', 'confidence': 0.83},
+                'adaptive_policy_snapshot': {'mode': 'observe_only', 'summary': 'fallback from market context'},
+            },
+            regime_info={'regime': 'trend', 'name': 'trend_up', 'confidence': 0.83},
+        )
+        payload = bot._notification_context(signal, {'signal_id': 7})
+        self.assertEqual(payload['signal_id'], 7)
+        self.assertEqual(payload['regime_snapshot']['name'], 'trend_up')
+        self.assertEqual(payload['adaptive_policy_snapshot']['mode'], 'observe_only')
+        self.assertEqual(payload['market_context']['regime_confidence'], 0.83)
+        self.assertEqual(payload['regime_info']['regime'], 'trend')
+
     def test_discord_bot_fallback_channel(self):
         cfg = Config()
         cfg._config.setdefault('notification', {}).setdefault('discord', {})

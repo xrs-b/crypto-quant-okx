@@ -3,7 +3,7 @@
 """
 import pandas as pd
 import numpy as np
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 
@@ -288,6 +288,78 @@ class SignalDetector:
             adjusted *= 0.78
 
         return min(100, max(0, int(round(adjusted))))
+
+    def _recompute_signal_state(self, signal: Signal, symbol: str = None) -> Signal:
+        buy_score = 0.0
+        sell_score = 0.0
+        triggered_strategies = []
+        for reason in list(signal.reasons or []):
+            strategy_name = str(reason.get('strategy') or '').strip()
+            if reason.get('triggered') and strategy_name and strategy_name not in triggered_strategies:
+                triggered_strategies.append(strategy_name)
+            weighted = float(reason.get('strength', 0) or 0) * float(reason.get('confidence', 0.5) or 0.5)
+            if reason.get('action') == 'buy':
+                buy_score += weighted
+            elif reason.get('action') == 'sell':
+                sell_score += weighted
+
+        signal.strategies_triggered = triggered_strategies
+        signal.direction_score = {
+            'buy': round(buy_score, 2),
+            'sell': round(sell_score, 2),
+            'net': round(abs(buy_score - sell_score), 2),
+            'triggered_count': len(triggered_strategies)
+        }
+
+        composite_config = self._cfg_section('strategies.composite', symbol or signal.symbol)
+        min_strength = composite_config.get('min_strength', 20)
+        min_strategy_count = composite_config.get('min_strategy_count', 1)
+
+        dominant_action = 'hold'
+        dominant_score = 0.0
+        opposing_score = 0.0
+        if buy_score > sell_score:
+            dominant_action = 'buy'
+            dominant_score = buy_score
+            opposing_score = sell_score
+        elif sell_score > buy_score:
+            dominant_action = 'sell'
+            dominant_score = sell_score
+            opposing_score = buy_score
+
+        net_strength = max(0.0, dominant_score - opposing_score * 0.5)
+        signal.strength = min(100, int(round(net_strength)))
+        signal.strength = self._adjust_strength_by_market_context(signal, dominant_action, signal.strength)
+        signal.signal_type = 'hold'
+        if dominant_action != 'hold' and len(triggered_strategies) >= min_strategy_count and signal.strength >= min_strength:
+            signal.signal_type = dominant_action
+        return signal
+
+    def apply_strategy_selection(self, signal: Signal, selection_contract: Optional[Dict[str, Any]] = None, *, symbol: str = None) -> Signal:
+        selection_contract = dict(selection_contract or {})
+        if not selection_contract:
+            return signal
+        selected = set(selection_contract.get('selected_strategies') or [])
+        weights = dict(selection_contract.get('strategy_weights') or {})
+        for reason in list(signal.reasons or []):
+            strategy_name = str(reason.get('strategy') or '').strip()
+            if not strategy_name:
+                continue
+            baseline_strength = float(reason.get('strength', 0) or 0)
+            multiplier = float(weights.get(strategy_name, 1.0) or 0.0)
+            multiplier = max(0.0, min(multiplier, 1.0))
+            adjusted_strength = baseline_strength * multiplier
+            reason.setdefault('metadata', {})
+            reason['metadata']['baseline_strength'] = baseline_strength
+            reason['metadata']['strategy_selection_multiplier'] = round(multiplier, 4)
+            reason['metadata']['strategy_selection_selected'] = strategy_name in selected
+            if multiplier < 1.0:
+                reason['strength'] = adjusted_strength
+            if multiplier <= 0.0:
+                reason['triggered'] = False
+        signal.market_context = dict(signal.market_context or {})
+        signal.market_context['strategy_selection'] = selection_contract
+        return self._recompute_signal_state(signal, symbol or signal.symbol)
 
     def _analyze_rsi(self, df: pd.DataFrame, price: float, symbol: str = None) -> Optional[Dict]:
         config = self._cfg_section('strategies.rsi', symbol)

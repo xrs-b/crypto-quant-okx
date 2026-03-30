@@ -1557,6 +1557,31 @@ class TestSignalDetector(unittest.TestCase):
         self.assertEqual(signal.market_context['adaptive_policy_snapshot']['mode'], 'observe_only')
         self.assertFalse(signal.adaptive_policy_snapshot['is_effective'])
 
+    def test_apply_strategy_selection_deweights_unselected_strategies(self):
+        signal = Signal(
+            symbol='BTC/USDT',
+            signal_type='buy',
+            price=50000,
+            strength=80,
+            reasons=[
+                {'strategy': 'RSI', 'action': 'buy', 'triggered': True, 'strength': 40, 'confidence': 0.9, 'metadata': {}},
+                {'strategy': 'MACD', 'action': 'buy', 'triggered': True, 'strength': 55, 'confidence': 0.95, 'metadata': {}},
+            ],
+            strategies_triggered=['RSI', 'MACD'],
+            market_context={'trend': 'bullish', 'volatility_too_low': False, 'volatility_too_high': False},
+        )
+        selection = {
+            'selected_strategies': ['MACD'],
+            'strategy_weights': {'RSI': 0.0, 'MACD': 1.0},
+            'decision_summary': 'select MACD only',
+        }
+        updated = self.detector.apply_strategy_selection(signal, selection, symbol='BTC/USDT')
+        self.assertEqual(updated.strategies_triggered, ['MACD'])
+        self.assertEqual(updated.signal_type, 'hold')
+        self.assertLess(updated.strength, 80)
+        self.assertEqual(updated.reasons[0]['metadata']['strategy_selection_multiplier'], 0.0)
+        self.assertTrue(updated.reasons[1]['metadata']['strategy_selection_selected'])
+
 
 class TestStrategies(unittest.TestCase):
     """策略测试"""
@@ -14093,6 +14118,13 @@ class TestTradingBotAdaptiveExecutionContext(unittest.TestCase):
             'execution_overrides': {'layer_max_total_ratio': 0.12},
             'risk_overrides': {'base_entry_margin_ratio': 0.05},
         }
+        signal.market_context = {
+            'strategy_selection': {
+                'selected_strategies': ['MACD', 'Volume'],
+                'strategy_weights': {'MACD': 1.0, 'Volume': 0.9, 'RSI': 0.0},
+                'decision_summary': 'selected=MACD,Volume',
+            }
+        }
         row = {
             'symbol': 'BTC/USDT',
             'signal_id': 101,
@@ -14117,7 +14149,48 @@ class TestTradingBotAdaptiveExecutionContext(unittest.TestCase):
         self.assertEqual(plan['adaptive_risk_snapshot']['enforced_budget']['base_entry_margin_ratio'], 0.05)
         self.assertEqual(plan['entry_plan']['allowed_margin'], 250)
         self.assertEqual(plan['planned_margin'], 250)
-        self.assertEqual(plan['layer_ratio'], 0.05)
+        self.assertEqual(plan['layer_ratio'], 0.06)
+        self.assertEqual(plan['strategy_tags'], ['MACD', 'Volume'])
+        self.assertEqual(plan['strategy_selection']['decision_summary'], 'selected=MACD,Volume')
+
+    def test_build_strategy_selection_contract_prefers_regime_matched_winners(self):
+        self.bot.db.record_trade(
+            symbol='BTC/USDT', side='long', entry_price=50000, quantity=0.1, leverage=5,
+            signal_id=201, layer_no=1, root_signal_id=201,
+            plan_context={
+                'strategy_tags': ['MACD'],
+                'regime_snapshot': {'name': 'trend', 'regime': 'trend'},
+                'adaptive_policy_snapshot': {'policy_version': 'adaptive_policy_v1_m1'},
+            }
+        )
+        self.bot.db.reconcile_trade_close(1, {'exit_price': 51000, 'pnl': 100, 'close_time': '2026-03-30T10:00:00', 'fills': [{'id': 'f201'}]}, reason='止盈收口')
+        self.bot.db.record_trade(
+            symbol='BTC/USDT', side='long', entry_price=50000, quantity=0.1, leverage=5,
+            signal_id=202, layer_no=1, root_signal_id=202,
+            plan_context={
+                'strategy_tags': ['RSI'],
+                'regime_snapshot': {'name': 'trend', 'regime': 'trend'},
+                'adaptive_policy_snapshot': {'policy_version': 'adaptive_policy_v1_m1'},
+            }
+        )
+        self.bot.db.reconcile_trade_close(2, {'exit_price': 49500, 'pnl': -50, 'close_time': '2026-03-30T11:00:00', 'fills': [{'id': 'f202'}]}, reason='止损离场')
+
+        signal = Signal(
+            symbol='BTC/USDT', signal_type='buy', price=50000, strength=70,
+            reasons=[
+                {'strategy': 'MACD', 'action': 'buy', 'triggered': True, 'strength': 35, 'confidence': 0.8, 'metadata': {}},
+                {'strategy': 'RSI', 'action': 'buy', 'triggered': True, 'strength': 35, 'confidence': 0.8, 'metadata': {}},
+            ],
+            strategies_triggered=['MACD', 'RSI'],
+            market_context={'trend': 'bullish'},
+        )
+        signal.regime_snapshot = {'name': 'trend', 'regime': 'trend'}
+        signal.adaptive_policy_snapshot = {'policy_version': 'adaptive_policy_v1_m1'}
+
+        contract = self.bot._build_strategy_selection_contract('BTC/USDT', signal)
+        self.assertEqual(contract['selected_strategies'][0], 'MACD')
+        self.assertLess(contract['strategy_weights']['RSI'], 1.0)
+        self.assertEqual(contract['strategy_stats']['MACD']['matched_mode'], 'matched')
 
 
 class TestQualityScalingPipeline(unittest.TestCase):

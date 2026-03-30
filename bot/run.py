@@ -1019,6 +1019,141 @@ class TradingBot:
         
         logger.info("交易机器人初始化完成")
 
+    def _strategy_selection_config(self, symbol: str = None) -> dict:
+        raw = self.config.get_symbol_value(symbol, 'adaptive_regime.strategy_selection', None) if symbol else self.config.get('adaptive_regime.strategy_selection', None)
+        if not isinstance(raw, dict):
+            raw = {}
+        return {
+            'enabled': bool(raw.get('enabled', True)),
+            'lookback_limit': max(int(raw.get('lookback_limit', 30) or 30), 1),
+            'min_trades_for_preference': max(int(raw.get('min_trades_for_preference', 2) or 2), 1),
+            'min_selected_strategies': max(int(raw.get('min_selected_strategies', 1) or 1), 1),
+            'max_selected_strategies': max(int(raw.get('max_selected_strategies', 3) or 3), 1),
+            'deweight_negative_return_multiplier': float(raw.get('deweight_negative_return_multiplier', 0.7) or 0.7),
+            'deweight_loss_streak_multiplier': float(raw.get('deweight_loss_streak_multiplier', 0.75) or 0.75),
+            'deweight_mismatch_multiplier': float(raw.get('deweight_mismatch_multiplier', 0.8) or 0.8),
+            'deweight_low_sample_multiplier': float(raw.get('deweight_low_sample_multiplier', 0.9) or 0.9),
+            'disable_on_rollback_match': bool(raw.get('disable_on_rollback_match', True)),
+        }
+
+    def _build_strategy_selection_contract(self, symbol: str, signal) -> dict:
+        cfg = self._strategy_selection_config(symbol)
+        regime_snapshot = getattr(signal, 'regime_snapshot', {}) or {}
+        policy_snapshot = getattr(signal, 'adaptive_policy_snapshot', {}) or {}
+        current_regime = str(regime_snapshot.get('name') or regime_snapshot.get('regime') or 'unknown')
+        current_policy = str(policy_snapshot.get('policy_version') or policy_snapshot.get('version') or 'unknown')
+        reasons = list(getattr(signal, 'reasons', []) or [])
+        baseline_strategies = [str(item.get('strategy') or '').strip() for item in reasons if str(item.get('strategy') or '').strip()]
+        unique_strategies = []
+        for name in baseline_strategies:
+            if name not in unique_strategies:
+                unique_strategies.append(name)
+        contract = {
+            'schema_version': 'adaptive_strategy_selection_v1',
+            'enabled': bool(cfg.get('enabled', True)),
+            'symbol': symbol,
+            'regime_tag': current_regime,
+            'policy_tag': current_policy,
+            'lookback_limit': cfg['lookback_limit'],
+            'baseline_strategies': list(unique_strategies),
+            'selected_strategies': list(unique_strategies),
+            'strategy_weights': {name: 1.0 for name in unique_strategies},
+            'strategy_stats': {},
+            'ranking': [],
+            'decision_summary': 'strategy_selection_disabled_or_no_candidates',
+        }
+        if not contract['enabled'] or not unique_strategies:
+            return contract
+
+        recent_trades = self.db.get_recent_close_outcome_trades(symbol=symbol, limit=cfg['lookback_limit']) if self.db else []
+        stats = {}
+        for strategy in unique_strategies:
+            strategy_rows = []
+            matched_rows = []
+            for row in recent_trades:
+                tags = [str(tag).strip() for tag in (row.get('strategy_tags') or []) if str(tag).strip()]
+                if strategy not in tags:
+                    continue
+                strategy_rows.append(row)
+                row_regime = str(row.get('regime_tag') or 'unknown')
+                row_policy = str(row.get('policy_tag') or 'unknown')
+                if row_regime == current_regime or row_policy == current_policy:
+                    matched_rows.append(row)
+            preferred_rows = matched_rows or strategy_rows
+            trade_count = len(preferred_rows)
+            avg_return_pct = round(sum(float(item.get('return_pct') or 0.0) for item in preferred_rows) / trade_count, 6) if trade_count else 0.0
+            wins = sum(1 for item in preferred_rows if float(item.get('return_pct') or 0.0) > 0)
+            losses = sum(1 for item in preferred_rows if float(item.get('return_pct') or 0.0) < 0)
+            loss_streak = 0
+            if preferred_rows:
+                ordered = sorted(preferred_rows, key=lambda item: str(item.get('close_time') or ''), reverse=True)
+                for item in ordered:
+                    if float(item.get('return_pct') or 0.0) < 0:
+                        loss_streak += 1
+                    else:
+                        break
+            matched_mode = 'matched' if matched_rows else 'fallback'
+            dominant_feedback_mode = 'observe'
+            freeze_match = False
+            for item in preferred_rows:
+                mode = str((((item.get('close_outcome_feedback') or {}).get('governance_mode')) or item.get('close_outcome_mode') or 'observe')).strip().lower()
+                if mode in {'rollback', 'tighten', 'review'}:
+                    dominant_feedback_mode = mode
+                    if mode == 'rollback':
+                        freeze_match = True
+                        break
+            weight = 1.0
+            reasons_applied = []
+            if trade_count and trade_count < cfg['min_trades_for_preference']:
+                weight *= cfg['deweight_low_sample_multiplier']
+                reasons_applied.append('low_sample')
+            if matched_mode == 'fallback' and (strategy_rows or preferred_rows):
+                weight *= cfg['deweight_mismatch_multiplier']
+                reasons_applied.append('regime_policy_fallback')
+            if avg_return_pct < 0:
+                weight *= cfg['deweight_negative_return_multiplier']
+                reasons_applied.append('negative_avg_return')
+            if loss_streak >= 2:
+                weight *= cfg['deweight_loss_streak_multiplier']
+                reasons_applied.append('recent_loss_streak')
+            if cfg['disable_on_rollback_match'] and freeze_match:
+                weight = 0.0
+                reasons_applied.append('matched_rollback_feedback')
+            weight = max(0.0, min(weight, 1.0))
+            stats[strategy] = {
+                'trade_count': trade_count,
+                'matched_trade_count': len(matched_rows),
+                'fallback_trade_count': len(strategy_rows),
+                'avg_return_pct': avg_return_pct,
+                'win_count': wins,
+                'loss_count': losses,
+                'recent_loss_streak': loss_streak,
+                'matched_mode': matched_mode,
+                'dominant_feedback_mode': dominant_feedback_mode,
+                'freeze_match': freeze_match,
+                'weight': round(weight, 4),
+                'reasons': reasons_applied,
+            }
+
+        ranked = sorted(stats.items(), key=lambda item: (-float(item[1].get('weight', 0.0)), -int(item[1].get('trade_count', 0)), -float(item[1].get('avg_return_pct', 0.0)), item[0]))
+        selected = [name for name, detail in ranked if float(detail.get('weight', 0.0)) > 0][:cfg['max_selected_strategies']]
+        if len(selected) < cfg['min_selected_strategies']:
+            for name, _detail in ranked:
+                if name not in selected:
+                    selected.append(name)
+                if len(selected) >= min(cfg['min_selected_strategies'], len(unique_strategies)):
+                    break
+        selected = selected[:max(cfg['min_selected_strategies'], min(cfg['max_selected_strategies'], len(unique_strategies)))]
+        weights = {name: float((stats.get(name) or {}).get('weight', 1.0)) for name in unique_strategies}
+        contract.update({
+            'selected_strategies': selected,
+            'strategy_weights': weights,
+            'strategy_stats': stats,
+            'ranking': [{'strategy': name, **detail} for name, detail in ranked],
+            'decision_summary': f"selected={','.join(selected) or 'none'} / regime={current_regime} / policy={current_policy}",
+        })
+        return contract
+
     def _max_open_candidates_per_cycle(self) -> int:
         raw = self.config.get('runtime.open_position.max_candidates_per_cycle', 1)
         try:
@@ -1257,6 +1392,7 @@ class TradingBot:
             4,
         )
         diversification_context = self._candidate_diversification_context(symbol, signal, risk_details)
+        strategy_selection = dict(((getattr(signal, 'market_context', {}) or {}).get('strategy_selection')) or {})
         ranking_contract = {
             'symbol': symbol,
             'signal_id': signal_id,
@@ -1267,6 +1403,8 @@ class TradingBot:
             'entry_decision': getattr(entry_decision, 'decision', None),
             'entry_score': float(getattr(entry_decision, 'score', 0) or 0),
             'ml_confidence': ml_confidence,
+            'selected_strategies': list(strategy_selection.get('selected_strategies') or getattr(signal, 'strategies_triggered', []) or []),
+            'strategy_selection_summary': strategy_selection.get('decision_summary'),
             'close_outcome_scope_mode': scope_mode,
             'close_outcome_scope': scope_window.get('scope'),
             'close_outcome_scope_key': scope_window.get('scope_key'),
@@ -1717,6 +1855,7 @@ class TradingBot:
             or {}
         )
 
+        strategy_selection = dict(((getattr(signal, 'market_context', {}) or {}).get('strategy_selection')) or {})
         plan_context = dict(layer_plan)
         plan_context.update({
             'current_price': row.get('current_price'),
@@ -1724,6 +1863,9 @@ class TradingBot:
             'root_signal_id': row.get('signal_id'),
             'regime_snapshot': regime_snapshot,
             'adaptive_policy_snapshot': adaptive_policy_snapshot,
+            'strategy_selection': strategy_selection,
+            'strategy_tags': list(strategy_selection.get('selected_strategies') or getattr(signal, 'strategies_triggered', []) or []),
+            'strategies_triggered': list(getattr(signal, 'strategies_triggered', []) or []),
             'final_execution_permit': self._build_final_execution_permit_contract(row),
         })
         if adaptive_risk_snapshot:
@@ -1806,10 +1948,15 @@ class TradingBot:
                 
                 # 分析信号
                 signal = self.detector.analyze(symbol, df, current_price, ml_pred)
+                strategy_selection = self._build_strategy_selection_contract(symbol, signal)
+                signal = self.detector.apply_strategy_selection(signal, strategy_selection, symbol=symbol)
+                signal.filter_details = signal.filter_details or {}
+                signal.filter_details['strategy_selection'] = strategy_selection
                 
                 print(f"   价格: {current_price:.4f}")
                 print(f"   信号: {signal.signal_type.upper()} | 强度: {signal.strength}%")
                 print(f"   触发策略: {', '.join(signal.strategies_triggered) or '无'}")
+                print(f"   🧠 策略选择: {', '.join(strategy_selection.get('selected_strategies') or []) or '无'} | {strategy_selection.get('decision_summary')}")
                 
                 # 详细指标
                 indicators = signal.indicators

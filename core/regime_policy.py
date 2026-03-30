@@ -19,6 +19,10 @@ EXECUTION_PROFILE_FIELDS = [
     "profit_only_add",
     "allow_same_bar_multiple_adds",
     "leverage_cap",
+    "stop_loss",
+    "take_profit",
+    "trailing_stop",
+    "trailing_activation",
 ]
 
 LAYERING_GUARDRAIL_FIELDS = [
@@ -29,6 +33,12 @@ LAYERING_GUARDRAIL_FIELDS = [
     "allow_same_bar_multiple_adds",
 ]
 
+EXIT_PROFILE_FIELDS = [
+    "stop_loss",
+    "take_profit",
+    "trailing_stop",
+    "trailing_activation",
+]
 
 
 def _slug(value: Any) -> str:
@@ -463,6 +473,10 @@ def build_execution_baseline_snapshot(config_helper: Any, symbol: Optional[str])
         'profit_only_add': bool(layering.get('profit_only_add', False)),
         'allow_same_bar_multiple_adds': bool(layering.get('allow_same_bar_multiple_adds', False)),
         'leverage_cap': leverage_cap,
+        'stop_loss': float(trading_cfg.get('stop_loss') or 0.02),
+        'take_profit': float(trading_cfg.get('take_profit') or 0.04),
+        'trailing_stop': float(trading_cfg.get('trailing_stop') or 0.01),
+        'trailing_activation': trading_cfg.get('trailing_activation') if trading_cfg.get('trailing_activation') is not None else 0.01,
     }
 
 
@@ -502,6 +516,19 @@ def merge_execution_overrides_conservatively(baseline_snapshot: Dict[str, Any], 
             final_value = min(baseline_float, requested_float)
             if final_value + 1e-12 < baseline_float:
                 effective[key] = int(final_value) if key == 'leverage_cap' else final_value
+                applied_overrides[key] = {'baseline': baseline, 'effective': effective[key], 'requested': requested, 'source': f'execution_overrides.{key}'}
+            elif conservative_only and requested_float > baseline_float + 1e-12:
+                ignored_overrides.append({'key': key, 'requested': requested, 'baseline': baseline, 'reason': 'non_conservative_override', 'code': 'IGNORED_NON_CONSERVATIVE_OVERRIDE'})
+            continue
+        if key in {'stop_loss', 'take_profit', 'trailing_stop', 'trailing_activation'}:
+            if not isinstance(requested, (int, float)):
+                ignored_overrides.append({'key': key, 'requested': requested, 'reason': 'override_not_numeric', 'code': 'IGNORED_INVALID_OVERRIDE'})
+                continue
+            requested_float = float(requested)
+            baseline_float = float(baseline)
+            final_value = min(baseline_float, requested_float)
+            if final_value + 1e-12 < baseline_float:
+                effective[key] = final_value
                 applied_overrides[key] = {'baseline': baseline, 'effective': effective[key], 'requested': requested, 'source': f'execution_overrides.{key}'}
             elif conservative_only and requested_float > baseline_float + 1e-12:
                 ignored_overrides.append({'key': key, 'requested': requested, 'baseline': baseline, 'reason': 'non_conservative_override', 'code': 'IGNORED_NON_CONSERVATIVE_OVERRIDE'})
@@ -773,6 +800,8 @@ def build_execution_effective_snapshot(config_helper: Any, symbol: Optional[str]
     enforcement_enabled = bool(guarded_cfg.get('execution_profile_enforcement_enabled', False))
     layering_hints_enabled = bool(guarded_cfg.get('layering_profile_hints_enabled', hints_enabled))
     layering_enforcement_enabled = bool(guarded_cfg.get('layering_profile_enforcement_enabled', False))
+    exit_hints_enabled = bool(guarded_cfg.get('exit_profile_hints_enabled', hints_enabled))
+    exit_enforcement_enabled = bool(guarded_cfg.get('exit_profile_enforcement_enabled', False))
     layering_plan_shape_enforcement_enabled = bool(guarded_cfg.get('layering_plan_shape_enforcement_enabled', False))
     rollout_symbols = list(guarded_cfg.get('rollout_symbols') or [])
     rollout_match = (not rollout_symbols) or (symbol in rollout_symbols)
@@ -787,6 +816,8 @@ def build_execution_effective_snapshot(config_helper: Any, symbol: Optional[str]
         enforcement_enabled = False
         layering_hints_enabled = False
         layering_enforcement_enabled = False
+        exit_hints_enabled = False
+        exit_enforcement_enabled = False
         layering_plan_shape_enforcement_enabled = False
     merged = merge_execution_overrides_conservatively(
         baseline,
@@ -820,6 +851,10 @@ def build_execution_effective_snapshot(config_helper: Any, symbol: Optional[str]
         'profit_only_add': 'WOULD_ENABLE_PROFIT_ONLY_ADD',
         'allow_same_bar_multiple_adds': 'WOULD_DISABLE_SAME_BAR_MULTIPLE_ADDS',
         'leverage_cap': 'WOULD_REDUCE_LEVERAGE_CAP',
+        'stop_loss': 'WOULD_TIGHTEN_STOP_LOSS',
+        'take_profit': 'WOULD_EARLY_TAKE_PROFIT',
+        'trailing_stop': 'WOULD_TIGHTEN_TRAILING_STOP',
+        'trailing_activation': 'WOULD_EARLY_ACTIVATE_TRAILING',
     }
     for field in EXECUTION_PROFILE_FIELDS:
         applied = field in applied_keys
@@ -827,10 +862,12 @@ def build_execution_effective_snapshot(config_helper: Any, symbol: Optional[str]
         effective_value = merged['effective'].get(field)
         is_layer_ratio = field == 'layer_ratios'
         is_layering_guardrail = field in LAYERING_GUARDRAIL_FIELDS
+        is_exit_field = field in EXIT_PROFILE_FIELDS
         enforce_via_execution = effective_state == 'effective' and applied and field == 'leverage_cap'
         enforce_via_layering = effective_state == 'effective' and applied and layering_enforcement_enabled and is_layering_guardrail
+        enforce_via_exit = effective_state == 'effective' and applied and exit_enforcement_enabled and is_exit_field
         enforce_plan_shape = effective_state == 'effective' and applied and layering_enforcement_enabled and layering_plan_shape_enforcement_enabled and is_layer_ratio
-        enforced = bool(enforce_via_execution or enforce_via_layering or enforce_plan_shape)
+        enforced = bool(enforce_via_execution or enforce_via_layering or enforce_via_exit or enforce_plan_shape)
         live_value = baseline_value
         reason = 'no_change'
         decision = 'unchanged'
@@ -850,6 +887,11 @@ def build_execution_effective_snapshot(config_helper: Any, symbol: Optional[str]
             hinted_only_fields.append(field)
             reason = 'execution_enforcement_disabled'
             decision = 'applied_candidate'
+            ignored = False
+        elif applied and is_exit_field and not exit_enforcement_enabled:
+            hinted_only_fields.append(field)
+            reason = 'exit_profile_enforcement_disabled'
+            decision = 'hints_only'
             ignored = False
         elif applied and is_layer_ratio and not layering_enforcement_enabled:
             hinted_only_fields.append(field)
@@ -966,6 +1008,8 @@ def build_execution_effective_snapshot(config_helper: Any, symbol: Optional[str]
         'enforcement_enabled': enforcement_enabled,
         'layering_hints_enabled': layering_hints_enabled,
         'layering_enforcement_enabled': layering_enforcement_enabled,
+        'exit_hints_enabled': exit_hints_enabled,
+        'exit_enforcement_enabled': exit_enforcement_enabled,
         'layering_plan_shape_enforcement_enabled': layering_plan_shape_enforcement_enabled,
         'conservative_only': conservative_only,
         'rollout_symbols': rollout_symbols,

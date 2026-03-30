@@ -3517,6 +3517,69 @@ class TestTradingExecutor(unittest.TestCase):
         # 价格继续回升，触发追踪止损 (85 * 1.05 = 89.25)
         self.assertTrue(self.executor.check_take_profit('BTC/USDT', 90))
 
+    def test_adaptive_exit_profile_snapshot_keeps_hints_only_when_exit_enforcement_disabled(self):
+        cfg = Config()
+        cfg._config['trading']['stop_loss'] = 0.02
+        cfg._config['trading']['take_profit'] = 0.04
+        cfg._config['trading']['trailing_stop'] = 0.05
+        cfg._config['trading']['trailing_activation'] = 0.10
+        cfg._config['adaptive_regime']['enabled'] = True
+        cfg._config['adaptive_regime']['mode'] = 'guarded_execute'
+        cfg._config['adaptive_regime']['guarded_execute']['execution_profile_hints_enabled'] = True
+        cfg._config['adaptive_regime']['guarded_execute']['execution_profile_enforcement_enabled'] = True
+        cfg._config['adaptive_regime']['guarded_execute']['exit_profile_hints_enabled'] = True
+        cfg._config['adaptive_regime']['guarded_execute']['exit_profile_enforcement_enabled'] = False
+        cfg._config['adaptive_regime']['guarded_execute']['rollout_symbols'] = ['BTC/USDT']
+        cfg._config['adaptive_regime']['regimes'] = {
+            'high_vol': {
+                'execution_overrides': {'stop_loss': 0.01, 'take_profit': 0.02, 'trailing_stop': 0.03, 'trailing_activation': 0.05}
+            }
+        }
+        regime_snapshot = build_regime_snapshot('high_vol', 0.9, {'ema_gap': 0.01, 'ema_direction': 1, 'volatility': 0.05}, '高波动')
+        policy_snapshot = resolve_regime_policy(cfg, 'BTC/USDT', regime_snapshot)
+        snapshot = build_execution_effective_snapshot(cfg, 'BTC/USDT', regime_snapshot=regime_snapshot, policy_snapshot=policy_snapshot)
+        self.assertEqual(snapshot['effective']['stop_loss'], 0.01)
+        self.assertEqual(snapshot['live']['stop_loss'], 0.02)
+        self.assertIn('stop_loss', snapshot['hinted_only_fields'])
+        self.assertFalse(snapshot['exit_enforcement_enabled'])
+
+    def test_adaptive_exit_profile_enforces_tighter_stop_loss_for_open_trade(self):
+        self.config._config['adaptive_regime']['enabled'] = True
+        self.config._config['adaptive_regime']['mode'] = 'guarded_execute'
+        self.config._config['adaptive_regime']['guarded_execute']['execution_profile_hints_enabled'] = True
+        self.config._config['adaptive_regime']['guarded_execute']['execution_profile_enforcement_enabled'] = True
+        self.config._config['adaptive_regime']['guarded_execute']['exit_profile_hints_enabled'] = True
+        self.config._config['adaptive_regime']['guarded_execute']['exit_profile_enforcement_enabled'] = True
+        self.config._config['adaptive_regime']['guarded_execute']['rollout_symbols'] = ['BTC/USDT']
+        self.config._config['adaptive_regime']['regimes'] = {
+            'high_vol': {'execution_overrides': {'stop_loss': 0.01}}
+        }
+        regime_snapshot = build_regime_snapshot('high_vol', 0.9, {'ema_gap': 0.01, 'ema_direction': 1, 'volatility': 0.05}, '高波动')
+        policy_snapshot = resolve_regime_policy(self.config, 'BTC/USDT', regime_snapshot)
+        self.db.update_position(symbol='BTC/USDT', side='long', entry_price=100, quantity=1, leverage=1, current_price=100)
+        self.db.record_trade(symbol='BTC/USDT', side='long', entry_price=100, quantity=1, leverage=1, plan_context={'regime_snapshot': regime_snapshot, 'adaptive_policy_snapshot': policy_snapshot})
+        self.assertTrue(self.executor.check_stop_loss('BTC/USDT', 99))
+
+    def test_adaptive_exit_profile_enforces_earlier_take_profit_for_open_trade(self):
+        self.config._config['adaptive_regime']['enabled'] = True
+        self.config._config['adaptive_regime']['mode'] = 'guarded_execute'
+        self.config._config['adaptive_regime']['guarded_execute']['execution_profile_hints_enabled'] = True
+        self.config._config['adaptive_regime']['guarded_execute']['execution_profile_enforcement_enabled'] = True
+        self.config._config['adaptive_regime']['guarded_execute']['exit_profile_hints_enabled'] = True
+        self.config._config['adaptive_regime']['guarded_execute']['exit_profile_enforcement_enabled'] = True
+        self.config._config['adaptive_regime']['guarded_execute']['rollout_symbols'] = ['BTC/USDT']
+        self.config._config['adaptive_regime']['regimes'] = {
+            'high_vol': {'execution_overrides': {'take_profit': 0.02}}
+        }
+        regime_snapshot = build_regime_snapshot('high_vol', 0.9, {'ema_gap': 0.01, 'ema_direction': 1, 'volatility': 0.05}, '高波动')
+        policy_snapshot = resolve_regime_policy(self.config, 'BTC/USDT', regime_snapshot)
+        self.db.update_position(symbol='BTC/USDT', side='long', entry_price=100, quantity=1, leverage=1, current_price=100)
+        self.db.record_trade(symbol='BTC/USDT', side='long', entry_price=100, quantity=1, leverage=1, plan_context={'regime_snapshot': regime_snapshot, 'adaptive_policy_snapshot': policy_snapshot})
+        self.executor.trading_config['take_profit'] = 0.04
+        self.executor.trading_config['trailing_stop'] = 0.5
+        self.executor.trading_config['trailing_activation'] = 1.0
+        self.assertTrue(self.executor.check_take_profit('BTC/USDT', 102))
+
     def test_close_position_auto_reconciles_51169_when_exchange_has_no_position(self):
         db = Database('data/test_close_mismatch.db')
         try:

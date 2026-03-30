@@ -939,6 +939,34 @@ class TradingExecutor:
         
         return False
     
+
+    def _get_open_trade_plan_context(self, symbol: str, side: str = None) -> Dict[str, Any]:
+        trade = self.db.get_latest_open_trade(symbol, side) if self.db else None
+        return dict((trade or {}).get('plan_context') or {})
+
+    def _resolve_live_exit_profile(self, symbol: str, side: str = None) -> Dict[str, Any]:
+        plan_context = self._get_open_trade_plan_context(symbol, side)
+        observability = dict(plan_context.get('observability') or {})
+        snapshot = dict(observability.get('adaptive_execution_snapshot') or {})
+        if not snapshot:
+            snapshot = build_execution_effective_snapshot(
+                self.config,
+                symbol,
+                regime_snapshot=plan_context.get('regime_snapshot'),
+                policy_snapshot=plan_context.get('adaptive_policy_snapshot'),
+            )
+        baseline = dict(snapshot.get('baseline') or {})
+        live = dict(snapshot.get('live') or snapshot.get('enforced_profile') or baseline)
+        return {
+            'plan_context': plan_context,
+            'observability': observability,
+            'snapshot': snapshot,
+            'baseline': baseline,
+            'live': live,
+            'enforced': bool(snapshot.get('effective_state') == 'effective' and snapshot.get('exit_enforcement_enabled', False)),
+            'hinted': bool(snapshot.get('exit_hints_enabled', False)),
+        }
+
     def check_stop_loss(self, symbol: str, current_price: float) -> bool:
         """检查止损"""
         
@@ -965,8 +993,10 @@ class TradingExecutor:
             return False
         
         leverage = position.get('leverage', 1) or 1
-        # 优先使用 MFE/MAE 建议，回退到配置默认值
-        stop_loss = self._recommendation_provider.get_stop_loss(symbol)
+        exit_profile = self._resolve_live_exit_profile(symbol, side)
+        stop_loss = exit_profile['live'].get('stop_loss')
+        if stop_loss is None:
+            stop_loss = self._recommendation_provider.get_stop_loss(symbol)
         
         # 计算盈亏比例
         try:
@@ -1016,21 +1046,18 @@ class TradingExecutor:
             return False
         
         leverage = position.get('leverage', 1) or 1
-        
-        # 追踪止损 - 优先使用配置值（测试友好），其次 MFE/MAE 建议
+        exit_profile = self._resolve_live_exit_profile(symbol, side)
+
+        # 追踪止损 - 优先使用 adaptive live profile，其次 recommendation/config 默认值
         ts_params = self._recommendation_provider.get_trailing_stop(symbol)
-        
-        # 追踪距离：优先 config，其次 recommendation
-        config_ts = self.trading_config.get('trailing_stop')
+
+        config_ts = exit_profile['live'].get('trailing_stop')
         rec_ts = ts_params.get('distance')
         trailing_stop = config_ts if config_ts is not None else rec_ts
-        
-        # 盈利触发型追踪止损：
-        # - 优先 config（可设为 None 表示旧行为：始终激活）
-        # - 其次 recommendation
-        config_ta = self.trading_config.get('trailing_activation')
+
+        config_ta = exit_profile['live'].get('trailing_activation')
         rec_ta = ts_params.get('activation')
-        
+
         if config_ta is not None:
             trailing_activation = config_ta
         elif rec_ta is not None:
@@ -1094,7 +1121,7 @@ class TradingExecutor:
             cache['trailing_armed'] = trailing_activated
         
         # 普通止盈 - 优先使用配置值，其次 MFE/MAE 建议
-        config_tp = self.trading_config.get('take_profit')
+        config_tp = exit_profile['live'].get('take_profit')
         rec_tp = self._recommendation_provider.get_take_profit(symbol)
         take_profit = rec_tp if config_tp is None else config_tp
         

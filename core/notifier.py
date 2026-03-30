@@ -239,6 +239,54 @@ class NotificationManager:
             pairs.append(f'{key}={value}')
         return ' | '.join(pairs) if pairs else '--'
 
+    def _extract_exchange_error_summary(self, details: Dict = None) -> Dict:
+        details = details or {}
+        summary = details.get('error_summary') if isinstance(details.get('error_summary'), dict) else {}
+        if summary:
+            return summary
+        nested = details.get('details') if isinstance(details.get('details'), dict) else {}
+        return nested.get('error_summary') if isinstance(nested.get('error_summary'), dict) else {}
+
+    def _error_category_label(self, category: str) -> str:
+        mapping = {
+            'exchange_symbol_restricted': '交易对/地区合规受限',
+            'bridge_execution_error': '桥接执行异常',
+        }
+        return mapping.get(str(category or '').strip(), str(category or '--').strip() or '--')
+
+    def _failure_hint_label(self, hint: str) -> str:
+        mapping = {
+            'switch_testnet_symbol_or_account_region': '切换 testnet 币种，或检查账号地区/合规限制',
+            'inspect_bridge_execution_error': '检查桥接执行异常与交易所原始返回',
+            'manual_testnet_cleanup_required': '需人工清理 testnet 残仓后再继续',
+            'retry_close_confirmation_or_manual_cleanup': '重试平仓确认；必要时人工清仓',
+            'inspect_open_order_and_force_flatten_on_testnet': '检查开仓是否已落地，并在 testnet 强制平仓',
+            'fix_smoke_plan_before_execute': '先修复 smoke 计划或参数，再重新执行',
+            'real_mode_blocked_no_execution': '当前被 testnet-only 边界拦截，未执行任何真实下单',
+        }
+        return mapping.get(str(hint or '').strip(), str(hint or '--').strip() or '--')
+
+    def _build_error_summary_lines(self, details: Dict = None, *, include_raw: bool = False) -> List[str]:
+        summary = self._extract_exchange_error_summary(details)
+        if not summary:
+            return []
+        lines = ['---', '【错误摘要】']
+        exchange_code = summary.get('exchange_code')
+        if exchange_code:
+            lines.append(f'交易所报码：{exchange_code}')
+        category = summary.get('category')
+        if category:
+            lines.append(f'错误分类：{self._error_category_label(category)}（{category}）')
+        message = summary.get('message') or summary.get('raw_error')
+        if message:
+            lines.append(f'摘要说明：{message}')
+        hint = summary.get('hint')
+        if hint:
+            lines.append(f'处理建议：{self._failure_hint_label(hint)}（{hint}）')
+        if include_raw and summary.get('raw_error') and summary.get('raw_error') != message:
+            lines.append(f'原始错误：{summary.get("raw_error")}')
+        return lines
+
     def _extract_observe_only_context(self, signal=None, details: Dict = None) -> Dict:
         details = details or {}
         observe = details.get('adaptive_regime_observe_only') if isinstance(details.get('adaptive_regime_observe_only'), dict) else {}
@@ -354,9 +402,9 @@ class NotificationManager:
         tags = ' / '.join(ctx['tags'][:limit]) if ctx['tags'] else '--'
         return [
             '---',
-            '【Adaptive Regime（Observe-only）】',
-            f"Regime：{ctx['regime_name']} ｜ 置信度：{ctx['confidence_text']}",
-            f"Policy：{ctx['mode']} ｜ Phase/State：{ctx['phase']} / {ctx['state']}",
+            '【自适应市场观察（Observe-only）】',
+            f"市场状态：{ctx['regime_name']} ｜ 置信度：{ctx['confidence_text']}",
+            f"策略模式：{ctx['mode']} ｜ 阶段/状态：{ctx['phase']} / {ctx['state']}",
             f"摘要：{ctx['summary']}",
             f"标签：{tags}",
             '说明：只增强观察与汇总展示，不改变真实交易执行。',
@@ -498,6 +546,7 @@ class NotificationManager:
             '【建议动作】',
             '优先检查交易所返回码、仓位模式、下单参数与余额',
         ]
+        lines.extend(self._build_error_summary_lines(details, include_raw=True))
         lines.extend(self._build_observe_only_lines(signal, details))
         return self.send('trade', '❌ 开仓执行失败', lines, 'error', details or {}, priority=priority)
 
@@ -534,6 +583,7 @@ class NotificationManager:
             '【建议动作】',
             '立即检查是否存在未平仓风险，并核对交易所真实持仓',
         ]
+        lines.extend(self._build_error_summary_lines(details, include_raw=True))
         return self.send('close', '❌ 平仓执行失败', lines, 'error', details or {}, priority=priority)
 
     def notify_reconcile_issue(self, report: Dict) -> Dict:
@@ -558,7 +608,8 @@ class NotificationManager:
     def notify_error(self, title: str, message: str, details: Dict = None) -> Dict:
         priority = 'urgent'
         pmeta = self._priority_meta(priority)
-        lines = ['【异常说明】', f'通知等级：{pmeta["emoji"]} {pmeta["label"]}', message]
+        lines = ['【异常说明】', f'通知等级：{pmeta["emoji"]} {pmeta["label"]}', f'错误标题：{title}', f'错误内容：{message}']
+        lines.extend(self._build_error_summary_lines(details, include_raw=False))
         if details:
             preview = self._context_preview(details)
             if preview and preview != '--':
@@ -636,6 +687,7 @@ class NotificationManager:
             'end': '✅ 机器人周期完成',
             'skip': '⏭️ 机器人周期跳过',
             'daemon': '🔁 守护模式启动',
+            'adaptive_rollout_orchestration': '🧭 自适应 rollout 编排',
         }
         level_map = {'start': 'info', 'end': 'info', 'skip': 'warning', 'daemon': 'info'}
         priority_map = {'start': 'normal', 'end': 'normal', 'skip': 'high', 'daemon': 'normal'}

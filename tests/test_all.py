@@ -1692,7 +1692,7 @@ class TestNotifications(unittest.TestCase):
         self.assertIn('折算数量：610.4 XRP', db.logs[2]['details']['message'])
         self.assertIn('通知等级：⚠️ 重要', db.logs[0]['details']['message'])
         self.assertIn('--------------------------------------------------------------', db.logs[0]['details']['message'])
-        self.assertIn('【Adaptive Regime（Observe-only）】', db.logs[0]['details']['message'])
+        self.assertIn('【自适应市场观察（Observe-only）】', db.logs[0]['details']['message'])
         self.assertIn('只增强观察与汇总展示，不改变真实交易执行', db.logs[0]['details']['message'])
         self.assertIn('【风控拦截】', db.logs[1]['details']['message'])
         self.assertIn('通知等级：🚨 紧急', db.logs[1]['details']['message'])
@@ -1727,8 +1727,8 @@ class TestNotifications(unittest.TestCase):
 
         notifier.notify_signal(signal, False, '测试 live regime payload', details)
         message = db.logs[-1]['details']['message']
-        self.assertNotIn('Regime：unknown ｜ 置信度：0%', message)
-        self.assertIn(f"Regime：{signal.regime_snapshot['name']} ｜ 置信度：{signal.regime_snapshot['confidence']:.0%}", message)
+        self.assertNotIn('市场状态：unknown ｜ 置信度：0%', message)
+        self.assertIn(f"市场状态：{signal.regime_snapshot['name']} ｜ 置信度：{signal.regime_snapshot['confidence']:.0%}", message)
 
     def test_notify_signal_observe_only_uses_market_context_fallback(self):
         cfg = Config()
@@ -1754,8 +1754,8 @@ class TestNotifications(unittest.TestCase):
         )
         notifier.notify_signal(signal, False, '测试回退', {'passed': False})
         message = db.logs[-1]['details']['message']
-        self.assertIn('Regime：trend_up ｜ 置信度：81%', message)
-        self.assertIn('Policy：observe_only ｜ Phase/State：m1 / shadow', message)
+        self.assertIn('市场状态：trend_up ｜ 置信度：81%', message)
+        self.assertIn('策略模式：observe_only ｜ 阶段/状态：m1 / shadow', message)
         self.assertIn('摘要：market-context fallback summary', message)
 
     def test_trading_bot_notification_context_backfills_snapshots(self):
@@ -1967,6 +1967,37 @@ class TestNotifications(unittest.TestCase):
 
         # Restore original
         notifier._send_discord_bot = original_send
+
+    def test_notify_trade_open_failed_renders_exchange_error_summary_in_chinese(self):
+        cfg = Config()
+        cfg._config.setdefault('notification', {}).setdefault('discord', {})
+        cfg._config['notification']['discord'].update({'enabled': False, 'bot_token': '', 'channel_id': '', 'webhook_url': ''})
+        db = FakeLogDB()
+        notifier = NotificationManager(cfg, db, None)
+        from signals.detector import Signal
+        signal = Signal(symbol='BTC/USDT', signal_type='buy', price=50000, strength=88, strategies_triggered=['RSI'])
+
+        notifier.notify_trade_open_failed(
+            'BTC/USDT',
+            'long',
+            50000,
+            '交易所拒绝',
+            signal,
+            {
+                'error_summary': {
+                    'exchange_code': '51155',
+                    'category': 'exchange_symbol_restricted',
+                    'message': "You can't trade this pair or borrow this crypto due to local compliance restrictions.",
+                    'hint': 'switch_testnet_symbol_or_account_region',
+                    'raw_error': 'okx {...}',
+                }
+            },
+        )
+        message = db.logs[-1]['details']['message']
+        self.assertIn('【错误摘要】', message)
+        self.assertIn('交易所报码：51155', message)
+        self.assertIn('错误分类：交易对/地区合规受限（exchange_symbol_restricted）', message)
+        self.assertIn('处理建议：切换 testnet 币种，或检查账号地区/合规限制（switch_testnet_symbol_or_account_region）', message)
 
     def test_notify_loss_streak_lock_includes_approval_actions_metadata(self):
         """测试熔断通知包含 approval_actions 元数据，供 OpenClaw bridge 解析"""

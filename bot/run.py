@@ -1975,6 +1975,8 @@ class TradingBot:
         )
         diversification_context = self._candidate_diversification_context(symbol, signal, risk_details)
         strategy_selection = dict(((getattr(signal, 'market_context', {}) or {}).get('strategy_selection')) or {})
+        final_strategy_contract = dict(((getattr(signal, 'market_context', {}) or {}).get('final_strategy_contract')) or {})
+        final_strategy_reason_code = str(final_strategy_contract.get('reason_code') or '').strip() or None
         strategy_budget_summary = dict(strategy_selection.get('budget_summary') or {})
         strategy_cooldown_summary = dict(strategy_selection.get('cooldown_summary') or {})
         ranking_contract = {
@@ -1995,6 +1997,10 @@ class TradingBot:
             'strategy_slot_cap': int(strategy_budget_summary.get('slot_cap', len(strategy_selection.get('selected_strategies') or [])) or 0),
             'strategy_cooldown_summary': strategy_cooldown_summary,
             'strategy_cooldown_reason_codes': list((strategy_selection.get('cooldown_summary') or {}).get('reason_code_counts', {}).keys()),
+            'final_strategy_contract': final_strategy_contract,
+            'final_strategy_decision': final_strategy_contract.get('decision'),
+            'final_strategy_reason_code': final_strategy_reason_code,
+            'final_strategy_summary': final_strategy_contract.get('final_decision_summary') or final_strategy_contract.get('summary'),
             'close_outcome_scope_mode': scope_mode,
             'close_outcome_scope': scope_window.get('scope'),
             'close_outcome_scope_key': scope_window.get('scope_key'),
@@ -2017,6 +2023,8 @@ class TradingBot:
             'cluster_key': diversification_context.get('symbol_cluster'),
             'side': diversification_context.get('side'),
             'regime_tag': diversification_context.get('regime_tag'),
+            'final_strategy_decision': final_strategy_contract.get('decision'),
+            'final_strategy_reason_code': final_strategy_reason_code,
         }
         skip_contract = {
             'symbol': symbol,
@@ -2045,6 +2053,12 @@ class TradingBot:
                 reason_code = 'DENY_GUARD_SCOPED_FREEZE'
                 action = 'skip_scoped_freeze'
             skip_contract.update({'status': 'skipped', 'reason': risk_reason, 'reason_code': reason_code, 'action': action})
+        elif final_strategy_contract and final_strategy_contract.get('decision') == 'skip_open':
+            row_reason_code = final_strategy_reason_code or 'SKIP_FINAL_STRATEGY_ALL_BLOCKED'
+            skip_contract.update({'status': 'skipped', 'reason': final_strategy_contract.get('final_decision_summary') or final_strategy_contract.get('summary'), 'reason_code': row_reason_code, 'action': 'skip_by_final_strategy_contract'})
+            ranking_contract['can_open'] = False
+            ranking_contract['ranking_penalty'] += 800
+            ranking_contract['priority_score'] = round(ranking_contract['priority_score'] - 800, 4)
         elif scope_window and scope_mode == 'tighten':
             skip_contract.update({'status': 'skipped', 'reason': 'scoped_window_tighten_bypass', 'reason_code': 'SKIP_GUARD_SCOPED_TIGHTEN', 'action': 'bypass_tighten_candidate'})
             ranking_contract['can_open'] = False
@@ -2247,6 +2261,7 @@ class TradingBot:
         skip_contract = dict(row.get('skip_contract') or {})
         execution_contract = dict(row.get('execution_contract') or {})
         ranking_contract = dict(row.get('ranking_contract') or {})
+        final_strategy_contract = dict(ranking_contract.get('final_strategy_contract') or ((getattr(row.get('signal'), 'market_context', {}) or {}).get('final_strategy_contract')) or {})
         exchange_mode = str(getattr(self.config, 'exchange_mode', None) or self.config.get('exchange.mode', 'paper')).strip().lower()
         selected = bool(execution_contract.get('selected', False))
         allowed = True
@@ -2263,6 +2278,13 @@ class TradingBot:
             action = 'deny_non_testnet_execution'
             final_gate = 'environment'
             decision_source = 'environment'
+        elif final_strategy_contract and final_strategy_contract.get('decision') == 'skip_open':
+            allowed = False
+            reason_code = str(final_strategy_contract.get('reason_code') or 'SKIP_FINAL_STRATEGY_ALL_BLOCKED')
+            reason = str(final_strategy_contract.get('final_decision_summary') or final_strategy_contract.get('summary') or 'final_strategy_contract_denied_open')
+            action = 'deny_final_strategy_contract'
+            final_gate = 'final_strategy_contract'
+            decision_source = 'final_strategy_contract'
         elif skip_contract.get('status') == 'skipped':
             allowed = False
             reason_code = str(skip_contract.get('reason_code') or 'SKIP_CONTRACT_DENY')
@@ -2327,6 +2349,7 @@ class TradingBot:
                 'risk_reason': row.get('risk_reason'),
                 'skip_contract': skip_contract,
                 'execution_contract': execution_contract,
+                'final_strategy_contract': final_strategy_contract,
                 'ranking_contract': {
                     'rank': ranking_contract.get('rank'),
                     'priority_score': ranking_contract.get('priority_score'),

@@ -191,6 +191,30 @@ _REASON_CODE_SPECS: Dict[str, Dict[str, str]] = {
         'family': 'final_strategy_contract',
         'legacy_code': 'FINAL_STRATEGY_PROBATION_ONLY',
     },
+    'SKIP_FINAL_STRATEGY_LOW_EVIDENCE': {
+        'disposition': 'skip',
+        'stage': 'strategy_selection',
+        'family': 'final_strategy_contract',
+        'legacy_code': 'FINAL_STRATEGY_LOW_EVIDENCE',
+    },
+    'SKIP_FINAL_STRATEGY_DIRECTION_CONFLICT': {
+        'disposition': 'skip',
+        'stage': 'strategy_selection',
+        'family': 'final_strategy_contract',
+        'legacy_code': 'FINAL_STRATEGY_DIRECTION_CONFLICT',
+    },
+    'SKIP_FINAL_STRATEGY_SIGNAL_MISMATCH': {
+        'disposition': 'skip',
+        'stage': 'strategy_selection',
+        'family': 'final_strategy_contract',
+        'legacy_code': 'FINAL_STRATEGY_SIGNAL_MISMATCH',
+    },
+    'SKIP_FINAL_STRATEGY_NO_SELECTED_TRIGGER': {
+        'disposition': 'skip',
+        'stage': 'strategy_selection',
+        'family': 'final_strategy_contract',
+        'legacy_code': 'FINAL_STRATEGY_NO_SELECTED_TRIGGER',
+    },
 }
 
 _REASON_CODE_ALIASES: Dict[str, str] = {}

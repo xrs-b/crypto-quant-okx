@@ -392,8 +392,52 @@ class SignalDetector:
         evidence_summary = dict(selection_contract.get('reactivation_evidence_summary') or {})
         selection_reason_codes = list(selection_contract.get('selection_reason_codes') or [])
 
+        triggered_details = []
+        action_counts = {'buy': 0, 'sell': 0}
+        evidence_score = 0.0
+        for reason in list(signal.reasons or []):
+            strategy_name = str(reason.get('strategy') or '').strip()
+            if not strategy_name or strategy_name not in selected or not reason.get('triggered'):
+                continue
+            action = str(reason.get('action') or '').strip().lower()
+            weighted_strength = float(reason.get('strength', 0) or 0) * float(reason.get('confidence', 0.0) or 0.0)
+            if action in action_counts:
+                action_counts[action] += 1
+            evidence_score += weighted_strength
+            triggered_details.append({
+                'strategy': strategy_name,
+                'action': reason.get('action'),
+                'strength': round(float(reason.get('strength', 0) or 0), 4),
+                'confidence': round(float(reason.get('confidence', 0.0) or 0.0), 4),
+                'weighted_strength': round(weighted_strength, 4),
+                'budget_ratio': float(budgets.get(strategy_name, 0.0) or 0.0),
+                'metadata': dict(reason.get('metadata') or {}),
+            })
+
+        conflict = {
+            'has_direction_conflict': bool(action_counts['buy'] > 0 and action_counts['sell'] > 0),
+            'buy_count': int(action_counts['buy']),
+            'sell_count': int(action_counts['sell']),
+        }
+        selected_trigger_count = len(triggered_details)
+        min_selected_trigger_count = max(1, min(int(selection_contract.get('min_selected_strategies') or 1), max(len(selected), 1)))
+        effective_signal_type = str(signal.signal_type or 'hold').strip().lower()
+        effective_direction = 'long' if effective_signal_type == 'buy' else 'short' if effective_signal_type == 'sell' else 'flat'
+        evidence = {
+            'selected_trigger_count': selected_trigger_count,
+            'min_selected_trigger_count': min_selected_trigger_count,
+            'selected_budget_ratio': round(sum(float(budgets.get(name, 0.0) or 0.0) for name in selected), 4),
+            'weighted_evidence_score': round(evidence_score, 4),
+            'strength': int(signal.strength or 0),
+            'direction_score': dict(signal.direction_score or {}),
+            'low_evidence': bool(selected and selected_trigger_count < min_selected_trigger_count),
+        }
+
         reason_code = 'PERMIT_FINAL_STRATEGY_CONTRACT_READY'
         status = 'ready'
+        decision = 'allow_open'
+        final_signal_type = effective_signal_type
+        final_direction = effective_direction
         if not selected:
             if int(reactivation_summary.get('confirm_required_count', 0) or 0) > 0 or int(cooldown_summary.get('active_count', 0) or 0) > 0 or int(cooldown_summary.get('recovery_window_count', 0) or 0) > 0:
                 reason_code = 'SKIP_FINAL_STRATEGY_ALL_BLOCKED'
@@ -401,44 +445,62 @@ class SignalDetector:
             else:
                 reason_code = selection_reason_codes[0] if selection_reason_codes else 'SKIP_FINAL_STRATEGY_ALL_BLOCKED'
                 status = 'idle'
+            decision = 'skip_open'
+            final_signal_type = 'hold'
+            final_direction = 'flat'
+        elif selected_trigger_count <= 0:
+            reason_code = 'SKIP_FINAL_STRATEGY_NO_SELECTED_TRIGGER'
+            status = 'blocked'
+            decision = 'skip_open'
+            final_signal_type = 'hold'
+            final_direction = 'flat'
+        elif conflict['has_direction_conflict']:
+            reason_code = 'SKIP_FINAL_STRATEGY_DIRECTION_CONFLICT'
+            status = 'blocked'
+            decision = 'skip_open'
+            final_signal_type = 'hold'
+            final_direction = 'flat'
+        elif evidence['low_evidence']:
+            reason_code = 'SKIP_FINAL_STRATEGY_LOW_EVIDENCE'
+            status = 'blocked'
+            decision = 'skip_open'
+            final_signal_type = 'hold'
+            final_direction = 'flat'
+        elif effective_signal_type not in {'buy', 'sell'} or effective_direction == 'flat':
+            reason_code = 'SKIP_FINAL_STRATEGY_SIGNAL_MISMATCH'
+            status = 'blocked'
+            decision = 'skip_open'
+            final_signal_type = 'hold'
+            final_direction = 'flat'
         elif int(reactivation_summary.get('probation_count', 0) or 0) > 0 and len(selected) == int(reactivation_summary.get('probation_count', 0) or 0):
             reason_code = 'DEWEIGHT_FINAL_STRATEGY_PROBATION_ONLY'
             status = 'guarded'
-
-        triggered_details = []
-        for reason in list(signal.reasons or []):
-            strategy_name = str(reason.get('strategy') or '').strip()
-            if not strategy_name or strategy_name not in selected or not reason.get('triggered'):
-                continue
-            triggered_details.append({
-                'strategy': strategy_name,
-                'action': reason.get('action'),
-                'strength': round(float(reason.get('strength', 0) or 0), 4),
-                'confidence': round(float(reason.get('confidence', 0.0) or 0.0), 4),
-                'budget_ratio': float(budgets.get(strategy_name, 0.0) or 0.0),
-                'metadata': dict(reason.get('metadata') or {}),
-            })
+            decision = 'allow_open_guarded'
 
         contract = {
             'schema_version': 'final_strategy_contract_v1',
             'symbol': signal.symbol,
             'status': status,
-            'signal_type': signal.signal_type,
-            'direction': 'long' if signal.signal_type == 'buy' else 'short' if signal.signal_type == 'sell' else 'flat',
+            'decision': decision,
+            'signal_type': final_signal_type,
+            'direction': final_direction,
             'strength': int(signal.strength or 0),
             'direction_score': dict(signal.direction_score or {}),
             'selected_strategies': selected,
             'selected_strategy_count': len(selected),
-            'selected_budget_ratio': round(sum(float(budgets.get(name, 0.0) or 0.0) for name in selected), 4),
+            'selected_budget_ratio': evidence['selected_budget_ratio'],
             'strategies_triggered': list(getattr(signal, 'strategies_triggered', []) or []),
             'strategy_details': triggered_details,
+            'conflict': conflict,
+            'evidence': evidence,
             'reason_code': reason_code,
             'reason_codes': selection_reason_codes,
             'selection_summary': selection_contract.get('decision_summary'),
             'cooldown_summary': cooldown_summary,
             'reactivation_summary': reactivation_summary,
             'reactivation_evidence_summary': evidence_summary,
-            'summary': f"{status}:{signal.signal_type}:selected={','.join(selected) or 'none'}:strength={int(signal.strength or 0)}",
+            'final_decision_summary': f"decision={decision} / reason_code={reason_code} / direction={final_direction} / selected={','.join(selected) or 'none'} / triggered={selected_trigger_count}/{max(len(selected), 1)} / strength={int(signal.strength or 0)}",
+            'summary': f"{status}:{final_signal_type}:selected={','.join(selected) or 'none'}:strength={int(signal.strength or 0)}",
             'generated_at': datetime.now().isoformat(),
         }
         return contract

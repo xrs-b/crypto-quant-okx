@@ -4850,6 +4850,32 @@ class TestOpenCandidateRanking(unittest.TestCase):
         self.assertTrue(any(item['diversification'].get('reason_codes') for item in summary['items'] if item['symbol'] == 'ETH/USDT'))
 
 
+    def test_build_candidate_contract_skips_when_final_strategy_contract_blocks_open(self):
+        signal = self._make_signal(symbol='BTC/USDT')
+        signal.market_context['final_strategy_contract'] = {
+            'schema_version': 'final_strategy_contract_v1',
+            'decision': 'skip_open',
+            'reason_code': 'SKIP_FINAL_STRATEGY_LOW_EVIDENCE',
+            'final_decision_summary': 'decision=skip_open / reason_code=SKIP_FINAL_STRATEGY_LOW_EVIDENCE',
+            'direction': 'flat',
+        }
+        row = self.bot._build_candidate_contract(
+            symbol='BTC/USDT',
+            current_price=50000,
+            signal=signal,
+            signal_id=700,
+            passed=True,
+            reason=None,
+            details={},
+            entry_decision=type('EntryDecisionStub', (), {'decision': 'allow', 'score': 80, 'to_dict': lambda self: {'decision': 'allow', 'score': 80}})(),
+            can_open=True,
+            risk_reason=None,
+            risk_details={'close_outcome_guard': {'passed': True, 'enabled': True, 'mode': 'observe', 'scope_window': {}, 'scope_context': {'symbol': 'BTC/USDT'}}},
+        )
+        self.assertFalse(row['ranking_contract']['can_open'])
+        self.assertEqual(row['skip_contract']['reason_code'], 'SKIP_FINAL_STRATEGY_LOW_EVIDENCE')
+        self.assertEqual(row['skip_contract']['action'], 'skip_by_final_strategy_contract')
+
     def test_build_final_execution_permit_contract_denies_scoped_freeze_on_testnet(self):
         signal = self._make_signal(symbol='BTC/USDT')
         row = self.bot._build_candidate_contract(
@@ -4888,6 +4914,35 @@ class TestOpenCandidateRanking(unittest.TestCase):
         self.assertEqual(permit['reason_code_stage'], 'risk_gate')
         self.assertTrue(permit['guardrail_evidence']['close_outcome_guard']['freeze_auto_promotion'])
         self.assertEqual(permit['guardrail_evidence']['close_outcome_decision_contract']['operator_action_policy']['action'], 'freeze_followup')
+
+    def test_build_final_execution_permit_contract_denies_when_final_strategy_contract_blocks_open(self):
+        signal = self._make_signal(symbol='BTC/USDT')
+        signal.market_context['final_strategy_contract'] = {
+            'schema_version': 'final_strategy_contract_v1',
+            'decision': 'skip_open',
+            'reason_code': 'SKIP_FINAL_STRATEGY_DIRECTION_CONFLICT',
+            'final_decision_summary': 'decision=skip_open / reason_code=SKIP_FINAL_STRATEGY_DIRECTION_CONFLICT',
+            'direction': 'flat',
+        }
+        row = self.bot._build_candidate_contract(
+            symbol='BTC/USDT',
+            current_price=50000,
+            signal=signal,
+            signal_id=703,
+            passed=True,
+            reason=None,
+            details={},
+            entry_decision=type('EntryDecisionStub', (), {'decision': 'allow', 'score': 80, 'to_dict': lambda self: {'decision': 'allow', 'score': 80}})(),
+            can_open=True,
+            risk_reason=None,
+            risk_details={'close_outcome_guard': {'passed': True, 'enabled': True, 'mode': 'observe', 'scope_window': {}, 'scope_context': {'symbol': 'BTC/USDT'}}},
+        )
+        row.setdefault('execution_contract', {}).update({'status': 'selected', 'selected': True, 'reason_code': 'PERMIT_EXECUTION_QUOTA_PASSED'})
+        permit = self.bot._build_final_execution_permit_contract(row)
+        self.assertFalse(permit['allowed'])
+        self.assertEqual(permit['reason_code'], 'SKIP_FINAL_STRATEGY_DIRECTION_CONFLICT')
+        self.assertEqual(permit['runtime_diagnose_bundle']['final_gate'], 'final_strategy_contract')
+        self.assertEqual(permit['runtime_diagnose_bundle']['decision_source'], 'final_strategy_contract')
 
     def test_build_final_execution_permit_contract_emits_reason_codes_and_replay_digest(self):
         signal = self._make_signal(symbol='BTC/USDT')

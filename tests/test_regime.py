@@ -961,6 +961,53 @@ class TestAdaptiveStrategySelectionCooldown(unittest.TestCase):
         self.assertGreaterEqual(gate['evidence_results']['signal_strength']['weighted_signal_strength'], 0.0)
         self.assertEqual(contract['reactivation_evidence_summary']['strategies_evaluated'], ['RSI'])
 
+    def test_final_strategy_contract_blocks_direction_conflict(self):
+        from signals.detector import SignalDetector, Signal
+        detector = SignalDetector(self.cfg.all)
+        signal = Signal(
+            symbol='BTC/USDT',
+            signal_type='hold',
+            price=100.0,
+            strength=42,
+            reasons=[
+                {'strategy': 'RSI', 'strength': 30, 'confidence': 0.8, 'action': 'buy', 'triggered': True},
+                {'strategy': 'MACD', 'strength': 28, 'confidence': 0.8, 'action': 'sell', 'triggered': True},
+            ],
+            market_context={},
+        )
+        contract = detector.build_final_strategy_contract(signal, {
+            'selected_strategies': ['RSI', 'MACD'],
+            'strategy_budgets': {'RSI': 0.4, 'MACD': 0.4},
+        })
+        self.assertEqual(contract['decision'], 'skip_open')
+        self.assertEqual(contract['reason_code'], 'SKIP_FINAL_STRATEGY_DIRECTION_CONFLICT')
+        self.assertTrue(contract['conflict']['has_direction_conflict'])
+        self.assertEqual(contract['direction'], 'flat')
+
+    def test_final_strategy_contract_blocks_low_evidence_selected_strategies(self):
+        from signals.detector import SignalDetector, Signal
+        detector = SignalDetector(self.cfg.all)
+        signal = Signal(
+            symbol='BTC/USDT',
+            signal_type='buy',
+            price=100.0,
+            strength=36,
+            reasons=[
+                {'strategy': 'RSI', 'strength': 30, 'confidence': 0.8, 'action': 'buy', 'triggered': True},
+                {'strategy': 'MACD', 'strength': 28, 'confidence': 0.8, 'action': 'buy', 'triggered': False},
+            ],
+            market_context={},
+        )
+        contract = detector.build_final_strategy_contract(signal, {
+            'selected_strategies': ['RSI', 'MACD'],
+            'strategy_budgets': {'RSI': 0.4, 'MACD': 0.4},
+            'min_selected_strategies': 2,
+        })
+        self.assertEqual(contract['decision'], 'skip_open')
+        self.assertEqual(contract['reason_code'], 'SKIP_FINAL_STRATEGY_LOW_EVIDENCE')
+        self.assertTrue(contract['evidence']['low_evidence'])
+        self.assertEqual(contract['direction'], 'flat')
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -1,5 +1,13 @@
 # Adaptive Market Regime Backlog
 
+## 2026-03-30 已完成：close outcome entry risk guard
+- 已把 `close outcome feedback` 从 orchestration / digest 层推进到 bot 主链 `RiskManager.can_open_position(...)`：
+  - 新增 `trading.close_outcome_feedback_guard` 配置，控制 `lookback_limit / min_sample_size / block_modes / tighten_modes / leverage+margin cap multipliers`；
+  - 当 symbol 级 recent close outcomes 进入 `rollback` 且命中 freeze guard 时，会直接 fail-closed 阻止新开仓；
+  - 当 close outcomes 处于 `tighten` 时，则会在不放宽任何 baseline 的前提下，自动收紧 `base_entry_margin_ratio / total_margin_cap_ratio / symbol_margin_cap_ratio / leverage_cap`；
+  - 相关 observability 已回挂到 `details.close_outcome_guard` 与 `exposure_limit.baseline_risk_budget / close_outcome_adjusted_risk_budget`，方便后续审计“点解今次仓位更细 / 点解直接唔开仓”。
+- 重点：呢层唔系纯 dashboard/API 展示，而系第一次把 recent close feedback 真正接回 bot 开仓风控，补上“平仓结果 → 下一次开仓预算/冻结”闭环。
+
 ## 2026-03-28 已完成：testnet bridge execution evidence-gated readiness / alert
 - 已新增统一 `m5_testnet_bridge_evidence_gate_v1`，把 `testnet_bridge_execution_evidence` 进一步收口成可直接消费的生产门禁语义：
   - 最近 testnet execute 是否成功（`recent_execute_succeeded`）

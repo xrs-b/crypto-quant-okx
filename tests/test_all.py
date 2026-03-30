@@ -4108,6 +4108,7 @@ class TestRiskManager(unittest.TestCase):
             shutil.move(str(self._local_config_path), str(self._backup_path))
 
         self.config = Config()
+        self.config._config.setdefault('trading', {}).update({'min_trade_interval': 0, 'max_trades_per_day': 999, 'max_daily_drawdown': 0.5, 'max_consecutive_losses': 99})
         self.db = Database('data/test_risk.db')
         self.risk_mgr = RiskManager(self.config, self.db)
         # Patch balance to avoid real exchange API calls in unit tests
@@ -4135,6 +4136,54 @@ class TestRiskManager(unittest.TestCase):
 
         self.assertTrue(can_open)
         self.assertIsNone(reason)
+
+    def test_close_outcome_guard_blocks_new_entries_on_rollback_feedback(self):
+        for idx in range(5):
+            trade_id = self.db.record_trade(symbol='BTC/USDT', side='long', entry_price=50000, quantity=0.1, leverage=5)
+            self.db.close_trade_with_outcome_enrichment(
+                trade_id=trade_id,
+                exit_price=49000,
+                pnl=-100,
+                pnl_percent=-2,
+                notes=f'rollback-loss-{idx}',
+                close_source='local_market_close',
+            )
+        can_open, reason, details = self.risk_mgr.can_open_position('BTC/USDT')
+        self.assertFalse(can_open)
+        self.assertIn('平仓反馈风控阻止开仓', reason)
+        self.assertEqual(details['close_outcome_guard']['mode'], 'rollback')
+        self.assertTrue(details['close_outcome_guard']['freeze_auto_promotion'])
+
+    def test_close_outcome_guard_tightens_risk_budget_on_underperformance(self):
+        for idx in range(5):
+            trade_id = self.db.record_trade(symbol='BTC/USDT', side='long', entry_price=50000, quantity=0.1, leverage=5)
+            if idx < 3:
+                self.db.close_trade_with_outcome_enrichment(
+                    trade_id=trade_id,
+                    exit_price=49500,
+                    pnl=-30,
+                    pnl_percent=-0.6,
+                    notes=f'tighten-loss-{idx}',
+                    close_source='local_market_close',
+                )
+            else:
+                self.db.close_trade_with_outcome_enrichment(
+                    trade_id=trade_id,
+                    exit_price=50050,
+                    pnl=5,
+                    pnl_percent=0.1,
+                    notes=f'tighten-win-{idx}',
+                    close_source='local_market_close',
+                )
+        can_open, reason, details = self.risk_mgr.can_open_position('BTC/USDT')
+        self.assertTrue(can_open)
+        self.assertIsNone(reason)
+        self.assertEqual(details['close_outcome_guard']['mode'], 'tighten')
+        baseline_budget = details['exposure_limit']['baseline_risk_budget']
+        adjusted_budget = details['exposure_limit']['close_outcome_adjusted_risk_budget']
+        self.assertLess(adjusted_budget['base_entry_margin_ratio'], baseline_budget['base_entry_margin_ratio'])
+        self.assertLessEqual(adjusted_budget['symbol_margin_cap_ratio'], baseline_budget['symbol_margin_cap_ratio'])
+        self.assertTrue(adjusted_budget['close_outcome_guard_applied'])
 
     def test_today_trade_count_uses_open_time(self):
         self.db.record_trade(symbol='BTC/USDT', side='long', entry_price=50000, quantity=0.1, leverage=10)

@@ -11,6 +11,7 @@ from core.exchange import Exchange
 from core.database import Database
 from core.logger import trade_logger
 from analytics.recommendation import get_recommendation_provider
+from analytics.helper import build_close_outcome_feedback_loop
 from core.risk_budget import get_risk_budget_config, summarize_margin_usage, compute_entry_plan, summarize_risk_hint_changes
 from core.regime_policy import build_observe_only_payload, build_risk_effective_snapshot, build_execution_effective_snapshot
 
@@ -1468,6 +1469,103 @@ class RiskManager:
         except Exception:
             return None
 
+    def _get_close_outcome_guard_config(self) -> Dict[str, Any]:
+        raw = self.trading_config.get('close_outcome_feedback_guard', {}) or {}
+        return {
+            'enabled': bool(raw.get('enabled', True)),
+            'lookback_limit': max(int(raw.get('lookback_limit', 20) or 20), 1),
+            'min_sample_size': max(int(raw.get('min_sample_size', 5) or 5), 1),
+            'block_modes': [str(x).strip().lower() for x in (raw.get('block_modes') or ['rollback']) if str(x).strip()],
+            'tighten_modes': [str(x).strip().lower() for x in (raw.get('tighten_modes') or ['tighten']) if str(x).strip()],
+            'require_freeze_for_block': bool(raw.get('require_freeze_for_block', True)),
+            'tighten_entry_ratio_multiplier': float(raw.get('tighten_entry_ratio_multiplier', 0.5) or 0.5),
+            'tighten_total_margin_cap_multiplier': float(raw.get('tighten_total_margin_cap_multiplier', 0.85) or 0.85),
+            'tighten_symbol_margin_cap_multiplier': float(raw.get('tighten_symbol_margin_cap_multiplier', 0.75) or 0.75),
+            'tighten_leverage_cap_multiplier': float(raw.get('tighten_leverage_cap_multiplier', 0.7) or 0.7),
+            'floor_entry_margin_ratio': float(raw.get('floor_entry_margin_ratio', 0.02) or 0.02),
+            'floor_total_margin_cap_ratio': float(raw.get('floor_total_margin_cap_ratio', 0.10) or 0.10),
+            'floor_symbol_margin_cap_ratio': float(raw.get('floor_symbol_margin_cap_ratio', 0.05) or 0.05),
+            'floor_leverage_cap': max(int(raw.get('floor_leverage_cap', 2) or 2), 1),
+        }
+
+    def _build_close_outcome_guard(self, symbol: str) -> Dict[str, Any]:
+        cfg = self._get_close_outcome_guard_config()
+        result = {
+            'enabled': bool(cfg.get('enabled')),
+            'passed': True,
+            'mode': 'observe',
+            'reason': None,
+            'action': 'observe_only_followup',
+            'route': 'observe_only_followup',
+            'freeze_auto_promotion': False,
+            'trade_count': 0,
+            'min_sample_size': int(cfg.get('min_sample_size') or 0),
+            'risk_budget_overrides': {},
+            'feedback_loop': {},
+            'digest': {},
+            'config': cfg,
+        }
+        if not result['enabled']:
+            result['reason'] = 'disabled'
+            return result
+        digest = self.db.get_close_outcome_digest(symbol=symbol, limit=cfg['lookback_limit']) if self.db else {}
+        feedback = build_close_outcome_feedback_loop(digest, label=f'close_outcome_risk_guard:{symbol}')
+        trade_count = int(feedback.get('trade_count') or digest.get('trade_count') or 0)
+        mode = str(feedback.get('governance_mode') or 'observe').strip().lower() or 'observe'
+        hint = feedback.get('orchestration_hint') or {}
+        next_action = feedback.get('next_action') or {}
+        result.update({
+            'mode': mode,
+            'action': next_action.get('action') or hint.get('action') or 'observe_only_followup',
+            'route': next_action.get('route') or hint.get('route') or 'observe_only_followup',
+            'freeze_auto_promotion': bool(hint.get('freeze_auto_promotion', False)),
+            'trade_count': trade_count,
+            'feedback_loop': feedback,
+            'digest': digest,
+        })
+        if trade_count < cfg['min_sample_size']:
+            result['reason'] = 'sample_too_small'
+            return result
+        should_block = mode in set(cfg['block_modes'] or [])
+        if should_block and cfg.get('require_freeze_for_block', True):
+            should_block = bool(result['freeze_auto_promotion'])
+        if should_block:
+            result['passed'] = False
+            result['reason'] = f'close_outcome_guard_block:{mode}'
+            return result
+        if mode in set(cfg['tighten_modes'] or []):
+            result['reason'] = f'close_outcome_guard_tighten:{mode}'
+            result['risk_budget_overrides'] = {
+                'base_entry_margin_ratio': max(cfg['floor_entry_margin_ratio'], float(cfg['tighten_entry_ratio_multiplier']) * 1.0),
+                'total_margin_cap_ratio': max(cfg['floor_total_margin_cap_ratio'], float(cfg['tighten_total_margin_cap_multiplier']) * 1.0),
+                'symbol_margin_cap_ratio': max(cfg['floor_symbol_margin_cap_ratio'], float(cfg['tighten_symbol_margin_cap_multiplier']) * 1.0),
+                'leverage_cap_multiplier': float(cfg['tighten_leverage_cap_multiplier']),
+                'floor_leverage_cap': int(cfg['floor_leverage_cap']),
+            }
+        else:
+            result['reason'] = f'close_outcome_guard_observe:{mode}'
+        return result
+
+    def _apply_close_outcome_budget_overrides(self, risk_budget: Dict[str, Any], guard: Dict[str, Any]) -> Dict[str, Any]:
+        adjusted = dict(risk_budget or {})
+        overrides = dict((guard or {}).get('risk_budget_overrides') or {})
+        if not overrides:
+            return adjusted
+        if adjusted.get('base_entry_margin_ratio') is not None:
+            adjusted['base_entry_margin_ratio'] = min(float(adjusted.get('base_entry_margin_ratio') or 0.0), float(adjusted.get('base_entry_margin_ratio') or 0.0) * float(overrides.get('base_entry_margin_ratio', 1.0)))
+        if adjusted.get('total_margin_cap_ratio') is not None:
+            adjusted['total_margin_cap_ratio'] = min(float(adjusted.get('total_margin_cap_ratio') or 0.0), float(adjusted.get('total_margin_cap_ratio') or 0.0) * float(overrides.get('total_margin_cap_ratio', 1.0)))
+        if adjusted.get('symbol_margin_cap_ratio') is not None:
+            adjusted['symbol_margin_cap_ratio'] = min(float(adjusted.get('symbol_margin_cap_ratio') or 0.0), float(adjusted.get('symbol_margin_cap_ratio') or 0.0) * float(overrides.get('symbol_margin_cap_ratio', 1.0)))
+        current_leverage_cap = adjusted.get('leverage_cap')
+        if current_leverage_cap is not None:
+            adjusted['leverage_cap'] = max(int(overrides.get('floor_leverage_cap') or 1), int(float(current_leverage_cap or 0) * float(overrides.get('leverage_cap_multiplier', 1.0))))
+        elif self.trading_config.get('leverage') is not None:
+            adjusted['leverage_cap'] = max(int(overrides.get('floor_leverage_cap') or 1), int(float(self.trading_config.get('leverage') or 1) * float(overrides.get('leverage_cap_multiplier', 1.0))))
+        adjusted['close_outcome_guard_applied'] = True
+        adjusted['close_outcome_guard_mode'] = guard.get('mode')
+        return adjusted
+
     def _sync_loss_streak_guard(self) -> Dict[str, Any]:
         state = self.db.get_risk_guard_state('loss_streak')
         now = datetime.now()
@@ -1648,6 +1746,28 @@ class RiskManager:
             'max': max_daily_drawdown
         }
 
+        close_outcome_guard = self._build_close_outcome_guard(symbol)
+        details['close_outcome_guard'] = {
+            'passed': bool(close_outcome_guard.get('passed', True)),
+            'enabled': bool(close_outcome_guard.get('enabled', False)),
+            'mode': close_outcome_guard.get('mode'),
+            'reason': close_outcome_guard.get('reason'),
+            'action': close_outcome_guard.get('action'),
+            'route': close_outcome_guard.get('route'),
+            'freeze_auto_promotion': bool(close_outcome_guard.get('freeze_auto_promotion', False)),
+            'trade_count': int(close_outcome_guard.get('trade_count', 0) or 0),
+            'min_sample_size': int(close_outcome_guard.get('min_sample_size', 0) or 0),
+            'policy_hints': list(((close_outcome_guard.get('feedback_loop') or {}).get('policy_hints') or [])),
+            'reason_codes': list(((close_outcome_guard.get('feedback_loop') or {}).get('reason_codes') or [])),
+            'recent_closes': list(((close_outcome_guard.get('digest') or {}).get('recent_closes') or [])),
+            'risk_budget_overrides': dict(close_outcome_guard.get('risk_budget_overrides') or {}),
+            'feedback_loop': dict(close_outcome_guard.get('feedback_loop') or {}),
+            'digest': dict(close_outcome_guard.get('digest') or {}),
+        }
+        if not close_outcome_guard.get('passed', True):
+            details['adaptive_risk_snapshot'] = dict(adaptive_risk_snapshot or {})
+            return False, f"平仓反馈风控阻止开仓({close_outcome_guard.get('mode') or 'guarded'})", details
+
         adaptive_risk_snapshot = build_risk_effective_snapshot(
             self.config,
             symbol,
@@ -1655,6 +1775,8 @@ class RiskManager:
             policy_snapshot=(plan_context or {}).get('adaptive_policy_snapshot'),
         )
         risk_budget = dict(adaptive_risk_snapshot.get('enforced_budget') or get_risk_budget_config(self.config, symbol))
+        baseline_risk_budget = dict(risk_budget)
+        risk_budget = self._apply_close_outcome_budget_overrides(risk_budget, close_outcome_guard)
         configured_leverage = int(self.trading_config.get('leverage', 10))
 
         leverage_cap = risk_budget.get('leverage_cap')
@@ -1773,6 +1895,8 @@ class RiskManager:
             'leverage_cap': leverage_cap,
             'position_ratio': position_ratio,
             'entry_plan': entry_plan,
+            'baseline_risk_budget': baseline_risk_budget,
+            'close_outcome_adjusted_risk_budget': risk_budget,
         }
 
         return True, None, details

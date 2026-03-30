@@ -29,7 +29,7 @@ from trading.executor import build_observability_context
 from analytics.backtest import StrategyBacktester, build_regime_policy_calibration_report, build_calibration_report_ready_payload, build_joint_governance_ready_payload, build_governance_workflow_ready_payload, export_calibration_payload
 from analytics.helper import build_orchestration_result_digest
 from strategies.strategy_library import StrategyManager
-from bot.run import build_exchange_diagnostics, build_exchange_smoke_plan, build_approval_hygiene_summary, build_runtime_health_summary, maybe_run_approval_hygiene, maybe_run_adaptive_rollout_orchestration, maybe_send_daily_health_summary, execute_exchange_smoke, reconcile_exchange_positions
+from bot.run import TradingBot, build_exchange_diagnostics, build_exchange_smoke_plan, build_approval_hygiene_summary, build_runtime_health_summary, maybe_run_approval_hygiene, maybe_run_adaptive_rollout_orchestration, maybe_send_daily_health_summary, execute_exchange_smoke, reconcile_exchange_positions
 from dashboard.api import app
 from core.risk_budget import get_risk_budget_config, compute_entry_plan, summarize_margin_usage, summarize_risk_hint_changes
 from core.presets import PresetManager
@@ -4396,6 +4396,88 @@ class TestRiskManagerBudgetDetails(unittest.TestCase):
         self.assertAlmostEqual(details['exposure_limit']['entry_plan']['risk_budget']['base_entry_margin_ratio'], 0.08, places=6)
         self.assertFalse(details['adaptive_risk_hints']['rollout_match'])
 
+
+
+class TestOpenCandidateRanking(unittest.TestCase):
+    def setUp(self):
+        self.bot = TradingBot()
+        self.bot.config._config.setdefault('runtime', {}).setdefault('open_position', {})['max_candidates_per_cycle'] = 1
+
+    def _make_signal(self, symbol='BTC/USDT', signal_type='buy', strength=70):
+        return Signal(
+            symbol=symbol,
+            signal_type=signal_type,
+            price=50000,
+            strength=strength,
+            reasons=['test'],
+            strategies_triggered=['trend_follow', 'momentum'],
+            indicators={},
+        )
+
+    def test_candidate_contract_skips_scoped_tighten_window(self):
+        signal = self._make_signal(symbol='BTC/USDT')
+        contract = self.bot._build_candidate_contract(
+            symbol='BTC/USDT',
+            current_price=50000,
+            signal=signal,
+            signal_id=101,
+            passed=True,
+            reason=None,
+            details={},
+            entry_decision=type('EntryDecisionStub', (), {'decision': 'allow', 'score': 80, 'to_dict': lambda self: {'decision': 'allow', 'score': 80}})(),
+            can_open=True,
+            risk_reason=None,
+            risk_details={
+                'close_outcome_guard': {
+                    'mode': 'tighten',
+                    'scope_window': {'scope': 'symbol', 'scope_key': 'symbol:BTC/USDT'},
+                    'scope_context': {'symbol': 'BTC/USDT', 'regime_tag': 'trend_up'},
+                }
+            },
+        )
+        self.assertFalse(contract['can_open'])
+        self.assertEqual(contract['skip_contract']['reason_code'], 'SCOPED_WINDOW_TIGHTEN')
+        self.assertEqual(contract['ranking_contract']['close_outcome_scope'], 'symbol')
+
+    def test_rank_open_candidates_prefers_non_scoped_candidate(self):
+        selected_signal = self._make_signal(symbol='ETH/USDT', strength=68)
+        skipped_signal = self._make_signal(symbol='BTC/USDT', strength=92)
+        entry_stub = type('EntryDecisionStub', (), {'decision': 'allow', 'score': 75, 'to_dict': lambda self: {'decision': 'allow', 'score': 75}})
+        ready_contract = self.bot._build_candidate_contract(
+            symbol='ETH/USDT',
+            current_price=3000,
+            signal=selected_signal,
+            signal_id=201,
+            passed=True,
+            reason=None,
+            details={},
+            entry_decision=entry_stub(),
+            can_open=True,
+            risk_reason=None,
+            risk_details={'close_outcome_guard': {'mode': 'observe', 'scope_window': {}, 'scope_context': {'symbol': 'ETH/USDT'}}},
+        )
+        tighten_contract = self.bot._build_candidate_contract(
+            symbol='BTC/USDT',
+            current_price=50000,
+            signal=skipped_signal,
+            signal_id=202,
+            passed=True,
+            reason=None,
+            details={},
+            entry_decision=entry_stub(),
+            can_open=True,
+            risk_reason=None,
+            risk_details={'close_outcome_guard': {'mode': 'tighten', 'scope_window': {'scope': 'symbol', 'scope_key': 'symbol:BTC/USDT'}, 'scope_context': {'symbol': 'BTC/USDT'}}},
+        )
+        ranked, selected = self.bot._rank_open_candidates([tighten_contract, ready_contract])
+        self.assertEqual(len(selected), 1)
+        self.assertEqual(selected[0]['symbol'], 'ETH/USDT')
+        btc_row = next(row for row in ranked if row['symbol'] == 'BTC/USDT')
+        self.assertEqual(btc_row['skip_contract']['reason_code'], 'SCOPED_WINDOW_TIGHTEN')
+        summary = self.bot._build_candidate_runtime_summary(ranked, selected)
+        self.assertEqual(summary['selected_count'], 1)
+        self.assertEqual(summary['candidate_count'], 2)
+        self.assertTrue(any(item.get('reason_code') == 'SCOPED_WINDOW_TIGHTEN' for item in summary['skip_contracts']))
 
 
 class TestLayerPlanAndIntents(unittest.TestCase):

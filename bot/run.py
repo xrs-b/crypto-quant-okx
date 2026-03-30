@@ -1016,6 +1016,171 @@ class TradingBot:
         self.notifier = NotificationManager(self.config, self.db, logger)
         
         logger.info("交易机器人初始化完成")
+
+    def _max_open_candidates_per_cycle(self) -> int:
+        raw = self.config.get('runtime.open_position.max_candidates_per_cycle', 1)
+        try:
+            return max(int(raw or 1), 1)
+        except Exception:
+            return 1
+
+    def _build_candidate_contract(self, *, symbol: str, current_price: float, signal, signal_id: int,
+                                  passed: bool, reason: str, details: dict, entry_decision,
+                                  can_open: bool = False, risk_reason: str = None, risk_details: dict = None) -> dict:
+        risk_details = dict(risk_details or {})
+        guard = dict(risk_details.get('close_outcome_guard') or {})
+        scope_window = dict(guard.get('scope_window') or {})
+        scope_context = dict(guard.get('scope_context') or {})
+        scope_mode = str(guard.get('mode') or 'observe').strip().lower() or 'observe'
+        side = 'long' if getattr(signal, 'signal_type', None) == 'buy' else 'short' if getattr(signal, 'signal_type', None) == 'sell' else None
+        ml_confidence = None
+        if isinstance(getattr(signal, 'indicators', None), dict):
+            ml_confidence = signal.indicators.get('ML_Confidence')
+        ranking_penalty = 0
+        if scope_window:
+            ranking_penalty += {'rollback': 1000, 'tighten': 250, 'review': 150}.get(scope_mode, 0)
+        if entry_decision and getattr(entry_decision, 'decision', None) != 'allow':
+            ranking_penalty += 500
+        if not can_open:
+            ranking_penalty += 900
+        ml_score = 0.0
+        if ml_confidence is not None:
+            ml_score = float(ml_confidence or 0)
+            if ml_score <= 1.0:
+                ml_score *= 100.0
+        priority_score = round(
+            float(getattr(signal, 'strength', 0) or 0)
+            + float(getattr(entry_decision, 'score', 0) or 0) * 1.5
+            + ml_score * 0.05
+            - float(ranking_penalty),
+            4,
+        )
+        ranking_contract = {
+            'symbol': symbol,
+            'signal_id': signal_id,
+            'side': side,
+            'price': current_price,
+            'signal_type': getattr(signal, 'signal_type', None),
+            'signal_strength': float(getattr(signal, 'strength', 0) or 0),
+            'entry_decision': getattr(entry_decision, 'decision', None),
+            'entry_score': float(getattr(entry_decision, 'score', 0) or 0),
+            'ml_confidence': ml_confidence,
+            'close_outcome_scope_mode': scope_mode,
+            'close_outcome_scope': scope_window.get('scope'),
+            'close_outcome_scope_key': scope_window.get('scope_key'),
+            'close_outcome_scope_active': bool(scope_window),
+            'close_outcome_freeze_auto_promotion': bool(guard.get('freeze_auto_promotion', False)),
+            'ranking_penalty': ranking_penalty,
+            'priority_score': priority_score,
+            'can_open': bool(can_open),
+            'scoped_window_penalized': bool(scope_window) and scope_mode in {'rollback', 'tighten', 'review'},
+        }
+        skip_contract = {
+            'symbol': symbol,
+            'signal_id': signal_id,
+            'side': side,
+            'status': 'pending',
+            'reason': None,
+            'reason_code': None,
+            'scope_mode': scope_mode,
+            'scope': scope_window.get('scope'),
+            'scope_key': scope_window.get('scope_key'),
+            'scope_context': scope_context,
+            'risk_reason': risk_reason,
+            'filter_reason': reason,
+            'action': None,
+        }
+        if not passed:
+            skip_contract.update({'status': 'skipped', 'reason': reason, 'reason_code': 'SIGNAL_FILTERED', 'action': 'filtered_before_ranking'})
+        elif not can_open:
+            reason_code = 'RISK_GATE_BLOCKED'
+            action = 'blocked_by_open_gate'
+            if scope_window and scope_mode == 'rollback':
+                reason_code = 'SCOPED_WINDOW_FREEZE'
+                action = 'skip_scoped_freeze'
+            skip_contract.update({'status': 'skipped', 'reason': risk_reason, 'reason_code': reason_code, 'action': action})
+        elif scope_window and scope_mode == 'tighten':
+            skip_contract.update({'status': 'skipped', 'reason': 'scoped_window_tighten_bypass', 'reason_code': 'SCOPED_WINDOW_TIGHTEN', 'action': 'bypass_tighten_candidate'})
+            ranking_contract['can_open'] = False
+            ranking_contract['ranking_penalty'] += 250
+            ranking_contract['priority_score'] = round(ranking_contract['priority_score'] - 250, 4)
+        elif scope_window and scope_mode == 'review':
+            skip_contract.update({'status': 'skipped', 'reason': 'scoped_window_review_bypass', 'reason_code': 'SCOPED_WINDOW_REVIEW', 'action': 'bypass_review_candidate'})
+            ranking_contract['can_open'] = False
+            ranking_contract['ranking_penalty'] += 150
+            ranking_contract['priority_score'] = round(ranking_contract['priority_score'] - 150, 4)
+        return {
+            'symbol': symbol,
+            'current_price': current_price,
+            'signal_id': signal_id,
+            'signal': signal,
+            'side': side,
+            'passed': bool(passed),
+            'filter_reason': reason,
+            'filter_details': dict(details or {}),
+            'entry_decision': entry_decision.to_dict() if entry_decision else {},
+            'can_open': bool(ranking_contract.get('can_open')),
+            'risk_reason': risk_reason,
+            'risk_details': risk_details,
+            'ranking_contract': ranking_contract,
+            'skip_contract': skip_contract,
+        }
+
+    def _rank_open_candidates(self, candidates: list) -> tuple[list, list]:
+        ranked = sorted(
+            list(candidates or []),
+            key=lambda row: (
+                0 if row.get('can_open') else 1,
+                0 if (row.get('skip_contract') or {}).get('status') != 'skipped' else 1,
+                -float((row.get('ranking_contract') or {}).get('priority_score') or 0),
+                str(row.get('symbol') or ''),
+            )
+        )
+        remaining_slots = self._max_open_candidates_per_cycle()
+        selected = []
+        for row in ranked:
+            skip_contract = row.get('skip_contract') or {}
+            if row.get('can_open') and skip_contract.get('status') != 'skipped' and remaining_slots > 0:
+                selected.append(row)
+                remaining_slots -= 1
+            elif row.get('can_open') and skip_contract.get('status') != 'skipped':
+                skip_contract.update({'status': 'skipped', 'reason': 'ranking_budget_exhausted', 'reason_code': 'RANKING_BUDGET_EXHAUSTED', 'action': 'defer_to_higher_ranked_candidate'})
+                row['can_open'] = False
+        for index, row in enumerate(ranked, start=1):
+            row.setdefault('ranking_contract', {})['rank'] = index
+            row.setdefault('ranking_contract', {})['selected'] = row in selected
+        return ranked, selected
+
+    def _build_candidate_runtime_summary(self, ranked_candidates: list, selected_candidates: list) -> dict:
+        items = []
+        skip_items = []
+        for row in ranked_candidates or []:
+            ranking_contract = dict(row.get('ranking_contract') or {})
+            skip_contract = dict(row.get('skip_contract') or {})
+            items.append({
+                'symbol': row.get('symbol'),
+                'signal_id': row.get('signal_id'),
+                'rank': ranking_contract.get('rank'),
+                'selected': bool(ranking_contract.get('selected', False)),
+                'can_open': bool(row.get('can_open', False)),
+                'priority_score': ranking_contract.get('priority_score'),
+                'signal_strength': ranking_contract.get('signal_strength'),
+                'entry_score': ranking_contract.get('entry_score'),
+                'close_outcome_scope_mode': ranking_contract.get('close_outcome_scope_mode'),
+                'close_outcome_scope': ranking_contract.get('close_outcome_scope'),
+                'close_outcome_scope_key': ranking_contract.get('close_outcome_scope_key'),
+                'skip_contract': skip_contract,
+            })
+            if skip_contract.get('status') == 'skipped':
+                skip_items.append(skip_contract)
+        return {
+            'schema_version': 'open_candidate_ranking_v1',
+            'selected_count': len(selected_candidates or []),
+            'candidate_count': len(ranked_candidates or []),
+            'max_open_candidates_per_cycle': self._max_open_candidates_per_cycle(),
+            'items': items,
+            'skip_contracts': skip_items,
+        }
     
     def run(self):
         """运行交易循环"""
@@ -1058,7 +1223,9 @@ class TradingBot:
             print(f"   {p['symbol']} | {p['side']} | {p['quantity']} | "
                   f"开仓: {p['entry_price']:.2f} | 当前: {p.get('current_price', 'N/A')}")
         print()
-        
+
+        candidate_contracts = []
+
         # 遍历所有监控的币种
         for symbol in self.config.symbols:
             print(f"=== 分析 {symbol} ===")
@@ -1102,8 +1269,7 @@ class TradingBot:
                 current_positions = {p['symbol']: p for p in positions}
                 
                 # ===== Entry Decision Layer MVP =====
-                # 评估"这个信号值不值得开单"
-                tracking_data = {}  # 可以从 db 或 cache 获取
+                tracking_data = {}
                 ml_pred = ml_pred if 'ml_pred' in dir() else None
                 entry_decision = self.entry_decider.decide(
                     signal, 
@@ -1111,12 +1277,9 @@ class TradingBot:
                     tracking_data=tracking_data,
                     ml_prediction=ml_pred
                 )
-                # 将决策结果写入 filter_details 供观测
                 signal.filter_details = signal.filter_details or {}
                 signal.filter_details['entry_decision'] = entry_decision.to_dict()
-                # 打印决策结果
                 print(f"   🎯 开单决策: {entry_decision.decision.upper()} | 分数: {entry_decision.score}")
-                # ================================
                 
                 # 验证信号
                 passed, reason, details = self.validator.validate(signal, current_positions)
@@ -1165,10 +1328,11 @@ class TradingBot:
                 merged_filter_details = dict(signal.filter_details or {})
                 merged_filter_details['observability'] = {**base_obs, **dict(merged_filter_details.get('observability') or {})}
                 self.db.update_signal(signal_id, filter_details=json.dumps(merged_filter_details, ensure_ascii=False))
-                
-                # 如果信号通过且可以开仓
+
+                can_open = False
+                risk_reason = None
+                risk_details = {}
                 if passed and signal.signal_type in ['buy', 'sell']:
-                    # 风险检查
                     can_open, risk_reason, risk_details = self.risk_mgr.can_open_position(symbol, side='long' if signal.signal_type == 'buy' else 'short', signal_id=signal_id, plan_context={'regime_snapshot': getattr(signal, 'regime_snapshot', {}) or getattr(signal, 'regime_info', {}) or {}, 'adaptive_policy_snapshot': getattr(signal, 'adaptive_policy_snapshot', {}) or {}})
                     risk_obs = dict((risk_details or {}).get('observability') or {})
                     if risk_obs:
@@ -1184,42 +1348,22 @@ class TradingBot:
                             recover_at=lock_info.get('recover_at'),
                             details={'symbol': symbol, 'risk_details': risk_details}
                         )
-                    
-                    if can_open:
-                        side = 'long' if signal.signal_type == 'buy' else 'short'
-                        
-                        # 开仓
-                        trade_id = self.executor.open_position(
-                            symbol, side, current_price, signal_id,
-                            plan_context=(risk_details or {}).get('exposure_limit', {}).get('layer_plan') or (risk_details or {}).get('layer_eligibility', {}).get('layer_plan'),
-                            root_signal_id=signal_id
-                        )
-                        positions = self.db.get_positions()
-                        
-                        if trade_id:
-                            summary['opened'] += 1
-                            self.recorder.mark_executed(signal_id, trade_id)
-                            latest_trade = self.db.get_latest_open_trade(symbol, side)
-                            contracts = latest_trade.get('quantity') if latest_trade else 0
-                            quantity_details = {}
-                            try:
-                                contract_size = self.exchange.get_contract_size(symbol)
-                                coin_quantity = self.exchange.contracts_to_coin_quantity(symbol, contracts)
-                                quantity_details = {
-                                    'contracts': contracts,
-                                    'contract_size': contract_size,
-                                    'coin_quantity': coin_quantity,
-                                    'notional_usdt': self.exchange.estimate_notional_usdt(symbol, contracts, current_price),
-                                }
-                            except Exception:
-                                quantity_details = {}
-                            self.notifier.notify_trade_open(symbol, side, current_price, contracts, trade_id, signal, quantity_details=quantity_details)
-                            print(f"   ✅ 开{'多' if side == 'long' else '空'}成功! Trade ID: {trade_id}")
-                        else:
-                            self.notifier.notify_trade_open_failed(symbol, side, current_price, '交易所拒绝或执行器返回空结果', signal, {'signal_id': signal_id})
-                            print(f"   ❌ 开仓失败")
-                    else:
+                    if not can_open:
                         print(f"   ⏸️ 风险检查阻止: {risk_reason}")
+
+                candidate_contracts.append(self._build_candidate_contract(
+                    symbol=symbol,
+                    current_price=current_price,
+                    signal=signal,
+                    signal_id=signal_id,
+                    passed=passed,
+                    reason=reason,
+                    details=details or {},
+                    entry_decision=entry_decision,
+                    can_open=can_open,
+                    risk_reason=risk_reason,
+                    risk_details=risk_details or {},
+                ))
                 
                 print()
                 
@@ -1228,6 +1372,67 @@ class TradingBot:
                 self.notifier.notify_error('处理币种出错', f'{symbol}: {e}', {'symbol': symbol})
                 logger.error(f"处理{symbol}出错: {e}")
                 print(f"   ⚠️ 错误: {e}\n")
+
+        ranked_candidates, selected_candidates = self._rank_open_candidates(candidate_contracts)
+        candidate_runtime_summary = self._build_candidate_runtime_summary(ranked_candidates, selected_candidates)
+        summary['candidate_ranking'] = candidate_runtime_summary
+        summary['candidate_skip_contracts'] = candidate_runtime_summary.get('skip_contracts') or []
+        summary['candidate_selected'] = [
+            {
+                'symbol': row.get('symbol'),
+                'signal_id': row.get('signal_id'),
+                'rank': (row.get('ranking_contract') or {}).get('rank'),
+                'priority_score': (row.get('ranking_contract') or {}).get('priority_score'),
+            }
+            for row in selected_candidates
+        ]
+
+        if ranked_candidates:
+            print("=== 开仓候选排序 ===")
+            for row in ranked_candidates:
+                ranking = row.get('ranking_contract') or {}
+                skip_contract = row.get('skip_contract') or {}
+                status = 'SELECTED' if ranking.get('selected') else skip_contract.get('reason_code') or ('READY' if row.get('can_open') else 'SKIP')
+                print(
+                    f"   #{ranking.get('rank')} {row.get('symbol')} | score={ranking.get('priority_score')} | scope={ranking.get('close_outcome_scope_mode')}:{ranking.get('close_outcome_scope') or '--'} | {status}"
+                )
+            print()
+
+        for row in selected_candidates:
+            symbol = row.get('symbol')
+            signal = row.get('signal')
+            current_price = row.get('current_price')
+            signal_id = row.get('signal_id')
+            side = row.get('side')
+            risk_details = row.get('risk_details') or {}
+
+            trade_id = self.executor.open_position(
+                symbol, side, current_price, signal_id,
+                plan_context=(risk_details or {}).get('exposure_limit', {}).get('layer_plan') or (risk_details or {}).get('layer_eligibility', {}).get('layer_plan'),
+                root_signal_id=signal_id
+            )
+            if trade_id:
+                summary['opened'] += 1
+                self.recorder.mark_executed(signal_id, trade_id)
+                latest_trade = self.db.get_latest_open_trade(symbol, side)
+                contracts = latest_trade.get('quantity') if latest_trade else 0
+                quantity_details = {}
+                try:
+                    contract_size = self.exchange.get_contract_size(symbol)
+                    coin_quantity = self.exchange.contracts_to_coin_quantity(symbol, contracts)
+                    quantity_details = {
+                        'contracts': contracts,
+                        'contract_size': contract_size,
+                        'coin_quantity': coin_quantity,
+                        'notional_usdt': self.exchange.estimate_notional_usdt(symbol, contracts, current_price),
+                    }
+                except Exception:
+                    quantity_details = {}
+                self.notifier.notify_trade_open(symbol, side, current_price, contracts, trade_id, signal, quantity_details=quantity_details)
+                print(f"   ✅ 开{'多' if side == 'long' else '空'}成功! Trade ID: {trade_id}")
+            else:
+                self.notifier.notify_trade_open_failed(symbol, side, current_price, '交易所拒绝或执行器返回空结果', signal, {'signal_id': signal_id})
+                print(f"   ❌ 开仓失败: {symbol}")
         
         # 检查现有持仓的止盈止损
         print("=== 检查持仓 ===")
@@ -1281,7 +1486,8 @@ class TradingBot:
             f'结束：{summary["finished_at"]}',
             f'监听币种：{", ".join(self.config.symbols)}',
             f'持仓对账：同步 {reconcile_report.get("synced", 0) if isinstance(reconcile_report, dict) else 0} 条 ｜ 清理 {reconcile_report.get("removed", 0) if isinstance(reconcile_report, dict) else 0} 条',
-            f'信号：{summary["signals"]} ｜ 通过：{summary["passed"]} ｜ 开仓：{summary["opened"]} ｜ 平仓：{summary["closed"]} ｜ 错误：{summary["errors"]}'
+            f'信号：{summary["signals"]} ｜ 通过：{summary["passed"]} ｜ 开仓：{summary["opened"]} ｜ 平仓：{summary["closed"]} ｜ 错误：{summary["errors"]}',
+            f'候选排序：{(summary.get("candidate_ranking") or {}).get("candidate_count", 0)} ｜ 选中：{(summary.get("candidate_ranking") or {}).get("selected_count", 0)} ｜ skip：{len(summary.get("candidate_skip_contracts") or [])}'
         ]
         self.notifier.notify_runtime('end', end_lines, summary)
         print(f"\n✅ 交易循环完成! {finished_at}\n")

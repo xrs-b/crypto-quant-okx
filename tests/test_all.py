@@ -3250,6 +3250,19 @@ class TestTradingExecutor(unittest.TestCase):
         self.assertEqual(len(self.db.get_positions()), 0)
         self.assertEqual(self.executor.exchange.closed_orders[-1]['posSide'], 'long')
 
+
+    def test_open_position_short_circuits_when_final_execution_permit_denied(self):
+        self.executor.exchange = FakeExecutorExchange()
+        trade_id = self.executor.open_position(
+            'BTC/USDT',
+            'long',
+            50000,
+            signal_id=1,
+            plan_context={'final_execution_permit': {'allowed': False, 'reason_code': 'SCOPED_WINDOW_FREEZE', 'reason': 'close_outcome_guard_blocked'}},
+        )
+        self.assertIsNone(trade_id)
+        self.assertEqual(self.executor.exchange.order_amounts, [])
+
     def test_open_position_reduces_amount_after_max_order_error(self):
         """测试遇到 51202 时会自动缩量再试"""
         self.executor.exchange = FakeExecutorExchange()
@@ -4664,6 +4677,66 @@ class TestOpenCandidateRanking(unittest.TestCase):
         summary = self.bot._build_candidate_runtime_summary(ranked, selected)
         self.assertEqual(summary['schema_version'], 'open_candidate_ranking_v3')
         self.assertTrue(any(item['diversification'].get('reason_codes') for item in summary['items'] if item['symbol'] == 'ETH/USDT'))
+
+
+    def test_build_final_execution_permit_contract_denies_scoped_freeze_on_testnet(self):
+        signal = self._make_signal(symbol='BTC/USDT')
+        row = self.bot._build_candidate_contract(
+            symbol='BTC/USDT',
+            current_price=50000,
+            signal=signal,
+            signal_id=701,
+            passed=True,
+            reason=None,
+            details={},
+            entry_decision=type('EntryDecisionStub', (), {'decision': 'allow', 'score': 80, 'to_dict': lambda self: {'decision': 'allow', 'score': 80}})(),
+            can_open=False,
+            risk_reason='平仓反馈风控阻止开仓(rollback)',
+            risk_details={
+                'close_outcome_guard': {
+                    'passed': False,
+                    'enabled': True,
+                    'mode': 'rollback',
+                    'reason': 'close_outcome_guard_block:rollback:symbol:BTC/USDT',
+                    'action': 'freeze_followup',
+                    'route': 'rollback_candidate_queue',
+                    'freeze_auto_promotion': True,
+                    'trade_count': 6,
+                    'min_sample_size': 5,
+                    'scope_window': {'scope': 'symbol', 'scope_key': 'symbol:BTC/USDT'},
+                    'scope_context': {'symbol': 'BTC/USDT', 'regime_tag': 'trend_up'},
+                    'reason_codes': ['close_outcome_policy_freeze_candidate'],
+                    'feedback_loop': {'decision_contract': {'operator_action_policy': {'action': 'freeze_followup'}}},
+                }
+            },
+        )
+        permit = self.bot._build_final_execution_permit_contract(row)
+        self.assertEqual(permit['status'], 'deny')
+        self.assertEqual(permit['reason_code'], 'SCOPED_WINDOW_FREEZE')
+        self.assertTrue(permit['guardrail_evidence']['close_outcome_guard']['freeze_auto_promotion'])
+        self.assertEqual(permit['guardrail_evidence']['close_outcome_decision_contract']['operator_action_policy']['action'], 'freeze_followup')
+
+    def test_build_execution_plan_context_embeds_final_execution_permit(self):
+        signal = self._make_signal(symbol='ETH/USDT', strength=75)
+        row = self.bot._build_candidate_contract(
+            symbol='ETH/USDT',
+            current_price=3200,
+            signal=signal,
+            signal_id=702,
+            passed=True,
+            reason=None,
+            details={},
+            entry_decision=type('EntryDecisionStub', (), {'decision': 'allow', 'score': 78, 'to_dict': lambda self: {'decision': 'allow', 'score': 78}})(),
+            can_open=True,
+            risk_reason=None,
+            risk_details={'close_outcome_guard': {'passed': True, 'enabled': True, 'mode': 'observe', 'scope_window': {}, 'scope_context': {'symbol': 'ETH/USDT'}}},
+        )
+        row.setdefault('execution_contract', {}).update({'status': 'selected', 'selected': True, 'reason_code': 'EXECUTION_QUOTA_PASSED'})
+        plan_context = self.bot._build_execution_plan_context(row)
+        permit = plan_context.get('final_execution_permit') or {}
+        self.assertTrue(permit.get('allowed'))
+        self.assertEqual(permit.get('reason_code'), 'FINAL_EXECUTION_PERMIT_GRANTED')
+        self.assertEqual(permit.get('exchange_mode'), 'testnet')
 
     def test_rank_open_candidates_enforces_execution_quota_with_structured_reason(self):
         self.bot.config._config['runtime']['open_position']['max_candidates_per_cycle'] = 3

@@ -581,7 +581,14 @@ class TradingExecutor:
     def open_position(self, symbol: str, side: str, 
                     current_price: float, signal_id: int = None, plan_context: Dict[str, Any] = None, layer_no: int = None, root_signal_id: int = None) -> Optional[int]:
         """开仓"""
-        
+        plan_context = dict(plan_context or {})
+        final_execution_permit = dict(plan_context.get('final_execution_permit') or {})
+        if final_execution_permit and not final_execution_permit.get('allowed', False):
+            trade_logger.warning(
+                f"{symbol}: final execution permit denied | reason_code={final_execution_permit.get('reason_code')} | reason={final_execution_permit.get('reason')}"
+            )
+            return None
+
         # 检查交易冷却
         if not self._check_cooldown(symbol):
             trade_logger.warning(f"{symbol}: 交易冷却中")

@@ -1461,6 +1461,88 @@ class TradingBot:
             'skip_contracts': skip_items,
         }
 
+    def _build_final_execution_permit_contract(self, row: dict) -> dict:
+        row = dict(row or {})
+        risk_details = dict(row.get('risk_details') or {})
+        guard = dict(risk_details.get('close_outcome_guard') or {})
+        skip_contract = dict(row.get('skip_contract') or {})
+        execution_contract = dict(row.get('execution_contract') or {})
+        ranking_contract = dict(row.get('ranking_contract') or {})
+        exchange_mode = str(getattr(self.config, 'exchange_mode', None) or self.config.get('exchange.mode', 'paper')).strip().lower()
+        selected = bool(execution_contract.get('selected', False))
+        allowed = True
+        reason_code = 'FINAL_EXECUTION_PERMIT_GRANTED'
+        reason = 'selected_candidate_ready_for_testnet_execution'
+        action = 'submit_testnet_order'
+
+        if exchange_mode != 'testnet':
+            allowed = False
+            reason_code = 'TESTNET_ONLY_EXECUTION_PERMIT'
+            reason = f'final_execution_permit_requires_testnet_mode:{exchange_mode or "unknown"}'
+            action = 'deny_non_testnet_execution'
+        elif skip_contract.get('status') == 'skipped':
+            allowed = False
+            reason_code = str(skip_contract.get('reason_code') or 'SKIP_CONTRACT_DENY')
+            reason = str(skip_contract.get('reason') or skip_contract.get('filter_reason') or 'candidate_skipped_before_final_execution')
+            action = str(skip_contract.get('action') or 'deny_skipped_candidate')
+        elif not selected:
+            allowed = False
+            reason_code = str(execution_contract.get('reason_code') or 'EXECUTION_CONTRACT_NOT_SELECTED')
+            reason = str(execution_contract.get('reason') or 'candidate_not_selected_for_execution_this_cycle')
+            action = str(execution_contract.get('action') or 'deny_unselected_candidate')
+        elif not row.get('can_open'):
+            allowed = False
+            reason_code = 'RISK_GATE_BLOCKED'
+            reason = str(row.get('risk_reason') or 'risk_gate_blocked_before_final_execution')
+            action = 'deny_risk_gate_blocked_candidate'
+
+        guard_reason_codes = list((guard.get('reason_codes') or []))
+        feedback_loop = dict(guard.get('feedback_loop') or {})
+        decision_contract = dict(feedback_loop.get('decision_contract') or {})
+        contract = {
+            'schema_version': 'final_execution_permit_v1',
+            'symbol': row.get('symbol'),
+            'signal_id': row.get('signal_id'),
+            'side': row.get('side'),
+            'status': 'permit' if allowed else 'deny',
+            'allowed': allowed,
+            'reason_code': reason_code,
+            'reason': reason,
+            'action': action,
+            'exchange_mode': exchange_mode,
+            'testnet_only': True,
+            'selected_for_execution': selected,
+            'scope_mode': ranking_contract.get('close_outcome_scope_mode') or guard.get('mode') or 'observe',
+            'generated_at': datetime.now().isoformat(),
+            'guardrail_evidence': {
+                'close_outcome_guard': {
+                    'enabled': bool(guard.get('enabled', False)),
+                    'passed': bool(guard.get('passed', True)),
+                    'mode': guard.get('mode'),
+                    'reason': guard.get('reason'),
+                    'action': guard.get('action'),
+                    'route': guard.get('route'),
+                    'freeze_auto_promotion': bool(guard.get('freeze_auto_promotion', False)),
+                    'scope_window': dict(guard.get('scope_window') or {}),
+                    'scope_context': dict(guard.get('scope_context') or {}),
+                    'reason_codes': guard_reason_codes,
+                    'trade_count': int(guard.get('trade_count', 0) or 0),
+                    'min_sample_size': int(guard.get('min_sample_size', 0) or 0),
+                },
+                'close_outcome_decision_contract': decision_contract,
+                'risk_reason': row.get('risk_reason'),
+                'skip_contract': skip_contract,
+                'execution_contract': execution_contract,
+                'ranking_contract': {
+                    'rank': ranking_contract.get('rank'),
+                    'priority_score': ranking_contract.get('priority_score'),
+                    'close_outcome_scope': ranking_contract.get('close_outcome_scope'),
+                    'close_outcome_scope_key': ranking_contract.get('close_outcome_scope_key'),
+                },
+            },
+        }
+        return contract
+
     def _build_execution_plan_context(self, row: dict) -> dict:
         """把风控阶段算出的 adaptive/live context 原样带进 executor。"""
         row = dict(row or {})
@@ -1493,6 +1575,7 @@ class TradingBot:
             'root_signal_id': row.get('signal_id'),
             'regime_snapshot': regime_snapshot,
             'adaptive_policy_snapshot': adaptive_policy_snapshot,
+            'final_execution_permit': self._build_final_execution_permit_contract(row),
         })
         if adaptive_risk_snapshot:
             plan_context['adaptive_risk_snapshot'] = adaptive_risk_snapshot
@@ -1710,6 +1793,7 @@ class TradingBot:
                 'diversification_context': (row.get('ranking_contract') or {}).get('diversification_context') or {},
                 'diversification': (row.get('ranking_contract') or {}).get('diversification') or {},
                 'execution_contract': (row.get('execution_contract') or {}),
+                'final_execution_permit': self._build_final_execution_permit_contract(row),
             }
             for row in selected_candidates
         ]
@@ -1729,6 +1813,8 @@ class TradingBot:
                 )
             print()
 
+        permit_reason_counts = Counter()
+        final_execution_permits = []
         for row in selected_candidates:
             symbol = row.get('symbol')
             signal = row.get('signal')
@@ -1737,6 +1823,20 @@ class TradingBot:
             side = row.get('side')
             risk_details = row.get('risk_details') or {}
             execution_plan_context = self._build_execution_plan_context(row)
+            final_permit = dict(execution_plan_context.get('final_execution_permit') or {})
+            final_execution_permits.append(final_permit)
+            permit_reason_counts[str(final_permit.get('reason_code') or 'UNKNOWN')] += 1
+            row['final_execution_permit'] = final_permit
+
+            if not final_permit.get('allowed', False):
+                summary.setdefault('final_execution_denied', []).append({
+                    'symbol': symbol,
+                    'signal_id': signal_id,
+                    'side': side,
+                    'contract': final_permit,
+                })
+                print(f"   ⛔ 最终执行许可拒绝: {symbol} | {final_permit.get('reason_code')} | {final_permit.get('reason')}")
+                continue
 
             trade_id = self.executor.open_position(
                 symbol, side, current_price, signal_id,
@@ -1773,6 +1873,15 @@ class TradingBot:
                 )
                 print(f"   ❌ 开仓失败: {symbol}")
         
+        summary['final_execution_permits'] = {
+            'schema_version': 'final_execution_permit_summary_v1',
+            'count': len(final_execution_permits),
+            'permit_count': sum(1 for item in final_execution_permits if item.get('allowed')),
+            'deny_count': sum(1 for item in final_execution_permits if not item.get('allowed')),
+            'reason_code_counts': dict(permit_reason_counts),
+            'items': final_execution_permits,
+        }
+
         # 检查现有持仓的止盈止损
         print("=== 检查持仓 ===")
         positions = self.db.get_positions()
@@ -1829,7 +1938,8 @@ class TradingBot:
             f'信号：{summary["signals"]} ｜ 通过：{summary["passed"]} ｜ 开仓：{summary["opened"]} ｜ 平仓：{summary["closed"]} ｜ 错误：{summary["errors"]}',
             f'候选排序：{(summary.get("candidate_ranking") or {}).get("candidate_count", 0)} ｜ 选中：{(summary.get("candidate_ranking") or {}).get("selected_count", 0)} ｜ skip：{len(summary.get("candidate_skip_contracts") or [])}',
             f'公平围栏：{", ".join(sorted({code for item in ((summary.get("candidate_ranking") or {}).get("items") or []) for code in (((item.get("diversification") or {}).get("reason_codes") or []))})) or "clear"}',
-            f'执行配额：cycle={(summary.get("candidate_ranking") or {}).get("execution_quota", {}).get("max_new_positions_per_cycle", 0)} ｜ cluster-cap={(summary.get("candidate_ranking") or {}).get("execution_quota", {}).get("max_same_cluster_per_cycle", 0)} ｜ reasons={json.dumps((summary.get("candidate_ranking") or {}).get("execution_quota", {}).get("reason_code_counts", {}), ensure_ascii=False)}'
+            f'执行配额：cycle={(summary.get("candidate_ranking") or {}).get("execution_quota", {}).get("max_new_positions_per_cycle", 0)} ｜ cluster-cap={(summary.get("candidate_ranking") or {}).get("execution_quota", {}).get("max_same_cluster_per_cycle", 0)} ｜ reasons={json.dumps((summary.get("candidate_ranking") or {}).get("execution_quota", {}).get("reason_code_counts", {}), ensure_ascii=False)}',
+            f'最终许可：permit={(summary.get("final_execution_permits") or {}).get("permit_count", 0)} ｜ deny={(summary.get("final_execution_permits") or {}).get("deny_count", 0)} ｜ reasons={json.dumps((summary.get("final_execution_permits") or {}).get("reason_code_counts", {}), ensure_ascii=False)}'
         ]
         self.notifier.notify_runtime('end', end_lines, summary)
         print(f"\n✅ 交易循环完成! {finished_at}\n")

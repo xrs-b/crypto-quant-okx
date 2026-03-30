@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import argparse
 import json
 import time
+from collections import Counter
 import pandas as pd
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -1024,6 +1025,130 @@ class TradingBot:
         except Exception:
             return 1
 
+    def _open_position_diversification_config(self) -> dict:
+        raw = self.config.get('runtime.open_position.diversification_fence', {}) or {}
+        if not isinstance(raw, dict):
+            raw = {}
+        return {
+            'enabled': bool(raw.get('enabled', True)),
+            'history_limit': max(int(raw.get('history_limit', 12) or 12), 1),
+            'same_side_soft_limit': max(int(raw.get('same_side_soft_limit', 2) or 2), 1),
+            'same_regime_soft_limit': max(int(raw.get('same_regime_soft_limit', 2) or 2), 1),
+            'same_cluster_soft_limit': max(int(raw.get('same_cluster_soft_limit', 1) or 1), 1),
+            'side_penalty': float(raw.get('side_penalty', 35) or 35),
+            'regime_penalty': float(raw.get('regime_penalty', 25) or 25),
+            'cluster_penalty': float(raw.get('cluster_penalty', 55) or 55),
+            'cooldown_penalty': float(raw.get('cooldown_penalty', 20) or 20),
+            'cooldown_cycles': max(int(raw.get('cooldown_cycles', 3) or 3), 0),
+            'symbol_cluster_overrides': dict(raw.get('symbol_cluster_overrides') or {}),
+        }
+
+    def _symbol_cluster_key(self, symbol: str) -> str:
+        overrides = (self._open_position_diversification_config().get('symbol_cluster_overrides') or {})
+        if symbol in overrides:
+            return str(overrides[symbol])
+        base_asset = str(symbol or '').split('/')[0].upper()
+        default_clusters = {
+            'BTC': 'store_of_value',
+            'ETH': 'core_layer1',
+            'SOL': 'high_beta_layer1',
+            'XRP': 'payments_beta',
+            'BNB': 'exchange_beta',
+            'DOGE': 'meme_beta',
+            'PEPE': 'meme_beta',
+        }
+        return default_clusters.get(base_asset, f'alt:{base_asset or "unknown"}')
+
+    def _candidate_diversification_context(self, symbol: str, signal, risk_details: dict = None) -> dict:
+        regime_snapshot = getattr(signal, 'regime_snapshot', {}) or getattr(signal, 'regime_info', {}) or {}
+        return {
+            'symbol': symbol,
+            'side': 'long' if getattr(signal, 'signal_type', None) == 'buy' else 'short' if getattr(signal, 'signal_type', None) == 'sell' else 'flat',
+            'regime_tag': regime_snapshot.get('name') or regime_snapshot.get('regime') or 'unknown',
+            'regime_family': regime_snapshot.get('family') or 'unknown',
+            'regime_direction': regime_snapshot.get('direction') or 'unknown',
+            'symbol_cluster': self._symbol_cluster_key(symbol),
+            'scope_mode': str(((risk_details or {}).get('close_outcome_guard') or {}).get('mode') or 'observe').strip().lower() or 'observe',
+        }
+
+    def _candidate_diversification_history(self) -> list:
+        state = load_runtime_state()
+        history = state.get('candidate_selection_history') or []
+        return history if isinstance(history, list) else []
+
+    def _persist_candidate_diversification_history(self, selected_candidates: list):
+        cfg = self._open_position_diversification_config()
+        state = load_runtime_state()
+        history = self._candidate_diversification_history()
+        history.insert(0, {
+            'time': datetime.now().isoformat(),
+            'selected': [dict((row.get('ranking_contract') or {}).get('diversification_context') or {}) for row in (selected_candidates or [])],
+        })
+        state['candidate_selection_history'] = history[:cfg['history_limit']]
+        save_runtime_state(state)
+
+    def _apply_diversification_fence(self, ranked_candidates: list) -> list:
+        cfg = self._open_position_diversification_config()
+        if not cfg.get('enabled', True):
+            return ranked_candidates
+        history = self._candidate_diversification_history()
+        recent_selected = []
+        for item in history[:cfg['history_limit']]:
+            recent_selected.extend(item.get('selected') or [])
+        recent_side = Counter(str(item.get('side') or 'unknown') for item in recent_selected)
+        recent_regime = Counter(str(item.get('regime_tag') or 'unknown') for item in recent_selected)
+        recent_cluster = Counter(str(item.get('symbol_cluster') or 'unknown') for item in recent_selected)
+        selected_contexts = []
+        adjusted = []
+        for row in ranked_candidates or []:
+            ranking_contract = row.setdefault('ranking_contract', {})
+            skip_contract = row.setdefault('skip_contract', {})
+            context = dict(ranking_contract.get('diversification_context') or {})
+            if skip_contract.get('status') == 'skipped' or not row.get('can_open'):
+                ranking_contract['diversification'] = {'status': 'ineligible', 'reason_codes': ['INELIGIBLE_BEFORE_DIVERSIFICATION'], 'applied_penalty': 0.0}
+                adjusted.append(row)
+                continue
+            penalty = 0.0
+            reason_codes = []
+            same_side_count = sum(1 for item in selected_contexts if item.get('side') == context.get('side')) + recent_side.get(str(context.get('side') or 'unknown'), 0)
+            same_regime_count = sum(1 for item in selected_contexts if item.get('regime_tag') == context.get('regime_tag')) + recent_regime.get(str(context.get('regime_tag') or 'unknown'), 0)
+            same_cluster_count = sum(1 for item in selected_contexts if item.get('symbol_cluster') == context.get('symbol_cluster')) + recent_cluster.get(str(context.get('symbol_cluster') or 'unknown'), 0)
+            if same_side_count >= cfg['same_side_soft_limit']:
+                penalty += cfg['side_penalty'] * max(1, same_side_count - cfg['same_side_soft_limit'] + 1)
+                reason_codes.append('SIDE_CONCENTRATION_PENALTY')
+            if same_regime_count >= cfg['same_regime_soft_limit']:
+                penalty += cfg['regime_penalty'] * max(1, same_regime_count - cfg['same_regime_soft_limit'] + 1)
+                reason_codes.append('REGIME_CONCENTRATION_PENALTY')
+            if same_cluster_count >= cfg['same_cluster_soft_limit']:
+                penalty += cfg['cluster_penalty'] * max(1, same_cluster_count - cfg['same_cluster_soft_limit'] + 1)
+                reason_codes.append('CLUSTER_CONCENTRATION_PENALTY')
+            recent_symbols = [str(item.get('symbol') or '') for item in recent_selected[:cfg.get('cooldown_cycles', 0)]]
+            if cfg.get('cooldown_cycles', 0) > 0 and str(context.get('symbol') or '') in recent_symbols:
+                penalty += cfg['cooldown_penalty']
+                reason_codes.append('SYMBOL_COOLDOWN_PENALTY')
+            if penalty > 0:
+                ranking_contract['priority_score'] = round(float(ranking_contract.get('priority_score') or 0) - penalty, 4)
+                ranking_contract['ranking_penalty'] = round(float(ranking_contract.get('ranking_penalty') or 0) + penalty, 4)
+            ranking_contract['diversification'] = {
+                'status': 'penalized' if penalty > 0 else 'clear',
+                'reason_codes': reason_codes,
+                'applied_penalty': round(penalty, 4),
+                'recent_side_count': same_side_count,
+                'recent_regime_count': same_regime_count,
+                'recent_cluster_count': same_cluster_count,
+            }
+            adjusted.append(row)
+            selected_contexts.append(context)
+        return sorted(
+            adjusted,
+            key=lambda row: (
+                0 if row.get('can_open') else 1,
+                0 if (row.get('skip_contract') or {}).get('status') != 'skipped' else 1,
+                -float((row.get('ranking_contract') or {}).get('priority_score') or 0),
+                str(row.get('symbol') or ''),
+            )
+        )
+
     def _build_candidate_contract(self, *, symbol: str, current_price: float, signal, signal_id: int,
                                   passed: bool, reason: str, details: dict, entry_decision,
                                   can_open: bool = False, risk_reason: str = None, risk_details: dict = None) -> dict:
@@ -1055,6 +1180,7 @@ class TradingBot:
             - float(ranking_penalty),
             4,
         )
+        diversification_context = self._candidate_diversification_context(symbol, signal, risk_details)
         ranking_contract = {
             'symbol': symbol,
             'signal_id': signal_id,
@@ -1074,6 +1200,8 @@ class TradingBot:
             'priority_score': priority_score,
             'can_open': bool(can_open),
             'scoped_window_penalized': bool(scope_window) and scope_mode in {'rollback', 'tighten', 'review'},
+            'diversification_context': diversification_context,
+            'diversification': {'status': 'pending', 'reason_codes': [], 'applied_penalty': 0.0},
         }
         skip_contract = {
             'symbol': symbol,
@@ -1136,6 +1264,7 @@ class TradingBot:
                 str(row.get('symbol') or ''),
             )
         )
+        ranked = self._apply_diversification_fence(ranked)
         remaining_slots = self._max_open_candidates_per_cycle()
         selected = []
         for row in ranked:
@@ -1169,12 +1298,14 @@ class TradingBot:
                 'close_outcome_scope_mode': ranking_contract.get('close_outcome_scope_mode'),
                 'close_outcome_scope': ranking_contract.get('close_outcome_scope'),
                 'close_outcome_scope_key': ranking_contract.get('close_outcome_scope_key'),
+                'diversification': ranking_contract.get('diversification') or {},
+                'diversification_context': ranking_contract.get('diversification_context') or {},
                 'skip_contract': skip_contract,
             })
             if skip_contract.get('status') == 'skipped':
                 skip_items.append(skip_contract)
         return {
-            'schema_version': 'open_candidate_ranking_v1',
+            'schema_version': 'open_candidate_ranking_v2',
             'selected_count': len(selected_candidates or []),
             'candidate_count': len(ranked_candidates or []),
             'max_open_candidates_per_cycle': self._max_open_candidates_per_cycle(),
@@ -1383,6 +1514,8 @@ class TradingBot:
                 'signal_id': row.get('signal_id'),
                 'rank': (row.get('ranking_contract') or {}).get('rank'),
                 'priority_score': (row.get('ranking_contract') or {}).get('priority_score'),
+                'diversification_context': (row.get('ranking_contract') or {}).get('diversification_context') or {},
+                'diversification': (row.get('ranking_contract') or {}).get('diversification') or {},
             }
             for row in selected_candidates
         ]
@@ -1393,8 +1526,10 @@ class TradingBot:
                 ranking = row.get('ranking_contract') or {}
                 skip_contract = row.get('skip_contract') or {}
                 status = 'SELECTED' if ranking.get('selected') else skip_contract.get('reason_code') or ('READY' if row.get('can_open') else 'SKIP')
+                diversification = ranking.get('diversification') or {}
+                fairness = ','.join(diversification.get('reason_codes') or []) or 'clear'
                 print(
-                    f"   #{ranking.get('rank')} {row.get('symbol')} | score={ranking.get('priority_score')} | scope={ranking.get('close_outcome_scope_mode')}:{ranking.get('close_outcome_scope') or '--'} | {status}"
+                    f"   #{ranking.get('rank')} {row.get('symbol')} | score={ranking.get('priority_score')} | scope={ranking.get('close_outcome_scope_mode')}:{ranking.get('close_outcome_scope') or '--'} | fair={fairness} | {status}"
                 )
             print()
 
@@ -1477,6 +1612,7 @@ class TradingBot:
                 logger.error(f"检查持仓{symbol}出错: {e}")
         finished_at = datetime.now()
         summary['finished_at'] = finished_at.isoformat()
+        self._persist_candidate_diversification_history(selected_candidates)
         state = load_runtime_state()
         state.update({'running': False, 'last_finished_at': finished_at.isoformat(), 'last_summary': summary})
         save_runtime_state(state)
@@ -1487,7 +1623,8 @@ class TradingBot:
             f'监听币种：{", ".join(self.config.symbols)}',
             f'持仓对账：同步 {reconcile_report.get("synced", 0) if isinstance(reconcile_report, dict) else 0} 条 ｜ 清理 {reconcile_report.get("removed", 0) if isinstance(reconcile_report, dict) else 0} 条',
             f'信号：{summary["signals"]} ｜ 通过：{summary["passed"]} ｜ 开仓：{summary["opened"]} ｜ 平仓：{summary["closed"]} ｜ 错误：{summary["errors"]}',
-            f'候选排序：{(summary.get("candidate_ranking") or {}).get("candidate_count", 0)} ｜ 选中：{(summary.get("candidate_ranking") or {}).get("selected_count", 0)} ｜ skip：{len(summary.get("candidate_skip_contracts") or [])}'
+            f'候选排序：{(summary.get("candidate_ranking") or {}).get("candidate_count", 0)} ｜ 选中：{(summary.get("candidate_ranking") or {}).get("selected_count", 0)} ｜ skip：{len(summary.get("candidate_skip_contracts") or [])}',
+            f'公平围栏：{", ".join(sorted({code for item in ((summary.get("candidate_ranking") or {}).get("items") or []) for code in (((item.get("diversification") or {}).get("reason_codes") or []))})) or "clear"}'
         ]
         self.notifier.notify_runtime('end', end_lines, summary)
         print(f"\n✅ 交易循环完成! {finished_at}\n")

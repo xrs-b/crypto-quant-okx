@@ -9,7 +9,7 @@ from typing import Dict, List, Optional, Any
 from pathlib import Path
 import pandas as pd
 
-from core.reason_codes import build_reason_code_details, merge_reason_codes, normalize_reason_code
+from core.reason_codes import build_final_execution_operator_hint, build_reason_code_details, merge_reason_codes, normalize_reason_code
 from core.regime_policy import normalize_observe_only_view, summarize_observe_only_collection
 
 
@@ -2918,6 +2918,10 @@ class Database:
             'guardrail_evidence': guardrail,
             'diagnose_replay': dict(payload.get('diagnose_replay') or {}),
         }
+        operator_hint = self._safe_json_dict(bundle.get('operator_action_hint')) or build_final_execution_operator_hint(payload['runtime_diagnose_bundle'])
+        payload['runtime_diagnose_bundle']['operator_action_hint'] = operator_hint
+        payload['runtime_diagnose_bundle']['next_step_hint'] = self._safe_json_dict(bundle.get('next_step_hint')) or dict(operator_hint)
+        payload['runtime_diagnose_bundle']['next_step_summary'] = bundle.get('next_step_summary') or operator_hint.get('summary')
         return payload
 
     def create_open_intent(self, *, symbol: str, side: str, signal_id: int = None, root_signal_id: int = None,

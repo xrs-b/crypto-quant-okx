@@ -25,7 +25,7 @@ from core.logger import logger
 from core.notifier import NotificationManager
 from core.presets import PresetManager
 from core.paths import DATA_DIR
-from core.reason_codes import build_reason_code_details, merge_reason_codes
+from core.reason_codes import build_reason_code_details, build_final_execution_operator_hint, merge_reason_codes
 from signals import SignalDetector, SignalValidator, SignalRecorder, EntryDecider
 from trading import TradingExecutor, RiskManager
 from ml.engine import MLEngine, ModelTrainer, DataCollector
@@ -1687,6 +1687,9 @@ class TradingBot:
             'guardrail_evidence': dict(contract.get('guardrail_evidence') or {}),
             'diagnose_replay': dict(contract.get('diagnose_replay') or {}),
         }
+        contract['runtime_diagnose_bundle']['operator_action_hint'] = build_final_execution_operator_hint(contract['runtime_diagnose_bundle'])
+        contract['runtime_diagnose_bundle']['next_step_hint'] = dict(contract['runtime_diagnose_bundle']['operator_action_hint'])
+        contract['runtime_diagnose_bundle']['next_step_summary'] = contract['runtime_diagnose_bundle']['operator_action_hint'].get('summary')
         return contract
 
     def _build_execution_plan_context(self, row: dict) -> dict:

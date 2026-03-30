@@ -4942,6 +4942,10 @@ class TestOpenCandidateRanking(unittest.TestCase):
         self.assertEqual(bundle['summary'], 'defer:DEFER_EXECUTION_CYCLE_QUOTA_EXHAUSTED@execution_quota')
         self.assertEqual(bundle['decision_path'][-1]['reason_code'], permit['reason_code'])
         self.assertTrue(any(item['stage'] == 'execution_quota' and item['reason_code'] == 'DEFER_EXECUTION_CYCLE_QUOTA_EXHAUSTED' for item in bundle['decision_path']))
+        self.assertEqual(bundle['operator_action_hint']['action_label'], 'defer_to_next_cycle')
+        self.assertEqual(bundle['operator_action_hint']['next_step'], 'wait_for_quota_or_cluster_capacity')
+        self.assertIn('next execution cycle or quota reset', bundle['operator_action_hint']['wait_for'])
+        self.assertEqual(bundle['next_step_hint']['summary'], bundle['operator_action_hint']['summary'])
 
     def test_database_normalize_final_execution_permit_builds_runtime_diagnose_bundle(self):
         db = Database(':memory:')
@@ -4970,6 +4974,10 @@ class TestOpenCandidateRanking(unittest.TestCase):
         self.assertEqual(bundle['summary'], 'deny:DENY_GUARD_SCOPED_FREEZE@risk_gate')
         self.assertEqual(bundle['decision_path'][0]['reason_code'], 'DENY_GUARD_SCOPED_FREEZE')
         self.assertIn('close_outcome_policy_freeze_candidate', bundle['reason_codes'])
+        self.assertEqual(bundle['operator_action_hint']['action_label'], 'deny_and_hold')
+        self.assertEqual(bundle['operator_action_hint']['next_step'], 'keep_scope_frozen_until_guard_recovers')
+        self.assertIn('freeze scoped auto-promotion / execution for affected symbol-family-window', bundle['operator_action_hint']['freeze_candidates'])
+        self.assertEqual(bundle['next_step_hint']['reason_code'], bundle['reason_code'])
 
 
     def test_rank_open_candidates_enforces_execution_quota_with_structured_reason(self):

@@ -144,3 +144,114 @@ def merge_reason_codes(*codes: Iterable[Any], primary: Any = None, fallback: Opt
         for code in group or []:
             _add(code)
     return merged
+
+
+def build_final_execution_operator_hint(bundle: Dict[str, Any] | None) -> Dict[str, Any]:
+    payload = dict(bundle or {})
+    decision = str(payload.get('decision') or payload.get('reason_code_disposition') or '').strip().lower() or 'observe'
+    reason_code = normalize_reason_code(payload.get('reason_code')) if payload.get('reason_code') else None
+    family = str(payload.get('reason_code_family') or '').strip().lower() or 'unknown'
+    final_gate = str(payload.get('final_gate') or payload.get('reason_code_stage') or 'final_execution_permit').strip().lower()
+    exchange_mode = str(payload.get('exchange_mode') or '').strip().lower()
+    allowed = bool(payload.get('allowed', False))
+    testnet_only = bool(payload.get('testnet_only', True))
+    guardrail = dict(payload.get('guardrail_evidence') or {})
+    close_guard = dict(guardrail.get('close_outcome_guard') or {})
+    scope_mode = str(payload.get('scope_mode') or close_guard.get('mode') or '').strip().lower() or 'observe'
+
+    checklist: List[str] = []
+    wait_for: List[str] = []
+    relax: List[str] = []
+    freeze: List[str] = []
+
+    action_label = 'keep_observing'
+    urgency = 'medium'
+    operator_message = '继续观察运行态，再等下一轮证据。'
+    next_step = 'monitor_runtime_diagnose_bundle'
+
+    if decision == 'permit' and allowed:
+        action_label = 'permit_testnet_execution'
+        urgency = 'low'
+        operator_message = '许可已通过；仅可在 testnet 下提交执行，并持续观察回放与风控证据。'
+        next_step = 'submit_testnet_order_and_monitor_feedback'
+        checklist.extend([
+            '确认 exchange_mode=testnet，禁止切到实盘',
+            '确认 final_execution_permit.allowed=true 且 selected_for_execution=true',
+            '提交后观察成交、风控回放与 close outcome feedback loop',
+        ])
+        wait_for.append('testnet execution acknowledgement')
+    elif decision == 'deny':
+        action_label = 'deny_and_hold'
+        urgency = 'high' if family in {'environment', 'risk_gate', 'close_outcome_guard'} else 'medium'
+        operator_message = '当前应拒绝执行并冻结推进，先处理阻断原因，不能绕过 testnet-only 边界。'
+        next_step = 'freeze_execution_until_blocker_clears'
+        checklist.append('检查最终阻断阶段与 reason_code 是否匹配')
+        freeze.append('freeze new execution attempts for this candidate')
+        if reason_code == 'DENY_ENV_TESTNET_ONLY' or exchange_mode not in {'', 'testnet'}:
+            checklist.append('核对配置是否误切到非 testnet 模式')
+            wait_for.append('exchange_mode switched back to testnet')
+            freeze.append('freeze all non-testnet execution paths')
+        elif family in {'risk_gate', 'close_outcome_guard'}:
+            checklist.append('检查 close_outcome_guard.reason_codes、scope_window 与 risk_reason')
+            wait_for.append('new risk sample or guardrail recovery evidence')
+            if reason_code == 'DENY_GUARD_SCOPED_FREEZE':
+                freeze.append('freeze scoped auto-promotion / execution for affected symbol-family-window')
+                next_step = 'keep_scope_frozen_until_guard_recovers'
+    elif decision == 'skip':
+        action_label = 'skip_this_cycle'
+        urgency = 'medium'
+        operator_message = '本轮跳过即可，不要强行开仓；先看过滤/守门原因，再等更好样本。'
+        next_step = 'observe_skip_reason_before_retry'
+        checklist.append('检查 candidate_skip / filter details，确认不是遗漏配置问题')
+        wait_for.append('fresh signal or wider evidence window')
+        if family == 'signal_filter':
+            relax.append('only relax signal thresholds after repeated false negatives are confirmed')
+        elif family == 'close_outcome_guard':
+            checklist.append('检查 scoped window 是否过紧、样本量是否不足')
+            if reason_code == 'SKIP_GUARD_SCOPED_TIGHTEN':
+                relax.append('consider widening scoped guard window after enough clean closes arrive')
+                next_step = 'wait_for_clean_close_samples_then_relax_scope'
+            elif reason_code == 'SKIP_GUARD_SCOPED_REVIEW':
+                wait_for.append('operator review outcome for scoped window')
+                next_step = 'review_scope_then_resume_if_cleared'
+    elif decision == 'defer':
+        action_label = 'defer_to_next_cycle'
+        urgency = 'medium'
+        operator_message = '当前先 defer，不要抢跑；等待配额或分组拥塞释放后再进入下一轮。'
+        next_step = 'wait_for_quota_or_cluster_capacity'
+        checklist.append('检查 execution_contract / quota counters / selected_*_counts 是否触顶')
+        wait_for.append('next execution cycle or quota reset')
+        if reason_code == 'DEFER_EXECUTION_CLUSTER_CAP_REACHED':
+            wait_for.append('cluster capacity frees up')
+            next_step = 'wait_for_cluster_capacity_then_retry'
+        elif reason_code == 'DEFER_EXECUTION_SIDE_CAP_REACHED':
+            wait_for.append('side capacity frees up')
+            next_step = 'wait_for_side_capacity_then_retry'
+        elif reason_code == 'DEFER_EXECUTION_REGIME_CAP_REACHED':
+            wait_for.append('regime capacity frees up')
+            next_step = 'wait_for_regime_capacity_then_retry'
+    else:
+        checklist.append('检查 diagnose bundle 是否完整，并持续观察下一轮运行')
+        wait_for.append('next runtime cycle')
+
+    if testnet_only:
+        freeze.append('never bypass testnet-only boundary')
+
+    summary = f"{action_label}:{reason_code or 'UNKNOWN'}:{next_step}"
+    return {
+        'schema_version': 'final_execution_operator_hint_v1',
+        'decision': decision,
+        'action_label': action_label,
+        'urgency': urgency,
+        'operator_message': operator_message,
+        'next_step': next_step,
+        'checklist': checklist,
+        'wait_for': wait_for,
+        'relax_candidates': relax,
+        'freeze_candidates': freeze,
+        'scope_mode': scope_mode,
+        'final_gate': final_gate,
+        'reason_code': reason_code,
+        'summary': summary,
+        'testnet_only': testnet_only,
+    }

@@ -1493,6 +1493,26 @@ class TradingBot:
         }
 
     def _build_final_execution_permit_contract(self, row: dict) -> dict:
+        def _stage_snapshot(stage: str, payload: dict, *, fallback_status: str = 'pending') -> dict:
+            snapshot = dict(payload or {})
+            if not snapshot:
+                return {}
+            snapshot_reason_code = str(snapshot.get('reason_code') or '').strip()
+            if snapshot_reason_code:
+                snapshot.update(build_reason_code_details(snapshot_reason_code))
+            return {
+                'stage': stage,
+                'status': snapshot.get('status') or fallback_status,
+                'selected': bool(snapshot.get('selected', False)) if 'selected' in snapshot else None,
+                'allowed': snapshot.get('allowed'),
+                'reason_code': snapshot.get('reason_code'),
+                'legacy_reason_code': snapshot.get('legacy_reason_code'),
+                'reason_code_disposition': snapshot.get('reason_code_disposition'),
+                'reason_code_stage': snapshot.get('reason_code_stage'),
+                'reason': snapshot.get('reason') or snapshot.get('filter_reason'),
+                'action': snapshot.get('action'),
+            }
+
         row = dict(row or {})
         risk_details = dict(row.get('risk_details') or {})
         guard = dict(risk_details.get('close_outcome_guard') or {})
@@ -1505,27 +1525,42 @@ class TradingBot:
         reason_code = 'PERMIT_FINAL_EXECUTION_GRANTED'
         reason = 'selected_candidate_ready_for_testnet_execution'
         action = 'submit_testnet_order'
+        final_gate = 'final_execution_permit'
+        decision_source = 'final_execution_permit'
 
         if exchange_mode != 'testnet':
             allowed = False
             reason_code = 'DENY_ENV_TESTNET_ONLY'
             reason = f'final_execution_permit_requires_testnet_mode:{exchange_mode or "unknown"}'
             action = 'deny_non_testnet_execution'
+            final_gate = 'environment'
+            decision_source = 'environment'
         elif skip_contract.get('status') == 'skipped':
             allowed = False
             reason_code = str(skip_contract.get('reason_code') or 'SKIP_CONTRACT_DENY')
             reason = str(skip_contract.get('reason') or skip_contract.get('filter_reason') or 'candidate_skipped_before_final_execution')
             action = str(skip_contract.get('action') or 'deny_skipped_candidate')
+            skip_reason = build_reason_code_details(reason_code, include_legacy=False)
+            if skip_reason.get('reason_code_disposition') == 'defer':
+                final_gate = 'execution_quota'
+                decision_source = 'execution_contract'
+            else:
+                final_gate = 'candidate_skip'
+                decision_source = 'skip_contract'
         elif not selected:
             allowed = False
             reason_code = str(execution_contract.get('reason_code') or 'EXECUTION_CONTRACT_NOT_SELECTED')
             reason = str(execution_contract.get('reason') or 'candidate_not_selected_for_execution_this_cycle')
             action = str(execution_contract.get('action') or 'deny_unselected_candidate')
+            final_gate = 'execution_quota'
+            decision_source = 'execution_contract'
         elif not row.get('can_open'):
             allowed = False
             reason_code = 'DENY_RISK_GATE_BLOCKED'
             reason = str(row.get('risk_reason') or 'risk_gate_blocked_before_final_execution')
             action = 'deny_risk_gate_blocked_candidate'
+            final_gate = 'risk_gate'
+            decision_source = 'risk_gate'
 
         guard_reason_codes = list((guard.get('reason_codes') or []))
         feedback_loop = dict(guard.get('feedback_loop') or {})
@@ -1595,6 +1630,62 @@ class TradingBot:
             'selected_for_execution': contract.get('selected_for_execution'),
             'scope_mode': contract.get('scope_mode'),
             'guardrail_evidence': dict(contract.get('guardrail_evidence') or {}),
+        }
+        decision_path = [
+            snapshot for snapshot in [
+                _stage_snapshot('candidate_skip', skip_contract, fallback_status='ready'),
+                _stage_snapshot('execution_quota', execution_contract, fallback_status='pending'),
+                {
+                    'stage': 'risk_gate',
+                    'status': 'passed' if row.get('can_open') else 'blocked',
+                    'selected': None,
+                    'allowed': bool(row.get('can_open')),
+                    'reason_code': 'DENY_RISK_GATE_BLOCKED' if not row.get('can_open') else None,
+                    'legacy_reason_code': 'RISK_GATE_BLOCKED' if not row.get('can_open') else None,
+                    'reason_code_disposition': 'deny' if not row.get('can_open') else 'permit',
+                    'reason_code_stage': 'risk_gate',
+                    'reason': row.get('risk_reason'),
+                    'action': 'deny_risk_gate_blocked_candidate' if not row.get('can_open') else 'allow_candidate_forward',
+                },
+                {
+                    'stage': 'final_execution_permit',
+                    'status': contract.get('status'),
+                    'selected': selected,
+                    'allowed': contract.get('allowed'),
+                    'reason_code': contract.get('reason_code'),
+                    'legacy_reason_code': contract.get('legacy_reason_code'),
+                    'reason_code_disposition': contract.get('reason_code_disposition'),
+                    'reason_code_stage': contract.get('reason_code_stage'),
+                    'reason': contract.get('reason'),
+                    'action': contract.get('action'),
+                },
+            ] if snapshot
+        ]
+        contract['runtime_diagnose_bundle'] = {
+            'schema_version': 'final_execution_diagnose_bundle_v1',
+            'symbol': contract.get('symbol'),
+            'signal_id': contract.get('signal_id'),
+            'side': contract.get('side'),
+            'generated_at': contract.get('generated_at'),
+            'exchange_mode': contract.get('exchange_mode'),
+            'testnet_only': contract.get('testnet_only'),
+            'selected_for_execution': selected,
+            'decision': contract.get('reason_code_disposition'),
+            'final_status': contract.get('status'),
+            'allowed': contract.get('allowed'),
+            'reason_code': contract.get('reason_code'),
+            'legacy_reason_code': contract.get('legacy_reason_code'),
+            'reason_code_family': contract.get('reason_code_family'),
+            'reason_code_stage': contract.get('reason_code_stage'),
+            'reason_codes': reason_codes,
+            'decision_source': decision_source,
+            'final_gate': final_gate,
+            'reason': contract.get('reason'),
+            'action': contract.get('action'),
+            'summary': f"{contract.get('reason_code_disposition')}:{contract.get('reason_code')}@{final_gate}",
+            'decision_path': decision_path,
+            'guardrail_evidence': dict(contract.get('guardrail_evidence') or {}),
+            'diagnose_replay': dict(contract.get('diagnose_replay') or {}),
         }
         return contract
 

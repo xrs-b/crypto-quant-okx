@@ -89,6 +89,7 @@ class Database:
         data['final_execution_reason_code'] = final_execution_permit.get('reason_code')
         data['final_execution_allowed'] = bool(final_execution_permit.get('allowed', False)) if final_execution_permit else None
         data['final_execution_guardrail_evidence'] = self._safe_json_dict(final_execution_permit.get('guardrail_evidence')) if final_execution_permit else {}
+        data['final_execution_diagnose_bundle'] = self._safe_json_dict(final_execution_permit.get('runtime_diagnose_bundle')) if final_execution_permit else {}
         data.update({
             'regime_tag': outcome.get('regime_tag') or regime_snapshot.get('name') or regime_snapshot.get('regime') or policy_snapshot.get('regime_name'),
             'policy_tag': outcome.get('policy_tag') or policy_snapshot.get('policy_version'),
@@ -2870,6 +2871,52 @@ class Database:
             'selected_for_execution': bool(payload.get('selected_for_execution', False)),
             'testnet_only': bool(payload.get('testnet_only', True)),
             'guardrail_evidence': guardrail,
+        }
+        bundle = self._safe_json_dict(payload.get('runtime_diagnose_bundle'))
+        normalized_path = []
+        for item in bundle.get('decision_path') or []:
+            snapshot = self._safe_json_dict(item)
+            code = normalize_reason_code(snapshot.get('reason_code')) if snapshot.get('reason_code') else None
+            if code:
+                snapshot.update(build_reason_code_details(code))
+                snapshot['reason_code'] = code
+            normalized_path.append({
+                'stage': snapshot.get('stage'),
+                'status': snapshot.get('status'),
+                'selected': snapshot.get('selected'),
+                'allowed': snapshot.get('allowed'),
+                'reason_code': snapshot.get('reason_code'),
+                'legacy_reason_code': snapshot.get('legacy_reason_code'),
+                'reason_code_disposition': snapshot.get('reason_code_disposition'),
+                'reason_code_stage': snapshot.get('reason_code_stage'),
+                'reason': snapshot.get('reason'),
+                'action': snapshot.get('action'),
+            })
+        payload['runtime_diagnose_bundle'] = {
+            'schema_version': bundle.get('schema_version') or 'final_execution_diagnose_bundle_v1',
+            'symbol': bundle.get('symbol') or payload.get('symbol'),
+            'signal_id': bundle.get('signal_id') or payload.get('signal_id'),
+            'side': bundle.get('side') or payload.get('side'),
+            'generated_at': bundle.get('generated_at') or payload.get('generated_at'),
+            'exchange_mode': bundle.get('exchange_mode') or payload.get('exchange_mode'),
+            'testnet_only': bool(bundle.get('testnet_only', payload.get('testnet_only', True))),
+            'selected_for_execution': bool(bundle.get('selected_for_execution', payload.get('selected_for_execution', False))),
+            'decision': bundle.get('decision') or payload.get('reason_code_disposition'),
+            'final_status': bundle.get('final_status') or payload.get('status'),
+            'allowed': bool(bundle.get('allowed', payload.get('allowed', False))),
+            'reason_code': payload.get('reason_code'),
+            'legacy_reason_code': payload.get('legacy_reason_code'),
+            'reason_code_family': payload.get('reason_code_family'),
+            'reason_code_stage': payload.get('reason_code_stage'),
+            'reason_codes': reason_codes,
+            'decision_source': bundle.get('decision_source') or payload.get('reason_code_stage'),
+            'final_gate': bundle.get('final_gate') or payload.get('reason_code_stage'),
+            'reason': bundle.get('reason') or payload.get('reason'),
+            'action': bundle.get('action') or payload.get('action'),
+            'summary': bundle.get('summary') or f"{payload.get('reason_code_disposition')}:{payload.get('reason_code')}@{payload.get('reason_code_stage')}",
+            'decision_path': normalized_path,
+            'guardrail_evidence': guardrail,
+            'diagnose_replay': dict(payload.get('diagnose_replay') or {}),
         }
         return payload
 

@@ -4916,6 +4916,62 @@ class TestOpenCandidateRanking(unittest.TestCase):
         self.assertEqual(permit.get('reason_code'), 'PERMIT_FINAL_EXECUTION_GRANTED')
         self.assertEqual(permit.get('exchange_mode'), 'testnet')
 
+    def test_build_final_execution_permit_contract_emits_runtime_diagnose_bundle_for_defer(self):
+        self.bot.config._config['runtime']['open_position']['max_candidates_per_cycle'] = 2
+        self.bot.config._config['runtime']['open_position']['execution_quota'] = {
+            'enabled': True,
+            'max_new_positions_per_cycle': 1,
+            'max_same_cluster_per_cycle': 2,
+            'max_same_side_per_cycle': 2,
+            'max_same_regime_per_cycle': 2,
+        }
+        entry_stub = type('EntryDecisionStub', (), {'decision': 'allow', 'score': 75, 'to_dict': lambda self: {'decision': 'allow', 'score': 75}})
+        btc_signal = self._make_signal(symbol='BTC/USDT', strength=91)
+        eth_signal = self._make_signal(symbol='ETH/USDT', strength=88)
+        btc = self.bot._build_candidate_contract(symbol='BTC/USDT', current_price=50000, signal=btc_signal, signal_id=801, passed=True, reason=None, details={}, entry_decision=entry_stub(), can_open=True, risk_reason=None, risk_details={'close_outcome_guard': {'mode': 'observe', 'scope_window': {}, 'scope_context': {}}})
+        eth = self.bot._build_candidate_contract(symbol='ETH/USDT', current_price=3000, signal=eth_signal, signal_id=802, passed=True, reason=None, details={}, entry_decision=entry_stub(), can_open=True, risk_reason=None, risk_details={'close_outcome_guard': {'mode': 'observe', 'scope_window': {}, 'scope_context': {}}})
+        ranked, _ = self.bot._rank_open_candidates([btc, eth])
+        deferred = next(row for row in ranked if row['symbol'] == 'ETH/USDT')
+        permit = self.bot._build_final_execution_permit_contract(deferred)
+        bundle = permit['runtime_diagnose_bundle']
+        self.assertEqual(bundle['schema_version'], 'final_execution_diagnose_bundle_v1')
+        self.assertEqual(bundle['decision'], 'defer')
+        self.assertEqual(bundle['decision_source'], 'execution_contract')
+        self.assertEqual(bundle['final_gate'], 'execution_quota')
+        self.assertEqual(bundle['reason_code'], 'DEFER_EXECUTION_CYCLE_QUOTA_EXHAUSTED')
+        self.assertEqual(bundle['summary'], 'defer:DEFER_EXECUTION_CYCLE_QUOTA_EXHAUSTED@execution_quota')
+        self.assertEqual(bundle['decision_path'][-1]['reason_code'], permit['reason_code'])
+        self.assertTrue(any(item['stage'] == 'execution_quota' and item['reason_code'] == 'DEFER_EXECUTION_CYCLE_QUOTA_EXHAUSTED' for item in bundle['decision_path']))
+
+    def test_database_normalize_final_execution_permit_builds_runtime_diagnose_bundle(self):
+        db = Database(':memory:')
+        normalized = db._normalize_final_execution_permit({
+            'allowed': False,
+            'status': 'deny',
+            'reason_code': 'SCOPED_WINDOW_FREEZE',
+            'action': 'deny_risk_gate_blocked_candidate',
+            'selected_for_execution': True,
+            'testnet_only': True,
+            'exchange_mode': 'testnet',
+            'guardrail_evidence': {'close_outcome_guard': {'reason_codes': ['close_outcome_policy_freeze_candidate']}},
+            'runtime_diagnose_bundle': {
+                'decision': 'deny',
+                'decision_source': 'risk_gate',
+                'final_gate': 'risk_gate',
+                'decision_path': [
+                    {'stage': 'risk_gate', 'status': 'blocked', 'reason_code': 'SCOPED_WINDOW_FREEZE', 'reason': 'freeze'},
+                ],
+            },
+        })
+        bundle = normalized['runtime_diagnose_bundle']
+        self.assertEqual(normalized['reason_code'], 'DENY_GUARD_SCOPED_FREEZE')
+        self.assertEqual(bundle['reason_code'], 'DENY_GUARD_SCOPED_FREEZE')
+        self.assertEqual(bundle['decision'], 'deny')
+        self.assertEqual(bundle['summary'], 'deny:DENY_GUARD_SCOPED_FREEZE@risk_gate')
+        self.assertEqual(bundle['decision_path'][0]['reason_code'], 'DENY_GUARD_SCOPED_FREEZE')
+        self.assertIn('close_outcome_policy_freeze_candidate', bundle['reason_codes'])
+
+
     def test_rank_open_candidates_enforces_execution_quota_with_structured_reason(self):
         self.bot.config._config['runtime']['open_position']['max_candidates_per_cycle'] = 3
         self.bot.config._config['runtime']['open_position']['execution_quota'] = {

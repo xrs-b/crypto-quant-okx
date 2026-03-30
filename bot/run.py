@@ -1043,6 +1043,19 @@ class TradingBot:
             'symbol_cluster_overrides': dict(raw.get('symbol_cluster_overrides') or {}),
         }
 
+    def _open_position_execution_quota_config(self) -> dict:
+        raw = self.config.get('runtime.open_position.execution_quota', {}) or {}
+        if not isinstance(raw, dict):
+            raw = {}
+        max_per_cycle = self._max_open_candidates_per_cycle()
+        return {
+            'enabled': bool(raw.get('enabled', True)),
+            'max_new_positions_per_cycle': max(int(raw.get('max_new_positions_per_cycle', max_per_cycle) or max_per_cycle), 1),
+            'max_same_cluster_per_cycle': max(int(raw.get('max_same_cluster_per_cycle', 1) or 1), 1),
+            'max_same_side_per_cycle': max(int(raw.get('max_same_side_per_cycle', max_per_cycle) or max_per_cycle), 1),
+            'max_same_regime_per_cycle': max(int(raw.get('max_same_regime_per_cycle', max_per_cycle) or max_per_cycle), 1),
+        }
+
     def _symbol_cluster_key(self, symbol: str) -> str:
         overrides = (self._open_position_diversification_config().get('symbol_cluster_overrides') or {})
         if symbol in overrides:
@@ -1203,6 +1216,17 @@ class TradingBot:
             'diversification_context': diversification_context,
             'diversification': {'status': 'pending', 'reason_codes': [], 'applied_penalty': 0.0},
         }
+        execution_contract = {
+            'status': 'pending',
+            'selected': False,
+            'reason': None,
+            'reason_code': None,
+            'action': None,
+            'quota': None,
+            'cluster_key': diversification_context.get('symbol_cluster'),
+            'side': diversification_context.get('side'),
+            'regime_tag': diversification_context.get('regime_tag'),
+        }
         skip_contract = {
             'symbol': symbol,
             'signal_id': signal_id,
@@ -1217,6 +1241,9 @@ class TradingBot:
             'risk_reason': risk_reason,
             'filter_reason': reason,
             'action': None,
+            'deferred': False,
+            'defer_to_cycle': None,
+            'execution_contract': execution_contract,
         }
         if not passed:
             skip_contract.update({'status': 'skipped', 'reason': reason, 'reason_code': 'SIGNAL_FILTERED', 'action': 'filtered_before_ranking'})
@@ -1251,8 +1278,76 @@ class TradingBot:
             'risk_reason': risk_reason,
             'risk_details': risk_details,
             'ranking_contract': ranking_contract,
+            'execution_contract': execution_contract,
             'skip_contract': skip_contract,
         }
+
+    def _apply_execution_quota_guardrails(self, ranked_candidates: list) -> tuple[list, list]:
+        cfg = self._open_position_execution_quota_config()
+        if not cfg.get('enabled', True):
+            for row in ranked_candidates or []:
+                row.setdefault('execution_contract', {}).update({'status': 'disabled', 'selected': False})
+            return ranked_candidates, []
+
+        selected = []
+        selected_cluster = Counter()
+        selected_side = Counter()
+        selected_regime = Counter()
+        cycle_quota = max(1, int(cfg.get('max_new_positions_per_cycle', self._max_open_candidates_per_cycle()) or self._max_open_candidates_per_cycle()))
+
+        for row in ranked_candidates or []:
+            skip_contract = row.setdefault('skip_contract', {})
+            ranking_contract = row.setdefault('ranking_contract', {})
+            execution_contract = row.setdefault('execution_contract', {})
+            context = dict(ranking_contract.get('diversification_context') or {})
+            cluster_key = str(context.get('symbol_cluster') or 'unknown')
+            side_key = str(context.get('side') or 'unknown')
+            regime_key = str(context.get('regime_tag') or 'unknown')
+            quota_snapshot = {
+                'selected_so_far': len(selected),
+                'cycle_quota': cycle_quota,
+                'cluster_key': cluster_key,
+                'same_cluster_selected': int(selected_cluster.get(cluster_key, 0)),
+                'cluster_cap': int(cfg.get('max_same_cluster_per_cycle', 1) or 1),
+                'same_side_selected': int(selected_side.get(side_key, 0)),
+                'side_cap': int(cfg.get('max_same_side_per_cycle', cycle_quota) or cycle_quota),
+                'same_regime_selected': int(selected_regime.get(regime_key, 0)),
+                'regime_cap': int(cfg.get('max_same_regime_per_cycle', cycle_quota) or cycle_quota),
+            }
+            execution_contract.update({'quota': quota_snapshot, 'cluster_key': cluster_key, 'side': side_key, 'regime_tag': regime_key})
+
+            if not row.get('can_open') or skip_contract.get('status') == 'skipped':
+                execution_contract.update({'status': 'ineligible', 'selected': False, 'reason_code': 'INELIGIBLE_BEFORE_EXECUTION_QUOTA', 'action': 'skip_before_execution_quota'})
+                continue
+
+            if len(selected) >= cycle_quota:
+                execution_contract.update({'status': 'deferred', 'selected': False, 'reason': 'execution_quota_exhausted', 'reason_code': 'EXECUTION_QUOTA_EXHAUSTED', 'action': 'defer_to_next_cycle'})
+                skip_contract.update({'status': 'skipped', 'reason': 'execution_quota_exhausted', 'reason_code': 'EXECUTION_QUOTA_EXHAUSTED', 'action': 'defer_to_next_cycle', 'deferred': True, 'defer_to_cycle': 'next'})
+                row['can_open'] = False
+                continue
+            if selected_cluster.get(cluster_key, 0) >= quota_snapshot['cluster_cap']:
+                execution_contract.update({'status': 'deferred', 'selected': False, 'reason': 'symbol_cluster_cap_reached', 'reason_code': 'SYMBOL_CLUSTER_CAP_REACHED', 'action': 'defer_cluster_capped'})
+                skip_contract.update({'status': 'skipped', 'reason': 'symbol_cluster_cap_reached', 'reason_code': 'SYMBOL_CLUSTER_CAP_REACHED', 'action': 'defer_cluster_capped', 'deferred': True, 'defer_to_cycle': 'next'})
+                row['can_open'] = False
+                continue
+            if selected_side.get(side_key, 0) >= quota_snapshot['side_cap']:
+                execution_contract.update({'status': 'deferred', 'selected': False, 'reason': 'side_execution_cap_reached', 'reason_code': 'SIDE_EXECUTION_CAP_REACHED', 'action': 'defer_side_capped'})
+                skip_contract.update({'status': 'skipped', 'reason': 'side_execution_cap_reached', 'reason_code': 'SIDE_EXECUTION_CAP_REACHED', 'action': 'defer_side_capped', 'deferred': True, 'defer_to_cycle': 'next'})
+                row['can_open'] = False
+                continue
+            if selected_regime.get(regime_key, 0) >= quota_snapshot['regime_cap']:
+                execution_contract.update({'status': 'deferred', 'selected': False, 'reason': 'regime_execution_cap_reached', 'reason_code': 'REGIME_EXECUTION_CAP_REACHED', 'action': 'defer_regime_capped'})
+                skip_contract.update({'status': 'skipped', 'reason': 'regime_execution_cap_reached', 'reason_code': 'REGIME_EXECUTION_CAP_REACHED', 'action': 'defer_regime_capped', 'deferred': True, 'defer_to_cycle': 'next'})
+                row['can_open'] = False
+                continue
+
+            selected.append(row)
+            selected_cluster[cluster_key] += 1
+            selected_side[side_key] += 1
+            selected_regime[regime_key] += 1
+            execution_contract.update({'status': 'selected', 'selected': True, 'reason': 'execution_quota_passed', 'reason_code': 'EXECUTION_QUOTA_PASSED', 'action': 'execute_this_cycle'})
+
+        return ranked_candidates, selected
 
     def _rank_open_candidates(self, candidates: list) -> tuple[list, list]:
         ranked = sorted(
@@ -1265,26 +1360,21 @@ class TradingBot:
             )
         )
         ranked = self._apply_diversification_fence(ranked)
-        remaining_slots = self._max_open_candidates_per_cycle()
-        selected = []
-        for row in ranked:
-            skip_contract = row.get('skip_contract') or {}
-            if row.get('can_open') and skip_contract.get('status') != 'skipped' and remaining_slots > 0:
-                selected.append(row)
-                remaining_slots -= 1
-            elif row.get('can_open') and skip_contract.get('status') != 'skipped':
-                skip_contract.update({'status': 'skipped', 'reason': 'ranking_budget_exhausted', 'reason_code': 'RANKING_BUDGET_EXHAUSTED', 'action': 'defer_to_higher_ranked_candidate'})
-                row['can_open'] = False
+        ranked, selected = self._apply_execution_quota_guardrails(ranked)
         for index, row in enumerate(ranked, start=1):
             row.setdefault('ranking_contract', {})['rank'] = index
             row.setdefault('ranking_contract', {})['selected'] = row in selected
+            row.setdefault('execution_contract', {})['selected'] = row in selected
         return ranked, selected
 
     def _build_candidate_runtime_summary(self, ranked_candidates: list, selected_candidates: list) -> dict:
         items = []
         skip_items = []
+        reason_counts = Counter()
+        execution_cfg = self._open_position_execution_quota_config()
         for row in ranked_candidates or []:
             ranking_contract = dict(row.get('ranking_contract') or {})
+            execution_contract = dict(row.get('execution_contract') or {})
             skip_contract = dict(row.get('skip_contract') or {})
             items.append({
                 'symbol': row.get('symbol'),
@@ -1300,15 +1390,29 @@ class TradingBot:
                 'close_outcome_scope_key': ranking_contract.get('close_outcome_scope_key'),
                 'diversification': ranking_contract.get('diversification') or {},
                 'diversification_context': ranking_contract.get('diversification_context') or {},
+                'execution_contract': execution_contract,
                 'skip_contract': skip_contract,
             })
             if skip_contract.get('status') == 'skipped':
                 skip_items.append(skip_contract)
+                if skip_contract.get('reason_code'):
+                    reason_counts[str(skip_contract.get('reason_code'))] += 1
         return {
-            'schema_version': 'open_candidate_ranking_v2',
+            'schema_version': 'open_candidate_ranking_v3',
             'selected_count': len(selected_candidates or []),
             'candidate_count': len(ranked_candidates or []),
             'max_open_candidates_per_cycle': self._max_open_candidates_per_cycle(),
+            'execution_quota': {
+                'enabled': bool(execution_cfg.get('enabled', True)),
+                'max_new_positions_per_cycle': int(execution_cfg.get('max_new_positions_per_cycle', self._max_open_candidates_per_cycle()) or self._max_open_candidates_per_cycle()),
+                'max_same_cluster_per_cycle': int(execution_cfg.get('max_same_cluster_per_cycle', 1) or 1),
+                'max_same_side_per_cycle': int(execution_cfg.get('max_same_side_per_cycle', self._max_open_candidates_per_cycle()) or self._max_open_candidates_per_cycle()),
+                'max_same_regime_per_cycle': int(execution_cfg.get('max_same_regime_per_cycle', self._max_open_candidates_per_cycle()) or self._max_open_candidates_per_cycle()),
+                'selected_cluster_counts': dict(Counter(str(((row.get('execution_contract') or {}).get('cluster_key') or 'unknown')) for row in (selected_candidates or []))),
+                'selected_side_counts': dict(Counter(str(((row.get('execution_contract') or {}).get('side') or 'unknown')) for row in (selected_candidates or []))),
+                'selected_regime_counts': dict(Counter(str(((row.get('execution_contract') or {}).get('regime_tag') or 'unknown')) for row in (selected_candidates or []))),
+                'reason_code_counts': dict(reason_counts),
+            },
             'items': items,
             'skip_contracts': skip_items,
         }
@@ -1516,6 +1620,7 @@ class TradingBot:
                 'priority_score': (row.get('ranking_contract') or {}).get('priority_score'),
                 'diversification_context': (row.get('ranking_contract') or {}).get('diversification_context') or {},
                 'diversification': (row.get('ranking_contract') or {}).get('diversification') or {},
+                'execution_contract': (row.get('execution_contract') or {}),
             }
             for row in selected_candidates
         ]
@@ -1528,8 +1633,10 @@ class TradingBot:
                 status = 'SELECTED' if ranking.get('selected') else skip_contract.get('reason_code') or ('READY' if row.get('can_open') else 'SKIP')
                 diversification = ranking.get('diversification') or {}
                 fairness = ','.join(diversification.get('reason_codes') or []) or 'clear'
+                execution_contract = row.get('execution_contract') or {}
+                exec_status = execution_contract.get('reason_code') or execution_contract.get('status') or '--'
                 print(
-                    f"   #{ranking.get('rank')} {row.get('symbol')} | score={ranking.get('priority_score')} | scope={ranking.get('close_outcome_scope_mode')}:{ranking.get('close_outcome_scope') or '--'} | fair={fairness} | {status}"
+                    f"   #{ranking.get('rank')} {row.get('symbol')} | score={ranking.get('priority_score')} | scope={ranking.get('close_outcome_scope_mode')}:{ranking.get('close_outcome_scope') or '--'} | fair={fairness} | exec={exec_status} | {status}"
                 )
             print()
 
@@ -1624,7 +1731,8 @@ class TradingBot:
             f'持仓对账：同步 {reconcile_report.get("synced", 0) if isinstance(reconcile_report, dict) else 0} 条 ｜ 清理 {reconcile_report.get("removed", 0) if isinstance(reconcile_report, dict) else 0} 条',
             f'信号：{summary["signals"]} ｜ 通过：{summary["passed"]} ｜ 开仓：{summary["opened"]} ｜ 平仓：{summary["closed"]} ｜ 错误：{summary["errors"]}',
             f'候选排序：{(summary.get("candidate_ranking") or {}).get("candidate_count", 0)} ｜ 选中：{(summary.get("candidate_ranking") or {}).get("selected_count", 0)} ｜ skip：{len(summary.get("candidate_skip_contracts") or [])}',
-            f'公平围栏：{", ".join(sorted({code for item in ((summary.get("candidate_ranking") or {}).get("items") or []) for code in (((item.get("diversification") or {}).get("reason_codes") or []))})) or "clear"}'
+            f'公平围栏：{", ".join(sorted({code for item in ((summary.get("candidate_ranking") or {}).get("items") or []) for code in (((item.get("diversification") or {}).get("reason_codes") or []))})) or "clear"}',
+            f'执行配额：cycle={(summary.get("candidate_ranking") or {}).get("execution_quota", {}).get("max_new_positions_per_cycle", 0)} ｜ cluster-cap={(summary.get("candidate_ranking") or {}).get("execution_quota", {}).get("max_same_cluster_per_cycle", 0)} ｜ reasons={json.dumps((summary.get("candidate_ranking") or {}).get("execution_quota", {}).get("reason_code_counts", {}), ensure_ascii=False)}'
         ]
         self.notifier.notify_runtime('end', end_lines, summary)
         print(f"\n✅ 交易循环完成! {finished_at}\n")

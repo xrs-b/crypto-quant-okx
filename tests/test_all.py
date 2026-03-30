@@ -4548,8 +4548,71 @@ class TestOpenCandidateRanking(unittest.TestCase):
         eth_row = next(row for row in ranked if row['symbol'] == 'ETH/USDT')
         self.assertIn('CLUSTER_CONCENTRATION_PENALTY', eth_row['ranking_contract']['diversification']['reason_codes'])
         summary = self.bot._build_candidate_runtime_summary(ranked, selected)
-        self.assertEqual(summary['schema_version'], 'open_candidate_ranking_v2')
+        self.assertEqual(summary['schema_version'], 'open_candidate_ranking_v3')
         self.assertTrue(any(item['diversification'].get('reason_codes') for item in summary['items'] if item['symbol'] == 'ETH/USDT'))
+
+    def test_rank_open_candidates_enforces_execution_quota_with_structured_reason(self):
+        self.bot.config._config['runtime']['open_position']['max_candidates_per_cycle'] = 3
+        self.bot.config._config['runtime']['open_position']['execution_quota'] = {
+            'enabled': True,
+            'max_new_positions_per_cycle': 1,
+            'max_same_cluster_per_cycle': 2,
+            'max_same_side_per_cycle': 2,
+            'max_same_regime_per_cycle': 2,
+        }
+        save_runtime_state({})
+        entry_stub = type('EntryDecisionStub', (), {'decision': 'allow', 'score': 75, 'to_dict': lambda self: {'decision': 'allow', 'score': 75}})
+        btc_signal = self._make_signal(symbol='BTC/USDT', strength=91)
+        eth_signal = self._make_signal(symbol='ETH/USDT', strength=88)
+        btc_signal.regime_snapshot = {'name': 'trend_up', 'regime': 'trend_up', 'family': 'trend', 'direction': 'up'}
+        eth_signal.regime_snapshot = {'name': 'trend_up', 'regime': 'trend_up', 'family': 'trend', 'direction': 'up'}
+        btc = self.bot._build_candidate_contract(symbol='BTC/USDT', current_price=50000, signal=btc_signal, signal_id=501, passed=True, reason=None, details={}, entry_decision=entry_stub(), can_open=True, risk_reason=None, risk_details={'close_outcome_guard': {'mode': 'observe', 'scope_window': {}, 'scope_context': {}}})
+        eth = self.bot._build_candidate_contract(symbol='ETH/USDT', current_price=3000, signal=eth_signal, signal_id=502, passed=True, reason=None, details={}, entry_decision=entry_stub(), can_open=True, risk_reason=None, risk_details={'close_outcome_guard': {'mode': 'observe', 'scope_window': {}, 'scope_context': {}}})
+        ranked, selected = self.bot._rank_open_candidates([btc, eth])
+        self.assertEqual([row['symbol'] for row in selected], ['BTC/USDT'])
+        eth_row = next(row for row in ranked if row['symbol'] == 'ETH/USDT')
+        self.assertEqual(eth_row['execution_contract']['reason_code'], 'EXECUTION_QUOTA_EXHAUSTED')
+        self.assertTrue(eth_row['skip_contract']['deferred'])
+        summary = self.bot._build_candidate_runtime_summary(ranked, selected)
+        self.assertEqual(summary['execution_quota']['reason_code_counts']['EXECUTION_QUOTA_EXHAUSTED'], 1)
+
+    def test_rank_open_candidates_enforces_cluster_cap_with_structured_reason(self):
+        self.bot.config._config['runtime']['open_position']['max_candidates_per_cycle'] = 3
+        self.bot.config._config['runtime']['open_position']['execution_quota'] = {
+            'enabled': True,
+            'max_new_positions_per_cycle': 3,
+            'max_same_cluster_per_cycle': 1,
+            'max_same_side_per_cycle': 3,
+            'max_same_regime_per_cycle': 3,
+        }
+        self.bot.config._config['runtime']['open_position']['diversification_fence'] = {
+            'enabled': True,
+            'same_side_soft_limit': 99,
+            'same_regime_soft_limit': 99,
+            'same_cluster_soft_limit': 99,
+            'cluster_penalty': 0,
+            'side_penalty': 0,
+            'regime_penalty': 0,
+            'cooldown_cycles': 0,
+            'symbol_cluster_overrides': {'BTC/USDT': 'majors', 'ETH/USDT': 'majors', 'XRP/USDT': 'payments'},
+        }
+        save_runtime_state({})
+        entry_stub = type('EntryDecisionStub', (), {'decision': 'allow', 'score': 75, 'to_dict': lambda self: {'decision': 'allow', 'score': 75}})
+        btc_signal = self._make_signal(symbol='BTC/USDT', strength=91)
+        eth_signal = self._make_signal(symbol='ETH/USDT', strength=89)
+        xrp_signal = self._make_signal(symbol='XRP/USDT', strength=87)
+        for sig in [btc_signal, eth_signal, xrp_signal]:
+            sig.regime_snapshot = {'name': 'trend_up', 'regime': 'trend_up', 'family': 'trend', 'direction': 'up'}
+        btc = self.bot._build_candidate_contract(symbol='BTC/USDT', current_price=50000, signal=btc_signal, signal_id=601, passed=True, reason=None, details={}, entry_decision=entry_stub(), can_open=True, risk_reason=None, risk_details={'close_outcome_guard': {'mode': 'observe', 'scope_window': {}, 'scope_context': {}}})
+        eth = self.bot._build_candidate_contract(symbol='ETH/USDT', current_price=3000, signal=eth_signal, signal_id=602, passed=True, reason=None, details={}, entry_decision=entry_stub(), can_open=True, risk_reason=None, risk_details={'close_outcome_guard': {'mode': 'observe', 'scope_window': {}, 'scope_context': {}}})
+        xrp = self.bot._build_candidate_contract(symbol='XRP/USDT', current_price=1, signal=xrp_signal, signal_id=603, passed=True, reason=None, details={}, entry_decision=entry_stub(), can_open=True, risk_reason=None, risk_details={'close_outcome_guard': {'mode': 'observe', 'scope_window': {}, 'scope_context': {}}})
+        ranked, selected = self.bot._rank_open_candidates([btc, eth, xrp])
+        self.assertEqual([row['symbol'] for row in selected], ['BTC/USDT', 'XRP/USDT'])
+        eth_row = next(row for row in ranked if row['symbol'] == 'ETH/USDT')
+        self.assertEqual(eth_row['execution_contract']['reason_code'], 'SYMBOL_CLUSTER_CAP_REACHED')
+        summary = self.bot._build_candidate_runtime_summary(ranked, selected)
+        self.assertEqual(summary['execution_quota']['selected_cluster_counts']['majors'], 1)
+        self.assertEqual(summary['execution_quota']['reason_code_counts']['SYMBOL_CLUSTER_CAP_REACHED'], 1)
 
 
 class TestLayerPlanAndIntents(unittest.TestCase):

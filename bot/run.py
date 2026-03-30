@@ -1086,6 +1086,24 @@ class TradingBot:
 
     def _notification_context(self, signal=None, details: dict = None) -> dict:
         payload = dict(details or {})
+        observability = payload.get('observability') if isinstance(payload.get('observability'), dict) else {}
+        if observability:
+            if not isinstance(payload.get('regime_snapshot'), dict) and isinstance(observability.get('regime_snapshot'), dict):
+                payload['regime_snapshot'] = dict(observability.get('regime_snapshot') or {})
+            if not isinstance(payload.get('adaptive_policy_snapshot'), dict) and isinstance(observability.get('adaptive_policy_snapshot'), dict):
+                payload['adaptive_policy_snapshot'] = dict(observability.get('adaptive_policy_snapshot') or {})
+            if not isinstance(payload.get('observe_only'), dict) and isinstance(observability.get('observe_only'), dict):
+                payload['observe_only'] = dict(observability.get('observe_only') or {})
+            if not isinstance(payload.get('adaptive_regime_observe_only'), dict):
+                obs_view = observability.get('observe_only') if isinstance(observability.get('observe_only'), dict) else {}
+                if obs_view:
+                    payload['adaptive_regime_observe_only'] = {
+                        'phase': obs_view.get('phase'),
+                        'state': obs_view.get('state'),
+                        'summary': obs_view.get('summary'),
+                        'tags': list(obs_view.get('tags') or []),
+                        'notes': list(obs_view.get('notes') or []),
+                    }
         if signal is None:
             return payload
 

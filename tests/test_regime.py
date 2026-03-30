@@ -748,5 +748,66 @@ class TestAdaptiveRegimeConfigAndPolicy(unittest.TestCase):
         self.assertEqual(policy['execution_overrides'], {})
 
 
+    def test_get_signal_regime_snapshot_falls_back_to_policy_snapshot(self):
+        from core.regime_policy import get_signal_regime_snapshot
+        # signal has adaptive_policy_snapshot with regime info but no direct regime_snapshot
+        policy_snapshot = {
+            'mode': 'guarded_execute',
+            'regime_name': 'high_vol_up',
+            'regime_confidence': 0.87,
+            'regime_family': 'vol',
+            'regime_direction': 'up',
+            'regime_confidence': 0.87,
+            'stability_score': 0.41,
+            'transition_risk': 0.33,
+            'regime_details': 'reconstructed from adaptive policy',
+            'regime_indicators': {'volatility': 0.06},
+        }
+        result = get_signal_regime_snapshot(signal=None, regime_snapshot=None, policy_snapshot=policy_snapshot)
+        self.assertEqual(result['name'], 'high_vol_up')
+        self.assertEqual(result['confidence'], 0.87)
+        self.assertEqual(result['family'], 'vol')
+        self.assertEqual(result['direction'], 'up')
+        self.assertEqual(result['stability_score'], 0.41)
+        self.assertEqual(result['transition_risk'], 0.33)
+        self.assertNotEqual(result['regime'], 'unknown')
+
+    def test_get_signal_regime_snapshot_prefers_explicit_regime_snapshot(self):
+        from core.regime_policy import get_signal_regime_snapshot
+        explicit_regime = build_regime_snapshot('trend', 0.91, {'ema_gap': 0.03})
+        policy_snapshot = {
+            'mode': 'guarded_execute',
+            'regime_name': 'high_vol',
+            'regime_confidence': 0.55,
+        }
+        result = get_signal_regime_snapshot(signal=None, regime_snapshot=explicit_regime, policy_snapshot=policy_snapshot)
+        self.assertEqual(result['name'], 'trend')
+        self.assertEqual(result['confidence'], 0.91)
+        self.assertEqual(result['regime'], 'trend')
+
+    def test_get_signal_regime_snapshot_missing_all_returns_unknown(self):
+        from core.regime_policy import get_signal_regime_snapshot
+        result = get_signal_regime_snapshot(signal=None, regime_snapshot=None, policy_snapshot=None)
+        self.assertEqual(result['regime'], 'unknown')
+        self.assertEqual(result['confidence'], 0.0)
+
+    def test_build_observe_only_payload_uses_policy_snapshot_fallback(self):
+        from core.regime_policy import build_observe_only_payload
+        policy_snapshot = {
+            'mode': 'guarded_execute',
+            'regime_name': 'range_bound',
+            'regime_confidence': 0.76,
+            'regime_family': 'range',
+            'regime_direction': 'sideways',
+            'stability_score': 0.50,
+            'transition_risk': 0.25,
+        }
+        cfg = Config()
+        payload = build_observe_only_payload(cfg, 'BTC/USDT', signal=None, policy_snapshot=policy_snapshot)
+        self.assertEqual(payload['regime_snapshot']['name'], 'range_bound')
+        self.assertEqual(payload['regime_snapshot']['confidence'], 0.76)
+        self.assertNotEqual(payload['regime_observe_only']['summary'], 'unknown[unknown] conf=0.00')
+
+
 if __name__ == '__main__':
     unittest.main()

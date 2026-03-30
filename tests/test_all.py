@@ -1712,6 +1712,68 @@ class TestNotifications(unittest.TestCase):
         self.assertEqual(payload['market_context']['regime_confidence'], 0.83)
         self.assertEqual(payload['regime_info']['regime'], 'trend')
 
+    def test_trading_bot_notification_context_pulls_regime_from_observability(self):
+        """When details contain observability with real regime_snapshot, use it."""
+        bot = TradingBot.__new__(TradingBot)
+        from signals.detector import Signal
+        signal = Signal(
+            symbol='BTC/USDT', signal_type='buy', price=50000, strength=88,
+            market_context={'regime': 'unknown'},
+        )
+        details = {
+            'observability': {
+                'regime_snapshot': {
+                    'regime': 'high_vol',
+                    'name': 'high_vol_up',
+                    'confidence': 0.87,
+                    'family': 'vol',
+                    'direction': 'up',
+                    'stability_score': 0.42,
+                    'transition_risk': 0.31,
+                    'indicators': {'volatility': 0.05},
+                },
+                'adaptive_policy_snapshot': {
+                    'mode': 'guarded_execute',
+                    'regime_name': 'high_vol_up',
+                    'regime_confidence': 0.87,
+                    'summary': 'high_vol[up] conf=0.87 stable=0.42 risk=0.31 | policy=adaptive_policy_v1_m4_testnet_live state=effective',
+                    'tags': ['guarded_execute', 'effective'],
+                },
+                'observe_only': {
+                    'summary': 'high_vol[up] conf=0.87 stable=0.42 risk=0.31 | policy=adaptive_policy_v1_m4_testnet_live state=effective',
+                    'tags': ['guarded_execute', 'regime:high_vol'],
+                    'phase': 'effective',
+                    'state': 'high_vol',
+                },
+            }
+        }
+        payload = bot._notification_context(signal, details)
+        self.assertEqual(payload['regime_snapshot']['name'], 'high_vol_up')
+        self.assertEqual(payload['regime_snapshot']['confidence'], 0.87)
+        self.assertEqual(payload['adaptive_policy_snapshot']['mode'], 'guarded_execute')
+        self.assertEqual(payload['observe_only']['summary'].split('conf=')[1].split(' ')[0], '0.87')
+        self.assertEqual(payload['adaptive_regime_observe_only']['summary'].split('conf=')[1].split(' ')[0], '0.87')
+
+    def test_trading_bot_notification_context_pulls_fallback_from_policy_snapshot(self):
+        """When signal has no regime_snapshot but has adaptive_policy_snapshot with regime info, reconstruct."""
+        bot = TradingBot.__new__(TradingBot)
+        from signals.detector import Signal
+        signal = Signal(
+            symbol='BTC/USDT', signal_type='buy', price=50000, strength=88,
+            market_context={},
+            adaptive_policy_snapshot={
+                'mode': 'guarded_execute',
+                'regime_name': 'range_bound',
+                'regime_confidence': 0.76,
+                'regime_family': 'range',
+                'regime_direction': 'sideways',
+                'summary': 'range_bound[sideways] conf=0.76 | policy=adaptive_policy_v1_m4_testnet_live state=effective',
+            },
+        )
+        payload = bot._notification_context(signal, {})
+        self.assertEqual(payload['adaptive_policy_snapshot']['regime_name'], 'range_bound')
+        self.assertEqual(payload['adaptive_policy_snapshot']['regime_confidence'], 0.76)
+
     def test_discord_bot_fallback_channel(self):
         cfg = Config()
         cfg._config.setdefault('notification', {}).setdefault('discord', {})

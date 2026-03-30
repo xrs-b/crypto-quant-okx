@@ -90,6 +90,15 @@ def _coerce_regime(value: Any) -> Regime:
         try:
             return Regime(value)
         except ValueError:
+            # Handle compound names like "trend_up" -> "trend", "high_vol_up" -> "high_vol"
+            key = value.strip().lower()
+            for r in Regime:
+                # Exact match (case-insensitive)
+                if key == r.value.lower():
+                    return r
+                # Partial match: "trend_up" matches "trend" (base regime name)
+                if r.value and key.startswith(r.value.lower()) or (r.value and r.value.lower().startswith(key.split('_')[0].split('-')[0])):
+                    return r
             return Regime.UNKNOWN
     return Regime.UNKNOWN
 

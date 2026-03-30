@@ -269,29 +269,48 @@ def build_neutral_policy_snapshot(
     return enrich_policy_snapshot(base)
 
 
-def get_signal_regime_snapshot(signal: Any = None, regime_snapshot: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def get_signal_regime_snapshot(signal: Any = None, regime_snapshot: Optional[Dict[str, Any]] = None, policy_snapshot: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     if regime_snapshot:
         return normalize_regime_snapshot(regime_snapshot)
-    if signal is None:
-        return build_regime_snapshot('unknown', 0.0, {}, 'missing regime snapshot')
-    raw = getattr(signal, 'regime_snapshot', None) or getattr(signal, 'regime_info', None) or getattr(signal, 'market_context', {}).get('regime_snapshot')
-    if raw:
-        return normalize_regime_snapshot(raw)
-    market_context = getattr(signal, 'market_context', {}) or {}
-    return build_regime_snapshot(
-        market_context.get('regime', 'unknown'),
-        market_context.get('regime_confidence', 0.0),
-        market_context.get('regime_indicators') or market_context.get('regime_features') or {},
-        market_context.get('regime_details', ''),
-        features=market_context.get('regime_features') or market_context.get('regime_indicators') or {},
-        detected_at=market_context.get('regime_detected_at'),
-        detector_version=market_context.get('regime_detector_version', None) or None,
-        name=market_context.get('regime_name') or market_context.get('regime'),
-        family=market_context.get('regime_family'),
-        direction=market_context.get('regime_direction'),
-        stability_score=market_context.get('regime_stability_score'),
-        transition_risk=market_context.get('regime_transition_risk'),
-    )
+    if signal is not None:
+        raw = getattr(signal, 'regime_snapshot', None) or getattr(signal, 'regime_info', None) or getattr(signal, 'market_context', {}).get('regime_snapshot')
+        if raw:
+            return normalize_regime_snapshot(raw)
+        market_context = getattr(signal, 'market_context', {}) or {}
+        market_regime = market_context.get('regime_name') or market_context.get('regime')
+        if market_regime:
+            return build_regime_snapshot(
+                market_context.get('regime', market_regime),
+                market_context.get('regime_confidence', 0.0),
+                market_context.get('regime_indicators') or market_context.get('regime_features') or {},
+                market_context.get('regime_details', ''),
+                features=market_context.get('regime_features') or market_context.get('regime_indicators') or {},
+                detected_at=market_context.get('regime_detected_at'),
+                detector_version=market_context.get('regime_detector_version', None) or None,
+                name=market_context.get('regime_name') or market_context.get('regime'),
+                family=market_context.get('regime_family'),
+                direction=market_context.get('regime_direction'),
+                stability_score=market_context.get('regime_stability_score'),
+                transition_risk=market_context.get('regime_transition_risk'),
+            )
+    policy_snapshot = dict(policy_snapshot or {})
+    policy_regime = policy_snapshot.get('regime_name') or policy_snapshot.get('regime')
+    if policy_regime:
+        return build_regime_snapshot(
+            policy_snapshot.get('regime') or policy_regime,
+            policy_snapshot.get('regime_confidence', 0.0),
+            policy_snapshot.get('regime_indicators') or policy_snapshot.get('regime_features') or {},
+            policy_snapshot.get('regime_details', 'reconstructed from adaptive policy snapshot'),
+            features=policy_snapshot.get('regime_features') or policy_snapshot.get('regime_indicators') or {},
+            detected_at=policy_snapshot.get('regime_detected_at'),
+            detector_version=policy_snapshot.get('detector_version', None) or None,
+            name=policy_snapshot.get('regime_name') or policy_snapshot.get('regime'),
+            family=policy_snapshot.get('regime_family'),
+            direction=policy_snapshot.get('regime_direction'),
+            stability_score=policy_snapshot.get('stability_score'),
+            transition_risk=policy_snapshot.get('transition_risk'),
+        )
+    return build_regime_snapshot('unknown', 0.0, {}, 'missing regime snapshot')
 
 
 def get_signal_policy_snapshot(config_helper: Any, symbol: Optional[str], signal: Any = None, regime_snapshot: Optional[Dict[str, Any]] = None, policy_snapshot: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -309,7 +328,7 @@ def get_signal_policy_snapshot(config_helper: Any, symbol: Optional[str], signal
 
 
 def build_observe_only_payload(config_helper: Any, symbol: Optional[str], signal: Any = None, regime_snapshot: Optional[Dict[str, Any]] = None, policy_snapshot: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    normalized_regime = get_signal_regime_snapshot(signal, regime_snapshot)
+    normalized_regime = get_signal_regime_snapshot(signal, regime_snapshot, policy_snapshot)
     normalized_policy = get_signal_policy_snapshot(config_helper, symbol, signal, normalized_regime, policy_snapshot)
     regime_view = build_regime_observe_only_view(normalized_regime)
     policy_view = build_policy_observe_only_view(normalized_policy)

@@ -2900,6 +2900,27 @@ class TestDiagnostics(unittest.TestCase):
         self.assertFalse(result['opened'])
         self.assertIn('testnet', result['error'])
 
+    def test_execute_exchange_smoke_classifies_exchange_symbol_restriction(self):
+        class RestrictedExecutableExchangeStub(ExecutableExchangeStub):
+            def create_order(self, symbol, side, amount, posSide=None):
+                raise RuntimeError(
+                    'okx {"code":"1","data":[{"sCode":"51155","sMsg":"You can\'t trade this pair or borrow this crypto due to local compliance restrictions. "}],"msg":"All operations failed"}'
+                )
+
+        cfg = Config()
+        cfg._config['symbols'] = {'watch_list': ['BTC/USDT']}
+        cfg._config.setdefault('exchange', {})['position_mode'] = 'hedge'
+        cfg._config['exchange']['mode'] = 'testnet'
+        cfg._config.setdefault('trading', {})['position_size'] = 0.1
+        cfg._config['trading']['leverage'] = 10
+
+        result = execute_exchange_smoke(cfg, RestrictedExecutableExchangeStub(), symbol='BTC/USDT', side='long')
+
+        self.assertFalse(result['opened'])
+        self.assertEqual(result['failure_compensation_hint'], 'switch_testnet_symbol_or_account_region')
+        self.assertEqual(result['error_summary']['category'], 'exchange_symbol_restricted')
+        self.assertEqual(result['error_summary']['exchange_code'], '51155')
+
 
 class TestTestnetSmokeAcceptanceScript(unittest.TestCase):
     def test_extract_smoke_result_from_cli_output(self):

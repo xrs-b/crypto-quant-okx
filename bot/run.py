@@ -838,6 +838,41 @@ def reconcile_exchange_positions(exchange: Exchange, db: Database) -> dict:
     return report
 
 
+def _classify_smoke_execution_error(error) -> dict:
+    """将交易所/桥接异常归一为更利于 smoke 验收解读的 hint。"""
+    text = str(error or '').strip()
+    lowered = text.lower()
+    classification = {
+        'raw_error': text,
+        'category': 'bridge_execution_error',
+        'hint': 'inspect_bridge_execution_error',
+        'exchange_code': None,
+        'message': text,
+    }
+    if not text:
+        return classification
+
+    json_start = text.find('{')
+    payload = None
+    if json_start >= 0:
+        try:
+            payload = json.loads(text[json_start:])
+        except Exception:
+            payload = None
+    if isinstance(payload, dict):
+        first = ((payload.get('data') or [None])[0]) or {}
+        exchange_code = str(first.get('sCode') or payload.get('code') or '').strip() or None
+        exchange_msg = str(first.get('sMsg') or payload.get('msg') or text).strip()
+        classification['exchange_code'] = exchange_code
+        classification['message'] = exchange_msg
+        if exchange_code == '51155' or 'local compliance restrictions' in exchange_msg.lower():
+            classification.update({
+                'category': 'exchange_symbol_restricted',
+                'hint': 'switch_testnet_symbol_or_account_region',
+            })
+    return classification
+
+
 def execute_exchange_smoke(cfg: Config, exchange: Exchange, symbol: str = None, side: str = 'long', db: Database = None) -> dict:
     """执行最小 testnet 开平仓验收。只允许 testnet。"""
     plan = build_exchange_smoke_plan(cfg, exchange, symbol=symbol, side=side)
@@ -934,9 +969,11 @@ def execute_exchange_smoke(cfg: Config, exchange: Exchange, symbol: str = None, 
             if not result['cleanup_needed']:
                 result['failure_compensation_hint'] = None
         except Exception as e:
-            result['error'] = str(e)
+            error_summary = _classify_smoke_execution_error(e)
+            result['error'] = error_summary.get('raw_error') or str(e)
+            result['error_summary'] = error_summary
             result['cleanup_needed'] = bool(result.get('opened') and not result.get('closed'))
-            result['failure_compensation_hint'] = 'inspect_open_order_and_force_flatten_on_testnet' if result['cleanup_needed'] else 'inspect_bridge_execution_error'
+            result['failure_compensation_hint'] = 'inspect_open_order_and_force_flatten_on_testnet' if result['cleanup_needed'] else error_summary.get('hint', 'inspect_bridge_execution_error')
             if result['opened'] and result['open_status'] == 'not_started':
                 result['open_status'] = 'submitted'
             if result['close_status'] == 'not_started':
@@ -955,6 +992,7 @@ def execute_exchange_smoke(cfg: Config, exchange: Exchange, symbol: str = None, 
             'residual_position_detected': result.get('residual_position_detected', False),
             'reconcile_summary': result.get('reconcile_summary') or {},
             'failure_compensation_hint': result.get('failure_compensation_hint'),
+            'error_summary': result.get('error_summary'),
         }
         smoke_run_id = db.record_smoke_run(
             exchange_mode=cfg.exchange_mode,

@@ -94,6 +94,18 @@ _REASON_CODE_SPECS: Dict[str, Dict[str, str]] = {
         'family': 'strategy_cooldown',
         'legacy_code': 'STRATEGY_RECOVERY_WINDOW_ACTIVE',
     },
+    'SKIP_STRATEGY_REACTIVATION_CONFIRM_REQUIRED': {
+        'disposition': 'skip',
+        'stage': 'strategy_selection',
+        'family': 'strategy_reactivation',
+        'legacy_code': 'STRATEGY_REACTIVATION_CONFIRM_REQUIRED',
+    },
+    'DEWEIGHT_STRATEGY_REACTIVATION_PROBATION_ACTIVE': {
+        'disposition': 'defer',
+        'stage': 'strategy_selection',
+        'family': 'strategy_reactivation',
+        'legacy_code': 'STRATEGY_REACTIVATION_PROBATION_ACTIVE',
+    },
 }
 
 _REASON_CODE_ALIASES: Dict[str, str] = {}

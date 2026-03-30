@@ -344,6 +344,7 @@ class SignalDetector:
         budgets = dict(selection_contract.get('strategy_budgets') or {})
         slots = dict(selection_contract.get('strategy_slots') or {})
         cooldowns = dict(selection_contract.get('strategy_cooldowns') or {})
+        reactivation_summary = dict(selection_contract.get('reactivation_summary') or {})
         for reason in list(signal.reasons or []):
             strategy_name = str(reason.get('strategy') or '').strip()
             if not strategy_name:
@@ -362,8 +363,14 @@ class SignalDetector:
             reason['metadata']['strategy_cooldown'] = cooldown
             reason['metadata']['strategy_cooldown_active'] = bool(cooldown.get('cooldown_active', False))
             reason['metadata']['strategy_recovery_window_active'] = bool(cooldown.get('recovery_window_active', False))
+            reactivation_gate = dict(cooldown.get('reactivation_gate') or {})
+            reason['metadata']['strategy_reactivation_gate'] = reactivation_gate
+            reason['metadata']['strategy_reactivation_gate_active'] = bool(reactivation_gate.get('gate_active', False))
+            reason['metadata']['strategy_reactivation_status'] = reactivation_gate.get('status')
             if cooldown.get('reason_code'):
                 reason['metadata']['strategy_cooldown_reason_code'] = cooldown.get('reason_code')
+            if reactivation_gate.get('reason_code'):
+                reason['metadata']['strategy_reactivation_reason_code'] = reactivation_gate.get('reason_code')
             if multiplier < 1.0:
                 reason['strength'] = adjusted_strength
             if multiplier <= 0.0:
@@ -371,6 +378,7 @@ class SignalDetector:
         signal.market_context = dict(signal.market_context or {})
         signal.market_context['strategy_selection'] = selection_contract
         signal.market_context['strategy_cooldown_summary'] = dict(selection_contract.get('cooldown_summary') or {})
+        signal.market_context['strategy_reactivation_summary'] = reactivation_summary
         return self._recompute_signal_state(signal, symbol or signal.symbol)
 
     def _analyze_rsi(self, df: pd.DataFrame, price: float, symbol: str = None) -> Optional[Dict]:

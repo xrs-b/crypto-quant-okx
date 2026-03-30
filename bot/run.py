@@ -1047,6 +1047,14 @@ class TradingBot:
             'strategy_recovery_min_win_rate': min(max(float(raw.get('strategy_recovery_min_win_rate', 50.0) or 50.0), 0.0), 100.0),
             'strategy_recovery_min_avg_return_pct': float(raw.get('strategy_recovery_min_avg_return_pct', 0.0) or 0.0),
             'strategy_cooldown_scopes': list(raw.get('strategy_cooldown_scopes') or ['symbol_regime', 'symbol', 'regime', 'global']),
+            'strategy_reactivation_gate_enabled': bool(raw.get('strategy_reactivation_gate_enabled', True)),
+            'strategy_reactivation_confirm_trades': max(int(raw.get('strategy_reactivation_confirm_trades', 1) or 1), 1),
+            'strategy_reactivation_min_win_rate': min(max(float(raw.get('strategy_reactivation_min_win_rate', 50.0) or 50.0), 0.0), 100.0),
+            'strategy_reactivation_min_avg_return_pct': float(raw.get('strategy_reactivation_min_avg_return_pct', 0.0) or 0.0),
+            'strategy_reactivation_require_positive_return': bool(raw.get('strategy_reactivation_require_positive_return', True)),
+            'strategy_reactivation_probation_trade_limit': max(int(raw.get('strategy_reactivation_probation_trade_limit', 2) or 2), 0),
+            'strategy_reactivation_probation_weight_multiplier': min(max(float(raw.get('strategy_reactivation_probation_weight_multiplier', 0.35) or 0.35), 0.0), 1.0),
+            'strategy_reactivation_probation_budget_cap': min(max(float(raw.get('strategy_reactivation_probation_budget_cap', 0.4) or 0.4), 0.0), 1.0),
         }
 
     def _evaluate_strategy_cooldown(self, *, strategy: str, symbol: str, current_regime: str, current_policy: str,
@@ -1076,6 +1084,27 @@ class TradingBot:
                 'min_trades': int(cfg.get('strategy_recovery_window_trades', 0) or 0),
                 'min_win_rate': float(cfg.get('strategy_recovery_min_win_rate', 0.0) or 0.0),
                 'min_avg_return_pct': float(cfg.get('strategy_recovery_min_avg_return_pct', 0.0) or 0.0),
+            },
+            'reactivation_gate': {
+                'enabled': bool(cfg.get('strategy_reactivation_gate_enabled', True)),
+                'status': 'clear',
+                'gate_active': False,
+                'reason_code': None,
+                'reason_codes': [],
+                'confirm_trade_count': 0,
+                'confirm_win_rate': 0.0,
+                'confirm_avg_return_pct': 0.0,
+                'confirm_positive_return_count': 0,
+                'required_confirm_trades': int(cfg.get('strategy_reactivation_confirm_trades', 1) or 1),
+                'required_min_win_rate': float(cfg.get('strategy_reactivation_min_win_rate', 0.0) or 0.0),
+                'required_min_avg_return_pct': float(cfg.get('strategy_reactivation_min_avg_return_pct', 0.0) or 0.0),
+                'require_positive_return': bool(cfg.get('strategy_reactivation_require_positive_return', True)),
+                'probation_trade_limit': int(cfg.get('strategy_reactivation_probation_trade_limit', 0) or 0),
+                'probation_trade_count': 0,
+                'probation_remaining_trades': 0,
+                'probation_weight_multiplier': float(cfg.get('strategy_reactivation_probation_weight_multiplier', 0.35) or 0.35),
+                'probation_budget_cap': float(cfg.get('strategy_reactivation_probation_budget_cap', 0.4) or 0.4),
+                'summary': 'reactivation_gate_clear',
             },
             'summary': 'strategy_cooldown_disabled',
         }
@@ -1115,9 +1144,12 @@ class TradingBot:
             latest_close_reason = str(latest.get('close_reason_category') or 'unknown')
             latest_failed = latest_return_pct < 0 or latest_close_reason == 'stop_loss'
             mode = str(feedback.get('governance_mode') or ('tighten' if latest_failed else 'observe')).strip().lower()
-            if mode not in {'rollback', 'tighten', 'review'} and not latest_failed:
+            trigger_row = next((item for item in rows if (float(item.get('return_pct') or 0.0) < 0) or (str(item.get('close_reason_category') or 'unknown') == 'stop_loss')), latest)
+            prior_adverse_trigger = trigger_row is not latest or latest_failed
+            reactivation_enabled = bool(cfg.get('strategy_reactivation_gate_enabled', True))
+            if mode not in {'rollback', 'tighten', 'review'} and not latest_failed and not (reactivation_enabled and prior_adverse_trigger):
                 continue
-            close_time_raw = latest.get('close_time') or latest.get('closed_at') or latest.get('updated_at')
+            close_time_raw = trigger_row.get('close_time') or trigger_row.get('closed_at') or trigger_row.get('updated_at')
             close_time = None
             try:
                 close_time = datetime.fromisoformat(str(close_time_raw).replace('Z', '+00:00')) if close_time_raw else None
@@ -1131,10 +1163,38 @@ class TradingBot:
             recovery_win_rate = round((sum(1 for item in recovery_rows if float(item.get('return_pct') or 0.0) > 0) / recovery_trade_count) * 100, 4) if recovery_trade_count else 0.0
             recovery_avg_return_pct = round(sum(float(item.get('return_pct') or 0.0) for item in recovery_rows) / recovery_trade_count, 6) if recovery_trade_count else 0.0
             recovery_window_active = recovery_trade_count < contract['recovery_thresholds']['min_trades'] or recovery_win_rate < contract['recovery_thresholds']['min_win_rate'] or recovery_avg_return_pct < contract['recovery_thresholds']['min_avg_return_pct']
+            confirm_trades = max(int(cfg.get('strategy_reactivation_confirm_trades', 1) or 1), 1)
+            confirm_rows = recovery_rows[:confirm_trades]
+            confirm_trade_count = len(confirm_rows)
+            confirm_win_rate = round((sum(1 for item in confirm_rows if float(item.get('return_pct') or 0.0) > 0) / confirm_trade_count) * 100, 4) if confirm_trade_count else 0.0
+            confirm_avg_return_pct = round(sum(float(item.get('return_pct') or 0.0) for item in confirm_rows) / confirm_trade_count, 6) if confirm_trade_count else 0.0
+            confirm_positive_return_count = sum(1 for item in confirm_rows if float(item.get('return_pct') or 0.0) > 0)
+            require_positive_return = bool(cfg.get('strategy_reactivation_require_positive_return', True))
+            confirm_passed = (
+                confirm_trade_count >= confirm_trades
+                and confirm_win_rate >= float(cfg.get('strategy_reactivation_min_win_rate', 0.0) or 0.0)
+                and confirm_avg_return_pct >= float(cfg.get('strategy_reactivation_min_avg_return_pct', 0.0) or 0.0)
+                and (not require_positive_return or confirm_positive_return_count > 0)
+            )
+            probation_limit = max(int(cfg.get('strategy_reactivation_probation_trade_limit', 0) or 0), 0)
+            probation_trade_count = min(recovery_trade_count, probation_limit) if confirm_passed else 0
+            probation_remaining_trades = max(0, probation_limit - probation_trade_count) if confirm_passed else 0
+            gate_status = 'clear'
+            gate_reason_code = None
+            prior_adverse_trigger = any((float(item.get('return_pct') or 0.0) < 0) or (str(item.get('close_reason_category') or 'unknown') == 'stop_loss') for item in rows)
+            if bool(cfg.get('strategy_reactivation_gate_enabled', True)) and not cooldown_active and (mode in {'rollback', 'tighten', 'review'} or recovery_window_active or prior_adverse_trigger):
+                if not confirm_passed:
+                    gate_status = 'confirm_required'
+                    gate_reason_code = 'SKIP_STRATEGY_REACTIVATION_CONFIRM_REQUIRED'
+                elif probation_remaining_trades > 0:
+                    gate_status = 'probation'
+                    gate_reason_code = 'DEWEIGHT_STRATEGY_REACTIVATION_PROBATION_ACTIVE'
             if mode == 'rollback' or cooldown_active:
                 reason_code = 'SKIP_STRATEGY_COOLDOWN_ACTIVE'
-            else:
+            elif recovery_window_active:
                 reason_code = 'SKIP_STRATEGY_RECOVERY_WINDOW_ACTIVE'
+            else:
+                reason_code = gate_reason_code
             active_trigger = {
                 **contract,
                 'cooldown_active': cooldown_active,
@@ -1145,10 +1205,10 @@ class TradingBot:
                 'remaining_minutes': max(0, int((cooldown_until - now).total_seconds() // 60)) if cooldown_until and cooldown_until > now else 0,
                 'scope': scope,
                 'scope_key': f'{strategy}:{scope}:{symbol if scope in {"symbol", "symbol_regime"} else "*"}:{current_regime if scope in {"regime", "symbol_regime"} else "*"}',
-                'cooldown_trade_id': latest.get('id'),
+                'cooldown_trade_id': trigger_row.get('id'),
                 'trigger_trade_time': close_time.isoformat() if close_time else close_time_raw,
-                'trigger_return_pct': float(latest.get('return_pct') or 0.0),
-                'trigger_close_reason_category': latest.get('close_reason_category'),
+                'trigger_return_pct': float(trigger_row.get('return_pct') or 0.0),
+                'trigger_close_reason_category': trigger_row.get('close_reason_category'),
                 'recovery_window_trades': [
                     {
                         'trade_id': item.get('id'),
@@ -1164,9 +1224,30 @@ class TradingBot:
                 'feedback_status': feedback.get('status'),
                 'feedback_mode': mode,
                 'feedback_reason_codes': list(feedback.get('reason_codes') or []),
-                'summary': f'{strategy}:{mode}:scope={scope}:cooldown={"active" if cooldown_active else "idle"}:recovery={"active" if recovery_window_active else "clear"}',
+                'reactivation_gate': {
+                    'enabled': bool(cfg.get('strategy_reactivation_gate_enabled', True)),
+                    'status': gate_status,
+                    'gate_active': gate_status in {'confirm_required', 'probation'},
+                    'reason_code': gate_reason_code,
+                    'reason_codes': [code for code in ([gate_reason_code] if gate_reason_code else []) if code],
+                    'confirm_trade_count': confirm_trade_count,
+                    'confirm_win_rate': confirm_win_rate,
+                    'confirm_avg_return_pct': confirm_avg_return_pct,
+                    'confirm_positive_return_count': confirm_positive_return_count,
+                    'required_confirm_trades': confirm_trades,
+                    'required_min_win_rate': float(cfg.get('strategy_reactivation_min_win_rate', 0.0) or 0.0),
+                    'required_min_avg_return_pct': float(cfg.get('strategy_reactivation_min_avg_return_pct', 0.0) or 0.0),
+                    'require_positive_return': require_positive_return,
+                    'probation_trade_limit': probation_limit,
+                    'probation_trade_count': probation_trade_count,
+                    'probation_remaining_trades': probation_remaining_trades,
+                    'probation_weight_multiplier': float(cfg.get('strategy_reactivation_probation_weight_multiplier', 0.35) or 0.35),
+                    'probation_budget_cap': float(cfg.get('strategy_reactivation_probation_budget_cap', 0.4) or 0.4),
+                    'summary': f'reactivation:{gate_status}:confirm={confirm_trade_count}/{confirm_trades}:probation_remaining={probation_remaining_trades}',
+                },
+                'summary': f'{strategy}:{mode}:scope={scope}:cooldown={"active" if cooldown_active else "idle"}:recovery={"active" if recovery_window_active else "clear"}:reactivation={gate_status}',
             }
-            if cooldown_active or recovery_window_active:
+            if cooldown_active or recovery_window_active or gate_status in {'confirm_required', 'probation'}:
                 return active_trigger
         return contract
 
@@ -1183,7 +1264,7 @@ class TradingBot:
             if name not in unique_strategies:
                 unique_strategies.append(name)
         contract = {
-            'schema_version': 'adaptive_strategy_selection_v3',
+            'schema_version': 'adaptive_strategy_selection_v4',
             'enabled': bool(cfg.get('enabled', True)),
             'symbol': symbol,
             'regime_tag': current_regime,
@@ -1202,6 +1283,14 @@ class TradingBot:
                 'active_count': 0,
                 'recovery_window_count': 0,
                 'blocked_strategies': [],
+                'reason_code_counts': {},
+            },
+            'reactivation_summary': {
+                'enabled': bool(cfg.get('strategy_reactivation_gate_enabled', True)),
+                'confirm_required_count': 0,
+                'probation_count': 0,
+                'gated_strategies': [],
+                'guarded_strategies': [],
                 'reason_code_counts': {},
             },
             'budget_summary': {
@@ -1283,9 +1372,18 @@ class TradingBot:
                 cfg=cfg,
             )
             strategy_cooldowns[strategy] = cooldown_contract
-            if cooldown_contract.get('cooldown_active') or cooldown_contract.get('recovery_window_active'):
+            reactivation_gate = dict(cooldown_contract.get('reactivation_gate') or {})
+            if cooldown_contract.get('cooldown_active') or cooldown_contract.get('recovery_window_active') or reactivation_gate.get('status') == 'confirm_required':
                 weight = 0.0
                 reasons_applied.append('strategy_cooldown_guard')
+                if reactivation_gate.get('status') == 'confirm_required':
+                    reasons_applied.append('strategy_reactivation_confirm_required')
+            elif reactivation_gate.get('status') == 'probation':
+                weight = min(
+                    weight,
+                    float(reactivation_gate.get('probation_weight_multiplier', cfg.get('strategy_reactivation_probation_weight_multiplier', 0.35)) or 0.35),
+                )
+                reasons_applied.append('strategy_reactivation_probation')
             stats[strategy] = {
                 'trade_count': trade_count,
                 'matched_trade_count': len(matched_rows),
@@ -1333,6 +1431,9 @@ class TradingBot:
             slot_bonus = max(0.0, (slot_cap - idx) * cfg['slot_bonus_decay']) if idx <= slot_cap else 0.0
             slot_penalty = max(0.0, (idx - slot_cap) * cfg['slot_penalty_decay']) if idx > slot_cap else 0.0
             budget_ratio = min(cfg['max_budget_ratio'], max(cfg['min_budget_ratio'], regime_budget_scalar * max(float(detail.get('weight', 1.0)), 0.0) + slot_bonus - slot_penalty))
+            reactivation_gate = dict((detail.get('cooldown_contract') or {}).get('reactivation_gate') or {})
+            if reactivation_gate.get('status') == 'probation':
+                budget_ratio = min(budget_ratio, float(reactivation_gate.get('probation_budget_cap', cfg.get('strategy_reactivation_probation_budget_cap', 0.4)) or 0.4))
             if name not in selected:
                 budget_ratio = min(budget_ratio, max(0.0, cfg['min_budget_ratio'] * 0.5))
             budgets[name] = round(budget_ratio, 4)
@@ -1345,9 +1446,14 @@ class TradingBot:
             })
             ranking_rows.append({'strategy': name, **detail})
         cooldown_reason_counts = Counter()
+        reactivation_reason_counts = Counter()
         blocked_strategies = []
+        gated_strategies = []
+        guarded_strategies = []
         active_count = 0
         recovery_window_count = 0
+        confirm_required_count = 0
+        probation_count = 0
         for name, cooldown in strategy_cooldowns.items():
             if cooldown.get('cooldown_active'):
                 active_count += 1
@@ -1356,6 +1462,15 @@ class TradingBot:
             if cooldown.get('reason_code'):
                 cooldown_reason_counts[str(cooldown.get('reason_code'))] += 1
                 blocked_strategies.append(name)
+            gate = dict(cooldown.get('reactivation_gate') or {})
+            if gate.get('status') == 'confirm_required':
+                confirm_required_count += 1
+                gated_strategies.append(name)
+            elif gate.get('status') == 'probation':
+                probation_count += 1
+                guarded_strategies.append(name)
+            if gate.get('reason_code'):
+                reactivation_reason_counts[str(gate.get('reason_code'))] += 1
         if slot_cap < len(unique_strategies):
             reason_codes.append('REGIME_SLOT_CAP_APPLIED')
         if any(float(v) < 1.0 for v in budgets.values()):
@@ -1366,6 +1481,10 @@ class TradingBot:
             reason_codes.append('STRATEGY_COOLDOWN_ACTIVE')
         if recovery_window_count > 0:
             reason_codes.append('STRATEGY_RECOVERY_WINDOW_ACTIVE')
+        if confirm_required_count > 0:
+            reason_codes.append('STRATEGY_REACTIVATION_CONFIRM_REQUIRED')
+        if probation_count > 0:
+            reason_codes.append('STRATEGY_REACTIVATION_PROBATION_ACTIVE')
         contract.update({
             'selected_strategies': selected,
             'strategy_weights': weights,
@@ -1381,6 +1500,14 @@ class TradingBot:
                 'blocked_strategies': blocked_strategies,
                 'reason_code_counts': dict(cooldown_reason_counts),
             },
+            'reactivation_summary': {
+                'enabled': bool(cfg.get('strategy_reactivation_gate_enabled', True)),
+                'confirm_required_count': confirm_required_count,
+                'probation_count': probation_count,
+                'gated_strategies': gated_strategies,
+                'guarded_strategies': guarded_strategies,
+                'reason_code_counts': dict(reactivation_reason_counts),
+            },
             'budget_summary': {
                 'slot_cap': slot_cap,
                 'selected_slots': len(selected),
@@ -1389,7 +1516,7 @@ class TradingBot:
                 'top_strategy': selected[0] if selected else None,
             },
             'ranking': ranking_rows,
-            'decision_summary': f"selected={','.join(selected) or 'none'} / regime={current_regime} / policy={current_policy} / slot_cap={slot_cap} / budget={round(sum(budgets.get(name, 0.0) for name in selected), 2)} / cooldowns={active_count}+{recovery_window_count} / reasons={','.join(reason_codes or ['baseline'])}",
+            'decision_summary': f"selected={','.join(selected) or 'none'} / regime={current_regime} / policy={current_policy} / slot_cap={slot_cap} / budget={round(sum(budgets.get(name, 0.0) for name in selected), 2)} / cooldowns={active_count}+{recovery_window_count} / reactivation={confirm_required_count}+{probation_count} / reasons={','.join(reason_codes or ['baseline'])}",
         })
         return contract
 

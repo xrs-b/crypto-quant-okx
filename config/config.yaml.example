@@ -354,6 +354,14 @@ adaptive_regime:
     max_selected_strategies: 3
     base_budget_ratio: 0.9
     min_budget_ratio: 0.2
+    strategy_reactivation_gate_enabled: true
+    strategy_reactivation_confirm_trades: 1
+    strategy_reactivation_min_win_rate: 50
+    strategy_reactivation_min_avg_return_pct: 0.0
+    strategy_reactivation_require_positive_return: true
+    strategy_reactivation_probation_trade_limit: 2
+    strategy_reactivation_probation_weight_multiplier: 0.35
+    strategy_reactivation_probation_budget_cap: 0.4
     regime_slot_caps:
       default: 2
       trend: 1

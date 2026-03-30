@@ -1441,6 +1441,76 @@ def _build_close_outcome_control_plane_semantics(*, governance_mode: Optional[st
 
 
 
+def _build_close_outcome_orchestration_hint(*, governance_mode: Optional[str] = None,
+                                           status: Optional[str] = None,
+                                           trade_count: int = 0,
+                                           control_plane: Optional[Dict[str, Any]] = None,
+                                           recommendation: Optional[str] = None,
+                                           reason_codes: Optional[List[str]] = None,
+                                           policy_hints: Optional[List[str]] = None) -> Dict[str, Any]:
+    control_plane = dict(control_plane or {})
+    next_action = dict(control_plane.get('next_action') or {})
+    normalized_mode = str(governance_mode or next_action.get('governance_mode') or 'observe').strip().lower() or 'observe'
+    normalized_status = str(status or next_action.get('status') or 'observe_only').strip().lower() or 'observe_only'
+
+    hint_action = 'observe'
+    rerun_policy = 'none'
+    rerun_reason = None
+    freeze_auto_promotion = False
+    allow_rollout_mutations = True
+    divert_runtime_lane = control_plane.get('line') or next_action.get('line') or 'governance'
+
+    if normalized_mode == 'rollback':
+        hint_action = 'rollback'
+        rerun_policy = 'immediate'
+        rerun_reason = 'close_outcome_feedback_requests_rollback_review'
+        freeze_auto_promotion = True
+        allow_rollout_mutations = False
+        divert_runtime_lane = 'recovery'
+    elif normalized_mode == 'tighten':
+        hint_action = 'tighten'
+        rerun_policy = 'guarded'
+        rerun_reason = 'close_outcome_feedback_requests_policy_tighten'
+        freeze_auto_promotion = True
+        allow_rollout_mutations = False
+        divert_runtime_lane = 'rollout'
+    elif normalized_mode == 'rollout':
+        hint_action = 'rerun'
+        rerun_policy = 'guarded'
+        rerun_reason = 'close_outcome_feedback_requests_rollout_readiness_review'
+        divert_runtime_lane = 'rollout'
+    elif normalized_mode == 'review':
+        hint_action = 'observe'
+        rerun_policy = 'guarded'
+        rerun_reason = 'close_outcome_feedback_requests_review'
+        freeze_auto_promotion = True
+        allow_rollout_mutations = False
+        divert_runtime_lane = 'rollout'
+
+    return {
+        'schema_version': 'trade_close_outcome_orchestration_hint_v1',
+        'action': hint_action,
+        'status': normalized_status,
+        'governance_mode': normalized_mode,
+        'trade_count': max(int(trade_count or 0), 0),
+        'line': divert_runtime_lane,
+        'route': next_action.get('route') or control_plane.get('route') or 'observe_only_followup',
+        'follow_up': next_action.get('follow_up') or control_plane.get('follow_up') or 'collect_more_close_outcomes',
+        'priority': next_action.get('priority') or control_plane.get('priority') or 'low',
+        'rerun_policy': rerun_policy,
+        'rerun_required': bool(rerun_reason),
+        'rerun_reason': rerun_reason,
+        'freeze_auto_promotion': freeze_auto_promotion,
+        'allow_rollout_mutations': allow_rollout_mutations,
+        'requires_operator_review': bool(((next_action.get('safe_execution') or control_plane.get('safe_execution') or {}).get('requires_manual_operator_review'))),
+        'reason_codes': _dedupe_strings(list(reason_codes or []) + list(control_plane.get('reason_codes') or [])),
+        'policy_hints': _dedupe_strings(list(policy_hints or []) + list(control_plane.get('policy_hints') or [])),
+        'message': recommendation or next_action.get('message') or control_plane.get('summary_line'),
+        'summary_line': f"{hint_action} / rerun={rerun_policy} / freeze={'yes' if freeze_auto_promotion else 'no'} / route={next_action.get('route') or control_plane.get('route') or 'observe_only_followup'}",
+        'safe_execution': dict(next_action.get('safe_execution') or control_plane.get('safe_execution') or {}),
+    }
+
+
 def _build_close_outcome_decision_contract(*, item_id: Optional[str] = None, label: Optional[str] = None,
                                           trade_count: int = 0, status: Optional[str] = None,
                                           governance_mode: Optional[str] = None,
@@ -1677,6 +1747,15 @@ def build_close_outcome_feedback_loop(close_outcome_digest: Optional[Dict[str, A
         policy_hints=policy_hints,
         next_action=next_action,
     )
+    orchestration_hint = _build_close_outcome_orchestration_hint(
+        governance_mode=governance_mode,
+        status=status,
+        trade_count=trade_count,
+        control_plane=control_plane,
+        recommendation=recommendation,
+        reason_codes=reason_codes,
+        policy_hints=policy_hints,
+    )
     decision_contract = _build_close_outcome_decision_contract(
         item_id=f'close_outcome:{label or dominant_policy or dominant_regime or "default"}',
         label=label,
@@ -1701,6 +1780,7 @@ def build_close_outcome_feedback_loop(close_outcome_digest: Optional[Dict[str, A
         'recommendation': recommendation,
         'next_action': next_action,
         'control_plane': control_plane,
+        'orchestration_hint': orchestration_hint,
         'decision_contract': decision_contract,
         'policy_hints': policy_hints,
         'reason_codes': reason_codes,
@@ -5667,6 +5747,7 @@ def build_runtime_orchestration_summary(payload: Optional[Dict[str, Any]] = None
         label='runtime_orchestration_summary',
     )
     close_outcome_control_plane = close_outcome_feedback.get('control_plane') or {}
+    close_outcome_orchestration_hint = close_outcome_feedback.get('orchestration_hint') or {}
     close_outcome_decision_contract = close_outcome_feedback.get('decision_contract') or {}
     review_queue_consumption = payload.get('auto_promotion_review_queue_consumption') or build_auto_promotion_review_queue_consumption(
         auto_promotion_execution,
@@ -5792,10 +5873,11 @@ def build_runtime_orchestration_summary(payload: Optional[Dict[str, Any]] = None
             })
     close_outcome_next_action = dict(close_outcome_control_plane.get('next_action') or close_outcome_feedback.get('next_action') or {})
     if close_outcome_next_action:
-        close_outcome_next_action.setdefault('line', 'governance')
+        close_outcome_next_action.setdefault('line', close_outcome_orchestration_hint.get('line') or 'governance')
         close_outcome_next_action.setdefault('count', close_outcome_feedback.get('trade_count', 0))
         close_outcome_next_action.setdefault('items', (close_outcome_digest.get('recent_closes') or [])[:max_items])
         close_outcome_next_action.setdefault('governance_mode', close_outcome_feedback.get('governance_mode'))
+        close_outcome_next_action.setdefault('orchestration_hint', close_outcome_orchestration_hint)
         next_actions.append(close_outcome_next_action)
     next_actions.sort(key=lambda row: ({'critical': -1, 'high': 0, 'medium': 1, 'low': 2}.get(row.get('priority'), 9), -(row.get('count') or 0), row.get('line') or ''))
     next_step = next_actions[0] if next_actions else {
@@ -5865,6 +5947,7 @@ def build_runtime_orchestration_summary(payload: Optional[Dict[str, Any]] = None
         'close_outcome_digest': close_outcome_digest,
         'close_outcome_feedback_loop': close_outcome_feedback,
         'close_outcome_control_plane': close_outcome_control_plane,
+        'close_outcome_orchestration_hint': close_outcome_orchestration_hint,
         'close_outcome_decision_contract': close_outcome_decision_contract,
     }
     return {
@@ -5883,6 +5966,7 @@ def build_runtime_orchestration_summary(payload: Optional[Dict[str, Any]] = None
         },
         'close_outcome_feedback_loop': close_outcome_feedback,
         'close_outcome_control_plane': close_outcome_control_plane,
+        'close_outcome_orchestration_hint': close_outcome_orchestration_hint,
         'close_outcome_decision_contract': close_outcome_decision_contract,
         'result_digest': result_digest,
         'orchestration': orchestration,
@@ -6390,6 +6474,23 @@ def execute_adaptive_rollout_orchestration(payload: Dict[str, Any], db: Any, *, 
         })
         return current_payload
 
+    close_outcome_digest = payload.get('close_outcome_digest') or build_close_outcome_digest(payload.get('closed_trades') or payload.get('trades') or [], label='adaptive_rollout_orchestration')
+    close_outcome_feedback = payload.get('close_outcome_feedback_loop') or build_close_outcome_feedback_loop(
+        close_outcome_digest,
+        label='adaptive_rollout_orchestration',
+    )
+    close_outcome_hint = close_outcome_feedback.get('orchestration_hint') or {}
+    payload['close_outcome_digest'] = close_outcome_digest
+    payload['close_outcome_feedback_loop'] = close_outcome_feedback
+    orchestration['close_outcome_feedback_loop'] = close_outcome_feedback
+    orchestration['close_outcome_orchestration_hint'] = close_outcome_hint
+    orchestration['summary']['close_outcome_rerun_required'] = bool(close_outcome_hint.get('rerun_required'))
+    orchestration['summary']['close_outcome_rerun_reason'] = close_outcome_hint.get('rerun_reason')
+    orchestration['summary']['close_outcome_action'] = close_outcome_hint.get('action')
+    orchestration['summary']['close_outcome_freeze_auto_promotion'] = bool(close_outcome_hint.get('freeze_auto_promotion'))
+    orchestration['summary']['close_outcome_route'] = close_outcome_hint.get('route')
+    orchestration['summary']['close_outcome_line'] = close_outcome_hint.get('line')
+
     payload = _run_executor(payload, label='pre_auto_approval', dry_run=True)
     readiness = build_production_rollout_readiness(payload, max_items=orchestration_settings.get('gate_max_items', 10))
     orchestration['production_rollout_readiness'] = {
@@ -6405,62 +6506,74 @@ def execute_adaptive_rollout_orchestration(payload: Dict[str, Any], db: Any, *, 
     orchestration['summary']['gate_blocking_issues'] = readiness.get('blocking_issues') or []
 
     gate_blocked = bool(orchestration_settings.get('enforce_production_gate', True)) and not bool(readiness.get('can_enable_low_intervention_runtime'))
+    if close_outcome_hint.get('freeze_auto_promotion'):
+        gate_blocked = True
+        orchestration['summary']['gate_status'] = 'close_outcome_guarded'
+        orchestration['summary']['gate_blocking_issues'] = _dedupe_strings(list(orchestration['summary'].get('gate_blocking_issues') or []) + ['close_outcome_feedback_guardrail'])
+        rerun_reasons = _dedupe_strings(orchestration['summary'].get('rerun_reasons') or [])
+        if close_outcome_hint.get('rerun_reason'):
+            rerun_reasons.append(close_outcome_hint.get('rerun_reason'))
+        orchestration['summary']['rerun_reasons'] = _dedupe_strings(rerun_reasons)
+        orchestration['summary']['rerun_reason'] = close_outcome_hint.get('rerun_reason') or orchestration['summary'].get('rerun_reason')
     orchestration['summary']['gate_blocked'] = gate_blocked
 
     if gate_blocked:
-        orchestration['summary']['rerun_reason'] = 'production_rollout_gate_blocked'
+        gate_source = 'close_outcome_feedback_gate' if close_outcome_hint.get('freeze_auto_promotion') else 'production_rollout_readiness_gate'
+        gate_switch = 'close_outcome_feedback_guardrail' if close_outcome_hint.get('freeze_auto_promotion') else 'production_rollout_readiness_gate_blocked'
+        orchestration['summary']['rerun_reason'] = close_outcome_hint.get('rerun_reason') if close_outcome_hint.get('freeze_auto_promotion') else 'production_rollout_gate_blocked'
+        orchestration['summary']['rerun_triggered'] = bool(close_outcome_hint.get('rerun_required'))
         orchestration['summary']['pass_count'] = len(orchestration['passes'])
         payload['auto_approval_execution'] = {
             'enabled': False,
             'mode': 'gated_off',
             'actor': 'system:adaptive-rollout-gate',
-            'source': 'production_rollout_readiness_gate',
+            'source': gate_source,
             'replay_source': replay_source,
             'executed_count': 0,
             'skipped_count': len((payload.get('approval_state') or {}).get('items') or []),
             'items': [],
             'gate': orchestration['production_rollout_readiness'],
-            'safety_switch': 'production_rollout_readiness_gate_blocked',
+            'safety_switch': gate_switch,
         }
         payload['controlled_rollout_execution'] = {
             'enabled': False,
             'mode': 'gated_off',
             'actor': 'system:adaptive-rollout-gate',
-            'source': 'production_rollout_readiness_gate',
+            'source': gate_source,
             'replay_source': replay_source,
             'executed_count': 0,
             'skipped_count': len((payload.get('approval_state') or {}).get('items') or []),
             'items': [],
             'gate': orchestration['production_rollout_readiness'],
-            'safety_switch': 'production_rollout_readiness_gate_blocked',
+            'safety_switch': gate_switch,
         }
         payload['auto_promotion_review_execution'] = {
             'enabled': False,
             'mode': 'gated_off',
             'actor': 'system:adaptive-rollout-gate',
-            'source': 'production_rollout_readiness_gate',
+            'source': gate_source,
             'replay_source': replay_source,
             'queued_count': 0,
             'skipped_count': len((payload.get('approval_state') or {}).get('items') or []),
             'items': [],
             'gate': orchestration['production_rollout_readiness'],
-            'safety_switch': 'production_rollout_readiness_gate_blocked',
+            'safety_switch': gate_switch,
         }
         payload['testnet_bridge_execution'] = {
             'schema_version': 'm5_testnet_bridge_execution_v1',
             'enabled': False,
             'mode': 'gated_off',
             'actor': 'system:adaptive-rollout-gate',
-            'source': 'production_rollout_readiness_gate',
+            'source': gate_source,
             'replay_source': replay_source,
             'status': 'gated_off',
             'plan_only': True,
             'gating': {'gate_status': orchestration['production_rollout_readiness'].get('status')},
-            'blocking_reasons': ['production_rollout_readiness_gate_blocked'],
+            'blocking_reasons': [gate_switch],
             'result': None,
             'audit': {'real_trade_execution': False, 'dangerous_live_parameter_change': False},
             'gate': orchestration['production_rollout_readiness'],
-            'safety_switch': 'production_rollout_readiness_gate_blocked',
+            'safety_switch': gate_switch,
         }
         _attach_testnet_bridge_execution_evidence(payload)
         bridge_evidence = payload.get('testnet_bridge_execution_evidence') or {}
@@ -11656,6 +11769,7 @@ def build_production_rollout_readiness(payload: Optional[Dict[str, Any]] = None,
     recovery_counts = recovery_line.get('counts') or summary.get('recovery') or {}
     close_outcome_feedback = runtime_summary.get('close_outcome_feedback_loop') or unified_overview.get('close_outcome_feedback_loop') or {}
     close_outcome_control_plane = runtime_summary.get('close_outcome_control_plane') or unified_overview.get('close_outcome_control_plane') or (close_outcome_feedback.get('control_plane') if isinstance(close_outcome_feedback, dict) else {}) or {}
+    close_outcome_orchestration_hint = runtime_summary.get('close_outcome_orchestration_hint') or unified_overview.get('close_outcome_orchestration_hint') or (close_outcome_feedback.get('orchestration_hint') if isinstance(close_outcome_feedback, dict) else {}) or {}
     close_outcome_decision_contract = runtime_summary.get('close_outcome_decision_contract') or unified_overview.get('close_outcome_decision_contract') or (close_outcome_feedback.get('decision_contract') if isinstance(close_outcome_feedback, dict) else {}) or {}
 
     blocking_issues = []
@@ -11678,6 +11792,8 @@ def build_production_rollout_readiness(payload: Optional[Dict[str, Any]] = None,
         blocking_issues.append('close_outcome_feedback_requires_rollback_review')
     elif close_outcome_feedback.get('governance_mode') == 'tighten':
         blocking_issues.append('close_outcome_feedback_requires_policy_tighten')
+    if close_outcome_orchestration_hint.get('freeze_auto_promotion'):
+        blocking_issues.append('close_outcome_feedback_guardrail')
     blocking_issues = _dedupe_strings(blocking_issues)
 
     gate_ready = bool(control_plane_readiness.get('can_continue_auto_promotion'))
@@ -11715,6 +11831,7 @@ def build_production_rollout_readiness(payload: Optional[Dict[str, Any]] = None,
             runbook_actions.append(row)
     close_outcome_next_action = dict(close_outcome_control_plane.get('next_action') or close_outcome_feedback.get('next_action') or {})
     if close_outcome_next_action and close_outcome_feedback.get('governance_mode') in {'rollback', 'tighten', 'rollout', 'review'}:
+        close_outcome_next_action.setdefault('orchestration_hint', close_outcome_orchestration_hint)
         runbook_actions.append(close_outcome_next_action)
     if not runbook_actions and runtime_summary.get('next_actions'):
         runbook_actions.extend((runtime_summary.get('next_actions') or [])[:max_items])
@@ -11746,9 +11863,11 @@ def build_production_rollout_readiness(payload: Optional[Dict[str, Any]] = None,
             'testnet_bridge_evidence_gate': bridge_gate.get('summary') or {},
             'close_outcome_feedback_loop': close_outcome_feedback,
             'close_outcome_control_plane': close_outcome_control_plane,
+            'close_outcome_orchestration_hint': close_outcome_orchestration_hint,
             'close_outcome_decision_contract': close_outcome_decision_contract,
         },
         'runbook_actions': runbook_actions[:max_items],
+        'close_outcome_orchestration_hint': close_outcome_orchestration_hint,
         'close_outcome_decision_contract': close_outcome_decision_contract,
         'top_alerts': (alert_digest.get('alerts') or [])[:max_items],
         'top_next_actions': (unified_overview.get('top_next_actions') or [])[:max_items],

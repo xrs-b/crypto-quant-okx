@@ -2871,6 +2871,13 @@ class TestHealthSummary(unittest.TestCase):
                             'result_counts': {'rerun_pass_count': 1},
                         },
                     },
+                    'close_outcome_orchestration_hint': {
+                        'action': 'tighten',
+                        'route': 'review_schedule_queue',
+                        'rerun_required': True,
+                        'freeze_auto_promotion': True,
+                        'rerun_reason': 'close_outcome_feedback_requests_policy_tighten',
+                    },
                     'next_step': {'action': 'review_followups', 'summary': 'review queued follow-ups'},
                     'stuck_points': [],
                     'follow_ups': {'required': True, 'summary': {'retry_queue_count': 1}},
@@ -2883,7 +2890,10 @@ class TestHealthSummary(unittest.TestCase):
                 self.assertEqual(state['adaptive_rollout_orchestration']['summary']['controlled_rollout_executed_count'], 1)
                 self.assertTrue(state['adaptive_rollout_orchestration']['summary']['recovery_rerun_triggered'])
                 self.assertEqual(state['adaptive_rollout_orchestration']['summary']['recovery_retry_reentered_executor_count'], 1)
+                self.assertEqual(state['adaptive_rollout_orchestration']['summary']['close_outcome_action'], 'tighten')
+                self.assertTrue(state['adaptive_rollout_orchestration']['summary']['close_outcome_freeze_auto_promotion'])
                 self.assertEqual(state['adaptive_rollout_orchestration']['runtime_summary']['rerun_observability']['primary_reason'], 'post_recovery_state_transition')
+                self.assertEqual(state['adaptive_rollout_orchestration']['runtime_summary']['close_outcome_orchestration_hint']['route'], 'review_schedule_queue')
                 self.assertEqual(state['adaptive_rollout_orchestration']['runtime_summary']['next_step']['action'], 'review_followups')
                 self.assertTrue(any(call['event_type'] == 'adaptive_rollout_orchestration' for call in notifier.calls))
             finally:
@@ -13530,6 +13540,8 @@ class TestCloseOutcomeDigest(unittest.TestCase):
         runtime_summary = build_runtime_orchestration_summary(dict(payload), max_items=2)
         self.assertEqual(runtime_summary['close_outcome_feedback_loop']['governance_mode'], 'tighten')
         self.assertEqual(runtime_summary['close_outcome_control_plane']['line'], 'rollout')
+        self.assertEqual(runtime_summary['close_outcome_orchestration_hint']['action'], 'tighten')
+        self.assertTrue(runtime_summary['close_outcome_orchestration_hint']['freeze_auto_promotion'])
         self.assertEqual(runtime_summary['next_step']['route'], 'review_schedule_queue')
         self.assertEqual(runtime_summary['related_summary']['close_outcome_feedback_loop']['next_action']['follow_up'], 'review_policy_thresholds')
         self.assertEqual(runtime_summary['close_outcome_decision_contract']['operator_action_policy']['route'], 'review_schedule_queue')
@@ -13573,10 +13585,53 @@ class TestCloseOutcomeDigest(unittest.TestCase):
         self.assertEqual(unified['close_outcome_control_plane']['action_policy'], 'freeze_and_manual_review')
         readiness = build_production_rollout_readiness(dict(payload), max_items=2)
         self.assertIn('close_outcome_feedback_requires_rollback_review', readiness['blocking_issues'])
+        self.assertIn('close_outcome_feedback_guardrail', readiness['blocking_issues'])
         self.assertEqual(readiness['summary']['close_outcome_control_plane']['route'], 'rollback_candidate_queue')
+        self.assertEqual(readiness['close_outcome_orchestration_hint']['action'], 'rollback')
+        self.assertTrue(readiness['close_outcome_orchestration_hint']['freeze_auto_promotion'])
         self.assertEqual(readiness['close_outcome_decision_contract']['operator_action_policy']['action'], 'freeze_followup')
         self.assertEqual(readiness['close_outcome_decision_contract']['follow_up_policy_gate']['decision'], 'rollback')
         self.assertEqual(readiness['runbook_actions'][0]['route'], 'rollback_candidate_queue')
+
+    def test_execute_adaptive_rollout_orchestration_uses_close_outcome_guardrail_to_block_mutations(self):
+        from analytics.helper import execute_adaptive_rollout_orchestration
+        payload = {
+            'consumer_view': {'workflow_state': {'summary': {}, 'item_states': []}, 'approval_state': {'summary': {}, 'items': []}, 'rollout_stage_progression': {'summary': {}, 'items': []}, 'rollout_executor': {}, 'auto_approval_execution': {}, 'controlled_rollout_execution': {}, 'validation_gate': {'enabled': False, 'ready': True, 'headline': 'validation_gate_ready', 'gap_count': 0, 'failing_case_count': 0, 'regression_detected': False}},
+            'approval_state': {'items': []},
+            'workflow_state': {'item_states': []},
+            'attention_view': {'summary': {}, 'headline': {}, 'items': []},
+            'operator_digest': {'headline': {'status': 'steady', 'message': 'ok'}, 'summary': {}, 'next_actions': [], 'attention': {}, 'control_plane_manifest': {}, 'control_plane_readiness': {'can_continue_auto_promotion': True, 'blocking_issues': []}},
+            'workflow_alert_digest': {'headline': {'status': 'steady', 'message': 'ok'}, 'summary': {'severity_counts': {}}, 'alerts': []},
+            'workflow_recovery_view': {'summary': {}, 'queues': {'rollback_candidates': [], 'manual_recovery': [], 'retry_queue': []}},
+            'adaptive_rollout_orchestration': {'summary': {}},
+            'close_outcome_digest': {
+                'schema_version': 'trade_close_outcome_digest_v1',
+                'trade_count': 5,
+                'win_count': 0,
+                'loss_count': 5,
+                'win_rate': 0.0,
+                'net_pnl': -30.0,
+                'avg_return_pct': -3.2,
+                'by_close_decision': {'loss': 5},
+                'by_outcome_quality': {'adverse': 4, 'bounded_loss': 1},
+                'by_close_reason_category': {'stop_loss': 5},
+                'by_regime_tag': {'range': 5},
+                'by_policy_tag': {'policy_v3': 5},
+                'dominant_regime_tag': 'range',
+                'dominant_policy_tag': 'policy_v3',
+                'dominant_close_reason_category': 'stop_loss',
+                'recent_closes': [{'trade_id': 5, 'symbol': 'ETH/USDT'}],
+            },
+            'testnet_bridge_execution_evidence': {'summary': {}, 'status': 'disabled', 'follow_up_required': False},
+        }
+        result = execute_adaptive_rollout_orchestration(dict(payload), Database('data/test_close_outcome_guardrail.db'), config=Config(), replay_source='unit_test_close_outcome_guardrail')
+        orchestration = result['adaptive_rollout_orchestration']
+        self.assertTrue(orchestration['summary']['gate_blocked'])
+        self.assertEqual(orchestration['summary']['gate_status'], 'close_outcome_guarded')
+        self.assertEqual(orchestration['summary']['rerun_reason'], 'close_outcome_feedback_requests_rollback_review')
+        self.assertEqual(result['auto_approval_execution']['source'], 'close_outcome_feedback_gate')
+        self.assertEqual(result['controlled_rollout_execution']['safety_switch'], 'close_outcome_feedback_guardrail')
+        self.assertFalse(result['testnet_bridge_execution']['audit']['real_trade_execution'])
 
 
 class TestTradeOutcomeAttribution(unittest.TestCase):

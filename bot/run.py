@@ -318,12 +318,14 @@ def maybe_run_adaptive_rollout_orchestration(cfg: Config, db: Database, notifier
     controlled_rollout_budget = ((runtime_summary.get('summary') or {}).get('controlled_rollout_budget') or {}) if isinstance(runtime_summary.get('summary'), dict) else {}
     auto_approval_budget = ((runtime_summary.get('summary') or {}).get('auto_approval_budget') or {}) if isinstance(runtime_summary.get('summary'), dict) else {}
 
+    close_outcome_hint = runtime_summary.get('close_outcome_orchestration_hint') or {}
     result.update({
         'ran': True,
         'summary': orchestration_summary,
         'workflow_ready': workflow_ready,
         'adaptive_rollout_orchestration': orchestration,
         'runtime_orchestration_summary': runtime_summary,
+        'close_outcome_orchestration_hint': close_outcome_hint,
     })
 
     runtime['adaptive_rollout_orchestration'] = {
@@ -365,6 +367,11 @@ def maybe_run_adaptive_rollout_orchestration(cfg: Config, db: Database, notifier
             'recovery_rollback_queued_count': int(orchestration_summary.get('recovery_rollback_queued_count', 0) or 0),
             'testnet_bridge_status': orchestration_summary.get('testnet_bridge_status'),
             'testnet_bridge_follow_up_required': bool(orchestration_summary.get('testnet_bridge_follow_up_required', False)),
+            'close_outcome_action': close_outcome_hint.get('action'),
+            'close_outcome_route': close_outcome_hint.get('route'),
+            'close_outcome_rerun_required': bool(close_outcome_hint.get('rerun_required', False)),
+            'close_outcome_freeze_auto_promotion': bool(close_outcome_hint.get('freeze_auto_promotion', False)),
+            'close_outcome_rerun_reason': close_outcome_hint.get('rerun_reason'),
         },
         'runtime_summary': {
             'schema_version': runtime_summary.get('schema_version'),
@@ -374,6 +381,7 @@ def maybe_run_adaptive_rollout_orchestration(cfg: Config, db: Database, notifier
             'next_step': runtime_summary.get('next_step') or {},
             'stuck_points': (runtime_summary.get('stuck_points') or [])[:max_items],
             'follow_ups': runtime_summary.get('follow_ups') or {},
+            'close_outcome_orchestration_hint': close_outcome_hint,
         },
     }
     save_runtime_state(runtime)
@@ -396,6 +404,10 @@ def maybe_run_adaptive_rollout_orchestration(cfg: Config, db: Database, notifier
         if rerun_observability.get('triggered'):
             lines.append(
                 f"rerun={rerun_observability.get('primary_reason') or '--'} ｜ count={(rerun_observability.get('result_counts') or {}).get('rerun_pass_count', 0)} ｜ recovery={'yes' if rerun_observability.get('recovery_triggered') else 'no'} ｜ reasons={','.join(rerun_observability.get('reasons') or []) or '--'}"
+            )
+        if close_outcome_hint:
+            lines.append(
+                f"close-outcome={close_outcome_hint.get('action') or '--'} ｜ route={close_outcome_hint.get('route') or '--'} ｜ rerun={'yes' if close_outcome_hint.get('rerun_required') else 'no'} ｜ freeze={'yes' if close_outcome_hint.get('freeze_auto_promotion') else 'no'}"
             )
         next_step = runtime_summary.get('next_step') or {}
         if next_step:

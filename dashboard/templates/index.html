@@ -3359,7 +3359,11 @@
         }
         async function loadStrategy() {
             const [stats, daily, perf, ml] = await Promise.all([api('/api/strategy/stats'), api('/api/daily/summary'), api('/api/trades/symbol-performance'), api('/api/ml/metrics')]);
-            document.getElementById('strategyTable').innerHTML = stats.length ? stats.map(s => `<tr><td>${s.strategy_name}</td><td>${s.total_signals}</td><td>${s.triggered_count}</td><td>${Number(s.avg_confidence || 0).toFixed(3)}</td></tr>`).join('') : '<tr><td colspan="4" class="muted">暂无策略分析</td></tr>';
+            document.getElementById('strategyTable').innerHTML = stats.length ? stats.map(s => {
+                const avgConfidence = Number(s.avg_confidence || 0);
+                const avgConfidenceText = avgConfidence > 0 ? avgConfidence.toFixed(3) : '--';
+                return `<tr><td>${s.strategy_name}</td><td>${s.total_signals}</td><td>${s.triggered_count}</td><td>${avgConfidenceText}</td></tr>`;
+            }).join('') : '<tr><td colspan="4" class="muted">暂无策略分析</td></tr>';
             document.getElementById('dailyTable').innerHTML = daily.length ? daily.map(d => `<tr><td>${d.date}</td><td>${d.trades}</td><td>${d.wins}</td><td>${d.losses}</td><td class="${Number(d.pnl || 0) >= 0 ? 'pos' : 'neg'}">${money(d.pnl)}</td></tr>`).join('') : '<tr><td colspan="5" class="muted">暂无日汇总</td></tr>';
             document.getElementById('symbolPerfTable').innerHTML = perf.length ? perf.map(p => `<tr><td>${p.symbol}</td><td>${p.trades}</td><td>${p.win_rate}%</td><td class="${Number(p.total_pnl || 0) >= 0 ? 'pos' : 'neg'}">${money(p.total_pnl)}</td></tr>`).join('') : '<tr><td colspan="4" class="muted">暂无币种表现</td></tr>';
             document.getElementById('mlMetricsTable').innerHTML = ml.length ? ml.map(m => `<tr><td>${m.symbol}</td><td>${(m.train_accuracy*100).toFixed(2)}%</td><td>${(m.test_accuracy*100).toFixed(2)}%</td><td>${(m.f1*100).toFixed(2)}%</td><td>${(m.top_features || []).slice(0,3).map(x => `${x.feature}:${x.importance}`).join(' | ')}</td></tr>`).join('') : '<tr><td colspan="5" class="muted">暂无模型评估</td></tr>';

@@ -164,7 +164,7 @@ const sigRegimeMap = {
 
 async function loadSignalRegime() {
     try {
-        const resp = await api('/api/regime?symbol=BTC/USDT:USDT&timeframe=1h');
+        const resp = await api('/api/regime?symbol=BTC/USDT&timeframe=1h');
         if (resp.success && resp.data) {
             const r = sigRegimeMap[resp.data.regime] || sigRegimeMap['unknown'];
             const conf = (resp.data.confidence * 100).toFixed(0);

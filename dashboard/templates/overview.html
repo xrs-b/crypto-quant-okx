@@ -274,7 +274,7 @@ function renderRegime(data) {
 
 async function loadRegime() {
     try {
-        const resp = await api('/api/regime?symbol=BTC/USDT:USDT&timeframe=1h');
+        const resp = await api('/api/regime?symbol=BTC/USDT&timeframe=1h');
         if (resp.success && resp.data) {
             document.getElementById('regimeInfo').innerHTML = renderRegime(resp.data);
         }

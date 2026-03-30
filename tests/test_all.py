@@ -1942,6 +1942,71 @@ class TestDashboardApi(unittest.TestCase):
         self.assertEqual(avoided['status'], 'avoided_loss')
         self.assertEqual(missed['status'], 'missed_profit')
 
+    def test_signals_api_enriches_regime_and_confidence_without_schema_change(self):
+        import dashboard.api as dashboard_api
+
+        class FakeDashboardExchange:
+            def __init__(self, candles_by_symbol=None):
+                self.candles_by_symbol = candles_by_symbol or {}
+
+            def normalize_symbol(self, symbol):
+                return str(symbol or '').split(':')[0]
+
+            def fetch_ohlcv(self, symbol, timeframe='1h', since=None, limit=100):
+                return self.candles_by_symbol.get(symbol, [])
+
+        test_db = Database('data/test_dashboard_signals_enrichment.db')
+        old_db = dashboard_api.db
+        old_exchange_client = dashboard_api._exchange_client
+        dashboard_api.db = test_db
+        dashboard_api._exchange_client = FakeDashboardExchange({
+            'BTC/USDT': [[i * 3600000, 100 + i, 101 + i, 99 + i, 100.5 + i, 10] for i in range(60)],
+        })
+        try:
+            signal_id = test_db.record_signal(
+                symbol='BTC/USDT:USDT',
+                signal_type='buy',
+                price=100,
+                strength=78,
+                reasons=[],
+                strategies_triggered=['trend_follow']
+            )
+            test_db.record_strategy_analysis(
+                signal_id=signal_id,
+                strategy_name='trend_follow',
+                triggered=True,
+                strength=78,
+                confidence=0.67,
+                action='buy',
+                details='unit-test'
+            )
+
+            client = app.test_client()
+            resp = client.get('/api/signals/list?limit=5')
+            self.assertEqual(resp.status_code, 200)
+            self.assertTrue(resp.json.get('success'))
+            rows = resp.json.get('data') or []
+            self.assertEqual(len(rows), 1)
+            row = rows[0]
+            self.assertIn('regime', row)
+            self.assertIn('confidence', row)
+            self.assertIn('regime_info', row)
+            self.assertIn('market_context', row)
+            self.assertIn(row['regime'], {'trend', 'range', 'high_vol', 'low_vol', 'risk_anomaly', 'unknown'})
+            self.assertGreater(row['confidence'], 0)
+            self.assertEqual(row['market_context']['regime_snapshot']['regime'], row['regime_info']['regime'])
+            self.assertEqual(row['market_context']['regime'], row['regime'])
+
+            base_resp = client.get('/api/signals?limit=5')
+            base_row = (base_resp.json.get('data') or [])[0]
+            self.assertIn('regime_info', base_row)
+            self.assertIn('market_context', base_row)
+        finally:
+            dashboard_api.db = old_db
+            dashboard_api._exchange_client = old_exchange_client
+            if os.path.exists('data/test_dashboard_signals_enrichment.db'):
+                os.remove('data/test_dashboard_signals_enrichment.db')
+
     def test_filter_effectiveness_api_groups_outcomes_by_filter_code(self):
         import dashboard.api as dashboard_api
 
@@ -5007,6 +5072,34 @@ class TestBacktestObserveOnlyTags(unittest.TestCase):
         self.assertEqual(summary['summary']['signals_scored'], 1)
         self.assertEqual(summary['summary']['observe_only_summary_view']['count'], 1)
         self.assertTrue(any('observe_only' in row['value'] for row in summary['summary']['observe_only_summary_view']['top_tags']))
+
+    def test_signal_quality_summarize_adds_recent_observe_only_summary_view(self):
+        from analytics.backtest import SignalQualityAnalyzer
+        analyzer = SignalQualityAnalyzer.__new__(SignalQualityAnalyzer)
+        summary = analyzer._summarize([
+            {
+                'symbol': 'BTC/USDT',
+                'created_at': '2026-03-29T10:00:00',
+                'avg_quality_pct': 1.25,
+                'recent_trades': [
+                    {
+                        'observe_only': {
+                            'summary': 'trend conf=0.91 | policy=adaptive state=effective',
+                            'tags': ['observe_only', 'regime:trend'],
+                            'snapshots': {
+                                'regime_snapshot': {'name': 'trend', 'family': 'trend', 'direction': 'up', 'confidence': 0.91},
+                                'adaptive_policy_snapshot': {'mode': 'guarded_execute', 'policy_version': 'adaptive', 'state': 'effective'},
+                            },
+                        }
+                    }
+                ],
+            }
+        ])
+        self.assertIn('recent', summary)
+        self.assertEqual(len(summary['recent']), 1)
+        self.assertIn('observe_only_summary_view', summary['recent'][0])
+        self.assertEqual(summary['recent'][0]['observe_only_summary_view']['count'], 1)
+
 
 
 class TestRegimePolicyCalibrationReport(unittest.TestCase):

@@ -3178,12 +3178,23 @@ class SignalQualityAnalyzer:
             })
         symbol_stats.sort(key=lambda x: x['avg_quality_pct'], reverse=True)
         valid.sort(key=lambda x: x['created_at'], reverse=True)
-        observe_only_summary_view = summarize_observe_only_collection([
+        observe_only_items = [
             trade
             for row in valid
-            for trade in (row.get('recent_trades') or [])
-            if trade.get('observe_only')
-        ])
+            for trade in ((row.get('recent_trades') or row.get('all_trades') or row.get('trades') or []))
+            if (trade.get('observe_only') or trade.get('summary') or trade.get('tags'))
+        ]
+        observe_only_summary_view = summarize_observe_only_collection(observe_only_items)
+        by_symbol_summary = []
+        for row in valid:
+            symbol_row = dict(row)
+            symbol_observe_only_items = [
+                trade
+                for trade in ((row.get('recent_trades') or row.get('all_trades') or row.get('trades') or []))
+                if (trade.get('observe_only') or trade.get('summary') or trade.get('tags'))
+            ]
+            symbol_row['observe_only_summary_view'] = summarize_observe_only_collection(symbol_observe_only_items)
+            by_symbol_summary.append(symbol_row)
         return {
             'summary': {
                 'signals_scored': len(valid),
@@ -3192,5 +3203,5 @@ class SignalQualityAnalyzer:
                 'observe_only_summary_view': observe_only_summary_view,
             },
             'by_symbol': symbol_stats,
-            'recent': valid[:50],
+            'recent': by_symbol_summary[:50],
         }

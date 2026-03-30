@@ -61,7 +61,7 @@ from core.risk_budget import get_risk_budget_config, summarize_margin_usage, com
 from signals.validator import SignalValidator
 from bot.run import execute_exchange_smoke, reconcile_exchange_positions, load_runtime_state
 from ml.engine import MLEngine
-from core.regime import RegimeDetector, detect_regime, Regime
+from core.regime import RegimeDetector, detect_regime, Regime, build_regime_snapshot, normalize_regime_snapshot
 from analytics import StrategyBacktester, SignalQualityAnalyzer, ParameterOptimizer, GovernanceEngine, build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, build_transition_journal_overview, attach_auto_approval_policy, execute_controlled_rollout_layer, execute_controlled_auto_approval_layer, execute_auto_promotion_review_queue_layer, execute_recovery_queue_layer, execute_adaptive_rollout_orchestration, execute_rollout_executor, build_rollout_control_plane_manifest, build_control_plane_readiness_summary, build_workflow_consumer_view, build_workflow_recovery_view, build_workflow_attention_view, build_workflow_operator_digest, build_workflow_alert_digest, build_dashboard_summary_cards, build_orchestration_result_digest, build_runtime_orchestration_summary, build_production_rollout_readiness, build_workbench_governance_view, build_workbench_governance_filter_view, build_workbench_governance_detail_view, build_workbench_merged_timeline, build_workbench_timeline_summary_aggregation, build_unified_workbench_overview, build_auto_promotion_candidate_view, build_auto_promotion_review_queue_filter_view, build_auto_promotion_review_queue_detail_view, build_close_outcome_digest
 from analytics.backtest import export_calibration_payload, build_governance_workflow_ready_payload
 from analytics.mfe_mae import MFEAnalyzer, get_mfe_mae_analysis
@@ -116,6 +116,118 @@ def _persist_workflow_approval_payload(payload: Dict[str, Any], replay_source: s
     payload = attach_auto_approval_policy(payload)
     build_workflow_consumer_view(payload)
     return payload
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _load_signal_strategy_confidence(signal_ids: List[Any]) -> Dict[int, float]:
+    ids = [int(signal_id) for signal_id in signal_ids if signal_id is not None]
+    if not ids:
+        return {}
+    conn = db._get_connection()
+    try:
+        placeholders = ','.join(['?'] * len(ids))
+        query = f"""
+            SELECT signal_id, AVG(confidence) AS avg_confidence
+            FROM strategy_analysis
+            WHERE signal_id IN ({placeholders})
+            GROUP BY signal_id
+        """
+        frame = pd.read_sql_query(query, conn, params=ids)
+    finally:
+        conn.close()
+    if frame.empty:
+        return {}
+    return {
+        int(row['signal_id']): round(_safe_float(row['avg_confidence']), 3)
+        for row in frame.to_dict('records')
+        if row.get('signal_id') is not None
+    }
+
+
+def _extract_signal_regime_snapshot(signal: Dict[str, Any]) -> Dict[str, Any]:
+    details = signal.get('filter_details') if isinstance(signal.get('filter_details'), dict) else {}
+    observability = details.get('observability') if isinstance(details.get('observability'), dict) else {}
+    market_context = details.get('market_context') if isinstance(details.get('market_context'), dict) else {}
+    candidates = [
+        signal.get('regime_info'),
+        signal.get('regime_snapshot'),
+        details.get('regime_snapshot'),
+        observability.get('regime_snapshot'),
+        market_context.get('regime_snapshot'),
+        market_context,
+    ]
+    for candidate in candidates:
+        if isinstance(candidate, dict) and (candidate.get('regime') or candidate.get('name')):
+            return normalize_regime_snapshot(candidate)
+    return {}
+
+
+def _detect_signal_regime_snapshot(exchange: Exchange, symbol: str, cache: Dict[str, Dict[str, Any]], *, timeframe: str = '1h', limit: int = 100) -> Dict[str, Any]:
+    normalized_symbol = exchange.normalize_symbol(symbol) if symbol else symbol
+    if not normalized_symbol:
+        return {}
+    if normalized_symbol in cache:
+        return cache[normalized_symbol]
+    try:
+        ohlcv = exchange.fetch_ohlcv(normalized_symbol, timeframe, limit=limit)
+        if not ohlcv or len(ohlcv) < 30:
+            snapshot = {}
+        else:
+            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+            df.set_index('timestamp', inplace=True)
+            result = detect_regime(df)
+            snapshot = normalize_regime_snapshot(result.to_dict())
+    except Exception:
+        snapshot = {}
+    cache[normalized_symbol] = snapshot
+    return snapshot
+
+
+def _enrich_signals_with_regime(signals: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    if not signals:
+        return signals
+    strategy_confidence = _load_signal_strategy_confidence([row.get('id') for row in signals])
+    exchange = None
+    regime_cache: Dict[str, Dict[str, Any]] = {}
+    enriched = []
+    for raw in signals:
+        signal = dict(raw)
+        snapshot = _extract_signal_regime_snapshot(signal)
+        if not snapshot:
+            if exchange is None:
+                exchange = _get_exchange_client()
+            snapshot = _detect_signal_regime_snapshot(exchange, signal.get('symbol'), regime_cache)
+        if not snapshot:
+            snapshot = build_regime_snapshot('unknown', 0.0, {}, 'missing regime snapshot')
+
+        strategy_avg_conf = strategy_confidence.get(int(signal['id'])) if signal.get('id') is not None and int(signal.get('id')) in strategy_confidence else None
+        computed_confidence = snapshot.get('confidence')
+        if (computed_confidence is None or _safe_float(computed_confidence) <= 0) and strategy_avg_conf is not None:
+            computed_confidence = strategy_avg_conf
+
+        market_context = signal.get('market_context') if isinstance(signal.get('market_context'), dict) else {}
+        merged_market_context = dict(market_context)
+        merged_market_context.setdefault('regime_snapshot', snapshot)
+        merged_market_context.setdefault('regime', snapshot.get('regime'))
+        merged_market_context.setdefault('regime_name', snapshot.get('name'))
+        merged_market_context.setdefault('regime_confidence', computed_confidence if computed_confidence is not None else snapshot.get('confidence', 0.0))
+        merged_market_context.setdefault('regime_details', snapshot.get('details'))
+        merged_market_context.setdefault('regime_indicators', snapshot.get('indicators') or {})
+        merged_market_context.setdefault('regime_features', snapshot.get('features') or snapshot.get('indicators') or {})
+
+        signal['regime'] = snapshot.get('regime', 'unknown')
+        signal['confidence'] = round(_safe_float(computed_confidence), 3)
+        signal['regime_info'] = snapshot
+        signal['market_context'] = merged_market_context
+        enriched.append(signal)
+    return enriched
 
 
 def _get_exchange_client():
@@ -927,13 +1039,15 @@ def get_symbol_performance():
 # ============================================================================
 
 @app.route('/api/signals')
+@app.route('/api/signals/list')
 def get_signals():
-    """获取信号记录"""
+    """获取信号记录（补充 computed regime/confidence 字段）"""
     symbol = request.args.get('symbol')
     limit = int(request.args.get('limit', 100))
-    
+
     signals = db.get_signals(symbol=symbol, limit=limit)
-    
+    signals = _enrich_signals_with_regime(signals)
+
     return jsonify({
         'success': True,
         'data': signals,

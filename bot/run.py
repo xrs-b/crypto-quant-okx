@@ -25,6 +25,7 @@ from core.logger import logger
 from core.notifier import NotificationManager
 from core.presets import PresetManager
 from core.paths import DATA_DIR
+from core.reason_codes import build_reason_code_details, merge_reason_codes
 from signals import SignalDetector, SignalValidator, SignalRecorder, EntryDecider
 from trading import TradingExecutor, RiskManager
 from ml.engine import MLEngine, ModelTrainer, DataCollector
@@ -1308,24 +1309,26 @@ class TradingBot:
             'execution_contract': execution_contract,
         }
         if not passed:
-            skip_contract.update({'status': 'skipped', 'reason': reason, 'reason_code': 'SIGNAL_FILTERED', 'action': 'filtered_before_ranking'})
+            skip_contract.update({'status': 'skipped', 'reason': reason, 'reason_code': 'SKIP_SIGNAL_FILTERED', 'action': 'filtered_before_ranking'})
         elif not can_open:
-            reason_code = 'RISK_GATE_BLOCKED'
+            reason_code = 'DENY_RISK_GATE_BLOCKED'
             action = 'blocked_by_open_gate'
             if scope_window and scope_mode == 'rollback':
-                reason_code = 'SCOPED_WINDOW_FREEZE'
+                reason_code = 'DENY_GUARD_SCOPED_FREEZE'
                 action = 'skip_scoped_freeze'
             skip_contract.update({'status': 'skipped', 'reason': risk_reason, 'reason_code': reason_code, 'action': action})
         elif scope_window and scope_mode == 'tighten':
-            skip_contract.update({'status': 'skipped', 'reason': 'scoped_window_tighten_bypass', 'reason_code': 'SCOPED_WINDOW_TIGHTEN', 'action': 'bypass_tighten_candidate'})
+            skip_contract.update({'status': 'skipped', 'reason': 'scoped_window_tighten_bypass', 'reason_code': 'SKIP_GUARD_SCOPED_TIGHTEN', 'action': 'bypass_tighten_candidate'})
             ranking_contract['can_open'] = False
             ranking_contract['ranking_penalty'] += 250
             ranking_contract['priority_score'] = round(ranking_contract['priority_score'] - 250, 4)
         elif scope_window and scope_mode == 'review':
-            skip_contract.update({'status': 'skipped', 'reason': 'scoped_window_review_bypass', 'reason_code': 'SCOPED_WINDOW_REVIEW', 'action': 'bypass_review_candidate'})
+            skip_contract.update({'status': 'skipped', 'reason': 'scoped_window_review_bypass', 'reason_code': 'SKIP_GUARD_SCOPED_REVIEW', 'action': 'bypass_review_candidate'})
             ranking_contract['can_open'] = False
             ranking_contract['ranking_penalty'] += 150
             ranking_contract['priority_score'] = round(ranking_contract['priority_score'] - 150, 4)
+        if skip_contract.get('reason_code'):
+            skip_contract.update(build_reason_code_details(skip_contract.get('reason_code')))
         return {
             'symbol': symbol,
             'current_price': current_price,
@@ -1379,27 +1382,36 @@ class TradingBot:
             execution_contract.update({'quota': quota_snapshot, 'cluster_key': cluster_key, 'side': side_key, 'regime_tag': regime_key})
 
             if not row.get('can_open') or skip_contract.get('status') == 'skipped':
-                execution_contract.update({'status': 'ineligible', 'selected': False, 'reason_code': 'INELIGIBLE_BEFORE_EXECUTION_QUOTA', 'action': 'skip_before_execution_quota'})
+                execution_contract.update({'status': 'ineligible', 'selected': False, 'reason_code': 'SKIP_PRE_EXECUTION_INELIGIBLE', 'action': 'skip_before_execution_quota'})
+                execution_contract.update(build_reason_code_details(execution_contract.get('reason_code')))
                 continue
 
             if len(selected) >= cycle_quota:
-                execution_contract.update({'status': 'deferred', 'selected': False, 'reason': 'execution_quota_exhausted', 'reason_code': 'EXECUTION_QUOTA_EXHAUSTED', 'action': 'defer_to_next_cycle'})
-                skip_contract.update({'status': 'skipped', 'reason': 'execution_quota_exhausted', 'reason_code': 'EXECUTION_QUOTA_EXHAUSTED', 'action': 'defer_to_next_cycle', 'deferred': True, 'defer_to_cycle': 'next'})
+                execution_contract.update({'status': 'deferred', 'selected': False, 'reason': 'execution_quota_exhausted', 'reason_code': 'DEFER_EXECUTION_CYCLE_QUOTA_EXHAUSTED', 'action': 'defer_to_next_cycle'})
+                skip_contract.update({'status': 'skipped', 'reason': 'execution_quota_exhausted', 'reason_code': 'DEFER_EXECUTION_CYCLE_QUOTA_EXHAUSTED', 'action': 'defer_to_next_cycle', 'deferred': True, 'defer_to_cycle': 'next'})
+                execution_contract.update(build_reason_code_details(execution_contract.get('reason_code')))
+                skip_contract.update(build_reason_code_details(skip_contract.get('reason_code')))
                 row['can_open'] = False
                 continue
             if selected_cluster.get(cluster_key, 0) >= quota_snapshot['cluster_cap']:
-                execution_contract.update({'status': 'deferred', 'selected': False, 'reason': 'symbol_cluster_cap_reached', 'reason_code': 'SYMBOL_CLUSTER_CAP_REACHED', 'action': 'defer_cluster_capped'})
-                skip_contract.update({'status': 'skipped', 'reason': 'symbol_cluster_cap_reached', 'reason_code': 'SYMBOL_CLUSTER_CAP_REACHED', 'action': 'defer_cluster_capped', 'deferred': True, 'defer_to_cycle': 'next'})
+                execution_contract.update({'status': 'deferred', 'selected': False, 'reason': 'symbol_cluster_cap_reached', 'reason_code': 'DEFER_EXECUTION_CLUSTER_CAP_REACHED', 'action': 'defer_cluster_capped'})
+                skip_contract.update({'status': 'skipped', 'reason': 'symbol_cluster_cap_reached', 'reason_code': 'DEFER_EXECUTION_CLUSTER_CAP_REACHED', 'action': 'defer_cluster_capped', 'deferred': True, 'defer_to_cycle': 'next'})
+                execution_contract.update(build_reason_code_details(execution_contract.get('reason_code')))
+                skip_contract.update(build_reason_code_details(skip_contract.get('reason_code')))
                 row['can_open'] = False
                 continue
             if selected_side.get(side_key, 0) >= quota_snapshot['side_cap']:
-                execution_contract.update({'status': 'deferred', 'selected': False, 'reason': 'side_execution_cap_reached', 'reason_code': 'SIDE_EXECUTION_CAP_REACHED', 'action': 'defer_side_capped'})
-                skip_contract.update({'status': 'skipped', 'reason': 'side_execution_cap_reached', 'reason_code': 'SIDE_EXECUTION_CAP_REACHED', 'action': 'defer_side_capped', 'deferred': True, 'defer_to_cycle': 'next'})
+                execution_contract.update({'status': 'deferred', 'selected': False, 'reason': 'side_execution_cap_reached', 'reason_code': 'DEFER_EXECUTION_SIDE_CAP_REACHED', 'action': 'defer_side_capped'})
+                skip_contract.update({'status': 'skipped', 'reason': 'side_execution_cap_reached', 'reason_code': 'DEFER_EXECUTION_SIDE_CAP_REACHED', 'action': 'defer_side_capped', 'deferred': True, 'defer_to_cycle': 'next'})
+                execution_contract.update(build_reason_code_details(execution_contract.get('reason_code')))
+                skip_contract.update(build_reason_code_details(skip_contract.get('reason_code')))
                 row['can_open'] = False
                 continue
             if selected_regime.get(regime_key, 0) >= quota_snapshot['regime_cap']:
-                execution_contract.update({'status': 'deferred', 'selected': False, 'reason': 'regime_execution_cap_reached', 'reason_code': 'REGIME_EXECUTION_CAP_REACHED', 'action': 'defer_regime_capped'})
-                skip_contract.update({'status': 'skipped', 'reason': 'regime_execution_cap_reached', 'reason_code': 'REGIME_EXECUTION_CAP_REACHED', 'action': 'defer_regime_capped', 'deferred': True, 'defer_to_cycle': 'next'})
+                execution_contract.update({'status': 'deferred', 'selected': False, 'reason': 'regime_execution_cap_reached', 'reason_code': 'DEFER_EXECUTION_REGIME_CAP_REACHED', 'action': 'defer_regime_capped'})
+                skip_contract.update({'status': 'skipped', 'reason': 'regime_execution_cap_reached', 'reason_code': 'DEFER_EXECUTION_REGIME_CAP_REACHED', 'action': 'defer_regime_capped', 'deferred': True, 'defer_to_cycle': 'next'})
+                execution_contract.update(build_reason_code_details(execution_contract.get('reason_code')))
+                skip_contract.update(build_reason_code_details(skip_contract.get('reason_code')))
                 row['can_open'] = False
                 continue
 
@@ -1407,7 +1419,8 @@ class TradingBot:
             selected_cluster[cluster_key] += 1
             selected_side[side_key] += 1
             selected_regime[regime_key] += 1
-            execution_contract.update({'status': 'selected', 'selected': True, 'reason': 'execution_quota_passed', 'reason_code': 'EXECUTION_QUOTA_PASSED', 'action': 'execute_this_cycle'})
+            execution_contract.update({'status': 'selected', 'selected': True, 'reason': 'execution_quota_passed', 'reason_code': 'PERMIT_EXECUTION_QUOTA_PASSED', 'action': 'execute_this_cycle'})
+            execution_contract.update(build_reason_code_details(execution_contract.get('reason_code')))
 
         return ranked_candidates, selected
 
@@ -1489,13 +1502,13 @@ class TradingBot:
         exchange_mode = str(getattr(self.config, 'exchange_mode', None) or self.config.get('exchange.mode', 'paper')).strip().lower()
         selected = bool(execution_contract.get('selected', False))
         allowed = True
-        reason_code = 'FINAL_EXECUTION_PERMIT_GRANTED'
+        reason_code = 'PERMIT_FINAL_EXECUTION_GRANTED'
         reason = 'selected_candidate_ready_for_testnet_execution'
         action = 'submit_testnet_order'
 
         if exchange_mode != 'testnet':
             allowed = False
-            reason_code = 'TESTNET_ONLY_EXECUTION_PERMIT'
+            reason_code = 'DENY_ENV_TESTNET_ONLY'
             reason = f'final_execution_permit_requires_testnet_mode:{exchange_mode or "unknown"}'
             action = 'deny_non_testnet_execution'
         elif skip_contract.get('status') == 'skipped':
@@ -1510,7 +1523,7 @@ class TradingBot:
             action = str(execution_contract.get('action') or 'deny_unselected_candidate')
         elif not row.get('can_open'):
             allowed = False
-            reason_code = 'RISK_GATE_BLOCKED'
+            reason_code = 'DENY_RISK_GATE_BLOCKED'
             reason = str(row.get('risk_reason') or 'risk_gate_blocked_before_final_execution')
             action = 'deny_risk_gate_blocked_candidate'
 
@@ -1559,14 +1572,8 @@ class TradingBot:
                 },
             },
         }
-        reason_codes = []
-        for code in [contract.get('reason_code')]:
-            if code not in (None, ''):
-                reason_codes.append(str(code))
-        for code in guard_reason_codes:
-            code = str(code or '').strip()
-            if code and code not in reason_codes:
-                reason_codes.append(code)
+        contract.update(build_reason_code_details(contract.get('reason_code')))
+        reason_codes = merge_reason_codes([contract.get('legacy_reason_code')], guard_reason_codes, primary=contract.get('reason_code'))
         contract['reason_codes'] = reason_codes
         contract['diagnose_replay'] = {
             'schema_version': 'final_execution_permit_replay_v1',
@@ -1576,6 +1583,10 @@ class TradingBot:
             'status': contract.get('status'),
             'allowed': contract.get('allowed'),
             'reason_code': contract.get('reason_code'),
+            'legacy_reason_code': contract.get('legacy_reason_code'),
+            'reason_code_family': contract.get('reason_code_family'),
+            'reason_code_stage': contract.get('reason_code_stage'),
+            'reason_code_disposition': contract.get('reason_code_disposition'),
             'reason_codes': reason_codes,
             'reason': contract.get('reason'),
             'action': contract.get('action'),

@@ -9,6 +9,7 @@ from typing import Dict, List, Optional, Any
 from pathlib import Path
 import pandas as pd
 
+from core.reason_codes import build_reason_code_details, merge_reason_codes, normalize_reason_code
 from core.regime_policy import normalize_observe_only_view, summarize_observe_only_collection
 
 
@@ -2843,17 +2844,15 @@ class Database:
         if not payload:
             return {}
         guardrail = self._safe_json_dict(payload.get('guardrail_evidence'))
-        reason_codes = []
-        for code in [payload.get('reason_code')]:
-            if code not in (None, ''):
-                reason_codes.append(str(code))
-        for code in (self._safe_json_dict(guardrail.get('close_outcome_guard')).get('reason_codes') or []):
-            code = str(code or '').strip()
-            if code and code not in reason_codes:
-                reason_codes.append(code)
         payload['allowed'] = bool(payload.get('allowed', False))
         payload['status'] = payload.get('status') or ('permit' if payload['allowed'] else 'deny')
-        payload['reason_code'] = str(payload.get('reason_code') or ('FINAL_EXECUTION_PERMIT_GRANTED' if payload['allowed'] else 'FINAL_EXECUTION_PERMIT_UNKNOWN'))
+        payload['reason_code'] = normalize_reason_code(payload.get('reason_code') or ('PERMIT_FINAL_EXECUTION_GRANTED' if payload['allowed'] else 'FINAL_EXECUTION_PERMIT_UNKNOWN'))
+        payload.update(build_reason_code_details(payload.get('reason_code')))
+        reason_codes = merge_reason_codes(
+            [payload.get('legacy_reason_code')],
+            self._safe_json_dict(guardrail.get('close_outcome_guard')).get('reason_codes') or [],
+            primary=payload.get('reason_code'),
+        )
         payload['reason_codes'] = reason_codes
         payload['guardrail_evidence'] = guardrail
         payload['diagnose_replay'] = {
@@ -2861,6 +2860,10 @@ class Database:
             'status': payload['status'],
             'allowed': payload['allowed'],
             'reason_code': payload['reason_code'],
+            'legacy_reason_code': payload.get('legacy_reason_code'),
+            'reason_code_family': payload.get('reason_code_family'),
+            'reason_code_stage': payload.get('reason_code_stage'),
+            'reason_code_disposition': payload.get('reason_code_disposition'),
             'reason_codes': reason_codes,
             'exchange_mode': payload.get('exchange_mode'),
             'action': payload.get('action'),

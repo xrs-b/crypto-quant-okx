@@ -3357,7 +3357,7 @@ class TestTradingExecutor(unittest.TestCase):
         permit = {
             'allowed': True,
             'status': 'permit',
-            'reason_code': 'FINAL_EXECUTION_PERMIT_GRANTED',
+            'reason_code': 'PERMIT_FINAL_EXECUTION_GRANTED',
             'reason': 'selected_candidate_ready_for_testnet_execution',
             'exchange_mode': 'testnet',
             'testnet_only': True,
@@ -3369,8 +3369,10 @@ class TestTradingExecutor(unittest.TestCase):
             plan_context={'final_execution_permit': permit}
         )
         intent = self.db.get_open_intent_by_signal_id(9001)
-        self.assertEqual(intent['final_execution_reason_code'], 'FINAL_EXECUTION_PERMIT_GRANTED')
+        self.assertEqual(intent['final_execution_reason_code'], 'PERMIT_FINAL_EXECUTION_GRANTED')
         self.assertTrue(intent['final_execution_allowed'])
+        self.assertEqual(intent['final_execution_permit']['legacy_reason_code'], 'FINAL_EXECUTION_PERMIT_GRANTED')
+        self.assertEqual(intent['final_execution_permit']['reason_code_disposition'], 'permit')
         self.assertIn('close_outcome_observe_only', intent['final_execution_permit']['reason_codes'])
         trade_id = self.db.record_trade(
             symbol='BTC/USDT', side='long', entry_price=50000, quantity=1, leverage=5, signal_id=9001,
@@ -3378,7 +3380,7 @@ class TestTradingExecutor(unittest.TestCase):
         )
         latest = self.db.get_latest_open_trade('BTC/USDT', 'long')
         self.assertEqual(latest['id'], trade_id)
-        self.assertEqual(latest['final_execution_reason_code'], 'FINAL_EXECUTION_PERMIT_GRANTED')
+        self.assertEqual(latest['final_execution_reason_code'], 'PERMIT_FINAL_EXECUTION_GRANTED')
         self.assertTrue(latest['final_execution_allowed'])
         self.assertEqual(latest['final_execution_permit']['diagnose_replay']['schema_version'], 'final_execution_permit_replay_v1')
         self.db.delete_open_intent(intent_id)
@@ -3390,10 +3392,21 @@ class TestTradingExecutor(unittest.TestCase):
             'long',
             50000,
             signal_id=1,
-            plan_context={'final_execution_permit': {'allowed': False, 'reason_code': 'SCOPED_WINDOW_FREEZE', 'reason': 'close_outcome_guard_blocked'}},
+            plan_context={'final_execution_permit': {'allowed': False, 'reason_code': 'DENY_GUARD_SCOPED_FREEZE', 'reason': 'close_outcome_guard_blocked'}},
         )
         self.assertIsNone(trade_id)
         self.assertEqual(self.executor.exchange.order_amounts, [])
+
+    def test_database_normalizes_legacy_final_execution_reason_codes(self):
+        permit = self.db._normalize_final_execution_permit({
+            'allowed': False,
+            'reason_code': 'SCOPED_WINDOW_FREEZE',
+            'guardrail_evidence': {'close_outcome_guard': {'reason_codes': ['close_outcome_policy_freeze_candidate']}},
+        })
+        self.assertEqual(permit['reason_code'], 'DENY_GUARD_SCOPED_FREEZE')
+        self.assertEqual(permit['legacy_reason_code'], 'SCOPED_WINDOW_FREEZE')
+        self.assertIn('SCOPED_WINDOW_FREEZE', permit['reason_codes'])
+        self.assertIn('close_outcome_policy_freeze_candidate', permit['reason_codes'])
 
     def test_open_position_reduces_amount_after_max_order_error(self):
         """测试遇到 51202 时会自动缩量再试"""
@@ -4695,7 +4708,7 @@ class TestOpenCandidateRanking(unittest.TestCase):
             },
         )
         self.assertFalse(contract['can_open'])
-        self.assertEqual(contract['skip_contract']['reason_code'], 'SCOPED_WINDOW_TIGHTEN')
+        self.assertEqual(contract['skip_contract']['reason_code'], 'SKIP_GUARD_SCOPED_TIGHTEN')
         self.assertEqual(contract['ranking_contract']['close_outcome_scope'], 'symbol')
 
     def test_rank_open_candidates_prefers_non_scoped_candidate(self):
@@ -4732,11 +4745,11 @@ class TestOpenCandidateRanking(unittest.TestCase):
         self.assertEqual(len(selected), 1)
         self.assertEqual(selected[0]['symbol'], 'ETH/USDT')
         btc_row = next(row for row in ranked if row['symbol'] == 'BTC/USDT')
-        self.assertEqual(btc_row['skip_contract']['reason_code'], 'SCOPED_WINDOW_TIGHTEN')
+        self.assertEqual(btc_row['skip_contract']['reason_code'], 'SKIP_GUARD_SCOPED_TIGHTEN')
         summary = self.bot._build_candidate_runtime_summary(ranked, selected)
         self.assertEqual(summary['selected_count'], 1)
         self.assertEqual(summary['candidate_count'], 2)
-        self.assertTrue(any(item.get('reason_code') == 'SCOPED_WINDOW_TIGHTEN' for item in summary['skip_contracts']))
+        self.assertTrue(any(item.get('reason_code') == 'SKIP_GUARD_SCOPED_TIGHTEN' for item in summary['skip_contracts']))
 
     def test_rank_open_candidates_applies_diversification_penalty_to_repeated_side_and_regime(self):
         self.bot.config._config['runtime']['open_position']['max_candidates_per_cycle'] = 2
@@ -4844,7 +4857,9 @@ class TestOpenCandidateRanking(unittest.TestCase):
         )
         permit = self.bot._build_final_execution_permit_contract(row)
         self.assertEqual(permit['status'], 'deny')
-        self.assertEqual(permit['reason_code'], 'SCOPED_WINDOW_FREEZE')
+        self.assertEqual(permit['reason_code'], 'DENY_GUARD_SCOPED_FREEZE')
+        self.assertEqual(permit['legacy_reason_code'], 'SCOPED_WINDOW_FREEZE')
+        self.assertEqual(permit['reason_code_stage'], 'risk_gate')
         self.assertTrue(permit['guardrail_evidence']['close_outcome_guard']['freeze_auto_promotion'])
         self.assertEqual(permit['guardrail_evidence']['close_outcome_decision_contract']['operator_action_policy']['action'], 'freeze_followup')
 
@@ -4876,6 +4891,8 @@ class TestOpenCandidateRanking(unittest.TestCase):
         self.assertIn('close_outcome_policy_freeze_candidate', permit['reason_codes'])
         self.assertEqual(permit['diagnose_replay']['schema_version'], 'final_execution_permit_replay_v1')
         self.assertEqual(permit['diagnose_replay']['reason_code'], permit['reason_code'])
+        self.assertEqual(permit['diagnose_replay']['legacy_reason_code'], permit['legacy_reason_code'])
+        self.assertEqual(permit['diagnose_replay']['reason_code_disposition'], 'deny')
 
     def test_build_execution_plan_context_embeds_final_execution_permit(self):
         signal = self._make_signal(symbol='ETH/USDT', strength=75)
@@ -4892,11 +4909,11 @@ class TestOpenCandidateRanking(unittest.TestCase):
             risk_reason=None,
             risk_details={'close_outcome_guard': {'passed': True, 'enabled': True, 'mode': 'observe', 'scope_window': {}, 'scope_context': {'symbol': 'ETH/USDT'}}},
         )
-        row.setdefault('execution_contract', {}).update({'status': 'selected', 'selected': True, 'reason_code': 'EXECUTION_QUOTA_PASSED'})
+        row.setdefault('execution_contract', {}).update({'status': 'selected', 'selected': True, 'reason_code': 'PERMIT_EXECUTION_QUOTA_PASSED'})
         plan_context = self.bot._build_execution_plan_context(row)
         permit = plan_context.get('final_execution_permit') or {}
         self.assertTrue(permit.get('allowed'))
-        self.assertEqual(permit.get('reason_code'), 'FINAL_EXECUTION_PERMIT_GRANTED')
+        self.assertEqual(permit.get('reason_code'), 'PERMIT_FINAL_EXECUTION_GRANTED')
         self.assertEqual(permit.get('exchange_mode'), 'testnet')
 
     def test_rank_open_candidates_enforces_execution_quota_with_structured_reason(self):
@@ -4919,10 +4936,12 @@ class TestOpenCandidateRanking(unittest.TestCase):
         ranked, selected = self.bot._rank_open_candidates([btc, eth])
         self.assertEqual([row['symbol'] for row in selected], ['BTC/USDT'])
         eth_row = next(row for row in ranked if row['symbol'] == 'ETH/USDT')
-        self.assertEqual(eth_row['execution_contract']['reason_code'], 'EXECUTION_QUOTA_EXHAUSTED')
+        self.assertEqual(eth_row['execution_contract']['reason_code'], 'DEFER_EXECUTION_CYCLE_QUOTA_EXHAUSTED')
+        self.assertEqual(eth_row['execution_contract']['reason_code_disposition'], 'defer')
+        self.assertEqual(eth_row['skip_contract']['legacy_reason_code'], 'EXECUTION_QUOTA_EXHAUSTED')
         self.assertTrue(eth_row['skip_contract']['deferred'])
         summary = self.bot._build_candidate_runtime_summary(ranked, selected)
-        self.assertEqual(summary['execution_quota']['reason_code_counts']['EXECUTION_QUOTA_EXHAUSTED'], 1)
+        self.assertEqual(summary['execution_quota']['reason_code_counts']['DEFER_EXECUTION_CYCLE_QUOTA_EXHAUSTED'], 1)
 
     def test_rank_open_candidates_enforces_cluster_cap_with_structured_reason(self):
         self.bot.config._config['runtime']['open_position']['max_candidates_per_cycle'] = 3
@@ -4957,10 +4976,10 @@ class TestOpenCandidateRanking(unittest.TestCase):
         ranked, selected = self.bot._rank_open_candidates([btc, eth, xrp])
         self.assertEqual([row['symbol'] for row in selected], ['BTC/USDT', 'XRP/USDT'])
         eth_row = next(row for row in ranked if row['symbol'] == 'ETH/USDT')
-        self.assertEqual(eth_row['execution_contract']['reason_code'], 'SYMBOL_CLUSTER_CAP_REACHED')
+        self.assertEqual(eth_row['execution_contract']['reason_code'], 'DEFER_EXECUTION_CLUSTER_CAP_REACHED')
         summary = self.bot._build_candidate_runtime_summary(ranked, selected)
         self.assertEqual(summary['execution_quota']['selected_cluster_counts']['majors'], 1)
-        self.assertEqual(summary['execution_quota']['reason_code_counts']['SYMBOL_CLUSTER_CAP_REACHED'], 1)
+        self.assertEqual(summary['execution_quota']['reason_code_counts']['DEFER_EXECUTION_CLUSTER_CAP_REACHED'], 1)
 
 
 class TestLayerPlanAndIntents(unittest.TestCase):

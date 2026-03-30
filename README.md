@@ -66,6 +66,18 @@ M4 Step 4 batch2 status: 已补第二批可直接开工实施稿，明确区分 
 5. 执行最小 testnet 开平仓验收
 6. 观察日志、Dashboard、数据库是否一致
 
+推荐连续验收（最小 acceptance）：
+
+```bash
+python scripts/testnet_smoke_acceptance.py --runs 3 --interval-seconds 30 --symbol BTC/USDT
+```
+
+如果只想预演而不真实打 testnet 单：
+
+```bash
+python scripts/testnet_smoke_acceptance.py --runs 3 --preview-only
+```
+
 ---
 
 ## 项目简介

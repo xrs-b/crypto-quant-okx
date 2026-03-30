@@ -46,6 +46,49 @@ def observability_log_text(context: Dict[str, Any]) -> str:
     return json.dumps(context, ensure_ascii=False, sort_keys=True)
 
 
+def validate_live_execution_guard_contract(plan_context: Dict[str, Any] = None, *, exchange_mode: str = None) -> Dict[str, Any]:
+    payload = dict(plan_context or {})
+    permit = dict(payload.get('final_execution_permit') or {})
+    contract = dict(payload.get('live_execution_guard') or {})
+    normalized_mode = str(exchange_mode or permit.get('exchange_mode') or payload.get('exchange_mode') or 'unknown').strip().lower()
+    enforcement_required = bool(permit) and normalized_mode in {'testnet', 'live', 'real'}
+    result = {
+        'required': enforcement_required,
+        'passed': True,
+        'fail_closed': True,
+        'exchange_mode': normalized_mode,
+        'reason': None,
+        'reason_code': None,
+        'contract': contract,
+    }
+    if not enforcement_required:
+        result['fail_closed'] = False
+        result['reason'] = 'not_required'
+        return result
+    if not contract:
+        result.update({'passed': False, 'reason': 'missing_live_execution_guard_contract', 'reason_code': 'DENY_LIVE_GUARD_CONTRACT_MISSING'})
+        return result
+    required_fields = ['schema_version', 'symbol', 'side', 'signal_id', 'exchange_mode', 'final_execution_permit_reason_code', 'final_execution_allowed', 'guard_passed']
+    missing = [key for key in required_fields if contract.get(key) in (None, '')]
+    if missing:
+        result.update({'passed': False, 'reason': f"missing_required_fields:{','.join(missing)}", 'reason_code': 'DENY_LIVE_GUARD_CONTRACT_INVALID'})
+        return result
+    if str(contract.get('exchange_mode') or '').strip().lower() != normalized_mode:
+        result.update({'passed': False, 'reason': 'exchange_mode_mismatch', 'reason_code': 'DENY_LIVE_GUARD_CONTRACT_INVALID'})
+        return result
+    if permit:
+        if str(contract.get('final_execution_permit_reason_code') or '') != str(permit.get('reason_code') or ''):
+            result.update({'passed': False, 'reason': 'permit_reason_code_mismatch', 'reason_code': 'DENY_LIVE_GUARD_CONTRACT_INVALID'})
+            return result
+        if bool(contract.get('final_execution_allowed')) != bool(permit.get('allowed', False)):
+            result.update({'passed': False, 'reason': 'permit_allowed_mismatch', 'reason_code': 'DENY_LIVE_GUARD_CONTRACT_INVALID'})
+            return result
+        if not bool(contract.get('guard_passed')) or not bool(permit.get('allowed', False)):
+            result.update({'passed': False, 'reason': contract.get('guard_reason') or 'final_execution_permit_denied', 'reason_code': str(contract.get('guard_reason_code') or permit.get('reason_code') or 'DENY_LIVE_GUARD_CONTRACT_INVALID')})
+            return result
+    return result
+
+
 def enrich_observability_with_snapshots(config_helper: Any, symbol: Optional[str], context: Dict[str, Any] = None, *, signal: Any = None, plan_context: Dict[str, Any] = None, regime_snapshot: Optional[Dict[str, Any]] = None, adaptive_policy_snapshot: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     enriched = dict(context or {})
     source_plan = dict(plan_context or {})
@@ -582,7 +625,16 @@ class TradingExecutor:
                     current_price: float, signal_id: int = None, plan_context: Dict[str, Any] = None, layer_no: int = None, root_signal_id: int = None) -> Optional[int]:
         """开仓"""
         plan_context = dict(plan_context or {})
+        plan_context.setdefault('symbol', symbol)
+        plan_context.setdefault('side', side)
+        plan_context.setdefault('signal_id', signal_id)
         final_execution_permit = dict(plan_context.get('final_execution_permit') or {})
+        guard_validation = validate_live_execution_guard_contract(plan_context, exchange_mode=str(self.config.get('exchange.mode', 'unknown') or 'unknown'))
+        if guard_validation.get('required') and not guard_validation.get('passed', False):
+            trade_logger.warning(
+                f"{symbol}: live execution guard contract denied | reason_code={guard_validation.get('reason_code')} | reason={guard_validation.get('reason')}"
+            )
+            return None
         if final_execution_permit and not final_execution_permit.get('allowed', False):
             trade_logger.warning(
                 f"{symbol}: final execution permit denied | reason_code={final_execution_permit.get('reason_code')} | reason={final_execution_permit.get('reason')}"
@@ -2033,6 +2085,72 @@ class RiskManager:
             return {'total': round(total, 2), 'free': round(free, 2), 'used': round(used, 2)}
         except Exception:
             return {'total': 0.0, 'free': 0.0, 'used': 0.0}
+
+    def _parse_trade_time(self, value: str) -> Optional[datetime]:
+        if not value:
+            return None
+        return datetime.fromisoformat(value)
+
+    def _get_today_trade_count(self) -> int:
+        trades = self.db.get_trades(limit=1000)
+        today = datetime.utcnow().date()
+        count = 0
+        for trade in trades:
+            opened_at = self._parse_trade_time(trade.get('open_time', ''))
+            if opened_at and opened_at.date() == today:
+                count += 1
+        return count
+
+    def _get_last_trade_time(self) -> Optional[datetime]:
+        return self.db.get_latest_trade_time()
+
+    def _get_consecutive_losses(self) -> int:
+        trades = self.db.get_trades(status='closed', limit=20)
+        count = 0
+        for trade in trades:
+            pnl = float(trade.get('pnl', 0) or 0)
+            if pnl < 0:
+                count += 1
+            else:
+                break
+        return count
+
+    def _get_daily_drawdown_ratio(self) -> float:
+        trades = self.db.get_trades(status='closed', limit=1000)
+        today = datetime.utcnow().date()
+        today_pnl = 0.0
+        for trade in trades:
+            realized_at = self._parse_trade_time(trade.get('close_time') or trade.get('open_time') or '')
+            if realized_at and realized_at.date() == today:
+                today_pnl += float(trade.get('pnl', 0) or 0)
+        if today_pnl >= 0:
+            return 0.0
+        balance_total = self._get_balance_summary().get('total', 0.0) or 1.0
+        return abs(today_pnl) / balance_total
+
+    def _get_balance_summary(self) -> Dict[str, float]:
+        try:
+            from core.exchange import Exchange
+            if self._exchange is None:
+                self._exchange = Exchange(self.config.all)
+            balance = self._exchange.fetch_balance()
+            total = float(balance.get('total', {}).get('USDT', 0) or 0)
+            free = float(balance.get('free', {}).get('USDT', 0) or 0)
+            used = max(0.0, total - free)
+            return {'total': round(total, 2), 'free': round(free, 2), 'used': round(used, 2)}
+        except Exception:
+            return {'total': 0.0, 'free': 0.0, 'used': 0.0}
+
+    def _get_current_exposure(self) -> float:
+        positions = self.db.get_positions()
+        total_balance = self._get_balance_summary().get('total', 0.0) or 1.0
+        total_margin_used = 0.0
+        for p in positions:
+            qty = float(p.get('coin_quantity', 0) or 0)
+            px = float(p.get('current_price', 0) or p.get('entry_price', 0) or 0)
+            lev = max(1, int(p.get('leverage', 1) or 1))
+            total_margin_used += (qty * px) / lev if qty and px else 0.0
+        return total_margin_used / total_balance if total_balance > 0 else 0.0
 
     def _parse_trade_time(self, value: str) -> Optional[datetime]:
         if not value:

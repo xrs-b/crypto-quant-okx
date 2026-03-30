@@ -3418,7 +3418,33 @@ class TestTradingExecutor(unittest.TestCase):
             'long',
             50000,
             signal_id=1,
-            plan_context={'final_execution_permit': {'allowed': False, 'reason_code': 'DENY_GUARD_SCOPED_FREEZE', 'reason': 'close_outcome_guard_blocked'}},
+            plan_context={
+                'final_execution_permit': {'allowed': False, 'reason_code': 'DENY_GUARD_SCOPED_FREEZE', 'reason': 'close_outcome_guard_blocked', 'exchange_mode': 'testnet'},
+                'live_execution_guard': {
+                    'schema_version': 'live_execution_guard_v1',
+                    'symbol': 'BTC/USDT',
+                    'side': 'long',
+                    'signal_id': 1,
+                    'exchange_mode': 'testnet',
+                    'final_execution_permit_reason_code': 'DENY_GUARD_SCOPED_FREEZE',
+                    'final_execution_allowed': False,
+                    'guard_passed': False,
+                    'guard_reason': 'close_outcome_guard_blocked',
+                    'guard_reason_code': 'DENY_GUARD_SCOPED_FREEZE',
+                },
+            },
+        )
+        self.assertIsNone(trade_id)
+        self.assertEqual(self.executor.exchange.order_amounts, [])
+
+    def test_open_position_fail_closed_when_live_execution_guard_contract_missing(self):
+        self.executor.exchange = FakeExecutorExchange()
+        trade_id = self.executor.open_position(
+            'BTC/USDT',
+            'long',
+            50000,
+            signal_id=11,
+            plan_context={'final_execution_permit': {'allowed': True, 'reason_code': 'PERMIT_FINAL_EXECUTION_GRANTED', 'reason': 'ok', 'exchange_mode': 'testnet'}},
         )
         self.assertIsNone(trade_id)
         self.assertEqual(self.executor.exchange.order_amounts, [])
@@ -5056,9 +5082,16 @@ class TestOpenCandidateRanking(unittest.TestCase):
         row.setdefault('execution_contract', {}).update({'status': 'selected', 'selected': True, 'reason_code': 'PERMIT_EXECUTION_QUOTA_PASSED'})
         plan_context = self.bot._build_execution_plan_context(row)
         permit = plan_context.get('final_execution_permit') or {}
+        guard = plan_context.get('live_execution_guard') or {}
         self.assertTrue(permit.get('allowed'))
         self.assertEqual(permit.get('reason_code'), 'PERMIT_FINAL_EXECUTION_GRANTED')
         self.assertEqual(permit.get('exchange_mode'), 'testnet')
+        self.assertEqual(guard.get('schema_version'), 'live_execution_guard_v1')
+        self.assertEqual(guard.get('symbol'), 'ETH/USDT')
+        self.assertEqual(guard.get('side'), 'long')
+        self.assertTrue(guard.get('final_execution_allowed'))
+        self.assertTrue(guard.get('guard_passed'))
+        self.assertEqual(guard.get('final_execution_permit_reason_code'), 'PERMIT_FINAL_EXECUTION_GRANTED')
 
     def test_build_final_execution_permit_contract_emits_runtime_diagnose_bundle_for_defer(self):
         self.bot.config._config['runtime']['open_position']['max_candidates_per_cycle'] = 2

@@ -2470,18 +2470,39 @@ class TradingBot:
 
         strategy_selection = dict(((getattr(signal, 'market_context', {}) or {}).get('strategy_selection')) or {})
         final_strategy_contract = dict(((getattr(signal, 'market_context', {}) or {}).get('final_strategy_contract')) or {})
+        final_execution_permit = self._build_final_execution_permit_contract(row)
         plan_context = dict(layer_plan)
         plan_context.update({
             'current_price': row.get('current_price'),
             'signal_id': row.get('signal_id'),
             'root_signal_id': row.get('signal_id'),
+            'symbol': row.get('symbol'),
+            'side': row.get('side'),
             'regime_snapshot': regime_snapshot,
             'adaptive_policy_snapshot': adaptive_policy_snapshot,
             'strategy_selection': strategy_selection,
             'strategy_tags': list(strategy_selection.get('selected_strategies') or getattr(signal, 'strategies_triggered', []) or []),
             'strategies_triggered': list(getattr(signal, 'strategies_triggered', []) or []),
             'final_strategy_contract': final_strategy_contract,
-            'final_execution_permit': self._build_final_execution_permit_contract(row),
+            'final_execution_permit': final_execution_permit,
+            'live_execution_guard': {
+                'schema_version': 'live_execution_guard_v1',
+                'symbol': row.get('symbol'),
+                'side': row.get('side'),
+                'signal_id': row.get('signal_id'),
+                'exchange_mode': final_execution_permit.get('exchange_mode') or str(getattr(self.config, 'exchange_mode', None) or self.config.get('exchange.mode', 'unknown')).strip().lower(),
+                'testnet_only': bool(final_execution_permit.get('testnet_only', True)),
+                'selected_for_execution': bool(final_execution_permit.get('selected_for_execution', False)),
+                'final_execution_allowed': bool(final_execution_permit.get('allowed', False)),
+                'final_execution_permit_reason_code': final_execution_permit.get('reason_code'),
+                'final_execution_permit_stage': final_execution_permit.get('reason_code_stage'),
+                'guard_passed': bool(final_execution_permit.get('allowed', False)),
+                'guard_reason': final_execution_permit.get('reason'),
+                'guard_reason_code': final_execution_permit.get('reason_code'),
+                'decision_source': ((final_execution_permit.get('runtime_diagnose_bundle') or {}).get('decision_source')),
+                'final_gate': ((final_execution_permit.get('runtime_diagnose_bundle') or {}).get('final_gate')),
+                'generated_at': final_execution_permit.get('generated_at'),
+            },
             # === adaptive_strategy_selection_v5: confirm_evidence summary ===
             'strategy_reactivation_evidence_summary': dict(
                 strategy_selection.get('reactivation_evidence_summary') or {}

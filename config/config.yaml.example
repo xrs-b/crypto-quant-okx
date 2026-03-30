@@ -348,6 +348,22 @@ adaptive_regime:
     risk_enforcement_enabled: false
     conservative_only: true
     rollout_symbols: ["BTC/USDT"]
+  strategy_selection:
+    enabled: true
+    min_selected_strategies: 1
+    max_selected_strategies: 3
+    base_budget_ratio: 0.9
+    min_budget_ratio: 0.2
+    regime_slot_caps:
+      default: 2
+      trend: 1
+      high_vol: 1
+      range: 2
+    regime_budget_overrides:
+      default: 0.9
+      trend: 0.6
+      high_vol: 0.5
+      range: 0.75
   defaults:
     policy_version: adaptive_policy_v1_m4_step3
   regimes:

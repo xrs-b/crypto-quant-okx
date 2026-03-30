@@ -341,6 +341,8 @@ class SignalDetector:
             return signal
         selected = set(selection_contract.get('selected_strategies') or [])
         weights = dict(selection_contract.get('strategy_weights') or {})
+        budgets = dict(selection_contract.get('strategy_budgets') or {})
+        slots = dict(selection_contract.get('strategy_slots') or {})
         for reason in list(signal.reasons or []):
             strategy_name = str(reason.get('strategy') or '').strip()
             if not strategy_name:
@@ -353,6 +355,8 @@ class SignalDetector:
             reason['metadata']['baseline_strength'] = baseline_strength
             reason['metadata']['strategy_selection_multiplier'] = round(multiplier, 4)
             reason['metadata']['strategy_selection_selected'] = strategy_name in selected
+            reason['metadata']['strategy_budget_ratio'] = float(budgets.get(strategy_name, multiplier) or 0.0)
+            reason['metadata']['strategy_slot_priority'] = int(slots.get(strategy_name, 0) or 0)
             if multiplier < 1.0:
                 reason['strength'] = adjusted_strength
             if multiplier <= 0.0:

@@ -453,3 +453,4 @@
 1. **项目主线不是换策略，而是把现有系统推进成低干预、自适应、可治理的市场策略系统。**
 2. **当前已走完 M0-M5 前半段，正处于 M5.3：把 workflow / approval / executor 雏形推进成 safe rollout automation control plane。**
 3. **下一步最值得做的是：safe action registry、stage handlers、auto-advance/rollback gates。**
+- **2026-03-30 implementation update (strategy budget / per-regime slot mainline)**：喺 `adaptive_strategy_selection_v1` 之上，主链现已补上 `adaptive_strategy_selection_v2`：`bot/run.py` 会按当前 `regime` 计算 `slot_cap / strategy_budgets / strategy_slots / selection_reason_codes / budget_summary`，并把结果回写到 `signals/detector.py` 的 strength 重算、candidate ranking contract 同 execution context。重点唔系放宽，而系进一步 **只收紧不放宽**：趋势/高波动等 regime 可以主动压缩 slot 数同 budget ratio，避免系统长期偏食单一策略，又可以让 ranking summary 明确说明当前到底系“策略被选中但预算偏紧”，定“根本已被 regime slot 挤出本轮优先槽位”。

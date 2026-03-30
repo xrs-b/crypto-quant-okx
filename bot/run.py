@@ -1029,6 +1029,13 @@ class TradingBot:
             'min_trades_for_preference': max(int(raw.get('min_trades_for_preference', 2) or 2), 1),
             'min_selected_strategies': max(int(raw.get('min_selected_strategies', 1) or 1), 1),
             'max_selected_strategies': max(int(raw.get('max_selected_strategies', 3) or 3), 1),
+            'base_budget_ratio': min(max(float(raw.get('base_budget_ratio', 1.0) or 1.0), 0.0), 1.0),
+            'min_budget_ratio': min(max(float(raw.get('min_budget_ratio', 0.2) or 0.2), 0.0), 1.0),
+            'max_budget_ratio': min(max(float(raw.get('max_budget_ratio', 1.0) or 1.0), 0.0), 1.0),
+            'slot_bonus_decay': max(float(raw.get('slot_bonus_decay', 0.12) or 0.12), 0.0),
+            'slot_penalty_decay': max(float(raw.get('slot_penalty_decay', 0.1) or 0.1), 0.0),
+            'regime_slot_caps': dict(raw.get('regime_slot_caps') or {}),
+            'regime_budget_overrides': dict(raw.get('regime_budget_overrides') or {}),
             'deweight_negative_return_multiplier': float(raw.get('deweight_negative_return_multiplier', 0.7) or 0.7),
             'deweight_loss_streak_multiplier': float(raw.get('deweight_loss_streak_multiplier', 0.75) or 0.75),
             'deweight_mismatch_multiplier': float(raw.get('deweight_mismatch_multiplier', 0.8) or 0.8),
@@ -1049,7 +1056,7 @@ class TradingBot:
             if name not in unique_strategies:
                 unique_strategies.append(name)
         contract = {
-            'schema_version': 'adaptive_strategy_selection_v1',
+            'schema_version': 'adaptive_strategy_selection_v2',
             'enabled': bool(cfg.get('enabled', True)),
             'symbol': symbol,
             'regime_tag': current_regime,
@@ -1058,7 +1065,17 @@ class TradingBot:
             'baseline_strategies': list(unique_strategies),
             'selected_strategies': list(unique_strategies),
             'strategy_weights': {name: 1.0 for name in unique_strategies},
+            'strategy_budgets': {name: cfg['base_budget_ratio'] for name in unique_strategies},
+            'strategy_slots': {name: index + 1 for index, name in enumerate(unique_strategies)},
             'strategy_stats': {},
+            'selection_reason_codes': ['STRATEGY_SELECTION_BASELINE'],
+            'budget_summary': {
+                'slot_cap': len(unique_strategies),
+                'selected_slots': len(unique_strategies),
+                'selected_budget_ratio': round(len(unique_strategies) * cfg['base_budget_ratio'], 4),
+                'available_budget_ratio': round(len(unique_strategies) * cfg['base_budget_ratio'], 4),
+                'top_strategy': unique_strategies[0] if unique_strategies else None,
+            },
             'ranking': [],
             'decision_summary': 'strategy_selection_disabled_or_no_candidates',
         }
@@ -1136,21 +1153,69 @@ class TradingBot:
             }
 
         ranked = sorted(stats.items(), key=lambda item: (-float(item[1].get('weight', 0.0)), -int(item[1].get('trade_count', 0)), -float(item[1].get('avg_return_pct', 0.0)), item[0]))
-        selected = [name for name, detail in ranked if float(detail.get('weight', 0.0)) > 0][:cfg['max_selected_strategies']]
+        slot_cap_map = dict(cfg.get('regime_slot_caps') or {})
+        raw_slot_cap = slot_cap_map.get(current_regime, slot_cap_map.get('default', cfg['max_selected_strategies']))
+        try:
+            slot_cap = max(cfg['min_selected_strategies'], min(int(raw_slot_cap or cfg['max_selected_strategies']), cfg['max_selected_strategies'], max(len(unique_strategies), 1)))
+        except Exception:
+            slot_cap = max(cfg['min_selected_strategies'], min(cfg['max_selected_strategies'], max(len(unique_strategies), 1)))
+        selected = [name for name, detail in ranked if float(detail.get('weight', 0.0)) > 0][:slot_cap]
         if len(selected) < cfg['min_selected_strategies']:
             for name, _detail in ranked:
                 if name not in selected:
                     selected.append(name)
                 if len(selected) >= min(cfg['min_selected_strategies'], len(unique_strategies)):
                     break
-        selected = selected[:max(cfg['min_selected_strategies'], min(cfg['max_selected_strategies'], len(unique_strategies)))]
-        weights = {name: float((stats.get(name) or {}).get('weight', 1.0)) for name in unique_strategies}
+        selected = selected[:max(cfg['min_selected_strategies'], min(slot_cap, len(unique_strategies)))]
+        budget_override_map = dict(cfg.get('regime_budget_overrides') or {})
+        regime_budget_scalar = budget_override_map.get(current_regime, budget_override_map.get('default', cfg['base_budget_ratio']))
+        try:
+            regime_budget_scalar = float(regime_budget_scalar)
+        except Exception:
+            regime_budget_scalar = cfg['base_budget_ratio']
+        regime_budget_scalar = min(max(regime_budget_scalar, cfg['min_budget_ratio']), cfg['max_budget_ratio'])
+        weights = {}
+        budgets = {}
+        slots = {}
+        reason_codes = []
+        ranking_rows = []
+        for idx, (name, detail) in enumerate(ranked, start=1):
+            slot_bonus = max(0.0, (slot_cap - idx) * cfg['slot_bonus_decay']) if idx <= slot_cap else 0.0
+            slot_penalty = max(0.0, (idx - slot_cap) * cfg['slot_penalty_decay']) if idx > slot_cap else 0.0
+            budget_ratio = min(cfg['max_budget_ratio'], max(cfg['min_budget_ratio'], regime_budget_scalar * max(float(detail.get('weight', 1.0)), 0.0) + slot_bonus - slot_penalty))
+            if name not in selected:
+                budget_ratio = min(budget_ratio, max(0.0, cfg['min_budget_ratio'] * 0.5))
+            budgets[name] = round(budget_ratio, 4)
+            weights[name] = round(min(float(detail.get('weight', 1.0)), budget_ratio), 4)
+            slots[name] = idx if name in selected else 0
+            detail.update({
+                'budget_ratio': budgets[name],
+                'slot_priority': slots[name],
+                'slot_in_scope': idx <= slot_cap,
+            })
+            ranking_rows.append({'strategy': name, **detail})
+        if slot_cap < len(unique_strategies):
+            reason_codes.append('REGIME_SLOT_CAP_APPLIED')
+        if any(float(v) < 1.0 for v in budgets.values()):
+            reason_codes.append('STRATEGY_BUDGET_DEWEIGHT_APPLIED')
+        if any(not ((stats.get(name) or {}).get('matched_mode') == 'matched') for name in selected):
+            reason_codes.append('STRATEGY_SELECTION_FALLBACK_USED')
         contract.update({
             'selected_strategies': selected,
             'strategy_weights': weights,
+            'strategy_budgets': budgets,
+            'strategy_slots': slots,
             'strategy_stats': stats,
-            'ranking': [{'strategy': name, **detail} for name, detail in ranked],
-            'decision_summary': f"selected={','.join(selected) or 'none'} / regime={current_regime} / policy={current_policy}",
+            'selection_reason_codes': reason_codes or ['STRATEGY_SELECTION_BASELINE'],
+            'budget_summary': {
+                'slot_cap': slot_cap,
+                'selected_slots': len(selected),
+                'selected_budget_ratio': round(sum(budgets.get(name, 0.0) for name in selected), 4),
+                'available_budget_ratio': round(sum(budgets.values()), 4),
+                'top_strategy': selected[0] if selected else None,
+            },
+            'ranking': ranking_rows,
+            'decision_summary': f"selected={','.join(selected) or 'none'} / regime={current_regime} / policy={current_policy} / slot_cap={slot_cap} / budget={round(sum(budgets.get(name, 0.0) for name in selected), 2)} / reasons={','.join(reason_codes or ['baseline'])}",
         })
         return contract
 
@@ -1384,15 +1449,18 @@ class TradingBot:
             ml_score = float(ml_confidence or 0)
             if ml_score <= 1.0:
                 ml_score *= 100.0
+        strategy_budget_boost = float(((getattr(signal, 'market_context', {}) or {}).get('strategy_selection') or {}).get('budget_summary', {}).get('selected_budget_ratio', 0.0) or 0.0)
         priority_score = round(
             float(getattr(signal, 'strength', 0) or 0)
             + float(getattr(entry_decision, 'score', 0) or 0) * 1.5
             + ml_score * 0.05
+            + strategy_budget_boost * 10.0
             - float(ranking_penalty),
             4,
         )
         diversification_context = self._candidate_diversification_context(symbol, signal, risk_details)
         strategy_selection = dict(((getattr(signal, 'market_context', {}) or {}).get('strategy_selection')) or {})
+        strategy_budget_summary = dict(strategy_selection.get('budget_summary') or {})
         ranking_contract = {
             'symbol': symbol,
             'signal_id': signal_id,
@@ -1405,6 +1473,10 @@ class TradingBot:
             'ml_confidence': ml_confidence,
             'selected_strategies': list(strategy_selection.get('selected_strategies') or getattr(signal, 'strategies_triggered', []) or []),
             'strategy_selection_summary': strategy_selection.get('decision_summary'),
+            'strategy_selection_reason_codes': list(strategy_selection.get('selection_reason_codes') or []),
+            'strategy_budget_summary': strategy_budget_summary,
+            'strategy_budget_ratio': float(strategy_budget_summary.get('selected_budget_ratio', 0.0) or 0.0),
+            'strategy_slot_cap': int(strategy_budget_summary.get('slot_cap', len(strategy_selection.get('selected_strategies') or [])) or 0),
             'close_outcome_scope_mode': scope_mode,
             'close_outcome_scope': scope_window.get('scope'),
             'close_outcome_scope_key': scope_window.get('scope_key'),

@@ -1580,6 +1580,7 @@ class TestSignalDetector(unittest.TestCase):
         self.assertEqual(updated.signal_type, 'hold')
         self.assertLess(updated.strength, 80)
         self.assertEqual(updated.reasons[0]['metadata']['strategy_selection_multiplier'], 0.0)
+        self.assertEqual(updated.reasons[0]['metadata']['strategy_budget_ratio'], 0.0)
         self.assertTrue(updated.reasons[1]['metadata']['strategy_selection_selected'])
 
 
@@ -14191,6 +14192,40 @@ class TestTradingBotAdaptiveExecutionContext(unittest.TestCase):
         self.assertEqual(contract['selected_strategies'][0], 'MACD')
         self.assertLess(contract['strategy_weights']['RSI'], 1.0)
         self.assertEqual(contract['strategy_stats']['MACD']['matched_mode'], 'matched')
+        self.assertEqual(contract['schema_version'], 'adaptive_strategy_selection_v2')
+        self.assertIn('budget_summary', contract)
+        self.assertIn('selection_reason_codes', contract)
+
+    def test_build_strategy_selection_contract_applies_regime_slot_budget_caps(self):
+        self.bot.config._config['adaptive_regime'] = self.bot.config._config.get('adaptive_regime', {}) or {}
+        self.bot.config._config['adaptive_regime']['strategy_selection'] = {
+            'enabled': True,
+            'min_selected_strategies': 1,
+            'max_selected_strategies': 3,
+            'min_budget_ratio': 0.2,
+            'base_budget_ratio': 0.9,
+            'regime_slot_caps': {'trend': 1, 'default': 2},
+            'regime_budget_overrides': {'trend': 0.6, 'default': 0.9},
+        }
+        signal = Signal(
+            symbol='BTC/USDT', signal_type='buy', price=50000, strength=78,
+            reasons=[
+                {'strategy': 'MACD', 'action': 'buy', 'triggered': True, 'strength': 40, 'confidence': 0.9, 'metadata': {}},
+                {'strategy': 'RSI', 'action': 'buy', 'triggered': True, 'strength': 30, 'confidence': 0.8, 'metadata': {}},
+                {'strategy': 'Volume', 'action': 'buy', 'triggered': True, 'strength': 28, 'confidence': 0.75, 'metadata': {}},
+            ],
+            strategies_triggered=['MACD', 'RSI', 'Volume'],
+            market_context={'trend': 'bullish'},
+        )
+        signal.regime_snapshot = {'name': 'trend', 'regime': 'trend'}
+        signal.adaptive_policy_snapshot = {'policy_version': 'adaptive_policy_v1_m1'}
+
+        contract = self.bot._build_strategy_selection_contract('BTC/USDT', signal)
+        self.assertEqual(contract['budget_summary']['slot_cap'], 1)
+        self.assertEqual(len(contract['selected_strategies']), 1)
+        self.assertIn('REGIME_SLOT_CAP_APPLIED', contract['selection_reason_codes'])
+        self.assertLessEqual(contract['strategy_budgets']['RSI'], 0.1)
+        self.assertGreater(contract['strategy_budgets']['MACD'], contract['strategy_budgets']['RSI'])
 
 
 class TestQualityScalingPipeline(unittest.TestCase):

@@ -343,6 +343,7 @@ class SignalDetector:
         weights = dict(selection_contract.get('strategy_weights') or {})
         budgets = dict(selection_contract.get('strategy_budgets') or {})
         slots = dict(selection_contract.get('strategy_slots') or {})
+        cooldowns = dict(selection_contract.get('strategy_cooldowns') or {})
         for reason in list(signal.reasons or []):
             strategy_name = str(reason.get('strategy') or '').strip()
             if not strategy_name:
@@ -351,18 +352,25 @@ class SignalDetector:
             multiplier = float(weights.get(strategy_name, 1.0) or 0.0)
             multiplier = max(0.0, min(multiplier, 1.0))
             adjusted_strength = baseline_strength * multiplier
+            cooldown = dict(cooldowns.get(strategy_name) or {})
             reason.setdefault('metadata', {})
             reason['metadata']['baseline_strength'] = baseline_strength
             reason['metadata']['strategy_selection_multiplier'] = round(multiplier, 4)
             reason['metadata']['strategy_selection_selected'] = strategy_name in selected
             reason['metadata']['strategy_budget_ratio'] = float(budgets.get(strategy_name, multiplier) or 0.0)
             reason['metadata']['strategy_slot_priority'] = int(slots.get(strategy_name, 0) or 0)
+            reason['metadata']['strategy_cooldown'] = cooldown
+            reason['metadata']['strategy_cooldown_active'] = bool(cooldown.get('cooldown_active', False))
+            reason['metadata']['strategy_recovery_window_active'] = bool(cooldown.get('recovery_window_active', False))
+            if cooldown.get('reason_code'):
+                reason['metadata']['strategy_cooldown_reason_code'] = cooldown.get('reason_code')
             if multiplier < 1.0:
                 reason['strength'] = adjusted_strength
             if multiplier <= 0.0:
                 reason['triggered'] = False
         signal.market_context = dict(signal.market_context or {})
         signal.market_context['strategy_selection'] = selection_contract
+        signal.market_context['strategy_cooldown_summary'] = dict(selection_contract.get('cooldown_summary') or {})
         return self._recompute_signal_state(signal, symbol or signal.symbol)
 
     def _analyze_rsi(self, df: pd.DataFrame, price: float, symbol: str = None) -> Optional[Dict]:

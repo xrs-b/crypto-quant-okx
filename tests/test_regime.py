@@ -1,4 +1,5 @@
 """Regime Layer v1 / adaptive regime M0 测试"""
+import json
 import os
 import sys
 import tempfile
@@ -21,6 +22,8 @@ from core.regime import (
     normalize_regime_snapshot,
 )
 from core.regime_policy import ADAPTIVE_POLICY_VERSION, resolve_regime_policy, build_validation_baseline_snapshot, build_validation_effective_snapshot, build_risk_effective_snapshot, build_execution_effective_snapshot
+from core.database import Database
+from bot.run import TradingBot
 
 
 def generate_test_data(regime_type: str, n: int = 100) -> pd.DataFrame:
@@ -807,6 +810,103 @@ class TestAdaptiveRegimeConfigAndPolicy(unittest.TestCase):
         self.assertEqual(payload['regime_snapshot']['name'], 'range_bound')
         self.assertEqual(payload['regime_snapshot']['confidence'], 0.76)
         self.assertNotEqual(payload['regime_observe_only']['summary'], 'unknown[unknown] conf=0.00')
+
+
+class TestAdaptiveStrategySelectionCooldown(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.db_path = os.path.join(self.tmpdir.name, 'trading.db')
+        self.cfg = Config()
+        self.cfg._config['db_path'] = self.db_path
+        self.db = Database(self.db_path)
+        self.bot = TradingBot.__new__(TradingBot)
+        self.bot.config = self.cfg
+        self.bot.db = self.db
+
+    def tearDown(self):
+        self.tmpdir.cleanup()
+
+    def _record_closed_trade(self, *, symbol='BTC/USDT', strategy='RSI', regime='trend', return_pct=-3.0, close_reason='止损', close_time='2026-03-30T10:00:00'):
+        trade_id = self.db.record_trade(
+            symbol=symbol,
+            side='long',
+            entry_price=100.0,
+            quantity=1.0,
+            leverage=1,
+            plan_context={
+                'strategy_tags': [strategy],
+                'regime_snapshot': {'name': regime, 'regime': regime},
+                'adaptive_policy_snapshot': {'policy_version': 'adaptive_policy_test'},
+            },
+        )
+        self.db.update_trade(
+            trade_id,
+            status='closed',
+            pnl=return_pct,
+            pnl_percent=return_pct,
+            close_time=close_time,
+            close_source='unit_test',
+            exit_price=97.0,
+            outcome_attribution=json.dumps({
+                'strategy_tags': [strategy],
+                'dominant_strategy': strategy,
+                'strategy_count': 1,
+                'regime_tag': regime,
+                'policy_tag': 'adaptive_policy_test',
+                'close_reason_category': 'stop_loss' if close_reason == '止损' else 'manual_close',
+                'outcome_quality': 'adverse' if return_pct < 0 else 'positive',
+            }, ensure_ascii=False),
+        )
+        return trade_id
+
+    def _build_signal(self):
+        return type('SignalStub', (), {
+            'regime_snapshot': {'name': 'trend', 'regime': 'trend'},
+            'adaptive_policy_snapshot': {'policy_version': 'adaptive_policy_test'},
+            'reasons': [
+                {'strategy': 'RSI', 'strength': 30, 'confidence': 0.8, 'action': 'buy', 'triggered': True},
+                {'strategy': 'MACD', 'strength': 25, 'confidence': 0.7, 'action': 'buy', 'triggered': True},
+            ],
+        })()
+
+    def test_strategy_selection_contract_blocks_strategy_on_recent_close_outcome_cooldown(self):
+        self._record_closed_trade(return_pct=-4.0, close_time='2999-03-30T10:00:00')
+        contract = self.bot._build_strategy_selection_contract('BTC/USDT', self._build_signal())
+        self.assertEqual(contract['schema_version'], 'adaptive_strategy_selection_v3')
+        self.assertIn('RSI', contract['strategy_cooldowns'])
+        self.assertTrue(contract['strategy_cooldowns']['RSI']['cooldown_active'])
+        self.assertEqual(contract['strategy_cooldowns']['RSI']['reason_code'], 'SKIP_STRATEGY_COOLDOWN_ACTIVE')
+        self.assertEqual(contract['strategy_weights']['RSI'], 0.0)
+        self.assertNotIn('RSI', contract['selected_strategies'])
+        self.assertIn('STRATEGY_COOLDOWN_ACTIVE', contract['selection_reason_codes'])
+
+    def test_strategy_selection_contract_keeps_recovery_window_active_after_cooldown_expires(self):
+        self._record_closed_trade(return_pct=-4.0, close_time='2026-03-20T10:00:00')
+        contract = self.bot._build_strategy_selection_contract('BTC/USDT', self._build_signal())
+        cooldown = contract['strategy_cooldowns']['RSI']
+        self.assertFalse(cooldown['cooldown_active'])
+        self.assertTrue(cooldown['recovery_window_active'])
+        self.assertEqual(cooldown['reason_code'], 'SKIP_STRATEGY_RECOVERY_WINDOW_ACTIVE')
+        self.assertIn('STRATEGY_RECOVERY_WINDOW_ACTIVE', contract['selection_reason_codes'])
+
+    def test_apply_strategy_selection_propagates_cooldown_summary_to_reason_metadata(self):
+        from signals.detector import SignalDetector, Signal
+        detector = SignalDetector(self.cfg.all)
+        signal = Signal(symbol='BTC/USDT', signal_type='buy', price=100.0, strength=50, reasons=[{'strategy': 'RSI', 'strength': 30, 'confidence': 0.8, 'action': 'buy', 'triggered': True}], market_context={})
+        selection_contract = {
+            'selected_strategies': [],
+            'strategy_weights': {'RSI': 0.0},
+            'strategy_budgets': {'RSI': 0.1},
+            'strategy_slots': {'RSI': 0},
+            'strategy_cooldowns': {'RSI': {'cooldown_active': True, 'recovery_window_active': True, 'reason_code': 'SKIP_STRATEGY_COOLDOWN_ACTIVE'}},
+            'cooldown_summary': {'active_count': 1, 'recovery_window_count': 1},
+        }
+        result = detector.apply_strategy_selection(signal, selection_contract, symbol='BTC/USDT')
+        meta = result.reasons[0]['metadata']
+        self.assertTrue(meta['strategy_cooldown_active'])
+        self.assertTrue(meta['strategy_recovery_window_active'])
+        self.assertEqual(result.market_context['strategy_cooldown_summary']['active_count'], 1)
+        self.assertFalse(result.reasons[0]['triggered'])
 
 
 if __name__ == '__main__':

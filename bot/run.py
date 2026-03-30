@@ -29,7 +29,7 @@ from core.reason_codes import build_reason_code_details, build_final_execution_o
 from signals import SignalDetector, SignalValidator, SignalRecorder, EntryDecider
 from trading import TradingExecutor, RiskManager
 from ml.engine import MLEngine, ModelTrainer, DataCollector
-from analytics import StrategyBacktester, SignalQualityAnalyzer, ParameterOptimizer, GovernanceEngine, build_approval_audit_overview, execute_adaptive_rollout_orchestration, build_runtime_orchestration_summary
+from analytics import StrategyBacktester, SignalQualityAnalyzer, ParameterOptimizer, GovernanceEngine, build_approval_audit_overview, execute_adaptive_rollout_orchestration, build_runtime_orchestration_summary, build_close_outcome_feedback_loop
 from analytics.backtest import export_calibration_payload
 from validation import format_validation_report_markdown, run_shadow_validation_case, run_shadow_validation_replay
 
@@ -1041,7 +1041,134 @@ class TradingBot:
             'deweight_mismatch_multiplier': float(raw.get('deweight_mismatch_multiplier', 0.8) or 0.8),
             'deweight_low_sample_multiplier': float(raw.get('deweight_low_sample_multiplier', 0.9) or 0.9),
             'disable_on_rollback_match': bool(raw.get('disable_on_rollback_match', True)),
+            'strategy_cooldown_enabled': bool(raw.get('strategy_cooldown_enabled', True)),
+            'strategy_cooldown_hours': max(float(raw.get('strategy_cooldown_hours', 6) or 6), 0.0),
+            'strategy_recovery_window_trades': max(int(raw.get('strategy_recovery_window_trades', 2) or 2), 0),
+            'strategy_recovery_min_win_rate': min(max(float(raw.get('strategy_recovery_min_win_rate', 50.0) or 50.0), 0.0), 100.0),
+            'strategy_recovery_min_avg_return_pct': float(raw.get('strategy_recovery_min_avg_return_pct', 0.0) or 0.0),
+            'strategy_cooldown_scopes': list(raw.get('strategy_cooldown_scopes') or ['symbol_regime', 'symbol', 'regime', 'global']),
         }
+
+    def _evaluate_strategy_cooldown(self, *, strategy: str, symbol: str, current_regime: str, current_policy: str,
+                                    preferred_rows: list, strategy_rows: list, cfg: dict) -> dict:
+        contract = {
+            'strategy': strategy,
+            'symbol': symbol,
+            'regime_tag': current_regime,
+            'policy_tag': current_policy,
+            'cooldown_active': False,
+            'recovery_window_active': False,
+            'reason_code': None,
+            'reason_codes': [],
+            'cooldown_until': None,
+            'remaining_minutes': 0,
+            'scope': None,
+            'scope_key': None,
+            'cooldown_trade_id': None,
+            'trigger_trade_time': None,
+            'trigger_return_pct': None,
+            'trigger_close_reason_category': None,
+            'recovery_window_trades': [],
+            'recovery_trade_count': 0,
+            'recovery_win_rate': 0.0,
+            'recovery_avg_return_pct': 0.0,
+            'recovery_thresholds': {
+                'min_trades': int(cfg.get('strategy_recovery_window_trades', 0) or 0),
+                'min_win_rate': float(cfg.get('strategy_recovery_min_win_rate', 0.0) or 0.0),
+                'min_avg_return_pct': float(cfg.get('strategy_recovery_min_avg_return_pct', 0.0) or 0.0),
+            },
+            'summary': 'strategy_cooldown_disabled',
+        }
+        if not cfg.get('strategy_cooldown_enabled', True):
+            return contract
+
+        scope_order = list(cfg.get('strategy_cooldown_scopes') or ['symbol_regime', 'symbol', 'regime', 'global'])
+        scoped_rows = {
+            'global': list(strategy_rows or []),
+            'symbol': [row for row in (strategy_rows or []) if str(row.get('symbol') or '') == symbol],
+            'regime': [row for row in (strategy_rows or []) if str(row.get('regime_tag') or 'unknown') == current_regime],
+            'symbol_regime': [row for row in (strategy_rows or []) if str(row.get('symbol') or '') == symbol and str(row.get('regime_tag') or 'unknown') == current_regime],
+        }
+        active_trigger = None
+        for scope in scope_order:
+            rows = list(scoped_rows.get(scope) or [])
+            if not rows:
+                continue
+            feedback = build_close_outcome_feedback_loop(
+                close_outcome_digest={
+                    'trade_count': len(rows),
+                    'win_rate': round((sum(1 for item in rows if float(item.get('return_pct') or 0.0) > 0) / len(rows)) * 100, 4) if rows else 0.0,
+                    'net_pnl': round(sum(float(item.get('pnl') or 0.0) for item in rows), 8),
+                    'avg_return_pct': round(sum(float(item.get('return_pct') or 0.0) for item in rows) / len(rows), 8) if rows else 0.0,
+                    'loss_count': sum(1 for item in rows if float(item.get('return_pct') or 0.0) < 0),
+                    'by_close_reason_category': dict(Counter(str(item.get('close_reason_category') or 'unknown') for item in rows)),
+                    'by_outcome_quality': dict(Counter(str(item.get('outcome_quality') or 'unknown') for item in rows)),
+                    'dominant_policy_tag': current_policy,
+                    'dominant_regime_tag': current_regime,
+                    'dominant_close_reason_category': max(Counter(str(item.get('close_reason_category') or 'unknown') for item in rows).items(), key=lambda item: item[1])[0] if rows else 'unknown',
+                },
+                label=f'strategy_cooldown:{strategy}:{scope}',
+                min_sample_size=max(1, int(cfg.get('min_trades_for_preference', 2) or 2)),
+            )
+            latest = rows[0]
+            latest_return_pct = float(latest.get('return_pct') or 0.0)
+            latest_close_reason = str(latest.get('close_reason_category') or 'unknown')
+            latest_failed = latest_return_pct < 0 or latest_close_reason == 'stop_loss'
+            mode = str(feedback.get('governance_mode') or ('tighten' if latest_failed else 'observe')).strip().lower()
+            if mode not in {'rollback', 'tighten', 'review'} and not latest_failed:
+                continue
+            close_time_raw = latest.get('close_time') or latest.get('closed_at') or latest.get('updated_at')
+            close_time = None
+            try:
+                close_time = datetime.fromisoformat(str(close_time_raw).replace('Z', '+00:00')) if close_time_raw else None
+            except Exception:
+                close_time = None
+            cooldown_until = close_time + timedelta(hours=float(cfg.get('strategy_cooldown_hours', 6) or 6)) if close_time else None
+            now = datetime.now(close_time.tzinfo) if close_time and close_time.tzinfo else datetime.now()
+            cooldown_active = bool(cooldown_until and cooldown_until > now)
+            recovery_rows = list(preferred_rows or [])[:max(int(cfg.get('strategy_recovery_window_trades', 0) or 0), 0)]
+            recovery_trade_count = len(recovery_rows)
+            recovery_win_rate = round((sum(1 for item in recovery_rows if float(item.get('return_pct') or 0.0) > 0) / recovery_trade_count) * 100, 4) if recovery_trade_count else 0.0
+            recovery_avg_return_pct = round(sum(float(item.get('return_pct') or 0.0) for item in recovery_rows) / recovery_trade_count, 6) if recovery_trade_count else 0.0
+            recovery_window_active = recovery_trade_count < contract['recovery_thresholds']['min_trades'] or recovery_win_rate < contract['recovery_thresholds']['min_win_rate'] or recovery_avg_return_pct < contract['recovery_thresholds']['min_avg_return_pct']
+            if mode == 'rollback' or cooldown_active:
+                reason_code = 'SKIP_STRATEGY_COOLDOWN_ACTIVE'
+            else:
+                reason_code = 'SKIP_STRATEGY_RECOVERY_WINDOW_ACTIVE'
+            active_trigger = {
+                **contract,
+                'cooldown_active': cooldown_active,
+                'recovery_window_active': recovery_window_active,
+                'reason_code': reason_code if (cooldown_active or recovery_window_active) else None,
+                'reason_codes': [code for code in list(feedback.get('reason_codes') or []) + ([reason_code] if reason_code else []) if code],
+                'cooldown_until': cooldown_until.isoformat() if cooldown_until else None,
+                'remaining_minutes': max(0, int((cooldown_until - now).total_seconds() // 60)) if cooldown_until and cooldown_until > now else 0,
+                'scope': scope,
+                'scope_key': f'{strategy}:{scope}:{symbol if scope in {"symbol", "symbol_regime"} else "*"}:{current_regime if scope in {"regime", "symbol_regime"} else "*"}',
+                'cooldown_trade_id': latest.get('id'),
+                'trigger_trade_time': close_time.isoformat() if close_time else close_time_raw,
+                'trigger_return_pct': float(latest.get('return_pct') or 0.0),
+                'trigger_close_reason_category': latest.get('close_reason_category'),
+                'recovery_window_trades': [
+                    {
+                        'trade_id': item.get('id'),
+                        'close_time': item.get('close_time') or item.get('closed_at'),
+                        'return_pct': float(item.get('return_pct') or 0.0),
+                        'close_reason_category': item.get('close_reason_category'),
+                    }
+                    for item in recovery_rows
+                ],
+                'recovery_trade_count': recovery_trade_count,
+                'recovery_win_rate': recovery_win_rate,
+                'recovery_avg_return_pct': recovery_avg_return_pct,
+                'feedback_status': feedback.get('status'),
+                'feedback_mode': mode,
+                'feedback_reason_codes': list(feedback.get('reason_codes') or []),
+                'summary': f'{strategy}:{mode}:scope={scope}:cooldown={"active" if cooldown_active else "idle"}:recovery={"active" if recovery_window_active else "clear"}',
+            }
+            if cooldown_active or recovery_window_active:
+                return active_trigger
+        return contract
 
     def _build_strategy_selection_contract(self, symbol: str, signal) -> dict:
         cfg = self._strategy_selection_config(symbol)
@@ -1056,7 +1183,7 @@ class TradingBot:
             if name not in unique_strategies:
                 unique_strategies.append(name)
         contract = {
-            'schema_version': 'adaptive_strategy_selection_v2',
+            'schema_version': 'adaptive_strategy_selection_v3',
             'enabled': bool(cfg.get('enabled', True)),
             'symbol': symbol,
             'regime_tag': current_regime,
@@ -1068,7 +1195,15 @@ class TradingBot:
             'strategy_budgets': {name: cfg['base_budget_ratio'] for name in unique_strategies},
             'strategy_slots': {name: index + 1 for index, name in enumerate(unique_strategies)},
             'strategy_stats': {},
+            'strategy_cooldowns': {},
             'selection_reason_codes': ['STRATEGY_SELECTION_BASELINE'],
+            'cooldown_summary': {
+                'enabled': bool(cfg.get('strategy_cooldown_enabled', True)),
+                'active_count': 0,
+                'recovery_window_count': 0,
+                'blocked_strategies': [],
+                'reason_code_counts': {},
+            },
             'budget_summary': {
                 'slot_cap': len(unique_strategies),
                 'selected_slots': len(unique_strategies),
@@ -1084,6 +1219,7 @@ class TradingBot:
 
         recent_trades = self.db.get_recent_close_outcome_trades(symbol=symbol, limit=cfg['lookback_limit']) if self.db else []
         stats = {}
+        strategy_cooldowns = {}
         for strategy in unique_strategies:
             strategy_rows = []
             matched_rows = []
@@ -1137,6 +1273,19 @@ class TradingBot:
                 weight = 0.0
                 reasons_applied.append('matched_rollback_feedback')
             weight = max(0.0, min(weight, 1.0))
+            cooldown_contract = self._evaluate_strategy_cooldown(
+                strategy=strategy,
+                symbol=symbol,
+                current_regime=current_regime,
+                current_policy=current_policy,
+                preferred_rows=preferred_rows,
+                strategy_rows=strategy_rows,
+                cfg=cfg,
+            )
+            strategy_cooldowns[strategy] = cooldown_contract
+            if cooldown_contract.get('cooldown_active') or cooldown_contract.get('recovery_window_active'):
+                weight = 0.0
+                reasons_applied.append('strategy_cooldown_guard')
             stats[strategy] = {
                 'trade_count': trade_count,
                 'matched_trade_count': len(matched_rows),
@@ -1150,6 +1299,7 @@ class TradingBot:
                 'freeze_match': freeze_match,
                 'weight': round(weight, 4),
                 'reasons': reasons_applied,
+                'cooldown_contract': cooldown_contract,
             }
 
         ranked = sorted(stats.items(), key=lambda item: (-float(item[1].get('weight', 0.0)), -int(item[1].get('trade_count', 0)), -float(item[1].get('avg_return_pct', 0.0)), item[0]))
@@ -1194,19 +1344,43 @@ class TradingBot:
                 'slot_in_scope': idx <= slot_cap,
             })
             ranking_rows.append({'strategy': name, **detail})
+        cooldown_reason_counts = Counter()
+        blocked_strategies = []
+        active_count = 0
+        recovery_window_count = 0
+        for name, cooldown in strategy_cooldowns.items():
+            if cooldown.get('cooldown_active'):
+                active_count += 1
+            if cooldown.get('recovery_window_active'):
+                recovery_window_count += 1
+            if cooldown.get('reason_code'):
+                cooldown_reason_counts[str(cooldown.get('reason_code'))] += 1
+                blocked_strategies.append(name)
         if slot_cap < len(unique_strategies):
             reason_codes.append('REGIME_SLOT_CAP_APPLIED')
         if any(float(v) < 1.0 for v in budgets.values()):
             reason_codes.append('STRATEGY_BUDGET_DEWEIGHT_APPLIED')
         if any(not ((stats.get(name) or {}).get('matched_mode') == 'matched') for name in selected):
             reason_codes.append('STRATEGY_SELECTION_FALLBACK_USED')
+        if active_count > 0:
+            reason_codes.append('STRATEGY_COOLDOWN_ACTIVE')
+        if recovery_window_count > 0:
+            reason_codes.append('STRATEGY_RECOVERY_WINDOW_ACTIVE')
         contract.update({
             'selected_strategies': selected,
             'strategy_weights': weights,
             'strategy_budgets': budgets,
             'strategy_slots': slots,
             'strategy_stats': stats,
+            'strategy_cooldowns': strategy_cooldowns,
             'selection_reason_codes': reason_codes or ['STRATEGY_SELECTION_BASELINE'],
+            'cooldown_summary': {
+                'enabled': bool(cfg.get('strategy_cooldown_enabled', True)),
+                'active_count': active_count,
+                'recovery_window_count': recovery_window_count,
+                'blocked_strategies': blocked_strategies,
+                'reason_code_counts': dict(cooldown_reason_counts),
+            },
             'budget_summary': {
                 'slot_cap': slot_cap,
                 'selected_slots': len(selected),
@@ -1215,7 +1389,7 @@ class TradingBot:
                 'top_strategy': selected[0] if selected else None,
             },
             'ranking': ranking_rows,
-            'decision_summary': f"selected={','.join(selected) or 'none'} / regime={current_regime} / policy={current_policy} / slot_cap={slot_cap} / budget={round(sum(budgets.get(name, 0.0) for name in selected), 2)} / reasons={','.join(reason_codes or ['baseline'])}",
+            'decision_summary': f"selected={','.join(selected) or 'none'} / regime={current_regime} / policy={current_policy} / slot_cap={slot_cap} / budget={round(sum(budgets.get(name, 0.0) for name in selected), 2)} / cooldowns={active_count}+{recovery_window_count} / reasons={','.join(reason_codes or ['baseline'])}",
         })
         return contract
 
@@ -1461,6 +1635,7 @@ class TradingBot:
         diversification_context = self._candidate_diversification_context(symbol, signal, risk_details)
         strategy_selection = dict(((getattr(signal, 'market_context', {}) or {}).get('strategy_selection')) or {})
         strategy_budget_summary = dict(strategy_selection.get('budget_summary') or {})
+        strategy_cooldown_summary = dict(strategy_selection.get('cooldown_summary') or {})
         ranking_contract = {
             'symbol': symbol,
             'signal_id': signal_id,
@@ -1477,6 +1652,8 @@ class TradingBot:
             'strategy_budget_summary': strategy_budget_summary,
             'strategy_budget_ratio': float(strategy_budget_summary.get('selected_budget_ratio', 0.0) or 0.0),
             'strategy_slot_cap': int(strategy_budget_summary.get('slot_cap', len(strategy_selection.get('selected_strategies') or [])) or 0),
+            'strategy_cooldown_summary': strategy_cooldown_summary,
+            'strategy_cooldown_reason_codes': list((strategy_selection.get('cooldown_summary') or {}).get('reason_code_counts', {}).keys()),
             'close_outcome_scope_mode': scope_mode,
             'close_outcome_scope': scope_window.get('scope'),
             'close_outcome_scope_key': scope_window.get('scope_key'),

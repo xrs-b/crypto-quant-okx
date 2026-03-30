@@ -82,6 +82,18 @@ _REASON_CODE_SPECS: Dict[str, Dict[str, str]] = {
         'family': 'execution_quota',
         'legacy_code': 'EXECUTION_QUOTA_PASSED',
     },
+    'SKIP_STRATEGY_COOLDOWN_ACTIVE': {
+        'disposition': 'skip',
+        'stage': 'strategy_selection',
+        'family': 'strategy_cooldown',
+        'legacy_code': 'STRATEGY_COOLDOWN_ACTIVE',
+    },
+    'SKIP_STRATEGY_RECOVERY_WINDOW_ACTIVE': {
+        'disposition': 'skip',
+        'stage': 'strategy_selection',
+        'family': 'strategy_cooldown',
+        'legacy_code': 'STRATEGY_RECOVERY_WINDOW_ACTIVE',
+    },
 }
 
 _REASON_CODE_ALIASES: Dict[str, str] = {}

@@ -76,6 +76,9 @@ def validate_live_execution_guard_contract(plan_context: Dict[str, Any] = None, 
     if str(contract.get('exchange_mode') or '').strip().lower() != normalized_mode:
         result.update({'passed': False, 'reason': 'exchange_mode_mismatch', 'reason_code': 'DENY_LIVE_GUARD_CONTRACT_INVALID'})
         return result
+    if str(contract.get('schema_version') or '').strip() != 'live_execution_guard_v1':
+        result.update({'passed': False, 'reason': 'schema_version_mismatch', 'reason_code': 'DENY_LIVE_GUARD_CONTRACT_INVALID'})
+        return result
     if permit:
         if str(contract.get('final_execution_permit_reason_code') or '') != str(permit.get('reason_code') or ''):
             result.update({'passed': False, 'reason': 'permit_reason_code_mismatch', 'reason_code': 'DENY_LIVE_GUARD_CONTRACT_INVALID'})

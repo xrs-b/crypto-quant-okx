@@ -33,6 +33,7 @@ from bot.run import TradingBot, build_exchange_diagnostics, build_exchange_smoke
 from dashboard.api import app
 from core.risk_budget import get_risk_budget_config, compute_entry_plan, summarize_margin_usage, summarize_risk_hint_changes
 from core.presets import PresetManager
+from scripts.testnet_smoke_acceptance import _extract_smoke_result, _build_acceptance
 
 
 class FakeExchange:
@@ -2900,6 +2901,31 @@ class TestDiagnostics(unittest.TestCase):
         self.assertIn('testnet', result['error'])
 
 
+class TestTestnetSmokeAcceptanceScript(unittest.TestCase):
+    def test_extract_smoke_result_from_cli_output(self):
+        payload = {'opened': True, 'closed': True, 'cleanup_needed': False}
+        stdout = "line1\nSMOKE_RESULT_JSON=" + json.dumps(payload, ensure_ascii=False) + "\n"
+        self.assertEqual(_extract_smoke_result(stdout), payload)
+
+    def test_build_acceptance_fails_on_cleanup_or_residual(self):
+        acceptance = _build_acceptance({
+            'opened': True,
+            'closed': True,
+            'cleanup_needed': True,
+            'residual_position_detected': True,
+            'reconcile_summary': {
+                'open_order_confirmed': True,
+                'close_order_confirmed': False,
+            },
+            'failure_compensation_hint': 'manual_testnet_cleanup_required',
+        }, cli_ok=True, preview_only=False)
+        self.assertFalse(acceptance['passed'])
+        self.assertIn('cleanup_not_needed', acceptance['failed_checks'])
+        self.assertIn('no_residual_position', acceptance['failed_checks'])
+        self.assertIn('close_order_confirmed', acceptance['failed_checks'])
+        self.assertEqual(acceptance['failure_compensation_hint'], 'manual_testnet_cleanup_required')
+
+
 class TestHealthSummary(unittest.TestCase):
     def test_build_approval_hygiene_summary_reports_stale_counts(self):
         cfg = Config()
@@ -3445,6 +3471,32 @@ class TestTradingExecutor(unittest.TestCase):
             50000,
             signal_id=11,
             plan_context={'final_execution_permit': {'allowed': True, 'reason_code': 'PERMIT_FINAL_EXECUTION_GRANTED', 'reason': 'ok', 'exchange_mode': 'testnet'}},
+        )
+        self.assertIsNone(trade_id)
+        self.assertEqual(self.executor.exchange.order_amounts, [])
+
+    def test_open_position_fail_closed_when_live_execution_guard_schema_mismatch(self):
+        self.executor.exchange = FakeExecutorExchange()
+        trade_id = self.executor.open_position(
+            'BTC/USDT',
+            'long',
+            50000,
+            signal_id=12,
+            plan_context={
+                'final_execution_permit': {'allowed': True, 'reason_code': 'PERMIT_FINAL_EXECUTION_GRANTED', 'reason': 'ok', 'exchange_mode': 'testnet'},
+                'live_execution_guard': {
+                    'schema_version': 'live_execution_guard_v0',
+                    'symbol': 'BTC/USDT',
+                    'side': 'long',
+                    'signal_id': 12,
+                    'exchange_mode': 'testnet',
+                    'final_execution_permit_reason_code': 'PERMIT_FINAL_EXECUTION_GRANTED',
+                    'final_execution_allowed': True,
+                    'guard_passed': True,
+                    'guard_reason': 'ok',
+                    'guard_reason_code': 'PERMIT_FINAL_EXECUTION_GRANTED',
+                },
+            },
         )
         self.assertIsNone(trade_id)
         self.assertEqual(self.executor.exchange.order_amounts, [])

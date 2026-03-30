@@ -24,11 +24,23 @@ python scripts/testnet_smoke_acceptance.py --runs 3 --preview-only
 
 ## 通过标准
 
+脚本现会自动聚合每轮 smoke 的机器可读结果，形成明确 pass/fail acceptance。
+
 - 每轮 CLI 退出码为 0
 - `smoke_runs` 有新增记录
 - `opened=true` 且 `closed=true`
 - `cleanup_needed=false`
 - `residual_position_detected=false`
+- `reconcile_summary.open_order_confirmed=true`
+- `reconcile_summary.close_order_confirmed=true`
+
+聚合输出位于：
+
+- `acceptance.status`：整体 `pass/fail`
+- `acceptance.overall_failed_checks`：本轮连续 smoke 的失败检查项汇总
+- `acceptance.cleanup_needed_runs`：出现 cleanup 的轮次
+- `acceptance.residual_position_runs`：出现 residual 的轮次
+- `acceptance.runs_requiring_follow_up`：需要人工跟进的轮次
 
 ## 建议巡检项
 

@@ -3249,6 +3249,7 @@ def main():
                     print(f"close_order: {result['close_order']}")
             if result.get('smoke_run_id'):
                 print(f"smoke_run_id: {result['smoke_run_id']}")
+            print(f"SMOKE_RESULT_JSON={json.dumps(result, ensure_ascii=False, sort_keys=True)}")
 
     elif args.validation_entry:
         if not args.case or len(args.case) != 1:

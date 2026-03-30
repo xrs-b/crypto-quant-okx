@@ -214,6 +214,13 @@ def normalize_regime_snapshot(snapshot: Optional[Dict[str, Any]]) -> Dict[str, A
 class RegimeDetector:
     """Regime 检测器 - 轻量版 v1"""
 
+    COLUMN_ALIASES = {
+        'close': ['close', 4, 'c'],
+        'high': ['high', 2, 'h'],
+        'low': ['low', 3, 'l'],
+        'volume': ['volume', 5, 'v'],
+    }
+
     DEFAULT_CONFIG = {
         'ema_short': 20,
         'ema_long': 60,
@@ -230,7 +237,8 @@ class RegimeDetector:
         self.config = {**self.DEFAULT_CONFIG, **(config or {})}
 
     def detect(self, df: pd.DataFrame, price: float = None) -> RegimeResult:
-        if not self._validate_data(df):
+        normalized_df = self._normalize_input_df(df)
+        if not self._validate_data(normalized_df):
             return RegimeResult(
                 regime=Regime.UNKNOWN,
                 confidence=0.0,
@@ -238,7 +246,7 @@ class RegimeDetector:
                 details="数据不足，回退旧逻辑",
             )
 
-        indicators = self._calculate_indicators(df, price)
+        indicators = self._calculate_indicators(normalized_df, price)
         regime, confidence, details = self._classify(indicators)
         return RegimeResult(
             regime=regime,
@@ -246,6 +254,28 @@ class RegimeDetector:
             indicators=indicators,
             details=details,
         )
+
+    def _resolve_column(self, df: pd.DataFrame, logical_name: str):
+        for candidate in self.COLUMN_ALIASES.get(logical_name, [logical_name]):
+            if candidate in df.columns:
+                return candidate
+        return None
+
+    def _normalize_input_df(self, df: pd.DataFrame) -> pd.DataFrame:
+        if df is None or getattr(df, 'empty', True):
+            return df
+        resolved = {}
+        for logical_name in self.COLUMN_ALIASES:
+            column = self._resolve_column(df, logical_name)
+            if column is not None:
+                resolved[logical_name] = df[column]
+        if not resolved:
+            return df
+        normalized_df = pd.DataFrame(resolved, index=df.index)
+        for column in df.columns:
+            if column not in normalized_df.columns:
+                normalized_df[column] = df[column]
+        return normalized_df
 
     def _validate_data(self, df: pd.DataFrame) -> bool:
         required_cols = ['close']

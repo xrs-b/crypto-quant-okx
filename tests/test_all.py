@@ -1537,6 +1537,18 @@ class TestSignalDetector(unittest.TestCase):
         valid_regimes = ['trend', 'range', 'high_vol', 'low_vol', 'risk_anomaly', 'unknown']
         self.assertIn(signal.market_context['regime'], valid_regimes)
 
+    def test_regime_detection_supports_live_numeric_ohlcv_columns(self):
+        """live K线使用 0..5 列时，也应该产出真实 regime，而不是 unknown/0%"""
+        current_price = self.df[4].iloc[-1]
+        signal = self.detector.analyze('BTC/USDT', self.df, current_price, None)
+
+        self.assertNotEqual(signal.regime_snapshot['regime'], 'unknown')
+        self.assertGreater(signal.regime_snapshot['confidence'], 0.0)
+        self.assertTrue(signal.regime_snapshot['indicators'])
+        self.assertNotEqual(signal.regime_snapshot['details'], '数据不足，回退旧逻辑')
+        self.assertEqual(signal.market_context['regime'], signal.regime_snapshot['regime'])
+        self.assertEqual(signal.market_context['regime_confidence'], signal.regime_snapshot['confidence'])
+
     def test_detector_attaches_unified_observe_only_snapshots(self):
         current_price = self.df[4].iloc[-1]
         signal = self.detector.analyze('BTC/USDT', self.df, current_price, None)
@@ -1662,6 +1674,34 @@ class TestNotifications(unittest.TestCase):
         self.assertTrue(duplicate_runtime['suppressed'])
         self.assertFalse(probe['delivered'])
         self.assertEqual(probe['outbox_status'], 'disabled')
+
+    def test_notify_signal_live_detector_payload_keeps_real_regime_and_confidence(self):
+        cfg = Config()
+        cfg._config.setdefault('notification', {}).setdefault('discord', {})
+        cfg._config['notification']['discord'].update({'enabled': False, 'bot_token': '', 'channel_id': '', 'webhook_url': ''})
+        db = FakeLogDB()
+        notifier = NotificationManager(cfg, db, None)
+        detector = SignalDetector(cfg.all)
+
+        dates = pd.date_range('2024-01-01', periods=80, freq='1h')
+        close = pd.Series(np.linspace(50000, 56000, 80))
+        df = pd.DataFrame({
+            0: dates,
+            1: close - 50,
+            2: close + 120,
+            3: close - 120,
+            4: close,
+            5: np.linspace(1000, 2400, 80),
+        })
+        signal = detector.analyze('BTC/USDT', df, float(df[4].iloc[-1]), None)
+        signal.signal_type = 'buy'
+        signal.strength = max(signal.strength, 42)
+        details = {'regime_snapshot': signal.regime_snapshot, 'adaptive_policy_snapshot': signal.adaptive_policy_snapshot}
+
+        notifier.notify_signal(signal, False, '测试 live regime payload', details)
+        message = db.logs[-1]['details']['message']
+        self.assertNotIn('Regime：unknown ｜ 置信度：0%', message)
+        self.assertIn(f"Regime：{signal.regime_snapshot['name']} ｜ 置信度：{signal.regime_snapshot['confidence']:.0%}", message)
 
     def test_notify_signal_observe_only_uses_market_context_fallback(self):
         cfg = Config()

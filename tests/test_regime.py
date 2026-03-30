@@ -872,7 +872,7 @@ class TestAdaptiveStrategySelectionCooldown(unittest.TestCase):
     def test_strategy_selection_contract_blocks_strategy_on_recent_close_outcome_cooldown(self):
         self._record_closed_trade(return_pct=-4.0, close_time='2999-03-30T10:00:00')
         contract = self.bot._build_strategy_selection_contract('BTC/USDT', self._build_signal())
-        self.assertEqual(contract['schema_version'], 'adaptive_strategy_selection_v4')
+        self.assertEqual(contract['schema_version'], 'adaptive_strategy_selection_v5')
         self.assertIn('RSI', contract['strategy_cooldowns'])
         self.assertTrue(contract['strategy_cooldowns']['RSI']['cooldown_active'])
         self.assertEqual(contract['strategy_cooldowns']['RSI']['reason_code'], 'SKIP_STRATEGY_COOLDOWN_ACTIVE')
@@ -929,9 +929,11 @@ class TestAdaptiveStrategySelectionCooldown(unittest.TestCase):
             'strategy_weights': {'RSI': 0.0},
             'strategy_budgets': {'RSI': 0.1},
             'strategy_slots': {'RSI': 0},
+            'selection_reason_codes': ['STRATEGY_COOLDOWN_ACTIVE'],
             'strategy_cooldowns': {'RSI': {'cooldown_active': True, 'recovery_window_active': True, 'reason_code': 'SKIP_STRATEGY_COOLDOWN_ACTIVE', 'reactivation_gate': {'status': 'confirm_required', 'gate_active': True, 'reason_code': 'SKIP_STRATEGY_REACTIVATION_CONFIRM_REQUIRED'}}},
             'cooldown_summary': {'active_count': 1, 'recovery_window_count': 1},
             'reactivation_summary': {'confirm_required_count': 1, 'probation_count': 0},
+            'reactivation_evidence_summary': {'strategies_evaluated': ['RSI']},
         }
         result = detector.apply_strategy_selection(signal, selection_contract, symbol='BTC/USDT')
         meta = result.reasons[0]['metadata']
@@ -941,7 +943,23 @@ class TestAdaptiveStrategySelectionCooldown(unittest.TestCase):
         self.assertEqual(meta['strategy_reactivation_status'], 'confirm_required')
         self.assertEqual(result.market_context['strategy_cooldown_summary']['active_count'], 1)
         self.assertEqual(result.market_context['strategy_reactivation_summary']['confirm_required_count'], 1)
+        self.assertEqual(result.market_context['final_strategy_contract']['reason_code'], 'SKIP_FINAL_STRATEGY_ALL_BLOCKED')
         self.assertFalse(result.reasons[0]['triggered'])
+
+    def test_strategy_selection_contract_records_structured_reactivation_evidence(self):
+        strategy_cfg = self.cfg._config.setdefault('adaptive_regime', {}).setdefault('strategy_selection', {})
+        strategy_cfg['strategy_recovery_window_trades'] = 1
+        strategy_cfg['strategy_reactivation_evidence_signal_strength_min'] = 20
+        strategy_cfg['strategy_reactivation_evidence_repeated_trigger_min'] = 2
+        self._record_closed_trade(return_pct=-4.0, close_time='2026-03-20T10:00:00')
+        contract = self.bot._build_strategy_selection_contract('BTC/USDT', self._build_signal())
+        gate = contract['strategy_cooldowns']['RSI']['reactivation_gate']
+        self.assertIn('evidence_results', gate)
+        self.assertIn('evidence_summary', gate)
+        self.assertFalse(gate['confirm_passed'])
+        self.assertEqual(gate['evidence_results']['outcome_improving']['reason_code'], 'REACT_CONFIRM_FAIL_OUTCOME')
+        self.assertGreaterEqual(gate['evidence_results']['signal_strength']['weighted_signal_strength'], 0.0)
+        self.assertEqual(contract['reactivation_evidence_summary']['strategies_evaluated'], ['RSI'])
 
 
 if __name__ == '__main__':

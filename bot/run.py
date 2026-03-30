@@ -1055,10 +1055,17 @@ class TradingBot:
             'strategy_reactivation_probation_trade_limit': max(int(raw.get('strategy_reactivation_probation_trade_limit', 2) or 2), 0),
             'strategy_reactivation_probation_weight_multiplier': min(max(float(raw.get('strategy_reactivation_probation_weight_multiplier', 0.35) or 0.35), 0.0), 1.0),
             'strategy_reactivation_probation_budget_cap': min(max(float(raw.get('strategy_reactivation_probation_budget_cap', 0.4) or 0.4), 0.0), 1.0),
+            # === adaptive_strategy_selection_v5: multi-dimensional confirm evidence ===
+            'strategy_reactivation_evidence_required': bool(raw.get('strategy_reactivation_evidence_required', True)),
+            'strategy_reactivation_evidence_outcome_improving_min_delta': max(float(raw.get('strategy_reactivation_evidence_outcome_improving_min_delta', 0.5) or 0.5), 0.0),
+            'strategy_reactivation_evidence_regime_match_required': bool(raw.get('strategy_reactivation_evidence_regime_match_required', False)),
+            'strategy_reactivation_evidence_signal_strength_min': min(max(float(raw.get('strategy_reactivation_evidence_signal_strength_min', 60.0) or 60.0), 0.0), 100.0),
+            'strategy_reactivation_evidence_repeated_trigger_min': max(int(raw.get('strategy_reactivation_evidence_repeated_trigger_min', 1) or 1), 0),
+            'strategy_reactivation_evidence_all_pass_required': bool(raw.get('strategy_reactivation_evidence_all_pass_required', False)),
         }
 
     def _evaluate_strategy_cooldown(self, *, strategy: str, symbol: str, current_regime: str, current_policy: str,
-                                    preferred_rows: list, strategy_rows: list, cfg: dict) -> dict:
+                                    preferred_rows: list, strategy_rows: list, cfg: dict, current_signal_evidence: dict = None) -> dict:
         contract = {
             'strategy': strategy,
             'symbol': symbol,
@@ -1170,12 +1177,113 @@ class TradingBot:
             confirm_avg_return_pct = round(sum(float(item.get('return_pct') or 0.0) for item in confirm_rows) / confirm_trade_count, 6) if confirm_trade_count else 0.0
             confirm_positive_return_count = sum(1 for item in confirm_rows if float(item.get('return_pct') or 0.0) > 0)
             require_positive_return = bool(cfg.get('strategy_reactivation_require_positive_return', True))
-            confirm_passed = (
+            base_confirm_passed = (
                 confirm_trade_count >= confirm_trades
                 and confirm_win_rate >= float(cfg.get('strategy_reactivation_min_win_rate', 0.0) or 0.0)
                 and confirm_avg_return_pct >= float(cfg.get('strategy_reactivation_min_avg_return_pct', 0.0) or 0.0)
                 and (not require_positive_return or confirm_positive_return_count > 0)
             )
+
+            # === adaptive_strategy_selection_v5: multi-dimensional confirm evidence ===
+            evidence_required = bool(cfg.get('strategy_reactivation_evidence_required', True))
+            all_pass_required = bool(cfg.get('strategy_reactivation_evidence_all_pass_required', False))
+
+            # Evidence 1: outcome improving (compare recent confirm window avg vs trigger trade)
+            trigger_return = float(trigger_row.get('return_pct') or 0.0)
+            outcome_improving_min_delta = float(cfg.get('strategy_reactivation_evidence_outcome_improving_min_delta', 0.5) or 0.5)
+            outcome_delta = confirm_avg_return_pct - trigger_return
+            outcome_improving_passed = bool(outcome_delta >= outcome_improving_min_delta)
+
+            # Evidence 2: regime match (confirm window all matched regime/policy)
+            regime_match_required = bool(cfg.get('strategy_reactivation_evidence_regime_match_required', False))
+            regime_matched_count = sum(
+                1 for item in confirm_rows
+                if str(item.get('regime_tag') or 'unknown') == current_regime
+            )
+            regime_match_ratio = round(regime_matched_count / confirm_trade_count * 100, 4) if confirm_trade_count else 0.0
+            regime_match_passed = True
+            if regime_match_required:
+                regime_match_passed = bool(regime_matched_count == confirm_trade_count and confirm_trade_count > 0)
+
+            signal_evidence = dict(current_signal_evidence or {})
+            weighted_signal_strength = float(signal_evidence.get('weighted_signal_strength', 0.0) or 0.0)
+            strategy_trigger_count = int(signal_evidence.get('strategy_trigger_count', 0) or 0)
+            current_triggered = bool(signal_evidence.get('triggered', False))
+
+            # Evidence 3: current signal strength for this strategy must be strong enough, not just historical proxy
+            signal_strength_min = min(max(float(cfg.get('strategy_reactivation_evidence_signal_strength_min', 60.0) or 60.0), 0.0), 100.0)
+            signal_strength_passed = bool(current_triggered and weighted_signal_strength >= signal_strength_min)
+
+            # Evidence 4: repeated trigger evidence = positive confirm trades + current strategy trigger count
+            repeated_trigger_min = max(int(cfg.get('strategy_reactivation_evidence_repeated_trigger_min', 1) or 1), 0)
+            repeated_trigger_observed = confirm_positive_return_count + strategy_trigger_count
+            repeated_trigger_passed = bool(repeated_trigger_observed >= repeated_trigger_min)
+
+            evidence_results = {
+                'outcome_improving': {
+                    'passed': bool(outcome_improving_passed),
+                    'trigger_return_pct': round(trigger_return, 6),
+                    'confirm_avg_return_pct': round(confirm_avg_return_pct, 6),
+                    'outcome_delta': round(outcome_delta, 6),
+                    'min_delta_required': round(outcome_improving_min_delta, 4),
+                    'reason_code': 'REACT_EVIDENCE_OUTCOME_IMPROVING' if outcome_improving_passed else 'REACT_CONFIRM_FAIL_OUTCOME',
+                },
+                'regime_match': {
+                    'passed': bool(regime_match_passed),
+                    'required': bool(regime_match_required),
+                    'matched_count': int(regime_matched_count),
+                    'total_count': int(confirm_trade_count),
+                    'match_ratio_pct': round(regime_match_ratio, 4),
+                    'reason_code': 'REACT_EVIDENCE_REGIME_MATCHED' if regime_match_passed else 'REACT_CONFIRM_FAIL_REGIME',
+                },
+                'signal_strength': {
+                    'passed': bool(signal_strength_passed),
+                    'weighted_signal_strength': round(weighted_signal_strength, 6),
+                    'raw_signal_strength': round(float(signal_evidence.get('signal_strength', 0.0) or 0.0), 6),
+                    'signal_confidence': round(float(signal_evidence.get('signal_confidence', 0.0) or 0.0), 6),
+                    'current_triggered': current_triggered,
+                    'min_threshold_pct': round(signal_strength_min, 4),
+                    'reason_code': 'REACT_EVIDENCE_SIGNAL_STRONG' if signal_strength_passed else 'REACT_CONFIRM_FAIL_SIGNAL_STRENGTH',
+                },
+                'repeated_trigger': {
+                    'passed': bool(repeated_trigger_passed),
+                    'positive_confirm_count': int(confirm_positive_return_count),
+                    'current_trigger_count': int(strategy_trigger_count),
+                    'observed_total': int(repeated_trigger_observed),
+                    'min_required': int(repeated_trigger_min),
+                    'reason_code': 'REACT_EVIDENCE_REPEATED_TRIGGER' if repeated_trigger_passed else 'REACT_CONFIRM_FAIL_REPEATED',
+                },
+            }
+
+            # Combine: if all_pass_required, need all evidence; otherwise use base + outcome_improving as gate
+            if evidence_required:
+                if all_pass_required:
+                    confirm_passed = bool(
+                        base_confirm_passed
+                        and outcome_improving_passed
+                        and regime_match_passed
+                        and signal_strength_passed
+                        and repeated_trigger_passed
+                    )
+                else:
+                    # Require base + outcome_improving; regime/signal/repeated as soft evidence (logged but not hard gates)
+                    confirm_passed = bool(base_confirm_passed and outcome_improving_passed)
+            else:
+                confirm_passed = bool(base_confirm_passed)
+
+            # Derive composite confirm evidence reason codes
+            evidence_pass_count = sum(1 for e in evidence_results.values() if e['passed'])
+            if confirm_passed and all_pass_required and evidence_pass_count == 4:
+                confirm_evidence_reason_code = 'REACT_CONFIRM_ALL_EVIDENCE_PASSED'
+            elif confirm_passed and evidence_pass_count >= 2:
+                confirm_evidence_reason_code = 'REACT_EVIDENCE_PARTIAL_PASS'
+            elif confirm_passed:
+                confirm_evidence_reason_code = 'REACT_CONFIRM_ALL_EVIDENCE_PASSED'
+            else:
+                # Pick the first failing evidence code
+                fail_codes = [e['reason_code'] for e in evidence_results.values() if not e['passed']]
+                confirm_evidence_reason_code = fail_codes[0] if fail_codes else 'REACT_CONFIRM_FAIL_THRESHOLD'
+
             probation_limit = max(int(cfg.get('strategy_reactivation_probation_trade_limit', 0) or 0), 0)
             probation_trade_count = min(recovery_trade_count, probation_limit) if confirm_passed else 0
             probation_remaining_trades = max(0, probation_limit - probation_trade_count) if confirm_passed else 0
@@ -1243,7 +1351,21 @@ class TradingBot:
                     'probation_remaining_trades': probation_remaining_trades,
                     'probation_weight_multiplier': float(cfg.get('strategy_reactivation_probation_weight_multiplier', 0.35) or 0.35),
                     'probation_budget_cap': float(cfg.get('strategy_reactivation_probation_budget_cap', 0.4) or 0.4),
-                    'summary': f'reactivation:{gate_status}:confirm={confirm_trade_count}/{confirm_trades}:probation_remaining={probation_remaining_trades}',
+                    'evidence_required': evidence_required,
+                    'all_pass_required': all_pass_required,
+                    'base_confirm_passed': bool(base_confirm_passed),
+                    'confirm_passed': bool(confirm_passed),
+                    'evidence_pass_count': int(evidence_pass_count),
+                    'evidence_results': evidence_results,
+                    'evidence_summary': {
+                        'trigger_trade_id': trigger_row.get('id'),
+                        'trigger_return_pct': round(trigger_return, 6),
+                        'current_signal_evidence': signal_evidence,
+                        'pass_count': int(evidence_pass_count),
+                        'total_count': len(evidence_results),
+                        'confirm_reason_code': confirm_evidence_reason_code,
+                    },
+                    'summary': f'reactivation:{gate_status}:confirm={confirm_trade_count}/{confirm_trades}:evidence={evidence_pass_count}/{len(evidence_results)}:probation_remaining={probation_remaining_trades}',
                 },
                 'summary': f'{strategy}:{mode}:scope={scope}:cooldown={"active" if cooldown_active else "idle"}:recovery={"active" if recovery_window_active else "clear"}:reactivation={gate_status}',
             }
@@ -1264,7 +1386,7 @@ class TradingBot:
             if name not in unique_strategies:
                 unique_strategies.append(name)
         contract = {
-            'schema_version': 'adaptive_strategy_selection_v4',
+            'schema_version': 'adaptive_strategy_selection_v5',
             'enabled': bool(cfg.get('enabled', True)),
             'symbol': symbol,
             'regime_tag': current_regime,
@@ -1293,6 +1415,22 @@ class TradingBot:
                 'guarded_strategies': [],
                 'reason_code_counts': {},
             },
+            # === adaptive_strategy_selection_v5: multi-dimensional confirm evidence summary ===
+            'reactivation_evidence_summary': {
+                'enabled': bool(cfg.get('strategy_reactivation_evidence_required', True)),
+                'all_pass_required': bool(cfg.get('strategy_reactivation_evidence_all_pass_required', False)),
+                'strategies_evaluated': [],
+                'evidence_counts': {
+                    'outcome_improving_passed': 0,
+                    'regime_match_passed': 0,
+                    'signal_strength_passed': 0,
+                    'repeated_trigger_passed': 0,
+                    'all_evidence_passed': 0,
+                    'partial_evidence_passed': 0,
+                    'all_failed': 0,
+                },
+                'reason_code_counts': {},
+            },
             'budget_summary': {
                 'slot_cap': len(unique_strategies),
                 'selected_slots': len(unique_strategies),
@@ -1300,6 +1438,7 @@ class TradingBot:
                 'available_budget_ratio': round(len(unique_strategies) * cfg['base_budget_ratio'], 4),
                 'top_strategy': unique_strategies[0] if unique_strategies else None,
             },
+            'final_strategy_contract': {},
             'ranking': [],
             'decision_summary': 'strategy_selection_disabled_or_no_candidates',
         }
@@ -1471,6 +1610,56 @@ class TradingBot:
                 guarded_strategies.append(name)
             if gate.get('reason_code'):
                 reactivation_reason_counts[str(gate.get('reason_code'))] += 1
+        # === adaptive_strategy_selection_v5: aggregate evidence_results into reactivation_evidence_summary ===
+        evidence_counts = {
+            'outcome_improving_passed': 0,
+            'regime_match_passed': 0,
+            'signal_strength_passed': 0,
+            'repeated_trigger_passed': 0,
+            'all_evidence_passed': 0,
+            'partial_evidence_passed': 0,
+            'all_failed': 0,
+        }
+        evidence_reason_counts = Counter()
+        strategies_evaluated = []
+        for name, cooldown in strategy_cooldowns.items():
+            gate = dict(cooldown.get('reactivation_gate') or {})
+            ev = gate.get('evidence_results') or {}
+            if not ev:
+                continue
+            strategies_evaluated.append(name)
+            passed_vals = [v['passed'] for v in ev.values()]
+            all_passed = all(passed_vals)
+            any_passed = any(passed_vals)
+            if all_passed:
+                evidence_counts['all_evidence_passed'] += 1
+            elif any_passed:
+                evidence_counts['partial_evidence_passed'] += 1
+            else:
+                evidence_counts['all_failed'] += 1
+            for key, result in ev.items():
+                key_map = {
+                    'outcome_improving': 'outcome_improving_passed',
+                    'regime_match': 'regime_match_passed',
+                    'signal_strength': 'signal_strength_passed',
+                    'repeated_trigger': 'repeated_trigger_passed',
+                }
+                if key in key_map and result.get('passed'):
+                    evidence_counts[key_map[key]] += 1
+                if result.get('reason_code'):
+                    evidence_reason_counts[str(result['reason_code'])] += 1
+        contract['reactivation_evidence_summary'].update({
+            'strategies_evaluated': strategies_evaluated,
+            'evidence_counts': evidence_counts,
+            'reason_code_counts': dict(evidence_reason_counts),
+        })
+        primary_reason_code = None
+        if confirm_required_count > 0:
+            primary_reason_code = 'SKIP_FINAL_STRATEGY_ALL_BLOCKED'
+        elif probation_count > 0 and probation_count == len(selected):
+            primary_reason_code = 'DEWEIGHT_FINAL_STRATEGY_PROBATION_ONLY'
+        elif selected:
+            primary_reason_code = 'PERMIT_FINAL_STRATEGY_CONTRACT_READY'
         if slot_cap < len(unique_strategies):
             reason_codes.append('REGIME_SLOT_CAP_APPLIED')
         if any(float(v) < 1.0 for v in budgets.values()):
@@ -1516,6 +1705,31 @@ class TradingBot:
                 'top_strategy': selected[0] if selected else None,
             },
             'ranking': ranking_rows,
+            'final_strategy_contract': {
+                'schema_version': 'final_strategy_contract_v1',
+                'status': 'blocked' if confirm_required_count > 0 else 'guarded' if probation_count > 0 and probation_count == len(selected) else 'ready',
+                'reason_code': primary_reason_code,
+                'selected_strategies': selected,
+                'selected_strategy_count': len(selected),
+                'selected_budget_ratio': round(sum(budgets.get(name, 0.0) for name in selected), 4),
+                'direction': 'pending_signal_resolution',
+                'signal_type': 'pending_signal_resolution',
+                'strength': None,
+                'selection_reason_codes': reason_codes or ['STRATEGY_SELECTION_BASELINE'],
+                'cooldown_summary': {
+                    'active_count': active_count,
+                    'recovery_window_count': recovery_window_count,
+                    'blocked_strategies': blocked_strategies,
+                },
+                'reactivation_summary': {
+                    'confirm_required_count': confirm_required_count,
+                    'probation_count': probation_count,
+                    'gated_strategies': gated_strategies,
+                    'guarded_strategies': guarded_strategies,
+                },
+                'reactivation_evidence_summary': dict(contract.get('reactivation_evidence_summary') or {}),
+                'summary': f"selected={','.join(selected) or 'none'} / regime={current_regime} / policy={current_policy} / slot_cap={slot_cap} / budget={round(sum(budgets.get(name, 0.0) for name in selected), 2)} / cooldowns={active_count}+{recovery_window_count} / reactivation={confirm_required_count}+{probation_count} / reasons={','.join(reason_codes or ['baseline'])}",
+            },
             'decision_summary': f"selected={','.join(selected) or 'none'} / regime={current_regime} / policy={current_policy} / slot_cap={slot_cap} / budget={round(sum(budgets.get(name, 0.0) for name in selected), 2)} / cooldowns={active_count}+{recovery_window_count} / reactivation={confirm_required_count}+{probation_count} / reasons={','.join(reason_codes or ['baseline'])}",
         })
         return contract
@@ -2232,6 +2446,7 @@ class TradingBot:
         )
 
         strategy_selection = dict(((getattr(signal, 'market_context', {}) or {}).get('strategy_selection')) or {})
+        final_strategy_contract = dict(((getattr(signal, 'market_context', {}) or {}).get('final_strategy_contract')) or {})
         plan_context = dict(layer_plan)
         plan_context.update({
             'current_price': row.get('current_price'),
@@ -2242,7 +2457,12 @@ class TradingBot:
             'strategy_selection': strategy_selection,
             'strategy_tags': list(strategy_selection.get('selected_strategies') or getattr(signal, 'strategies_triggered', []) or []),
             'strategies_triggered': list(getattr(signal, 'strategies_triggered', []) or []),
+            'final_strategy_contract': final_strategy_contract,
             'final_execution_permit': self._build_final_execution_permit_contract(row),
+            # === adaptive_strategy_selection_v5: confirm_evidence summary ===
+            'strategy_reactivation_evidence_summary': dict(
+                strategy_selection.get('reactivation_evidence_summary') or {}
+            ),
         })
         if adaptive_risk_snapshot:
             plan_context['adaptive_risk_snapshot'] = adaptive_risk_snapshot
@@ -3022,4 +3242,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-

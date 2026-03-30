@@ -14124,7 +14124,15 @@ class TestTradingBotAdaptiveExecutionContext(unittest.TestCase):
                 'selected_strategies': ['MACD', 'Volume'],
                 'strategy_weights': {'MACD': 1.0, 'Volume': 0.9, 'RSI': 0.0},
                 'decision_summary': 'selected=MACD,Volume',
-            }
+            },
+            'final_strategy_contract': {
+                'schema_version': 'final_strategy_contract_v1',
+                'status': 'ready',
+                'signal_type': 'buy',
+                'direction': 'long',
+                'selected_strategies': ['MACD', 'Volume'],
+                'reason_code': 'PERMIT_FINAL_STRATEGY_CONTRACT_READY',
+            },
         }
         row = {
             'symbol': 'BTC/USDT',
@@ -14153,6 +14161,8 @@ class TestTradingBotAdaptiveExecutionContext(unittest.TestCase):
         self.assertEqual(plan['layer_ratio'], 0.06)
         self.assertEqual(plan['strategy_tags'], ['MACD', 'Volume'])
         self.assertEqual(plan['strategy_selection']['decision_summary'], 'selected=MACD,Volume')
+        self.assertEqual(plan['final_strategy_contract']['reason_code'], 'PERMIT_FINAL_STRATEGY_CONTRACT_READY')
+        self.assertEqual(plan['final_strategy_contract']['direction'], 'long')
 
     def test_build_strategy_selection_contract_prefers_regime_matched_winners(self):
         self.bot.db.record_trade(
@@ -14192,7 +14202,7 @@ class TestTradingBotAdaptiveExecutionContext(unittest.TestCase):
         self.assertEqual(contract['selected_strategies'][0], 'MACD')
         self.assertLess(contract['strategy_weights']['RSI'], 1.0)
         self.assertEqual(contract['strategy_stats']['MACD']['matched_mode'], 'matched')
-        self.assertEqual(contract['schema_version'], 'adaptive_strategy_selection_v2')
+        self.assertEqual(contract['schema_version'], 'adaptive_strategy_selection_v5')
         self.assertIn('budget_summary', contract)
         self.assertIn('selection_reason_codes', contract)
 

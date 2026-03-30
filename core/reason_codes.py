@@ -106,6 +106,91 @@ _REASON_CODE_SPECS: Dict[str, Dict[str, str]] = {
         'family': 'strategy_reactivation',
         'legacy_code': 'STRATEGY_REACTIVATION_PROBATION_ACTIVE',
     },
+    # === Strategy Reactivation Confirm Evidence (adaptive strategy selection v5) ===
+    'REACT_EVIDENCE_OUTCOME_IMPROVING': {
+        'disposition': 'permit',
+        'stage': 'strategy_selection',
+        'family': 'strategy_reactivation',
+        'legacy_code': 'REACTIVATION_EVIDENCE_OUTCOME_IMPROVING',
+    },
+    'REACT_EVIDENCE_REGIME_MATCHED': {
+        'disposition': 'permit',
+        'stage': 'strategy_selection',
+        'family': 'strategy_reactivation',
+        'legacy_code': 'REACTIVATION_EVIDENCE_REGIME_MATCHED',
+    },
+    'REACT_EVIDENCE_SIGNAL_STRONG': {
+        'disposition': 'permit',
+        'stage': 'strategy_selection',
+        'family': 'strategy_reactivation',
+        'legacy_code': 'REACTIVATION_EVIDENCE_SIGNAL_STRONG',
+    },
+    'REACT_EVIDENCE_REPEATED_TRIGGER': {
+        'disposition': 'permit',
+        'stage': 'strategy_selection',
+        'family': 'strategy_reactivation',
+        'legacy_code': 'REACTIVATION_EVIDENCE_REPEATED_TRIGGER',
+    },
+    'REACT_CONFIRM_FAIL_OUTCOME': {
+        'disposition': 'skip',
+        'stage': 'strategy_selection',
+        'family': 'strategy_reactivation',
+        'legacy_code': 'REACTIVATION_CONFIRM_FAIL_OUTCOME',
+    },
+    'REACT_CONFIRM_FAIL_REGIME': {
+        'disposition': 'skip',
+        'stage': 'strategy_selection',
+        'family': 'strategy_reactivation',
+        'legacy_code': 'REACTIVATION_CONFIRM_FAIL_REGIME',
+    },
+    'REACT_CONFIRM_FAIL_SIGNAL_STRENGTH': {
+        'disposition': 'skip',
+        'stage': 'strategy_selection',
+        'family': 'strategy_reactivation',
+        'legacy_code': 'REACTIVATION_CONFIRM_FAIL_SIGNAL_STRENGTH',
+    },
+    'REACT_CONFIRM_FAIL_REPEATED': {
+        'disposition': 'skip',
+        'stage': 'strategy_selection',
+        'family': 'strategy_reactivation',
+        'legacy_code': 'REACTIVATION_CONFIRM_FAIL_REPEATED',
+    },
+    'REACT_CONFIRM_FAIL_THRESHOLD': {
+        'disposition': 'skip',
+        'stage': 'strategy_selection',
+        'family': 'strategy_reactivation',
+        'legacy_code': 'REACTIVATION_CONFIRM_FAIL_THRESHOLD',
+    },
+    'REACT_CONFIRM_ALL_EVIDENCE_PASSED': {
+        'disposition': 'permit',
+        'stage': 'strategy_selection',
+        'family': 'strategy_reactivation',
+        'legacy_code': 'REACTIVATION_CONFIRM_ALL_EVIDENCE_PASSED',
+    },
+    'REACT_EVIDENCE_PARTIAL_PASS': {
+        'disposition': 'permit',
+        'stage': 'strategy_selection',
+        'family': 'strategy_reactivation',
+        'legacy_code': 'REACTIVATION_EVIDENCE_PARTIAL_PASS',
+    },
+    'PERMIT_FINAL_STRATEGY_CONTRACT_READY': {
+        'disposition': 'permit',
+        'stage': 'strategy_selection',
+        'family': 'final_strategy_contract',
+        'legacy_code': 'FINAL_STRATEGY_CONTRACT_READY',
+    },
+    'SKIP_FINAL_STRATEGY_ALL_BLOCKED': {
+        'disposition': 'skip',
+        'stage': 'strategy_selection',
+        'family': 'final_strategy_contract',
+        'legacy_code': 'FINAL_STRATEGY_ALL_BLOCKED',
+    },
+    'DEWEIGHT_FINAL_STRATEGY_PROBATION_ONLY': {
+        'disposition': 'defer',
+        'stage': 'strategy_selection',
+        'family': 'final_strategy_contract',
+        'legacy_code': 'FINAL_STRATEGY_PROBATION_ONLY',
+    },
 }
 
 _REASON_CODE_ALIASES: Dict[str, str] = {}

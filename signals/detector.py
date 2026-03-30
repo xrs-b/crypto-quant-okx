@@ -379,7 +379,69 @@ class SignalDetector:
         signal.market_context['strategy_selection'] = selection_contract
         signal.market_context['strategy_cooldown_summary'] = dict(selection_contract.get('cooldown_summary') or {})
         signal.market_context['strategy_reactivation_summary'] = reactivation_summary
-        return self._recompute_signal_state(signal, symbol or signal.symbol)
+        signal = self._recompute_signal_state(signal, symbol or signal.symbol)
+        signal.market_context['final_strategy_contract'] = self.build_final_strategy_contract(signal, selection_contract)
+        return signal
+
+    def build_final_strategy_contract(self, signal: Signal, selection_contract: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        selection_contract = dict(selection_contract or (getattr(signal, 'market_context', {}) or {}).get('strategy_selection') or {})
+        selected = list(selection_contract.get('selected_strategies') or getattr(signal, 'strategies_triggered', []) or [])
+        budgets = dict(selection_contract.get('strategy_budgets') or {})
+        cooldown_summary = dict(selection_contract.get('cooldown_summary') or {})
+        reactivation_summary = dict(selection_contract.get('reactivation_summary') or {})
+        evidence_summary = dict(selection_contract.get('reactivation_evidence_summary') or {})
+        selection_reason_codes = list(selection_contract.get('selection_reason_codes') or [])
+
+        reason_code = 'PERMIT_FINAL_STRATEGY_CONTRACT_READY'
+        status = 'ready'
+        if not selected:
+            if int(reactivation_summary.get('confirm_required_count', 0) or 0) > 0 or int(cooldown_summary.get('active_count', 0) or 0) > 0 or int(cooldown_summary.get('recovery_window_count', 0) or 0) > 0:
+                reason_code = 'SKIP_FINAL_STRATEGY_ALL_BLOCKED'
+                status = 'blocked'
+            else:
+                reason_code = selection_reason_codes[0] if selection_reason_codes else 'SKIP_FINAL_STRATEGY_ALL_BLOCKED'
+                status = 'idle'
+        elif int(reactivation_summary.get('probation_count', 0) or 0) > 0 and len(selected) == int(reactivation_summary.get('probation_count', 0) or 0):
+            reason_code = 'DEWEIGHT_FINAL_STRATEGY_PROBATION_ONLY'
+            status = 'guarded'
+
+        triggered_details = []
+        for reason in list(signal.reasons or []):
+            strategy_name = str(reason.get('strategy') or '').strip()
+            if not strategy_name or strategy_name not in selected or not reason.get('triggered'):
+                continue
+            triggered_details.append({
+                'strategy': strategy_name,
+                'action': reason.get('action'),
+                'strength': round(float(reason.get('strength', 0) or 0), 4),
+                'confidence': round(float(reason.get('confidence', 0.0) or 0.0), 4),
+                'budget_ratio': float(budgets.get(strategy_name, 0.0) or 0.0),
+                'metadata': dict(reason.get('metadata') or {}),
+            })
+
+        contract = {
+            'schema_version': 'final_strategy_contract_v1',
+            'symbol': signal.symbol,
+            'status': status,
+            'signal_type': signal.signal_type,
+            'direction': 'long' if signal.signal_type == 'buy' else 'short' if signal.signal_type == 'sell' else 'flat',
+            'strength': int(signal.strength or 0),
+            'direction_score': dict(signal.direction_score or {}),
+            'selected_strategies': selected,
+            'selected_strategy_count': len(selected),
+            'selected_budget_ratio': round(sum(float(budgets.get(name, 0.0) or 0.0) for name in selected), 4),
+            'strategies_triggered': list(getattr(signal, 'strategies_triggered', []) or []),
+            'strategy_details': triggered_details,
+            'reason_code': reason_code,
+            'reason_codes': selection_reason_codes,
+            'selection_summary': selection_contract.get('decision_summary'),
+            'cooldown_summary': cooldown_summary,
+            'reactivation_summary': reactivation_summary,
+            'reactivation_evidence_summary': evidence_summary,
+            'summary': f"{status}:{signal.signal_type}:selected={','.join(selected) or 'none'}:strength={int(signal.strength or 0)}",
+            'generated_at': datetime.now().isoformat(),
+        }
+        return contract
 
     def _analyze_rsi(self, df: pd.DataFrame, price: float, symbol: str = None) -> Optional[Dict]:
         config = self._cfg_section('strategies.rsi', symbol)

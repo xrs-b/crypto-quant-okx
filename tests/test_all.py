@@ -4185,6 +4185,50 @@ class TestRiskManager(unittest.TestCase):
         self.assertLessEqual(adjusted_budget['symbol_margin_cap_ratio'], baseline_budget['symbol_margin_cap_ratio'])
         self.assertTrue(adjusted_budget['close_outcome_guard_applied'])
 
+    def test_close_outcome_guard_blocks_only_matching_symbol_regime_window(self):
+        bearish_ctx = {'regime_snapshot': {'name': 'trend_down', 'regime': 'trend_down'}}
+        bullish_ctx = {'regime_snapshot': {'name': 'trend_up', 'regime': 'trend_up'}}
+        for idx in range(3):
+            trade_id = self.db.record_trade(symbol='BTC/USDT', side='long', entry_price=50000, quantity=0.1, leverage=5, plan_context=bearish_ctx)
+            self.db.close_trade_with_outcome_enrichment(
+                trade_id=trade_id,
+                exit_price=49000,
+                pnl=-100,
+                pnl_percent=-2,
+                notes=f'scoped-rollback-{idx}',
+                close_source='local_market_close',
+            )
+        guard = self.risk_mgr._build_close_outcome_guard('BTC/USDT', plan_context=bearish_ctx)
+        self.assertFalse(guard['passed'])
+        self.assertEqual(guard['scope_window']['scope'], 'symbol_regime')
+        self.assertEqual(guard['scope_window']['regime_tag'], 'trend_down')
+        can_open_other, reason_other, details_other = self.risk_mgr.can_open_position('BTC/USDT', plan_context=bullish_ctx)
+        self.assertTrue(can_open_other)
+        self.assertIsNone(reason_other)
+        self.assertNotEqual(details_other['close_outcome_guard'].get('scope_window', {}).get('scope'), 'symbol_regime')
+
+    def test_close_outcome_guard_tightens_only_matching_regime_window(self):
+        range_ctx = {'regime_snapshot': {'name': 'range', 'regime': 'range'}}
+        trend_ctx = {'regime_snapshot': {'name': 'trend_up', 'regime': 'trend_up'}}
+        for idx in range(3):
+            trade_id = self.db.record_trade(symbol=f'ALT{idx}/USDT', side='long', entry_price=100, quantity=1, leverage=5, plan_context=range_ctx)
+            self.db.close_trade_with_outcome_enrichment(
+                trade_id=trade_id,
+                exit_price=99.2,
+                pnl=-4 if idx < 2 else 1,
+                pnl_percent=-0.4 if idx < 2 else 0.1,
+                notes=f'regime-tighten-{idx}',
+                close_source='local_market_close',
+            )
+        can_open, reason, details = self.risk_mgr.can_open_position('BTC/USDT', plan_context=range_ctx)
+        self.assertTrue(can_open)
+        self.assertIsNone(reason)
+        self.assertEqual(details['close_outcome_guard']['scope_window']['scope'], 'regime')
+        self.assertEqual(details['close_outcome_guard']['mode'], 'tighten')
+        can_open_trend, _, details_trend = self.risk_mgr.can_open_position('BTC/USDT', plan_context=trend_ctx)
+        self.assertTrue(can_open_trend)
+        self.assertNotEqual(details_trend['close_outcome_guard'].get('scope_window', {}).get('scope'), 'regime')
+
     def test_today_trade_count_uses_open_time(self):
         self.db.record_trade(symbol='BTC/USDT', side='long', entry_price=50000, quantity=0.1, leverage=10)
         self.assertEqual(self.risk_mgr._get_today_trade_count(), 1)
@@ -7245,6 +7289,8 @@ class TestExecutionObservability(unittest.TestCase):
                 },
             }, ensure_ascii=False), filtered=1, filter_reason='方向锁占用中')
             db.create_open_intent(symbol='BTC/USDT:USDT', side='long', signal_id=signal_id, root_signal_id=signal_id, planned_margin=60, leverage=10, layer_no=1, plan_context={'foo': 'bar'})
+            trade_id = db.record_trade(symbol='BTC/USDT:USDT', side='long', entry_price=50000, quantity=1, leverage=5, plan_context={'regime_snapshot': {'name': 'trend', 'regime': 'trend'}})
+            db.close_trade_with_outcome_enrichment(trade_id=trade_id, exit_price=49000, pnl=-100, pnl_percent=-2, notes='snapshot-scope-window', close_source='local_market_close')
             snapshot = db.get_execution_state_snapshot()
             self.assertIn('exposure', snapshot)
             self.assertGreater(snapshot['exposure']['projected_total_margin'], snapshot['exposure']['current_total_margin'])
@@ -7258,6 +7304,9 @@ class TestExecutionObservability(unittest.TestCase):
             self.assertIn('top_tags', snapshot['observe_only_summary'])
             self.assertIn('recent_decisions', snapshot['summary'])
             self.assertTrue(snapshot['summary']['observe_only_banner'])
+            self.assertIn('close_outcome_scope_windows', snapshot)
+            self.assertIn('active_window_count', snapshot['close_outcome_scope_windows'])
+            self.assertIn('close_outcome_active_scope_windows', snapshot['summary'])
 
 from analytics.helper import build_workflow_approval_records, merge_persisted_approval_state, build_approval_audit_overview, attach_auto_approval_policy, execute_controlled_rollout_layer, execute_controlled_auto_approval_layer, execute_auto_promotion_review_queue_layer, execute_recovery_queue_layer, execute_testnet_bridge_layer, execute_adaptive_rollout_orchestration, execute_rollout_executor, build_rollout_control_plane_manifest, build_control_plane_readiness_summary, build_workflow_consumer_view, build_workflow_recovery_view, build_workflow_attention_view, build_workflow_operator_digest, build_workflow_alert_digest, build_dashboard_summary_cards, build_runtime_orchestration_summary, build_production_rollout_readiness, build_workbench_governance_view, build_workbench_governance_detail_view, build_workbench_merged_timeline, build_workbench_timeline_summary_aggregation, build_unified_workbench_overview, build_auto_promotion_candidate_view, build_auto_promotion_execution_summary, build_auto_promotion_review_queue_consumption, build_auto_promotion_review_queue_filter_view, build_auto_promotion_review_queue_detail_view, _build_follow_up_policy_gate, _build_state_machine_semantics, _build_safe_rollout_action_registry
 

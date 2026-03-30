@@ -1311,8 +1311,8 @@ class Database:
         summary = {'exit_price': close_price, 'source': close_source, 'fills': []}
         return self.reconcile_trade_close(trade_id, summary, reason=f"自动收口: {reason}")
     
-    def get_close_outcome_digest(self, symbol: str = None, limit: int = 200) -> Dict[str, Any]:
-        """获取平仓 outcome 聚合摘要"""
+    def get_recent_close_outcome_trades(self, symbol: str = None, limit: int = 200) -> List[Dict[str, Any]]:
+        """获取最近已平仓交易（按 close_time 倒序），保留 outcome attribution 供风控窗口计算。"""
         conn = self._get_connection()
         query = "SELECT * FROM trades WHERE status = 'closed'"
         params = []
@@ -1323,7 +1323,11 @@ class Database:
         params.append(limit)
         df = pd.read_sql_query(query, conn, params=params)
         conn.close()
-        rows = [self._recalculate_trade_metrics(row) for row in df.to_dict('records')]
+        return [self._recalculate_trade_metrics(row) for row in df.to_dict('records')]
+
+    def get_close_outcome_digest(self, symbol: str = None, limit: int = 200) -> Dict[str, Any]:
+        """获取平仓 outcome 聚合摘要"""
+        rows = self.get_recent_close_outcome_trades(symbol=symbol, limit=limit)
         from analytics.helper import build_close_outcome_digest
         return build_close_outcome_digest(rows, label='database_trade_close_outcomes')
 
@@ -3257,6 +3261,8 @@ class Database:
         exposure = self._build_execution_exposure_summary(positions, intents)
         signal_digest = self._build_signal_decision_digest()
         observe_only_summary = summarize_observe_only_collection(signal_digest)
+        from analytics.helper import build_close_outcome_scope_windows
+        close_outcome_scope_windows = build_close_outcome_scope_windows(self.get_recent_close_outcome_trades(limit=50), label='execution_state_snapshot')
         recent_decisions = []
         for row in signal_digest[:5]:
             recent_decisions.append({
@@ -3276,6 +3282,7 @@ class Database:
             'exposure': exposure,
             'signal_decisions': signal_digest,
             'observe_only_summary': observe_only_summary,
+            'close_outcome_scope_windows': close_outcome_scope_windows,
             'summary': {
                 'active_intents': len(intents),
                 'direction_locks': len(locks),
@@ -3284,6 +3291,7 @@ class Database:
                 'signals_with_decision': len(signal_digest),
                 'observe_only_banner': observe_only_summary.get('banner'),
                 'observe_only_top_tags': observe_only_summary.get('top_tags'),
+                'close_outcome_active_scope_windows': int(close_outcome_scope_windows.get('active_window_count', 0) or 0),
                 'recent_decisions': recent_decisions,
             }
         }

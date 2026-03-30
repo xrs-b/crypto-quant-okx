@@ -22,6 +22,7 @@ def main() -> int:
         'direction_locks': snapshot.get('direction_locks') or [],
         'layer_plans': snapshot.get('layer_plans') or [],
         'signal_decisions': (snapshot.get('signal_decisions') or [])[:20],
+        'close_outcome_scope_windows': snapshot.get('close_outcome_scope_windows') or {},
     }
     print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
     return 0

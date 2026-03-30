@@ -1815,6 +1815,105 @@ def _dedupe_strings(values: Optional[List[Any]]) -> List[str]:
     return deduped
 
 
+def _parse_close_outcome_time(value: Any) -> Optional[datetime]:
+    if value in (None, ''):
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace('Z', '+00:00'))
+    except Exception:
+        return None
+
+
+def build_close_outcome_scope_windows(trades: Optional[List[Dict[str, Any]]] = None, *, config: Optional[Dict[str, Any]] = None,
+                                      now: Optional[datetime] = None, label: Optional[str] = None) -> Dict[str, Any]:
+    cfg = dict(config or {})
+    enabled = bool(cfg.get('scoped_window_enabled', True))
+    window_hours = max(float(cfg.get('scoped_window_hours', 6) or 6), 0.0)
+    min_sample_size = max(int(cfg.get('scoped_window_min_sample_size', 3) or 3), 1)
+    scope_priority = [str(x).strip() for x in (cfg.get('scope_priority') or ['symbol_regime', 'symbol', 'regime', 'global']) if str(x).strip()]
+    scoped_modes = {str(x).strip().lower() for x in (cfg.get('scoped_window_modes') or ['rollback', 'tighten']) if str(x).strip()}
+    baseline_min_sample_size = max(int(cfg.get('min_sample_size', 3) or 3), 1)
+    effective_min_sample_size = min(baseline_min_sample_size, min_sample_size)
+    current_time = now or datetime.utcnow()
+    normalized_rows = []
+    for row in list(trades or []):
+        normalized = _normalize_close_outcome_trade_row(row)
+        if normalized.get('status') != 'closed':
+            continue
+        normalized['closed_at'] = _parse_close_outcome_time(normalized.get('close_time'))
+        normalized_rows.append(normalized)
+
+    def _scope_key(scope_type: str, row: Dict[str, Any]) -> str:
+        symbol = str(row.get('symbol') or '--').strip() or '--'
+        regime = str(row.get('regime_tag') or 'unknown').strip() or 'unknown'
+        if scope_type == 'global':
+            return 'global'
+        if scope_type == 'symbol':
+            return symbol
+        if scope_type == 'regime':
+            return regime
+        return f'{symbol}::{regime}'
+
+    scope_labels = {
+        'global': 'global',
+        'symbol': 'symbol',
+        'regime': 'regime',
+        'symbol_regime': 'symbol+regime',
+    }
+    grouped: Dict[str, Dict[str, Any]] = {}
+    for scope_type in ('global', 'symbol', 'regime', 'symbol_regime'):
+        for row in normalized_rows:
+            key = _scope_key(scope_type, row)
+            bucket = grouped.setdefault(f'{scope_type}:{key}', {'scope_type': scope_type, 'scope_key': key, 'trades': []})
+            bucket['trades'].append(row)
+
+    windows = []
+    active_count = 0
+    for item in grouped.values():
+        scoped_digest = build_close_outcome_digest(item['trades'], label=f"{label or 'close_outcome_scope'}:{item['scope_type']}:{item['scope_key']}")
+        scoped_feedback = build_close_outcome_feedback_loop(scoped_digest, label=f"{label or 'close_outcome_scope'}:{item['scope_type']}:{item['scope_key']}", min_sample_size=effective_min_sample_size)
+        latest_close = max((row.get('closed_at') for row in item['trades'] if row.get('closed_at')), default=None)
+        freeze_until = (latest_close + timedelta(hours=window_hours)) if latest_close and window_hours > 0 else latest_close
+        is_mode_eligible = str(scoped_feedback.get('governance_mode') or 'observe').strip().lower() in scoped_modes
+        is_active = bool(enabled and latest_close and freeze_until and current_time < freeze_until and is_mode_eligible and int(scoped_feedback.get('trade_count', 0) or 0) >= min_sample_size)
+        remaining_minutes = max(0, int((freeze_until - current_time).total_seconds() // 60)) if is_active and freeze_until else 0
+        if is_active:
+            active_count += 1
+        windows.append({
+            'scope': item['scope_type'],
+            'scope_label': scope_labels.get(item['scope_type']) or item['scope_type'],
+            'scope_key': item['scope_key'],
+            'symbol': item['trades'][0].get('symbol') if item['scope_type'] in {'symbol', 'symbol_regime'} and item['trades'] else None,
+            'regime_tag': item['trades'][0].get('regime_tag') if item['scope_type'] in {'regime', 'symbol_regime'} and item['trades'] else None,
+            'active': is_active,
+            'mode': scoped_feedback.get('governance_mode'),
+            'status': scoped_feedback.get('status'),
+            'trade_count': int(scoped_feedback.get('trade_count', 0) or 0),
+            'min_sample_size': min_sample_size,
+            'window_hours': window_hours,
+            'window_started_at': latest_close.isoformat() if latest_close else None,
+            'freeze_until': freeze_until.isoformat() if freeze_until else None,
+            'remaining_minutes': remaining_minutes,
+            'recovery_condition': 'expire_window_or_collect_new_positive_closes',
+            'reason_codes': list(scoped_feedback.get('reason_codes') or []),
+            'policy_hints': list(scoped_feedback.get('policy_hints') or []),
+            'feedback_loop': scoped_feedback,
+            'digest': scoped_digest,
+        })
+    windows.sort(key=lambda row: (not bool(row.get('active')), scope_priority.index(row.get('scope')) if row.get('scope') in scope_priority else 999, -int(row.get('trade_count', 0) or 0), str(row.get('scope_key') or '')))
+    return {
+        'schema_version': 'trade_close_outcome_scope_windows_v1',
+        'enabled': enabled,
+        'label': label,
+        'active_window_count': active_count,
+        'scope_priority': scope_priority,
+        'window_hours': window_hours,
+        'min_sample_size': min_sample_size,
+        'windows': windows,
+        'active_windows': [row for row in windows if row.get('active')],
+    }
+
+
 def _collect_open_preconditions(preconditions: Optional[List[Dict]]) -> List[str]:
     pending_status = {'open', 'pending', 'required'}
     collected = []

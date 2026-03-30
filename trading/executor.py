@@ -11,7 +11,7 @@ from core.exchange import Exchange
 from core.database import Database
 from core.logger import trade_logger
 from analytics.recommendation import get_recommendation_provider
-from analytics.helper import build_close_outcome_feedback_loop
+from analytics.helper import build_close_outcome_feedback_loop, build_close_outcome_scope_windows
 from core.risk_budget import get_risk_budget_config, summarize_margin_usage, compute_entry_plan, summarize_risk_hint_changes
 from core.regime_policy import build_observe_only_payload, build_risk_effective_snapshot, build_execution_effective_snapshot
 
@@ -1486,10 +1486,17 @@ class RiskManager:
             'floor_total_margin_cap_ratio': float(raw.get('floor_total_margin_cap_ratio', 0.10) or 0.10),
             'floor_symbol_margin_cap_ratio': float(raw.get('floor_symbol_margin_cap_ratio', 0.05) or 0.05),
             'floor_leverage_cap': max(int(raw.get('floor_leverage_cap', 2) or 2), 1),
+            'scoped_window_enabled': bool(raw.get('scoped_window_enabled', True)),
+            'scoped_window_hours': float(raw.get('scoped_window_hours', 6) or 6),
+            'scoped_window_min_sample_size': max(int(raw.get('scoped_window_min_sample_size', 3) or 3), 1),
+            'scoped_window_modes': [str(x).strip().lower() for x in (raw.get('scoped_window_modes') or ['rollback', 'tighten']) if str(x).strip()],
+            'scope_priority': [str(x).strip() for x in (raw.get('scope_priority') or ['symbol_regime', 'symbol', 'regime', 'global']) if str(x).strip()],
         }
 
-    def _build_close_outcome_guard(self, symbol: str) -> Dict[str, Any]:
+    def _build_close_outcome_guard(self, symbol: str, plan_context: Dict[str, Any] = None) -> Dict[str, Any]:
         cfg = self._get_close_outcome_guard_config()
+        regime_snapshot = (plan_context or {}).get('regime_snapshot') if isinstance(plan_context, dict) else {}
+        current_regime = str((regime_snapshot or {}).get('name') or (regime_snapshot or {}).get('regime') or '').strip() or None
         result = {
             'enabled': bool(cfg.get('enabled')),
             'passed': True,
@@ -1503,38 +1510,75 @@ class RiskManager:
             'risk_budget_overrides': {},
             'feedback_loop': {},
             'digest': {},
+            'scope_window': {},
+            'scope_windows': {},
+            'scope_context': {'symbol': symbol, 'regime_tag': current_regime},
             'config': cfg,
         }
         if not result['enabled']:
             result['reason'] = 'disabled'
             return result
+        recent_trades = self.db.get_recent_close_outcome_trades(limit=cfg['lookback_limit']) if self.db else []
         digest = self.db.get_close_outcome_digest(symbol=symbol, limit=cfg['lookback_limit']) if self.db else {}
         feedback = build_close_outcome_feedback_loop(digest, label=f'close_outcome_risk_guard:{symbol}')
-        trade_count = int(feedback.get('trade_count') or digest.get('trade_count') or 0)
-        mode = str(feedback.get('governance_mode') or 'observe').strip().lower() or 'observe'
-        hint = feedback.get('orchestration_hint') or {}
-        next_action = feedback.get('next_action') or {}
+        scope_windows = build_close_outcome_scope_windows(recent_trades, config=cfg, label=f'close_outcome_scope_guard:{symbol}') if recent_trades else {'active_windows': [], 'windows': [], 'scope_priority': cfg.get('scope_priority') or []}
+        active_windows = list(scope_windows.get('active_windows') or [])
+        active_scope = None
+        has_symbol_regime_windows_for_symbol = any(window.get('scope') == 'symbol_regime' and window.get('symbol') == symbol for window in active_windows)
+        has_regime_windows_for_regime = bool(current_regime) and any(window.get('scope') == 'regime' and window.get('regime_tag') == current_regime for window in active_windows)
+        for window in active_windows:
+            if window.get('scope') == 'symbol_regime' and window.get('symbol') == symbol and window.get('regime_tag') == current_regime:
+                active_scope = window
+                break
+        if active_scope is None and not has_symbol_regime_windows_for_symbol:
+            for window in active_windows:
+                if window.get('scope') == 'symbol' and window.get('symbol') == symbol:
+                    active_scope = window
+                    break
+        if active_scope is None:
+            for window in active_windows:
+                if window.get('scope') == 'regime' and current_regime and window.get('regime_tag') == current_regime:
+                    active_scope = window
+                    break
+        if active_scope is None and not has_symbol_regime_windows_for_symbol and not has_regime_windows_for_regime:
+            for window in active_windows:
+                if window.get('scope') == 'global':
+                    active_scope = window
+                    break
+        effective_feedback = dict(active_scope.get('feedback_loop') or feedback) if active_scope else feedback
+        effective_digest = dict(active_scope.get('digest') or digest) if active_scope else digest
+        trade_count = int(effective_feedback.get('trade_count') or effective_digest.get('trade_count') or 0)
+        mode = str(effective_feedback.get('governance_mode') or 'observe').strip().lower() or 'observe'
+        hint = effective_feedback.get('orchestration_hint') or {}
+        next_action = effective_feedback.get('next_action') or {}
         result.update({
             'mode': mode,
             'action': next_action.get('action') or hint.get('action') or 'observe_only_followup',
             'route': next_action.get('route') or hint.get('route') or 'observe_only_followup',
             'freeze_auto_promotion': bool(hint.get('freeze_auto_promotion', False)),
             'trade_count': trade_count,
-            'feedback_loop': feedback,
-            'digest': digest,
+            'feedback_loop': effective_feedback,
+            'digest': effective_digest,
+            'scope_window': dict(active_scope or {}),
+            'scope_windows': dict(scope_windows or {}),
         })
-        if trade_count < cfg['min_sample_size']:
+        effective_min_sample_size = int((active_scope or {}).get('min_sample_size') or cfg['min_sample_size'] or 0)
+        result['min_sample_size'] = effective_min_sample_size
+        if trade_count < effective_min_sample_size:
             result['reason'] = 'sample_too_small'
             return result
         should_block = mode in set(cfg['block_modes'] or [])
         if should_block and cfg.get('require_freeze_for_block', True):
             should_block = bool(result['freeze_auto_promotion'])
+        scope_suffix = ''
+        if result.get('scope_window'):
+            scope_suffix = f":{result['scope_window'].get('scope')}:{result['scope_window'].get('scope_key')}"
         if should_block:
             result['passed'] = False
-            result['reason'] = f'close_outcome_guard_block:{mode}'
+            result['reason'] = f'close_outcome_guard_block:{mode}{scope_suffix}'
             return result
         if mode in set(cfg['tighten_modes'] or []):
-            result['reason'] = f'close_outcome_guard_tighten:{mode}'
+            result['reason'] = f'close_outcome_guard_tighten:{mode}{scope_suffix}'
             result['risk_budget_overrides'] = {
                 'base_entry_margin_ratio': max(cfg['floor_entry_margin_ratio'], float(cfg['tighten_entry_ratio_multiplier']) * 1.0),
                 'total_margin_cap_ratio': max(cfg['floor_total_margin_cap_ratio'], float(cfg['tighten_total_margin_cap_multiplier']) * 1.0),
@@ -1543,7 +1587,7 @@ class RiskManager:
                 'floor_leverage_cap': int(cfg['floor_leverage_cap']),
             }
         else:
-            result['reason'] = f'close_outcome_guard_observe:{mode}'
+            result['reason'] = f'close_outcome_guard_observe:{mode}{scope_suffix}'
         return result
 
     def _apply_close_outcome_budget_overrides(self, risk_budget: Dict[str, Any], guard: Dict[str, Any]) -> Dict[str, Any]:
@@ -1746,7 +1790,7 @@ class RiskManager:
             'max': max_daily_drawdown
         }
 
-        close_outcome_guard = self._build_close_outcome_guard(symbol)
+        close_outcome_guard = self._build_close_outcome_guard(symbol, plan_context=plan_context)
         details['close_outcome_guard'] = {
             'passed': bool(close_outcome_guard.get('passed', True)),
             'enabled': bool(close_outcome_guard.get('enabled', False)),
@@ -1761,6 +1805,9 @@ class RiskManager:
             'reason_codes': list(((close_outcome_guard.get('feedback_loop') or {}).get('reason_codes') or [])),
             'recent_closes': list(((close_outcome_guard.get('digest') or {}).get('recent_closes') or [])),
             'risk_budget_overrides': dict(close_outcome_guard.get('risk_budget_overrides') or {}),
+            'scope_context': dict(close_outcome_guard.get('scope_context') or {}),
+            'scope_window': dict(close_outcome_guard.get('scope_window') or {}),
+            'active_scope_windows': list(((close_outcome_guard.get('scope_windows') or {}).get('active_windows') or [])),
             'feedback_loop': dict(close_outcome_guard.get('feedback_loop') or {}),
             'digest': dict(close_outcome_guard.get('digest') or {}),
         }

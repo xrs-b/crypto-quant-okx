@@ -1746,7 +1746,7 @@ class TestNotifications(unittest.TestCase):
         self.assertIn('折算数量：610.4 XRP', db.logs[2]['details']['message'])
         self.assertIn('通知等级：⚠️ 重要', db.logs[0]['details']['message'])
         self.assertIn('--------------------------------------------------------------', db.logs[0]['details']['message'])
-        self.assertIn('【自适应市场观察（Observe-only）】', db.logs[0]['details']['message'])
+        self.assertIn('【自适应市场状态（Observe-only）】', db.logs[0]['details']['message'])
         self.assertIn('只增强观察与汇总展示，不改变真实交易执行', db.logs[0]['details']['message'])
         self.assertIn('【风控拦截】', db.logs[1]['details']['message'])
         self.assertIn('通知等级：🚨 紧急', db.logs[1]['details']['message'])
@@ -1782,7 +1782,7 @@ class TestNotifications(unittest.TestCase):
         notifier.notify_signal(signal, False, '测试 live regime payload', details)
         message = db.logs[-1]['details']['message']
         self.assertNotIn('市场状态：unknown ｜ 置信度：0%', message)
-        self.assertIn(f"市场状态：{signal.regime_snapshot['name']} ｜ 置信度：{signal.regime_snapshot['confidence']:.0%}", message)
+        self.assertIn(f"市场状态：{signal.regime_snapshot['name']}（置信度 {signal.regime_snapshot['confidence']:.0%}）", message)
 
     def test_notify_signal_observe_only_uses_market_context_fallback(self):
         cfg = Config()
@@ -1808,8 +1808,9 @@ class TestNotifications(unittest.TestCase):
         )
         notifier.notify_signal(signal, False, '测试回退', {'passed': False})
         message = db.logs[-1]['details']['message']
-        self.assertIn('市场状态：trend_up ｜ 置信度：81%', message)
-        self.assertIn('策略模式：observe_only ｜ 阶段/状态：m1 / shadow', message)
+        self.assertIn('市场状态：trend_up（置信度 81%）', message)
+        self.assertIn('策略模式：仅观察 [observe_only]', message)
+        self.assertIn('阶段/状态：M1阶段 / 阴影', message)
         self.assertIn('摘要：market-context fallback summary', message)
 
     def test_trading_bot_notification_context_backfills_snapshots(self):

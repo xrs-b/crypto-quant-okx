@@ -399,15 +399,48 @@ class NotificationManager:
         ctx = self._extract_observe_only_context(signal, details)
         if not ctx['summary'] or ctx['summary'] == '--':
             return []
+        # Map internal mode to localized Chinese labels
+        mode_labels = {
+            'observe_only': '仅观察',
+            'decision_only': '决策参考',
+            'guarded_execute': '保守执行',
+            'full': '完全执行',
+            'disabled': '已禁用',
+        }
+        localized_mode = mode_labels.get(ctx['mode'], ctx['mode'])
+        # Map phase/state to Chinese where applicable
+        phase_labels = {
+            'observe_only': '仅观察',
+            'decision_only': '决策参考',
+            'guarded_execute': '保守执行',
+            'full': '完全执行',
+            'risk_guarded': '风控守护',
+            'directional': '方向信号',
+            'rotation': '轮动信号',
+            'm1': 'M1阶段',  # Preserve custom phase values from policy
+            'm2': 'M2阶段',
+            'm3': 'M3阶段',
+            'm4': 'M4阶段',
+        }
+        localized_phase = phase_labels.get(ctx['phase'], ctx['phase'])
+        state_labels = {
+            'stable': '稳定',
+            'transition_risk': '过渡风险',
+            'neutral': '中性',
+            'effective': '已生效',
+            'shadow': '阴影',
+        }
+        localized_state = state_labels.get(ctx['state'], ctx['state'])
         tags = ' / '.join(ctx['tags'][:limit]) if ctx['tags'] else '--'
         return [
             '---',
-            '【自适应市场观察（Observe-only）】',
-            f"市场状态：{ctx['regime_name']} ｜ 置信度：{ctx['confidence_text']}",
-            f"策略模式：{ctx['mode']} ｜ 阶段/状态：{ctx['phase']} / {ctx['state']}",
+            '【自适应市场状态（Observe-only）】',
+            f"市场状态：{ctx['regime_name']}（置信度 {ctx['confidence_text']}）",
+            f"策略模式：{localized_mode} [{ctx['mode']}]",
+            f"阶段/状态：{localized_phase} / {localized_state}",
             f"摘要：{ctx['summary']}",
             f"标签：{tags}",
-            '说明：只增强观察与汇总展示，不改变真实交易执行。',
+            '说明：仅增强观察与汇总展示，当前不改变真实交易执行。',
         ]
 
     def send(self, event_type: str, title: str, lines: List[str], level: str = 'info', details: Dict = None, priority: str = 'normal', components: List[Dict] = None) -> Dict:

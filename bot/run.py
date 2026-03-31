@@ -564,6 +564,11 @@ def build_exchange_diagnostics(cfg: Config, exchange: Exchange) -> dict:
             row['is_futures_symbol'] = bool(exchange.is_futures_symbol(symbol))
             if row['is_futures_symbol']:
                 row['order_symbol'] = exchange.get_order_symbol(symbol)
+                market = exchange.get_market(symbol) if hasattr(exchange, 'get_market') else None
+                if market:
+                    row['market_symbol'] = market.get('symbol')
+                    row['market_id'] = market.get('id')
+                    row['market_inst_id'] = (market.get('info') or {}).get('instId')
                 ticker = exchange.fetch_ticker(symbol)
                 row['last_price'] = ticker.get('last')
                 if row['last_price']:
@@ -621,18 +626,24 @@ def build_exchange_smoke_plan(cfg: Config, exchange: Exchange, symbol: str = Non
         if str(cfg.position_mode).lower() not in {'oneway', 'one-way', 'net', 'single'}:
             preview_open['posSide'] = side
             preview_close['posSide'] = side
+        order_symbol = exchange.get_order_symbol(selected_symbol)
+        market = exchange.get_market(selected_symbol) if hasattr(exchange, 'get_market') else None
         plan['open_preview'] = {
-            'symbol': exchange.get_order_symbol(selected_symbol),
+            'symbol': order_symbol,
             'side': 'buy' if side == 'long' else 'sell',
             'amount': plan['sample_amount'],
             'params': preview_open,
         }
         plan['close_preview'] = {
-            'symbol': exchange.get_order_symbol(selected_symbol),
+            'symbol': order_symbol,
             'side': 'sell' if side == 'long' else 'buy',
             'amount': plan['sample_amount'],
             'params': preview_close,
         }
+        if market:
+            plan['market_symbol'] = market.get('symbol')
+            plan['market_id'] = market.get('id')
+            plan['market_inst_id'] = (market.get('info') or {}).get('instId')
         plan['execute_ready'] = True
     except Exception as e:
         plan['error'] = str(e)

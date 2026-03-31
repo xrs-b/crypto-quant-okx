@@ -1647,6 +1647,23 @@ class TestStrategies(unittest.TestCase):
 class TestExchange(unittest.TestCase):
     """交易所适配容错测试"""
 
+    def test_get_market_prefers_canonical_swap_id_over_ambiguous_symbol_mapping(self):
+        ex = Exchange.__new__(Exchange)
+        ex.config = {'exchange': {'name': 'okx', 'mode': 'testnet'}}
+        ex.exchange = type('E', (), {
+            'markets_by_id': {
+                'BTC-USDT-SWAP': [{'symbol': 'BTC/USDT:USDT', 'id': 'BTC-USDT-SWAP', 'swap': True, 'linear': True, 'info': {'instId': 'BTC-USDT-SWAP'}}],
+                'TEST01-USDT-SWAP': [{'symbol': 'BTC/USDT:USDT', 'id': 'TEST01-USDT-SWAP', 'swap': True, 'linear': True, 'info': {'instId': 'TEST01-USDT-SWAP'}}],
+            }
+        })()
+        ex._markets = {
+            'BTC/USDT:USDT': {'symbol': 'BTC/USDT:USDT', 'id': 'TEST01-USDT-SWAP', 'swap': True, 'linear': True, 'info': {'instId': 'TEST01-USDT-SWAP'}},
+        }
+
+        market = ex.get_market('BTC/USDT')
+        self.assertEqual(market['id'], 'BTC-USDT-SWAP')
+        self.assertEqual(ex.get_order_symbol('BTC/USDT'), 'BTC-USDT-SWAP')
+
     def test_create_order_fallback_without_posside(self):
         ex = Exchange.__new__(Exchange)
         ex.config = {'exchange': {'position_mode': 'hedge'}}

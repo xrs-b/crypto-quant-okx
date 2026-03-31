@@ -35,7 +35,34 @@ class Exchange:
             self._markets = self.exchange.load_markets()
         return self._markets
 
+    def _preferred_market_id_candidates(self, symbol: str) -> List[str]:
+        raw = self.normalize_symbol(symbol)
+        if not raw or '/' not in raw:
+            return []
+        parts = [part for part in raw.split('/') if part]
+        if len(parts) < 2:
+            return []
+        base, quote = parts[0], parts[1]
+        return [f'{base}-{quote}-SWAP']
+
+    def _select_market_from_markets_by_id(self, symbol: str) -> Optional[Dict]:
+        self._load_markets()
+        markets_by_id = getattr(self.exchange, 'markets_by_id', None) or {}
+        for market_id in self._preferred_market_id_candidates(symbol):
+            rows = markets_by_id.get(market_id)
+            if not rows:
+                continue
+            if not isinstance(rows, list):
+                rows = [rows]
+            for market in rows:
+                if market and market.get('swap') and market.get('linear'):
+                    return market
+        return None
+
     def get_market(self, symbol: str) -> Optional[Dict]:
+        preferred = self._select_market_from_markets_by_id(symbol)
+        if preferred:
+            return preferred
         markets = self._load_markets()
         candidates = [f'{symbol}:USDT', symbol]
         for candidate in candidates:
@@ -52,7 +79,7 @@ class Exchange:
         market = self.get_market(symbol)
         if not market:
             raise ValueError(f'无可用市场: {symbol}')
-        return market['symbol']
+        return market.get('id') or market['symbol']
 
     def get_contract_size(self, symbol: str) -> float:
         market = self.get_market(symbol)
@@ -71,16 +98,17 @@ class Exchange:
         market = self.get_market(symbol)
         if not market:
             raise ValueError(f'无可用市场: {symbol}')
+        market_key = market.get('id') or market.get('symbol')
         contract_size = float(market.get('contractSize') or 1.0)
         raw_amount = desired_notional_usdt / max(contract_size * price, 1e-10)
-        amount = float(self.exchange.amount_to_precision(market['symbol'], raw_amount))
+        amount = float(self.exchange.amount_to_precision(market_key, raw_amount))
         amount_limits = (market.get('limits', {}).get('amount', {}) or {})
         min_amount = float(amount_limits.get('min') or 0.0)
         max_amount = float(amount_limits.get('max') or 0.0)
         if amount < min_amount:
             amount = min_amount
         if max_amount and amount > max_amount:
-            amount = float(self.exchange.amount_to_precision(market['symbol'], max_amount))
+            amount = float(self.exchange.amount_to_precision(market_key, max_amount))
         return amount
 
     def _set_default_leverage(self):

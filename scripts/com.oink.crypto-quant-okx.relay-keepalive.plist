@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.oink.crypto-quant-okx.relay-keepalive</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/path/to/crypto-quant-okx/scripts/keep_relay_alive.sh</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PROJECT_DIR</key>
+        <string>/path/to/crypto-quant-okx</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StartInterval</key>
+    <integer>120</integer>
+
+    <key>WorkingDirectory</key>
+    <string>/path/to/crypto-quant-okx</string>
+
+    <key>StandardOutPath</key>
+    <string>/path/to/crypto-quant-okx/logs/relay-keepalive.launchd.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/path/to/crypto-quant-okx/logs/relay-keepalive.launchd.err.log</string>
+</dict>
+</plist>

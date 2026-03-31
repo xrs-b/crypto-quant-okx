@@ -8,6 +8,7 @@ PROJECT_DIR="${PROJECT_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 VENV_PYTHON="${VENV_PYTHON:-$PROJECT_DIR/.venv/bin/python3}"
 VENV_FLASK="${VENV_FLASK:-$PROJECT_DIR/.venv/bin/flask}"
 BOT_LOG_FILE="${BOT_LOG_FILE:-$PROJECT_DIR/logs/bot.log}"
+RELAY_LOG_FILE="${RELAY_LOG_FILE:-$PROJECT_DIR/logs/relay.log}"
 DASHBOARD_LOG_FILE="${DASHBOARD_LOG_FILE:-$PROJECT_DIR/logs/dashboard.log}"
 PID_FILE="${PID_FILE:-$PROJECT_DIR/bot.pid}"
 RELAY_PID_FILE="${RELAY_PID_FILE:-$PROJECT_DIR/relay.pid}"
@@ -103,10 +104,22 @@ status() {
         if ps -p "$pid" >/dev/null 2>&1; then
             echo -e "${GREEN}🟢 交易机器人运行中 (PID: $pid)${NC}"
         else
-            echo -e "${RED}🔴 进程已停止，但PID文件存在${NC}"
+            echo -e "${RED}🔴 交易机器人进程已停止，但PID文件存在${NC}"
         fi
     else
         echo -e "${YELLOW}⚪ 交易机器人未运行${NC}"
+    fi
+
+    if [ -f "$RELAY_PID_FILE" ]; then
+        local relay_pid
+        relay_pid=$(cat "$RELAY_PID_FILE")
+        if ps -p "$relay_pid" >/dev/null 2>&1; then
+            echo -e "${GREEN}🟢 通知 relay 运行中 (PID: $relay_pid)${NC}"
+        else
+            echo -e "${RED}🔴 通知 relay 进程已停止，但PID文件存在${NC}"
+        fi
+    else
+        echo -e "${YELLOW}⚪ 通知 relay 未运行${NC}"
     fi
 }
 
@@ -123,9 +136,10 @@ start_relay() {
     ensure_logs_dir
     cd "$PROJECT_DIR"
 
-    PROJECT_DIR="$PROJECT_DIR" nohup "$VENV_PYTHON" "$PROJECT_DIR/bot/run.py" --relay-outbox >> "$BOT_LOG_FILE" 2>&1 &
+    PROJECT_DIR="$PROJECT_DIR" nohup "$VENV_PYTHON" "$PROJECT_DIR/bot/run.py" --relay-outbox >> "$RELAY_LOG_FILE" 2>&1 &
     echo $! > "$RELAY_PID_FILE"
     echo -e "${GREEN}✅ 通知 relay 已启动 (PID: $(cat "$RELAY_PID_FILE"))${NC}"
+    echo "日志文件: $RELAY_LOG_FILE"
 }
 
 stop_relay() {

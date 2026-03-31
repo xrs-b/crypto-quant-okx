@@ -446,6 +446,9 @@ def build_runtime_health_summary(cfg: Config, db: Database) -> dict:
     approval_hygiene = build_approval_hygiene_summary(cfg, db)
     approval_runtime = runtime.get('approval_hygiene', {}) if isinstance(runtime.get('approval_hygiene'), dict) else {}
     approval_mode = 'auto-cleanup' if approval_hygiene.get('auto_cleanup_enabled') else 'audit-only'
+    notification_stats = db.get_notification_outbox_stats()
+    relay_runtime = runtime.get('relay', {}) if isinstance(runtime.get('relay'), dict) else {}
+    relay_last_result = relay_runtime.get('last_result', {}) if isinstance(relay_runtime.get('last_result'), dict) else {}
     orchestration_runtime = runtime.get('adaptive_rollout_orchestration', {}) if isinstance(runtime.get('adaptive_rollout_orchestration'), dict) else {}
     orchestration_cfg = cfg.get('runtime.adaptive_rollout_orchestration', {}) or {}
     orchestration_enabled = bool(orchestration_cfg.get('enabled', False))
@@ -473,6 +476,11 @@ def build_runtime_health_summary(cfg: Config, db: Database) -> dict:
         f'审批卫生：stale>{approval_hygiene.get("stale_after_minutes", 0)} 分钟 ｜ 上次处理 {approval_runtime.get("last_run_at") or "--"} ｜ 上次过期收口 {approval_runtime.get("expired_count", 0)}',
         f'Operator routing：{approval_hygiene.get("operator_action_summary", {}).get("policy_counts") or {}}',
         '---',
+        f'Notification Outbox：pending={notification_stats.get("pending", 0)} ｜ delivered={notification_stats.get("delivered", 0)} ｜ suppressed={notification_stats.get("suppressed", 0)} ｜ oldest={notification_stats.get("oldest_pending_at") or "--"}',
+        f'Relay 状态：running={"yes" if relay_runtime.get("running") else "no"} ｜ interval={relay_runtime.get("interval_seconds") or "--"}s ｜ last-check={relay_runtime.get("last_checked_at") or "--"}',
+        f'Relay 最近一轮：scanned={relay_last_result.get("scanned", 0)} ｜ delivered={relay_last_result.get("delivered", 0)} ｜ failed={relay_last_result.get("failed", 0)} ｜ skipped={relay_last_result.get("skipped", 0)}',
+        f'Pending 类型：{notification_stats.get("top_pending_types") or []}',
+        '---',
         f'Adaptive Rollout Orchestration：enabled={"yes" if orchestration_enabled else "no"} ｜ gate={orchestration_summary.get("gate_status") or "--"} ｜ blocked={"yes" if orchestration_summary.get("gate_blocked") else "no"}',
         f'编排执行：auto-approval {orchestration_summary.get("auto_approval_executed_count", 0)} ｜ rollout {orchestration_summary.get("controlled_rollout_executed_count", 0)} ｜ review {orchestration_summary.get("review_queue_queued_count", 0)}',
         f'Auto-approval budget：limit={auto_approval_budget.get("max_executed_per_pass", 0) or "unlimited"} ｜ remaining={auto_approval_budget.get("remaining_slots", "--")} ｜ exhausted={"yes" if auto_approval_budget.get("exhausted") else "no"} ｜ skipped={auto_approval_budget.get("skipped_by_budget", 0)}',
@@ -499,6 +507,11 @@ def build_runtime_health_summary(cfg: Config, db: Database) -> dict:
             'mode': mode,
             'models': model_rows,
             'approval_hygiene': approval_hygiene,
+            'notification_outbox': notification_stats,
+            'relay': {
+                'runtime': relay_runtime,
+                'last_result': relay_last_result,
+            },
             'adaptive_rollout_orchestration': {
                 'enabled': orchestration_enabled,
                 'runtime': orchestration_runtime,

@@ -1,14 +1,12 @@
 """
 [LEGACY ENTRYPOINT — DO NOT USE AS CURRENT PRODUCTION ENTRY]
 
-这是历史主程序入口文件，仅为兼容旧开发痕迹与问题排查参考而保留。
+这是历史主程序入口文件，仅为兼容保留与问题排查参考而存在。
 
-当前正式入口请使用：
-- python3 bot/run.py         # 当前交易机器人正式主入口
-- dashboard.api:app          # 当前 Dashboard Flask app 入口
-- scripts/start.sh           # 当前推荐的 bot / dashboard / relay 拉起脚本
+当前正式入口与 legacy 边界统一说明见：
+- docs/legacy-index.md
 
-不建议把本文件作为当前正式运行命令或部署入口；README 与部署文档已统一指向上述正式入口。
+不要把本文件作为当前部署或正式运行入口。
 """
 import sys
 import os

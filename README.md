@@ -46,23 +46,15 @@ M4 Step 4 batch2 status: 已补第二批可直接开工实施稿，明确区分 
 
 ## Supported entrypoints / legacy boundary
 
-为减少误用，当前仓库**唯一建议使用**的运行入口如下：
+为减少误用，当前主线正式入口与 legacy 边界已统一收口到：
+
+- [`docs/legacy-index.md`](docs/legacy-index.md)
+
+如果你要直接运行当前主线，优先使用：
 
 - **交易主入口**：`bot/run.py`
 - **Dashboard 运行入口**：`dashboard.api:app`（或 `python3 bot/run.py --dashboard`）
 - **守护 / relay / dashboard 拉起脚本**：`scripts/start.sh` / `scripts/start.public.sh`
-
-以下文件目前保留仅为**历史兼容 / 参考实现 / 本地研究脚本**，**不是主线运行入口**：
-
-- `bot/main.py`
-- `dashboard/app.py`
-- `ml/collect_data.py`
-- `ml/train_model.py`
-- `ml/simple_model.py`
-
-其中 ML 相关也请统一走 `bot/run.py --collect` / `bot/run.py --train`，不要再直接把 `ml/*.py` 当成正式入口。
-
-如果你要跑当前主线，请优先按 README / DEPLOYMENT 文档中的 `bot/run.py`、`dashboard.api:app`、`scripts/start*.sh` 操作，避免误用旧入口。
 
 ---
 

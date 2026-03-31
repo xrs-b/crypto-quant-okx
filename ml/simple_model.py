@@ -1,8 +1,13 @@
 """
-[LEGACY RESEARCH SCRIPT]
+[LEGACY RESEARCH SCRIPT — DO NOT USE AS CURRENT PRODUCTION ENTRY]
 
-早期规则模型/研究脚本，保留作历史参考，不属于当前交易主线入口。
-当前主线运行入口请使用 `bot/run.py`。
+这是历史规则模型/研究脚本，仅保留作研究记录与排查参考，不属于当前交易主线。
+
+当前正式入口请使用：
+- python3 bot/run.py             # 当前交易机器人正式主入口
+- ml.engine                      # 当前主线 ML / 数据流程所在模块
+
+不建议直接执行本文件作为当前正式运行命令；README 与主线流程已统一切换到正式入口。
 """
 from pathlib import Path
 import pandas as pd

@@ -1,8 +1,13 @@
 """
-[LEGACY ML SCRIPT]
+[LEGACY ML SCRIPT — DO NOT USE AS CURRENT PRODUCTION ENTRY]
 
-早期独立数据收集脚本，保留作历史参考。
-当前主线请优先使用 `python3 bot/run.py --collect`，由 `ml.engine.DataCollector` 驱动。
+这是历史数据收集脚本，仅保留作研究记录与排查参考。
+
+当前正式入口请使用：
+- python3 bot/run.py --collect   # 当前正式数据收集命令
+- ml.engine.DataCollector        # 当前主线收集实现
+
+不建议直接执行本文件作为当前正式运行命令；README 与主线流程已统一切换到上述正式入口。
 """
 from pathlib import Path
 import time

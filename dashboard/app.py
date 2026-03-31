@@ -1,13 +1,13 @@
 """
-[LEGACY DASHBOARD ENTRYPOINT]
+[LEGACY DASHBOARD ENTRYPOINT — DO NOT USE AS CURRENT PRODUCTION ENTRY]
 
-历史 Dashboard 入口，当前保留主要用于旧页面兼容/参考。
+这是历史 Dashboard 入口文件，仅保留作旧页面兼容与排查参考。
 
-当前主线请使用：
+当前正式入口请使用：
 - dashboard.api:app
 - 或 python3 bot/run.py --dashboard
 
-为避免误用，README / 部署文档已统一指向 dashboard.api:app。
+不建议把本文件作为当前正式运行命令或部署入口；README 与部署文档已统一指向上述正式入口。
 """
 from flask import Flask, render_template, jsonify, request, send_from_directory
 import sys

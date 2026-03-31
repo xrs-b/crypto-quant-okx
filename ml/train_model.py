@@ -1,8 +1,13 @@
 """
-[LEGACY ML SCRIPT]
+[LEGACY ML SCRIPT — DO NOT USE AS CURRENT PRODUCTION ENTRY]
 
-早期独立训练脚本，保留作历史参考。
-当前主线请优先使用 `python3 bot/run.py --train`，由 `ml.engine.ModelTrainer` 驱动。
+这是历史模型训练脚本，仅保留作研究记录与排查参考。
+
+当前正式入口请使用：
+- python3 bot/run.py --train     # 当前正式训练命令
+- ml.engine.ModelTrainer         # 当前主线训练实现
+
+不建议直接执行本文件作为当前正式运行命令；README 与主线流程已统一切换到上述正式入口。
 """
 from pathlib import Path
 import pandas as pd

@@ -63,8 +63,15 @@ class NotificationManager:
         except Exception:
             pass
 
-    def relay_pending_outbox(self, limit: int = 20) -> Dict:
-        result = {'scanned': 0, 'delivered': 0, 'failed': 0, 'skipped': 0, 'items': []}
+    def relay_pending_outbox(self, limit: int = 20, sample_size: int = 3) -> Dict:
+        result = {
+            'scanned': 0,
+            'delivered': 0,
+            'failed': 0,
+            'skipped': 0,
+            'status_counts': {},
+            'sample_items': [],
+        }
         if not self.db:
             return result
         try:
@@ -72,10 +79,15 @@ class NotificationManager:
         except Exception:
             return result
         result['scanned'] = len(rows)
+        status_counts = {'delivered': 0, 'pending': 0, 'skipped': 0}
+        sample_items = []
         for row in rows:
+            item_id = row.get('id')
             if row.get('channel') != 'discord':
                 result['skipped'] += 1
-                result['items'].append({'id': row.get('id'), 'status': 'skipped', 'reason': 'unsupported-channel'})
+                status_counts['skipped'] += 1
+                if len(sample_items) < sample_size:
+                    sample_items.append({'id': item_id, 'status': 'skipped', 'reason': 'unsupported-channel'})
                 continue
             existing = copy.deepcopy(row.get('details') or {})
             delivery = existing.get('delivery') or {}
@@ -91,13 +103,19 @@ class NotificationManager:
                 }
             }
             if delivered:
-                self._update_outbox_status(row.get('id'), 'delivered', updated)
+                self._update_outbox_status(item_id, 'delivered', updated)
                 result['delivered'] += 1
-                result['items'].append({'id': row.get('id'), 'status': 'delivered'})
+                status_counts['delivered'] += 1
+                if len(sample_items) < sample_size:
+                    sample_items.append({'id': item_id, 'status': 'delivered'})
             else:
-                self._update_outbox_status(row.get('id'), 'pending', updated)
+                self._update_outbox_status(item_id, 'pending', updated)
                 result['failed'] += 1
-                result['items'].append({'id': row.get('id'), 'status': 'pending'})
+                status_counts['pending'] += 1
+                if len(sample_items) < sample_size:
+                    sample_items.append({'id': item_id, 'status': 'pending'})
+        result['status_counts'] = {k: v for k, v in status_counts.items() if v}
+        result['sample_items'] = sample_items
         return result
 
     def _send_discord_webhook(self, content: str) -> bool:
@@ -238,6 +256,20 @@ class NotificationManager:
                 continue
             pairs.append(f'{key}={value}')
         return ' | '.join(pairs) if pairs else '--'
+
+    def _trim_text(self, value, limit: int = 120) -> str:
+        text = str(value or '--').strip() or '--'
+        if len(text) <= limit:
+            return text
+        return f"{text[: max(limit - 1, 0)].rstrip()}…"
+
+    def _compact_join(self, items: List[str], limit: int = 4) -> str:
+        cleaned = [str(item).strip() for item in (items or []) if str(item).strip()]
+        if not cleaned:
+            return '--'
+        visible = cleaned[:limit]
+        suffix = f' +{len(cleaned) - limit}' if len(cleaned) > limit else ''
+        return ' / '.join(visible) + suffix
 
     def _extract_exchange_error_summary(self, details: Dict = None) -> Dict:
         details = details or {}
@@ -431,14 +463,14 @@ class NotificationManager:
             'shadow': '阴影',
         }
         localized_state = state_labels.get(ctx['state'], ctx['state'])
-        tags = ' / '.join(ctx['tags'][:limit]) if ctx['tags'] else '--'
+        tags = self._compact_join(ctx['tags'], limit=limit)
         return [
             '---',
             '【自适应市场状态（Observe-only）】',
             f"市场状态：{ctx['regime_name']}（置信度 {ctx['confidence_text']}）",
             f"策略模式：{localized_mode} [{ctx['mode']}]",
             f"阶段/状态：{localized_phase} / {localized_state}",
-            f"摘要：{ctx['summary']}",
+            f"摘要：{self._trim_text(ctx['summary'], limit=120)}",
             f"标签：{tags}",
             '说明：仅增强观察与汇总展示，当前不改变真实交易执行。',
         ]

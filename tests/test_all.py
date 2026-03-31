@@ -2793,6 +2793,45 @@ class TestHealthSummary(unittest.TestCase):
         if os.path.exists('data/test_health_summary_recovery_rerun.db'):
             os.remove('data/test_health_summary_recovery_rerun.db')
 
+    def test_build_runtime_health_summary_compacts_operator_and_pending_previews(self):
+        import bot.run as bot_run
+        cfg = Config()
+        db = Database('data/test_health_summary_compact.db')
+        old_runtime_path = bot_run.RUNTIME_STATE_PATH
+        original_method = Database.get_notification_outbox_stats
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bot_run.RUNTIME_STATE_PATH = Path(tmpdir) / 'runtime_state.json'
+            bot_run.RUNTIME_STATE_PATH.write_text(json.dumps({
+                'approval_hygiene': {'last_run_at': '2026-03-29T06:00:00', 'expired_count': 2},
+                'relay': {
+                    'running': True,
+                    'interval_seconds': 30,
+                    'last_checked_at': '2026-03-29T06:05:00',
+                    'last_result': {'scanned': 5, 'delivered': 2, 'failed': 1, 'skipped': 2},
+                },
+            }, ensure_ascii=False, indent=2))
+            Database.get_notification_outbox_stats = lambda self: {
+                'pending': 4,
+                'delivered': 9,
+                'suppressed': 2,
+                'oldest_pending_at': '2026-03-29T05:00:00',
+                'top_pending_types': [
+                    {'event_type': 'runtime', 'count': 2},
+                    {'event_type': 'error', 'count': 1},
+                    {'event_type': 'decision', 'count': 1},
+                    {'event_type': 'trade', 'count': 1},
+                ],
+            }
+            try:
+                summary = build_runtime_health_summary(cfg, db)
+                self.assertTrue(any('Operator routing：clear' in line for line in summary['lines']))
+                self.assertTrue(any('Pending 类型：runtime:2 / error:1 / decision:1 / +1' in line for line in summary['lines']))
+            finally:
+                Database.get_notification_outbox_stats = original_method
+                bot_run.RUNTIME_STATE_PATH = old_runtime_path
+        if os.path.exists('data/test_health_summary_compact.db'):
+            os.remove('data/test_health_summary_compact.db')
+
     def test_maybe_run_adaptive_rollout_orchestration_persists_runtime_summary(self):
         import bot.run as bot_run
         cfg = Config()

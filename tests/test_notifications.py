@@ -266,9 +266,38 @@ class TestNotifications(unittest.TestCase):
         relay = notifier.relay_pending_outbox(limit=10)
         self.assertEqual(relay['scanned'], 1)
         self.assertEqual(relay['delivered'], 1)
+        self.assertEqual(relay['status_counts'], {'delivered': 1})
+        self.assertEqual(relay['sample_items'], [{'id': 1, 'status': 'delivered'}])
         self.assertEqual(db.outbox[-1]['status'], 'delivered')
         self.assertTrue(db.outbox[-1]['details']['delivery']['relay_attempted'])
         self.assertEqual(db.outbox[-1]['details']['delivery']['path'], 'relay')
+
+    def test_notify_signal_observe_only_compacts_long_summary_and_tags(self):
+        cfg = Config()
+        cfg._config.setdefault('notification', {}).setdefault('discord', {})
+        cfg._config['notification']['discord'].update({'enabled': False, 'bot_token': '', 'channel_id': '', 'webhook_url': ''})
+        db = FakeLogDB()
+        notifier = NotificationManager(cfg, db, None)
+        from signals.detector import Signal
+        signal = Signal(
+            symbol='BTC/USDT', signal_type='buy', price=50000, strength=88, strategies_triggered=['RSI'],
+            market_context={
+                'adaptive_policy_snapshot': {
+                    'mode': 'observe_only',
+                    'phase': 'm1',
+                    'state': 'shadow',
+                    'summary': 'x' * 160,
+                    'tags': ['observe_only', 'market_context', 'trend', 'watch', 'extra_tag'],
+                },
+                'regime_name': 'trend_up',
+                'regime_confidence': 0.81,
+            },
+        )
+        notifier.notify_signal(signal, False, '测试压缩', {'passed': False})
+        message = db.logs[-1]['details']['message']
+        self.assertIn('摘要：', message)
+        self.assertIn('…', message)
+        self.assertIn('标签：observe_only / market_context / trend / watch +1', message)
 
     def test_duplicate_notifications_get_aggregate_summary(self):
         cfg = Config()

@@ -59,7 +59,15 @@ def run_notification_relay(interval: int = 30, once: bool = False, limit: int = 
             'last_result': {'time': now, **result},
         }
         save_runtime_state(relay_state)
-        print(json.dumps({'time': now, **result}, ensure_ascii=False))
+        print(json.dumps({
+            'time': now,
+            'scanned': result.get('scanned', 0),
+            'delivered': result.get('delivered', 0),
+            'failed': result.get('failed', 0),
+            'skipped': result.get('skipped', 0),
+            'status_counts': result.get('status_counts', {}),
+            'sample_items': result.get('sample_items', []),
+        }, ensure_ascii=False))
         if once:
             break
         time.sleep(interval)
@@ -77,6 +85,41 @@ def load_runtime_state() -> dict:
 def save_runtime_state(state: dict):
     RUNTIME_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
     RUNTIME_STATE_PATH.write_text(json.dumps(state or {}, ensure_ascii=False, indent=2))
+
+
+def _format_count_map(value: dict, *, empty: str = '--', limit: int = 3) -> str:
+    if not isinstance(value, dict) or not value:
+        return empty
+    items = [(str(k), int(v)) for k, v in value.items() if v]
+    if not items:
+        return empty
+    items.sort(key=lambda item: (-item[1], item[0]))
+    visible = [f'{key}:{count}' for key, count in items[:limit]]
+    if len(items) > limit:
+        visible.append(f'+{len(items) - limit}')
+    return ' / '.join(visible)
+
+
+def _format_list_preview(value, *, empty: str = '--', limit: int = 3) -> str:
+    if not value:
+        return empty
+    cleaned = []
+    for item in value:
+        if isinstance(item, dict):
+            label = item.get('event_type') or item.get('type') or item.get('name') or item.get('status')
+            count = item.get('count')
+            text = f'{label}:{count}' if label and count is not None else str(item)
+        else:
+            text = str(item)
+        text = text.strip()
+        if text:
+            cleaned.append(text)
+    if not cleaned:
+        return empty
+    visible = cleaned[:limit]
+    if len(cleaned) > limit:
+        visible.append(f'+{len(cleaned) - limit}')
+    return ' / '.join(visible)
 
 
 def _build_approval_hygiene_operator_action_summary(stale_rows: list, decision_diffs: list, *, auto_cleanup_enabled: bool = False) -> dict:
@@ -474,12 +517,12 @@ def build_runtime_health_summary(cfg: Config, db: Database) -> dict:
         '---',
         f'Approval Hygiene：mode={approval_mode} ｜ stale={approval_hygiene.get("stale_count", 0)} ｜ decision diff={approval_hygiene.get("decision_diff_count", 0)}',
         f'审批卫生：stale>{approval_hygiene.get("stale_after_minutes", 0)} 分钟 ｜ 上次处理 {approval_runtime.get("last_run_at") or "--"} ｜ 上次过期收口 {approval_runtime.get("expired_count", 0)}',
-        f'Operator routing：{approval_hygiene.get("operator_action_summary", {}).get("policy_counts") or {}}',
+        f'Operator routing：{_format_count_map(approval_hygiene.get("operator_action_summary", {}).get("policy_counts") or {}, empty="clear")}',
         '---',
         f'Notification Outbox：pending={notification_stats.get("pending", 0)} ｜ delivered={notification_stats.get("delivered", 0)} ｜ suppressed={notification_stats.get("suppressed", 0)} ｜ oldest={notification_stats.get("oldest_pending_at") or "--"}',
         f'Relay 状态：running={"yes" if relay_runtime.get("running") else "no"} ｜ interval={relay_runtime.get("interval_seconds") or "--"}s ｜ last-check={relay_runtime.get("last_checked_at") or "--"}',
         f'Relay 最近一轮：scanned={relay_last_result.get("scanned", 0)} ｜ delivered={relay_last_result.get("delivered", 0)} ｜ failed={relay_last_result.get("failed", 0)} ｜ skipped={relay_last_result.get("skipped", 0)}',
-        f'Pending 类型：{notification_stats.get("top_pending_types") or []}',
+        f'Pending 类型：{_format_list_preview(notification_stats.get("top_pending_types") or [], empty="clear")}',
         '---',
         f'Adaptive Rollout Orchestration：enabled={"yes" if orchestration_enabled else "no"} ｜ gate={orchestration_summary.get("gate_status") or "--"} ｜ blocked={"yes" if orchestration_summary.get("gate_blocked") else "no"}',
         f'编排执行：auto-approval {orchestration_summary.get("auto_approval_executed_count", 0)} ｜ rollout {orchestration_summary.get("controlled_rollout_executed_count", 0)} ｜ review {orchestration_summary.get("review_queue_queued_count", 0)}',
@@ -2935,16 +2978,24 @@ class TradingBot:
         state.update({'running': False, 'last_finished_at': finished_at.isoformat(), 'last_summary': summary})
         save_runtime_state(state)
         append_runtime_history({'type': 'end', 'time': finished_at.isoformat(), 'message': f'周期完成：信号 {summary["signals"]} / 开仓 {summary["opened"]} / 平仓 {summary["closed"]} / 错误 {summary["errors"]}'})
+        candidate_ranking = summary.get("candidate_ranking") or {}
+        execution_quota = candidate_ranking.get("execution_quota") or {}
+        fairness_codes = sorted({
+            code
+            for item in (candidate_ranking.get("items") or [])
+            for code in (((item.get("diversification") or {}).get("reason_codes") or []))
+        })
+        final_permits = summary.get("final_execution_permits") or {}
         end_lines = [
             f'开始：{summary["started_at"]}',
             f'结束：{summary["finished_at"]}',
             f'监听币种：{", ".join(self.config.symbols)}',
             f'持仓对账：同步 {reconcile_report.get("synced", 0) if isinstance(reconcile_report, dict) else 0} 条 ｜ 清理 {reconcile_report.get("removed", 0) if isinstance(reconcile_report, dict) else 0} 条',
             f'信号：{summary["signals"]} ｜ 通过：{summary["passed"]} ｜ 开仓：{summary["opened"]} ｜ 平仓：{summary["closed"]} ｜ 错误：{summary["errors"]}',
-            f'候选排序：{(summary.get("candidate_ranking") or {}).get("candidate_count", 0)} ｜ 选中：{(summary.get("candidate_ranking") or {}).get("selected_count", 0)} ｜ skip：{len(summary.get("candidate_skip_contracts") or [])}',
-            f'公平围栏：{", ".join(sorted({code for item in ((summary.get("candidate_ranking") or {}).get("items") or []) for code in (((item.get("diversification") or {}).get("reason_codes") or []))})) or "clear"}',
-            f'执行配额：cycle={(summary.get("candidate_ranking") or {}).get("execution_quota", {}).get("max_new_positions_per_cycle", 0)} ｜ cluster-cap={(summary.get("candidate_ranking") or {}).get("execution_quota", {}).get("max_same_cluster_per_cycle", 0)} ｜ reasons={json.dumps((summary.get("candidate_ranking") or {}).get("execution_quota", {}).get("reason_code_counts", {}), ensure_ascii=False)}',
-            f'最终许可：permit={(summary.get("final_execution_permits") or {}).get("permit_count", 0)} ｜ deny={(summary.get("final_execution_permits") or {}).get("deny_count", 0)} ｜ reasons={json.dumps((summary.get("final_execution_permits") or {}).get("reason_code_counts", {}), ensure_ascii=False)}'
+            f'候选排序：{candidate_ranking.get("candidate_count", 0)} ｜ 选中：{candidate_ranking.get("selected_count", 0)} ｜ skip：{len(summary.get("candidate_skip_contracts") or [])}',
+            f'公平围栏：{_format_list_preview(fairness_codes, empty="clear")}',
+            f'执行配额：cycle={execution_quota.get("max_new_positions_per_cycle", 0)} ｜ cluster-cap={execution_quota.get("max_same_cluster_per_cycle", 0)} ｜ reasons={_format_count_map(execution_quota.get("reason_code_counts") or {}, empty="clear")}',
+            f'最终许可：permit={final_permits.get("permit_count", 0)} ｜ deny={final_permits.get("deny_count", 0)} ｜ reasons={_format_count_map(final_permits.get("reason_code_counts") or {}, empty="clear")}'
         ]
         self.notifier.notify_runtime('end', end_lines, summary)
         print(f"\n✅ 交易循环完成! {finished_at}\n")

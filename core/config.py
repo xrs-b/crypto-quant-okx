@@ -78,8 +78,9 @@ class Config:
     
     def __init__(self, config_path: str = None):
         if config_path is None:
-            # 默认配置文件路径
-            project_root = Path(__file__).parent.parent
+            # 默认配置文件路径：优先尊重 PROJECT_DIR，避免 wrapper / 外部入口 / 源码镜像时误读到另一份仓库配置。
+            project_dir = (os.getenv('PROJECT_DIR') or '').strip()
+            project_root = Path(project_dir).expanduser().resolve() if project_dir else Path(__file__).resolve().parent.parent
             config_path = project_root / "config" / "config.yaml"
         
         self.config_path = config_path

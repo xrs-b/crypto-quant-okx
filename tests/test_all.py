@@ -408,6 +408,43 @@ class TestConfig(unittest.TestCase):
             if old_path is not None:
                 os.environ['CRYPTO_QUANT_OKX_HOME_LOCAL_CONFIG'] = old_path
 
+    def test_default_config_path_respects_project_dir_env(self):
+        old_project_dir = os.environ.get('PROJECT_DIR')
+        old_enable = os.environ.pop('CRYPTO_QUANT_OKX_ENABLE_HOME_LOCAL', None)
+        old_home_path = os.environ.pop('CRYPTO_QUANT_OKX_HOME_LOCAL_CONFIG', None)
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                project_dir = Path(tmpdir)
+                config_dir = project_dir / 'config'
+                config_dir.mkdir(parents=True, exist_ok=True)
+                (config_dir / 'config.yaml').write_text(
+                    "notification:\n"
+                    "  discord:\n"
+                    "    channel_id: project-channel\n",
+                    encoding='utf-8'
+                )
+                (config_dir / 'config.local.yaml').write_text(
+                    "api:\n"
+                    "  key: project-key\n"
+                    "  secret: project-secret\n"
+                    "  passphrase: project-pass\n",
+                    encoding='utf-8'
+                )
+                os.environ['PROJECT_DIR'] = str(project_dir)
+                cfg = Config()
+                self.assertEqual(Path(cfg.config_path).resolve(), (config_dir / 'config.yaml').resolve())
+                self.assertEqual(cfg.get('notification.discord.channel_id'), 'project-channel')
+                self.assertEqual(cfg.get('api.key'), 'project-key')
+        finally:
+            if old_project_dir is None:
+                os.environ.pop('PROJECT_DIR', None)
+            else:
+                os.environ['PROJECT_DIR'] = old_project_dir
+            if old_enable is not None:
+                os.environ['CRYPTO_QUANT_OKX_ENABLE_HOME_LOCAL'] = old_enable
+            if old_home_path is not None:
+                os.environ['CRYPTO_QUANT_OKX_HOME_LOCAL_CONFIG'] = old_home_path
+
 
 class TestAdaptiveRegimeM0(unittest.TestCase):
     def setUp(self):

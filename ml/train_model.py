@@ -1,6 +1,8 @@
 """
-机器学习模型 - 预测涨跌
-使用Random Forest + 技术指标
+[LEGACY ML SCRIPT]
+
+早期独立训练脚本，保留作历史参考。
+当前主线请优先使用 `python3 bot/run.py --train`，由 `ml.engine.ModelTrainer` 驱动。
 """
 from pathlib import Path
 import pandas as pd

@@ -1,5 +1,13 @@
 """
-OKX量化交易系统 - 仪表盘 (多页面版本)
+[LEGACY DASHBOARD ENTRYPOINT]
+
+历史 Dashboard 入口，当前保留主要用于旧页面兼容/参考。
+
+当前主线请使用：
+- dashboard.api:app
+- 或 python3 bot/run.py --dashboard
+
+为避免误用，README / 部署文档已统一指向 dashboard.api:app。
 """
 from flask import Flask, render_template, jsonify, request, send_from_directory
 import sys

@@ -1,6 +1,8 @@
 """
-简单的量化信号模型 - 不需要ML库
-基于技术指标规则
+[LEGACY RESEARCH SCRIPT]
+
+早期规则模型/研究脚本，保留作历史参考，不属于当前交易主线入口。
+当前主线运行入口请使用 `bot/run.py`。
 """
 from pathlib import Path
 import pandas as pd

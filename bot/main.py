@@ -1,5 +1,14 @@
 """
-OKX量化交易机器人 - 主程序
+[LEGACY ENTRYPOINT]
+
+历史主程序入口，保留只为兼容旧开发痕迹/排查参考。
+
+当前主线运行入口请使用：
+- bot/run.py                  # 交易主入口 / daemon / train / collect / diagnose / relay
+- dashboard.api:app          # Dashboard Flask app
+- scripts/start.sh           # bot / dashboard / relay 拉起脚本
+
+注意：这个文件不是当前 README / 部署文档支持的主线入口，未来可继续归档。
 """
 import sys
 import os

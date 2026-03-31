@@ -99,7 +99,7 @@
 - [ ] `scripts/okx-trading.service` 的模板版
 
 ### 8. Dashboard / Web 安全项
-- [ ] 将 `dashboard/app.py` 里的固定 `SECRET_KEY` 改成环境变量
+- [ ] 如继续保留 legacy `dashboard/app.py`，将其中开发态默认 `SECRET_KEY` 改成只允许环境变量注入或明确标注仅限本地开发
 - [ ] 如果允许远程访问 Dashboard，补充最小安全说明
 - [ ] 说明是否建议只内网访问
 

@@ -60,6 +60,8 @@ M4 Step 4 batch2 status: 已补第二批可直接开工实施稿，明确区分 
 - `ml/train_model.py`
 - `ml/simple_model.py`
 
+其中 ML 相关也请统一走 `bot/run.py --collect` / `bot/run.py --train`，不要再直接把 `ml/*.py` 当成正式入口。
+
 如果你要跑当前主线，请优先按 README / DEPLOYMENT 文档中的 `bot/run.py`、`dashboard.api:app`、`scripts/start*.sh` 操作，避免误用旧入口。
 
 ---

@@ -1,3 +1,7 @@
+# Example systemd unit for bot/run.py.
+# Replace user / project path / python path before production use.
+# Current mainline runtime entrypoint is bot/run.py (not bot/main.py).
+
 [Unit]
 Description=OKX Quantitative Trading Bot
 After=network.target

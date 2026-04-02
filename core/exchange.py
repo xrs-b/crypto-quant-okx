@@ -380,11 +380,19 @@ class Exchange:
             summary['source'] = 'exchange_fills_capped_fallback_pnl'
         return summary
 
+    def _get_market_fetch_symbol(self, symbol: str) -> str:
+        market = self.get_market(symbol)
+        if not market:
+            return symbol
+        return market.get('symbol') or market.get('id') or symbol
+
     def fetch_ticker(self, symbol: str) -> Dict:
-        return self.exchange.fetch_ticker(symbol)
+        market_symbol = self._get_market_fetch_symbol(symbol)
+        return self.exchange.fetch_ticker(market_symbol)
 
     def fetch_ohlcv(self, symbol: str, timeframe: str = '1h', since: int = None, limit: int = 100) -> List:
-        return self.exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=limit)
+        market_symbol = self._get_market_fetch_symbol(symbol)
+        return self.exchange.fetch_ohlcv(market_symbol, timeframe, since=since, limit=limit)
 
     def set_leverage(self, symbol: str, leverage: int = 3):
         market = self.get_market(symbol)

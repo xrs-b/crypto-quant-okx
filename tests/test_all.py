@@ -1711,6 +1711,46 @@ class TestExchange(unittest.TestCase):
         self.assertEqual(len(ex.exchange.calls), 2)
         self.assertEqual(ex.exchange.calls[1]['params'], {'tdMode': 'isolated'})
 
+    def test_fetch_ticker_uses_resolved_swap_market_symbol(self):
+        class FetchTickerStub:
+            def __init__(self):
+                self.calls = []
+
+            def fetch_ticker(self, symbol):
+                self.calls.append(symbol)
+                return {'symbol': symbol, 'last': 123.45}
+
+        ex = Exchange.__new__(Exchange)
+        ex.config = {'exchange': {'name': 'okx', 'mode': 'testnet'}}
+        ex.exchange = FetchTickerStub()
+        ex.get_market = lambda symbol: {'symbol': 'SOL/USDT:USDT', 'id': 'SOL-USDT-SWAP', 'swap': True, 'linear': True}
+
+        ticker = ex.fetch_ticker('SOL/USDT')
+        self.assertEqual(ex.exchange.calls, ['SOL/USDT:USDT'])
+        self.assertEqual(ticker['symbol'], 'SOL/USDT:USDT')
+
+    def test_fetch_ohlcv_uses_resolved_swap_market_symbol(self):
+        class FetchOHLCVStub:
+            def __init__(self):
+                self.calls = []
+
+            def fetch_ohlcv(self, symbol, timeframe='1h', since=None, limit=100):
+                self.calls.append({'symbol': symbol, 'timeframe': timeframe, 'since': since, 'limit': limit})
+                return [[1, 2, 3, 4, 5, 6]]
+
+        ex = Exchange.__new__(Exchange)
+        ex.config = {'exchange': {'name': 'okx', 'mode': 'testnet'}}
+        ex.exchange = FetchOHLCVStub()
+        ex.get_market = lambda symbol: {'symbol': 'SOL/USDT:USDT', 'id': 'SOL-USDT-SWAP', 'swap': True, 'linear': True}
+
+        rows = ex.fetch_ohlcv('SOL/USDT', '1h', since=1234567890, limit=50)
+        self.assertEqual(ex.exchange.calls, [{
+            'symbol': 'SOL/USDT:USDT',
+            'timeframe': '1h',
+            'since': 1234567890,
+            'limit': 50,
+        }])
+        self.assertEqual(rows, [[1, 2, 3, 4, 5, 6]])
 
 
 class TestReconcilePositions(unittest.TestCase):

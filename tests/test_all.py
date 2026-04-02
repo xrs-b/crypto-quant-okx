@@ -146,6 +146,64 @@ class OpenFillFallbackExchangeStub(OpenFillAverageExchangeStub):
         }
 
 
+class OpenFillPositionEntryExchangeStub(OpenFillAverageExchangeStub):
+    def __init__(self, fill_price=50123.4, position_entry_price=50188.8):
+        super().__init__(fill_price=fill_price)
+        self.position_entry_price = position_entry_price
+        self.fetch_positions_calls = 0
+        self.normalize_position_calls = 0
+        self.order_created = False
+
+    def create_order(self, symbol, side, amount, posSide=None):
+        self.order_created = True
+        return super().create_order(symbol, side, amount, posSide=posSide)
+
+    def fetch_open_trade_summary(self, symbol, order=None, fallback_price=None, fallback_quantity=None):
+        self.fetch_open_trade_summary_calls.append({
+            'symbol': symbol,
+            'order': dict(order or {}),
+            'fallback_price': fallback_price,
+            'fallback_quantity': fallback_quantity,
+        })
+        return {
+            'entry_price': fallback_price,
+            'quantity': fallback_quantity,
+            'contract_size': self.get_contract_size(symbol),
+            'coin_quantity': self.contracts_to_coin_quantity(symbol, fallback_quantity),
+            'fill_count': 0,
+            'source': 'execution_reference_fallback',
+        }
+
+    def fetch_positions(self):
+        self.fetch_positions_calls += 1
+        if not self.order_created:
+            return []
+        return [{
+            'symbol': 'BTC/USDT',
+            'side': 'long',
+            'contracts': 10.0,
+            'entryPrice': self.position_entry_price,
+            'markPrice': self.position_entry_price,
+            'leverage': 10,
+        }]
+
+    def normalize_position(self, pos):
+        self.normalize_position_calls += 1
+        quantity = float(pos.get('contracts') or 0)
+        contract_size = self.get_contract_size(pos.get('symbol'))
+        return {
+            'symbol': pos.get('symbol'),
+            'side': pos.get('side'),
+            'quantity': quantity,
+            'contracts': quantity,
+            'contract_size': contract_size,
+            'coin_quantity': quantity * contract_size,
+            'entry_price': float(pos.get('entryPrice') or 0),
+            'current_price': float(pos.get('markPrice') or 0),
+            'leverage': int(pos.get('leverage') or 10),
+        }
+
+
 class DriftBlockExchangeStub:
     def __init__(self, latest_price=50250):
         self.latest_price = latest_price
@@ -3507,6 +3565,33 @@ class TestTradingExecutor(unittest.TestCase):
         self.assertEqual(latest_trade['plan_context']['execution_reference_price'], 50000.0)
         self.assertEqual(latest_trade['plan_context']['actual_entry_price_source'], 'exchange_open_fills')
         self.assertEqual(latest_trade['plan_context']['actual_entry_fill_count'], 1)
+
+    def test_open_position_trade_logger_uses_actual_entry_price(self):
+        self.executor.exchange = OpenFillAverageExchangeStub(fill_price=50088.8)
+        with patch('trading.executor.trade_logger.trade') as mock_trade_log:
+            trade_id = self.executor.open_position('BTC/USDT', 'long', 50000, signal_id=1021)
+        self.assertIsNotNone(trade_id)
+        mock_trade_log.assert_called_once()
+        log_args = mock_trade_log.call_args[0]
+        self.assertEqual(log_args[0], 'BTC/USDT')
+        self.assertEqual(log_args[1], 'long')
+        self.assertAlmostEqual(log_args[2], 50088.8)
+        self.assertAlmostEqual(log_args[3], 10.0)
+        self.assertEqual(log_args[4], trade_id)
+
+    def test_open_position_uses_exchange_position_entry_when_fill_average_unavailable(self):
+        self.executor.exchange = OpenFillPositionEntryExchangeStub(position_entry_price=50066.6)
+        trade_id = self.executor.open_position('BTC/USDT', 'long', 50000, signal_id=1022)
+        self.assertIsNotNone(trade_id)
+        latest_trade = self.db.get_latest_open_trade('BTC/USDT', 'long')
+        position = self.db.get_positions()[0]
+        self.assertAlmostEqual(latest_trade['entry_price'], 50066.6)
+        self.assertAlmostEqual(position['entry_price'], 50066.6)
+        self.assertAlmostEqual(position['current_price'], 50066.6)
+        self.assertEqual(latest_trade['plan_context']['actual_entry_price_source'], 'exchange_position_entry')
+        self.assertEqual(latest_trade['plan_context']['actual_entry_fill_count'], 0)
+        self.assertGreaterEqual(self.executor.exchange.fetch_positions_calls, 1)
+        self.assertGreaterEqual(self.executor.exchange.normalize_position_calls, 1)
 
     def test_open_position_falls_back_to_execution_reference_price_when_fill_average_unavailable(self):
         self.executor.exchange = OpenFillFallbackExchangeStub(fill_price=50088.8)

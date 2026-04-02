@@ -210,6 +210,25 @@ class TradingExecutor:
                 return True
         return False
 
+    def _fetch_exchange_position_snapshot(self, symbol: str, side: str) -> Optional[Dict[str, Any]]:
+        try:
+            positions = self.exchange.fetch_positions() or []
+        except Exception:
+            return None
+        for pos in positions:
+            normalized = pos if pos.get('contract_size') is not None else (self.exchange.normalize_position(pos) if hasattr(self.exchange, 'normalize_position') else pos)
+            if not normalized:
+                continue
+            pos_symbol = normalized.get('symbol')
+            pos_side = str(normalized.get('side') or '').lower()
+            if pos_symbol != symbol or pos_side != side:
+                continue
+            quantity = float(normalized.get('quantity') or normalized.get('contracts') or 0)
+            if quantity <= 0:
+                continue
+            return normalized
+        return None
+
     def _store_close_result(self, symbol: str, side: str, result: Dict[str, Any]) -> None:
         key = (symbol, side)
         payload = dict(result or {})
@@ -241,33 +260,21 @@ class TradingExecutor:
         return True
     
     def _recover_open_trade_from_exchange(self, symbol: str, side: str, signal_id: int = None, note: str = None) -> Optional[int]:
-        try:
-            positions = self.exchange.fetch_positions() or []
-        except Exception:
+        normalized = self._fetch_exchange_position_snapshot(symbol, side)
+        if not normalized:
             return None
-        for pos in positions:
-            normalized = pos if pos.get('contract_size') is not None else (self.exchange.normalize_position(pos) if hasattr(self.exchange, 'normalize_position') else pos)
-            if not normalized:
-                continue
-            pos_symbol = normalized.get('symbol')
-            pos_side = str(normalized.get('side') or '').lower()
-            if pos_symbol != symbol or pos_side != side:
-                continue
-            quantity = float(normalized.get('quantity') or normalized.get('contracts') or 0)
-            if quantity <= 0:
-                continue
-            contract_size = float(normalized.get('contract_size') or 1)
-            coin_quantity = float(normalized.get('coin_quantity') or quantity * contract_size)
-            leverage = int(float(normalized.get('leverage') or self.trading_config.get('leverage', 10) or 10))
-            entry_price = float(normalized.get('entry_price') or normalized.get('current_price') or 0)
-            trade_id = self.db.record_trade(
-                symbol=symbol, side=side, entry_price=entry_price, quantity=quantity, leverage=leverage,
-                signal_id=signal_id, notes=note or '交易所持仓恢复 open trade', contract_size=contract_size, coin_quantity=coin_quantity
-            )
-            self.db.update_position(symbol=symbol, side=side, entry_price=entry_price, quantity=quantity, leverage=leverage, current_price=float(normalized.get('current_price') or entry_price), contract_size=contract_size, coin_quantity=coin_quantity)
-            self.db.sync_layer_plan_state(symbol, side, root_signal_id=signal_id, reset_if_flat=False)
-            return trade_id
-        return None
+        quantity = float(normalized.get('quantity') or normalized.get('contracts') or 0)
+        contract_size = float(normalized.get('contract_size') or 1)
+        coin_quantity = float(normalized.get('coin_quantity') or quantity * contract_size)
+        leverage = int(float(normalized.get('leverage') or self.trading_config.get('leverage', 10) or 10))
+        entry_price = float(normalized.get('entry_price') or normalized.get('current_price') or 0)
+        trade_id = self.db.record_trade(
+            symbol=symbol, side=side, entry_price=entry_price, quantity=quantity, leverage=leverage,
+            signal_id=signal_id, notes=note or '交易所持仓恢复 open trade', contract_size=contract_size, coin_quantity=coin_quantity
+        )
+        self.db.update_position(symbol=symbol, side=side, entry_price=entry_price, quantity=quantity, leverage=leverage, current_price=float(normalized.get('current_price') or entry_price), contract_size=contract_size, coin_quantity=coin_quantity)
+        self.db.sync_layer_plan_state(symbol, side, root_signal_id=signal_id, reset_if_flat=False)
+        return trade_id
 
     def _build_latest_risk_snapshot(self, symbol: str, side: str, current_price: float = None, available_hint: float = None) -> Dict[str, Any]:
         positions = []
@@ -920,6 +927,15 @@ class TradingExecutor:
                 actual_coin_quantity = float((open_fill_summary or {}).get('coin_quantity') or (actual_quantity * actual_contract_size))
                 actual_entry_source = (open_fill_summary or {}).get('source') or 'execution_reference_fallback'
                 actual_fill_count = int((open_fill_summary or {}).get('fill_count') or 0)
+                if actual_fill_count <= 0:
+                    exchange_position = self._fetch_exchange_position_snapshot(symbol, side)
+                    exchange_position_entry = float((exchange_position or {}).get('entry_price') or 0)
+                    if exchange_position_entry > 0:
+                        actual_entry_price = exchange_position_entry
+                        actual_quantity = float((exchange_position or {}).get('quantity') or (exchange_position or {}).get('contracts') or actual_quantity)
+                        actual_contract_size = float((exchange_position or {}).get('contract_size') or actual_contract_size or 1.0)
+                        actual_coin_quantity = float((exchange_position or {}).get('coin_quantity') or (actual_quantity * actual_contract_size))
+                        actual_entry_source = 'exchange_position_entry'
 
                 # 记录交易
                 trade_id = self.db.record_trade(
@@ -966,7 +982,7 @@ class TradingExecutor:
                 self._finalize_layer(symbol, side, plan_context, success=True)
                 self.db.release_direction_lock(lock_symbol, lock_side, owner=lock_owner)
                 trade_logger.trade(
-                    symbol, side, execution_reference_price, amount, trade_id
+                    symbol, side, actual_entry_price, actual_quantity, trade_id
                 )
                 trade_logger.info(f"{symbol}: 开仓执行完成 | obs={observability_log_text(plan_context.get('observability'))}")
                 

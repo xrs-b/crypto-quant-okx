@@ -1054,25 +1054,62 @@ class Database:
         except Exception:
             return None
 
-    def _normalize_close_reason_code(self, reason: Any = None, *, reason_category: str = None) -> str:
-        text = str(reason or '').strip().lower()
+    def _normalize_close_reason_code(self, reason: Any = None, *, reason_category: str = None,
+                                     close_source: str = None, close_meta: Dict[str, Any] = None) -> str:
+        meta = self._safe_json_dict(close_meta)
+        explicit = str(meta.get('close_reason_code') or '').strip().lower()
+        alias_map = {
+            'partial_tp': 'partial_take_profit',
+            'partial_take_profit': 'partial_take_profit',
+            'partial_tp2': 'partial_take_profit_2',
+            'partial_take_profit_2': 'partial_take_profit_2',
+            'trailing': 'trailing_stop',
+            'trailing_stop': 'trailing_stop',
+            'take_profit': 'take_profit',
+            'tp': 'take_profit',
+            'stop_loss': 'stop_loss',
+            'sl': 'stop_loss',
+            'reconcile': 'reconcile_close',
+            'reconcile_close': 'reconcile_close',
+            'stale': 'stale_close',
+            'stale_close': 'stale_close',
+            'manual': 'manual_close',
+            'manual_close': 'manual_close',
+        }
+        if explicit in alias_map:
+            return alias_map[explicit]
+
+        parts = [
+            reason,
+            reason_category,
+            close_source,
+            meta.get('reason'),
+            meta.get('close_reason'),
+            meta.get('close_source'),
+            meta.get('source'),
+            meta.get('reason_category'),
+        ]
+        text = ' | '.join(str(part or '').strip() for part in parts if str(part or '').strip()).lower()
+        raw_text = ' | '.join(str(part or '').strip() for part in parts if str(part or '').strip())
+
+        stale_markers = ('stale', '交易所无仓', '无对应仓位', '已无对应仓位', '无仓位', '无持仓', 'position_mismatch')
+        if any(marker in raw_text or marker in text for marker in stale_markers) or str(close_source or '').strip().lower() == 'stale_local_close' or reason_category == 'stale_close':
+            return 'stale_close'
         if 'partial_tp2' in text:
             return 'partial_take_profit_2'
-        if 'partial_tp' in text:
+        if 'partial_tp' in text or 'partial take profit' in text:
             return 'partial_take_profit'
         if 'trailing' in text:
             return 'trailing_stop'
-        if 'take_profit' in text or '止盈' in str(reason or '') or reason_category == 'take_profit':
+        if 'take_profit' in text or '止盈' in raw_text or reason_category == 'take_profit':
             return 'take_profit'
-        if 'stop' in text or '止损' in str(reason or '') or reason_category == 'stop_loss':
+        if 'stop' in text or '止损' in raw_text or reason_category == 'stop_loss':
             return 'stop_loss'
-        if 'reconcile' in text or '收口' in str(reason or '') or '对账' in str(reason or '') or reason_category == 'reconcile_close':
+        if 'reconcile' in text or '收口' in raw_text or '对账' in raw_text or reason_category == 'reconcile_close':
             return 'reconcile_close'
-        if 'stale' in text or '无对应仓位' in str(reason or '') or reason_category == 'stale_close':
-            return 'stale_close'
-        if 'manual' in text or '手动' in str(reason or '') or reason_category == 'manual_close':
+        if 'manual' in text or '手动' in raw_text or reason_category == 'manual_close':
             return 'manual_close'
-        return reason_category or 'unknown'
+        return alias_map.get(str(reason_category or '').strip().lower(), reason_category or explicit or 'unknown')
 
     def _build_trade_outcome_attribution(self, current: Dict[str, Any], summary: Dict = None, *, reason: str = None,
                                          exit_price: Any = None, pnl: Any = None, pnl_percent: Any = None,
@@ -1110,21 +1147,26 @@ class Database:
         holding_minutes = round(holding_seconds / 60, 2) if holding_seconds is not None else None
         signal_time = self._parse_datetime(plan_context.get('signal_time') or plan_context.get('bar_time'))
         open_time = self._parse_datetime(current.get('open_time'))
-        signal_age_seconds_at_entry = None
-        if signal_time is not None and open_time is not None:
+        signal_age_seconds_at_entry = self._safe_float(close_meta.get('signal_age_seconds_at_entry'), None)
+        if signal_age_seconds_at_entry is None:
+            signal_age_seconds_at_entry = self._safe_float(plan_context.get('signal_age_seconds_at_entry'), None)
+        if signal_age_seconds_at_entry is None and signal_time is not None and open_time is not None:
             try:
                 signal_age_seconds_at_entry = max(0.0, round((open_time - signal_time).total_seconds(), 3))
             except Exception:
                 signal_age_seconds_at_entry = None
-        signal_reference_price = self._safe_float(plan_context.get('signal_price') or plan_context.get('entry_reference_price') or plan_context.get('price') or plan_context.get('current_price'))
-        entry_drift_pct_from_signal = None
-        if signal_reference_price > 0 and entry_price > 0:
+        signal_reference_price = self._safe_float(close_meta.get('signal_reference_price') or plan_context.get('signal_price') or plan_context.get('entry_reference_price') or plan_context.get('price') or plan_context.get('current_price'))
+        entry_drift_pct_from_signal = self._safe_float(close_meta.get('entry_drift_pct_from_signal'), None)
+        if entry_drift_pct_from_signal is None:
+            entry_drift_pct_from_signal = self._safe_float(plan_context.get('entry_drift_pct_from_signal'), None)
+        if entry_drift_pct_from_signal is None and signal_reference_price > 0 and entry_price > 0:
             try:
                 entry_drift_pct_from_signal = round(((entry_price - signal_reference_price) / signal_reference_price) * 100, 6)
             except Exception:
                 entry_drift_pct_from_signal = None
         reason_text = str(reason or '').strip()
         reason_lower = reason_text.lower()
+        reason_category = None
         if 'stop' in reason_lower or '止损' in reason_text:
             reason_category = 'stop_loss'
         elif 'tp' in reason_lower or 'take_profit' in reason_lower or '止盈' in reason_text:
@@ -1133,11 +1175,36 @@ class Database:
             reason_category = 'reconcile_close'
         elif 'manual' in reason_lower or '手动' in reason_text:
             reason_category = 'manual_close'
-        elif 'stale' in reason_lower or '无对应仓位' in reason_text:
+        elif 'stale' in reason_lower or '无对应仓位' in reason_text or '交易所无仓' in reason_text:
+            reason_category = 'stale_close'
+        close_reason_code = self._normalize_close_reason_code(
+            reason_text,
+            reason_category=reason_category,
+            close_source=effective_close_source,
+            close_meta=close_meta,
+        )
+        if close_reason_code == 'stop_loss':
+            reason_category = 'stop_loss'
+        elif close_reason_code in {'take_profit', 'partial_take_profit', 'partial_take_profit_2', 'trailing_stop'}:
+            reason_category = 'take_profit'
+        elif close_reason_code == 'reconcile_close':
+            reason_category = 'reconcile_close'
+        elif close_reason_code == 'manual_close':
+            reason_category = 'manual_close'
+        elif close_reason_code == 'stale_close':
+            reason_category = 'stale_close'
+        elif 'stop' in reason_lower or '止损' in reason_text:
+            reason_category = 'stop_loss'
+        elif 'tp' in reason_lower or 'take_profit' in reason_lower or '止盈' in reason_text:
+            reason_category = 'take_profit'
+        elif 'reconcile' in reason_lower or '收口' in reason_text or '对账' in reason_text:
+            reason_category = 'reconcile_close'
+        elif 'manual' in reason_lower or '手动' in reason_text:
+            reason_category = 'manual_close'
+        elif 'stale' in reason_lower or '无对应仓位' in reason_text or '交易所无仓' in reason_text:
             reason_category = 'stale_close'
         else:
             reason_category = 'signal_or_rule_close' if reason_text else 'unknown'
-        close_reason_code = self._normalize_close_reason_code(reason_text, reason_category=reason_category)
         instant_exit_threshold_seconds = int(self._safe_float(close_meta.get('instant_exit_threshold_seconds'), 300) or 300)
         instant_exit = bool(close_meta.get('instant_exit')) if close_meta.get('instant_exit') is not None else bool(holding_seconds is not None and holding_seconds <= instant_exit_threshold_seconds)
         instant_stopout = bool(close_meta.get('instant_stopout')) if close_meta.get('instant_stopout') is not None else bool(instant_exit and reason_category == 'stop_loss')
@@ -1392,9 +1459,10 @@ class Database:
         rows = df.to_dict('records')
         return [self._recalculate_trade_metrics(row) for row in rows]
 
-    def mark_trade_stale_closed(self, trade_id: int, reason: str, close_price: float = None, close_source: str = 'reconcile_fallback'):
+    def mark_trade_stale_closed(self, trade_id: int, reason: str, close_price: float = None, close_source: str = 'stale_local_close'):
         summary = {'exit_price': close_price, 'source': close_source, 'fills': []}
-        return self.reconcile_trade_close(trade_id, summary, reason=f"自动收口: {reason}")
+        close_meta = {'close_reason_code': 'stale_close', 'close_source': close_source}
+        return self.reconcile_trade_close(trade_id, summary, reason=f"自动收口: {reason}", close_meta=close_meta)
     
     def get_recent_close_outcome_trades(self, symbol: str = None, limit: int = 200) -> List[Dict[str, Any]]:
         """获取最近已平仓交易（按 close_time 倒序），保留 outcome attribution 供风控窗口计算。"""

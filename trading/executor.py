@@ -1263,23 +1263,37 @@ class TradingExecutor:
         reason_text = str(reason or '')
         reason_lower = reason_text.lower()
         reason_is_stop = ('stop' in reason_lower) or ('止损' in reason_text)
-        close_reason_code = 'unknown'
-        if 'partial_tp2' in reason_lower:
-            close_reason_code = 'partial_take_profit_2'
-        elif 'partial_tp' in reason_lower:
-            close_reason_code = 'partial_take_profit'
-        elif 'trailing' in reason_lower:
-            close_reason_code = 'trailing_stop'
-        elif 'take_profit' in reason_lower or '止盈' in reason_text:
-            close_reason_code = 'take_profit'
-        elif reason_is_stop:
-            close_reason_code = 'stop_loss'
-        elif 'reconcile' in reason_lower or '收口' in reason_text or '对账' in reason_text:
-            close_reason_code = 'reconcile_close'
-        elif 'stale' in reason_lower or '无对应仓位' in reason_text:
-            close_reason_code = 'stale_close'
-        elif 'manual' in reason_lower or '手动' in reason_text:
-            close_reason_code = 'manual_close'
+
+        plan_context = dict((self.db.get_latest_open_trade(symbol, side) or {}).get('plan_context') or {}) if self.db else {}
+        signal_age_seconds_at_entry = plan_context.get('signal_age_seconds_at_entry')
+        if signal_age_seconds_at_entry in (None, ''):
+            signal_time_raw = plan_context.get('signal_time') or plan_context.get('bar_time')
+            open_time_raw = (self.db.get_latest_open_trade(symbol, side) or {}).get('open_time') if self.db else None
+            try:
+                if signal_time_raw and open_time_raw:
+                    signal_time = datetime.fromisoformat(str(signal_time_raw).replace('Z', '+00:00'))
+                    open_time = datetime.fromisoformat(str(open_time_raw).replace('Z', '+00:00'))
+                    if signal_time.tzinfo is None:
+                        signal_time = signal_time.replace(tzinfo=timezone.utc)
+                    if open_time.tzinfo is None:
+                        open_time = open_time.replace(tzinfo=timezone.utc)
+                    signal_age_seconds_at_entry = max(0.0, round((open_time - signal_time).total_seconds(), 3))
+            except Exception:
+                signal_age_seconds_at_entry = None
+
+        signal_reference_price = float(plan_context.get('signal_price') or plan_context.get('entry_reference_price') or plan_context.get('price') or plan_context.get('current_price') or 0.0)
+        entry_drift_pct_from_signal = plan_context.get('entry_drift_pct_from_signal')
+        if entry_drift_pct_from_signal in (None, '') and signal_reference_price > 0 and entry_price > 0:
+            try:
+                entry_drift_pct_from_signal = round(((entry_price - signal_reference_price) / signal_reference_price) * 100, 6)
+            except Exception:
+                entry_drift_pct_from_signal = None
+
+        close_reason_code = self.db._normalize_close_reason_code(
+            reason_text,
+            close_source='local_market_close',
+            close_meta={'close_source': 'local_market_close'},
+        ) if self.db else 'unknown'
         instant_exit = bool(holding_seconds is not None and holding_seconds <= instant_exit_threshold_seconds)
         exit_guard_state = {
             'exit_armed': bool(exit_armed),
@@ -1292,14 +1306,14 @@ class TradingExecutor:
             'exit_profile_enforced': bool((exit_profile or {}).get('enforced', False)),
             'exit_profile_hinted': bool((exit_profile or {}).get('hinted', False)),
         }
-        plan_context = dict((self.db.get_latest_open_trade(symbol, side) or {}).get('plan_context') or {}) if self.db else {}
         return {
             'instant_exit': instant_exit,
             'instant_stopout': bool(instant_exit and reason_is_stop),
             'pre_arm_exit': bool(not exit_armed),
             'instant_exit_threshold_seconds': instant_exit_threshold_seconds,
-            'signal_age_seconds_at_entry': plan_context.get('signal_age_seconds_at_entry'),
-            'entry_drift_pct_from_signal': plan_context.get('entry_drift_pct_from_signal'),
+            'signal_age_seconds_at_entry': signal_age_seconds_at_entry,
+            'signal_reference_price': signal_reference_price if signal_reference_price > 0 else None,
+            'entry_drift_pct_from_signal': entry_drift_pct_from_signal,
             'stale_signal_ttl_seconds': plan_context.get('stale_signal_ttl_seconds'),
             'entry_drift_tolerance_bps': plan_context.get('entry_drift_tolerance_bps'),
             'exit_guard_state': exit_guard_state,

@@ -14894,6 +14894,61 @@ class TestTradeOutcomeAttribution(unittest.TestCase):
         self.assertEqual(outcome['stale_signal_ttl_seconds'], 120)
         self.assertEqual(outcome['entry_drift_tolerance_bps'], 30)
 
+    def test_executor_partial_tp_close_path_preserves_structured_reason_and_attribution(self):
+        class CloseCapableExchange(FakeExecutorExchange):
+            def close_order(self, symbol, side, quantity, posSide=None):
+                return {'symbol': symbol, 'side': side, 'quantity': quantity, 'posSide': posSide}
+
+            def fetch_closed_trade_summary(self, trade, fallback_price=None):
+                return None
+
+        self.executor.exchange = CloseCapableExchange()
+        self.db.update_position(symbol='BTC/USDT', side='long', entry_price=100, quantity=2, leverage=1, current_price=100, coin_quantity=2, contract_size=1)
+        self.db.record_trade(
+            symbol='BTC/USDT', side='long', entry_price=100, quantity=2, leverage=1, coin_quantity=2, contract_size=1,
+            plan_context={
+                'signal_age_seconds_at_entry': 123.0,
+                'entry_drift_pct_from_signal': 1.25,
+                'stale_signal_ttl_seconds': 600,
+                'entry_drift_tolerance_bps': 40,
+                'strategy_tags': ['scalp_partial_tp'],
+            }
+        )
+
+        result = self.executor.close_position('BTC/USDT', reason='partial_tp', close_price=105, close_quantity=1)
+
+        self.assertTrue(result)
+        trade = self.db.get_trades(symbol='BTC/USDT', limit=1)[0]
+        outcome = trade['outcome_attribution']
+        self.assertEqual(outcome['close_reason_code'], 'partial_take_profit')
+        self.assertEqual(outcome['close_reason_category'], 'take_profit')
+        self.assertEqual(outcome['signal_age_seconds_at_entry'], 123.0)
+        self.assertEqual(outcome['entry_drift_pct_from_signal'], 1.25)
+        self.assertEqual(outcome['stale_signal_ttl_seconds'], 600)
+        self.assertEqual(outcome['entry_drift_tolerance_bps'], 40)
+        self.assertIn('exit_guard_state', outcome)
+        self.assertIn('pre_arm_exit', outcome['exit_guard_state'])
+
+    def test_mark_trade_stale_closed_emits_stable_stale_reason_code(self):
+        trade_id = self.db.record_trade(
+            symbol='BTC/USDT', side='long', entry_price=100, quantity=1, leverage=1,
+            plan_context={
+                'signal_age_seconds_at_entry': 60.0,
+                'entry_drift_pct_from_signal': 0.5,
+            }
+        )
+
+        changed = self.db.mark_trade_stale_closed(trade_id, '交易所无仓', close_price=99)
+
+        self.assertTrue(changed)
+        trade = self.db.get_trades(symbol='BTC/USDT', limit=1)[0]
+        outcome = trade['outcome_attribution']
+        self.assertEqual(outcome['close_reason_code'], 'stale_close')
+        self.assertEqual(outcome['close_reason_category'], 'stale_close')
+        self.assertEqual(outcome['close_source'], 'stale_local_close')
+        self.assertEqual(outcome['signal_age_seconds_at_entry'], 60.0)
+        self.assertEqual(outcome['entry_drift_pct_from_signal'], 0.5)
+
     def test_executor_close_path_marks_pre_arm_exit_without_stopout(self):
         class CloseCapableExchange(FakeExecutorExchange):
             def close_order(self, symbol, side, quantity, posSide=None):

@@ -5,6 +5,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import unittest
+from unittest.mock import patch
 import pandas as pd
 import numpy as np
 
@@ -13,7 +14,7 @@ from core.notifier import NotificationManager
 from core.regime import build_regime_snapshot
 from core.regime_policy import resolve_regime_policy
 from signals import SignalDetector
-from bot.run import TradingBot
+from bot.run import TradingBot, build_runtime_outcome_issue_summary, maybe_run_outcome_issue_summary
 from tests.test_all import FakeLogDB
 
 class TestNotifications(unittest.TestCase):
@@ -444,4 +445,71 @@ class TestNotifications(unittest.TestCase):
         self.assertEqual(approval_actions['method'], 'POST')
         self.assertTrue(approval_actions.get('idempotent', False))
         self.assertIn('payload', approval_actions)
+
+    def test_build_runtime_outcome_issue_summary_uses_default_symbols(self):
+        cfg = Config()
+        cfg._config.setdefault('runtime', {})['outcome_issue_summary'] = {
+            'enabled': False,
+            'notify_enabled': False,
+            'interval_minutes': 360,
+        }
+        with patch('bot.run.build_outcome_issue_summary_payload') as builder:
+            builder.return_value = {
+                'text': 'Outcome issue summary — recent 24h\nScope: symbols=XRP/USDT, SOL/USDT',
+                'reports': {},
+            }
+            summary = build_runtime_outcome_issue_summary(cfg)
+        builder.assert_called_once()
+        _, kwargs = builder.call_args
+        self.assertEqual(kwargs['symbols'], ['XRP/USDT', 'SOL/USDT'])
+        self.assertEqual(summary['config']['symbols'], ['XRP/USDT', 'SOL/USDT'])
+        self.assertIn('Outcome issue summary', summary['payload']['text'])
+
+    def test_maybe_run_outcome_issue_summary_respects_notify_switch(self):
+        cfg = Config()
+        cfg._config.setdefault('runtime', {})['outcome_issue_summary'] = {
+            'enabled': True,
+            'notify_enabled': False,
+            'interval_minutes': 360,
+            'recent_hours': 24,
+            'symbols': ['XRP/USDT', 'SOL/USDT'],
+        }
+        db = FakeLogDB()
+        notifier = NotificationManager(cfg, db, None)
+        with patch('bot.run.load_runtime_state', return_value={}), patch('bot.run.save_runtime_state') as _save, patch('bot.run.build_outcome_issue_summary_payload') as builder:
+            builder.return_value = {
+                'text': 'Outcome issue summary — recent 24h\nBy symbol\n- XRP/USDT: samples=3',
+                'reports': {},
+            }
+            result = maybe_run_outcome_issue_summary(cfg, db, notifier, force=True)
+        self.assertTrue(result['ran'])
+        self.assertFalse(result['sent'])
+        self.assertEqual(result['reason'], 'notify-disabled')
+        self.assertEqual(len(db.outbox), 0)
+
+    def test_maybe_run_outcome_issue_summary_can_force_notify_once(self):
+        cfg = Config()
+        cfg._config.setdefault('runtime', {})['outcome_issue_summary'] = {
+            'enabled': True,
+            'notify_enabled': False,
+            'interval_minutes': 360,
+            'recent_hours': 12,
+            'symbols': ['XRP/USDT'],
+        }
+        cfg._config.setdefault('notification', {}).setdefault('discord', {})
+        cfg._config['notification']['discord'].update({'enabled': False, 'webhook_url': '', 'bot_token': '', 'channel_id': ''})
+        db = FakeLogDB()
+        notifier = NotificationManager(cfg, db, None)
+        with patch('bot.run.load_runtime_state', return_value={}), patch('bot.run.save_runtime_state') as _save, patch('bot.run.build_outcome_issue_summary_payload') as builder:
+            builder.return_value = {
+                'text': 'Outcome issue summary — recent 12h\nBy symbol\n- XRP/USDT: samples=2',
+                'reports': {},
+            }
+            result = maybe_run_outcome_issue_summary(cfg, db, notifier, force=True, force_notify=True)
+        self.assertTrue(result['ran'])
+        self.assertTrue(result['sent'])
+        self.assertEqual(result['reason'], 'notified')
+        self.assertEqual(len(db.outbox), 1)
+        self.assertEqual(db.outbox[-1]['event_type'], 'runtime')
+        self.assertIn('Outcome issue summary — recent 12h', db.outbox[-1]['message'])
 

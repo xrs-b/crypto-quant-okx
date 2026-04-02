@@ -51,6 +51,14 @@ trading:
 #   health_summary:
 #     enabled: true
 #     hour: 20
+#   outcome_issue_summary:
+#     enabled: true
+#     notify_enabled: false   # 建议先 dry-run，只写 runtime_state / CLI 手动看
+#     interval_minutes: 360
+#     recent_hours: 24
+#     view: both
+#     limit: 50
+#     symbols: [XRP/USDT, SOL/USDT]
 #   approval_hygiene:
 #     enabled: true
 #     auto_cleanup_enabled: false

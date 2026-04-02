@@ -32,6 +32,7 @@ from ml.engine import MLEngine, ModelTrainer, DataCollector
 from analytics import StrategyBacktester, SignalQualityAnalyzer, ParameterOptimizer, GovernanceEngine, build_approval_audit_overview, execute_adaptive_rollout_orchestration, build_runtime_orchestration_summary, build_close_outcome_feedback_loop
 from analytics.backtest import export_calibration_payload
 from validation import format_validation_report_markdown, run_shadow_validation_case, run_shadow_validation_replay
+from scripts.outcome_issue_summary import build_outcome_issue_summary_payload, DEFAULT_SYMBOLS as DEFAULT_OUTCOME_ISSUE_SYMBOLS
 
 
 def run_notification_relay(interval: int = 30, once: bool = False, limit: int = 20):
@@ -592,6 +593,106 @@ def maybe_send_daily_health_summary(cfg: Config, db: Database, notifier: Notific
     }
     save_runtime_state(runtime)
     return {'sent': True, 'summary': summary, 'result': result}
+
+
+def build_runtime_outcome_issue_summary(cfg: Config, db: Database = None) -> dict:
+    outcome_cfg = cfg.get('runtime.outcome_issue_summary', {}) or {}
+    symbols = list(outcome_cfg.get('symbols') or DEFAULT_OUTCOME_ISSUE_SYMBOLS)
+    hours = float(outcome_cfg.get('recent_hours', 24) or 24)
+    limit = max(1, int(outcome_cfg.get('limit', 50) or 50))
+    view = str(outcome_cfg.get('view', 'both') or 'both')
+    fetch_limit = outcome_cfg.get('fetch_limit')
+    fetch_limit = None if fetch_limit in (None, '') else max(1, int(fetch_limit))
+    db_path = str((db.db_path if db and hasattr(db, 'db_path') else cfg.db_path) or cfg.db_path)
+    payload = build_outcome_issue_summary_payload(
+        db_path,
+        view=view,
+        hours=hours,
+        limit=limit,
+        symbols=symbols,
+        fetch_limit=fetch_limit,
+    )
+    text_lines = [line for line in str(payload.get('text') or '').splitlines() if line.strip()]
+    return {
+        'title': '🧾 Outcome issue 摘要',
+        'lines': text_lines,
+        'details': {
+            'runtime_outcome_issue_summary': payload,
+        },
+        'payload': payload,
+        'config': {
+            'enabled': bool(outcome_cfg.get('enabled', False)),
+            'notify_enabled': bool(outcome_cfg.get('notify_enabled', False)),
+            'interval_minutes': max(1, int(outcome_cfg.get('interval_minutes', 360) or 360)),
+            'symbols': symbols,
+            'recent_hours': hours,
+            'limit': limit,
+            'view': view,
+            'fetch_limit': fetch_limit,
+        },
+    }
+
+
+def maybe_run_outcome_issue_summary(cfg: Config, db: Database, notifier: NotificationManager, force: bool = False, force_notify: bool = False) -> dict:
+    runtime = load_runtime_state()
+    outcome_state = runtime.get('outcome_issue_summary', {}) if isinstance(runtime.get('outcome_issue_summary'), dict) else {}
+    summary = build_runtime_outcome_issue_summary(cfg, db)
+    outcome_cfg = summary.get('config') or {}
+    enabled = bool(outcome_cfg.get('enabled', False))
+    notify_enabled = bool(outcome_cfg.get('notify_enabled', False)) or bool(force_notify)
+    interval_minutes = max(1, int(outcome_cfg.get('interval_minutes', 360) or 360))
+    now = datetime.now()
+    last_run_at_raw = outcome_state.get('last_run_at')
+    last_run_at = None
+    if last_run_at_raw:
+        try:
+            last_run_at = datetime.fromisoformat(str(last_run_at_raw))
+        except ValueError:
+            last_run_at = None
+
+    if not force:
+        if not enabled:
+            return {'ran': False, 'sent': False, 'reason': 'disabled', 'summary': summary}
+        if last_run_at is not None:
+            elapsed_minutes = (now - last_run_at).total_seconds() / 60.0
+            if elapsed_minutes < interval_minutes:
+                return {
+                    'ran': False,
+                    'sent': False,
+                    'reason': 'cooldown_active',
+                    'summary': summary,
+                    'interval_minutes': interval_minutes,
+                    'elapsed_minutes': round(elapsed_minutes, 2),
+                    'next_eligible_run_at': (last_run_at + timedelta(minutes=interval_minutes)).isoformat(),
+                }
+
+    result = None
+    sent = False
+    if notify_enabled:
+        result = notifier.send('runtime', summary['title'], summary['lines'], 'info', summary['details'], priority='normal')
+        sent = True
+
+    runtime['outcome_issue_summary'] = {
+        'last_run_at': now.isoformat(),
+        'last_sent_at': now.isoformat() if sent else outcome_state.get('last_sent_at'),
+        'enabled': enabled,
+        'notify_enabled': bool(outcome_cfg.get('notify_enabled', False)),
+        'interval_minutes': interval_minutes,
+        'symbols': list(outcome_cfg.get('symbols') or []),
+        'recent_hours': outcome_cfg.get('recent_hours'),
+        'limit': outcome_cfg.get('limit'),
+        'view': outcome_cfg.get('view'),
+        'result': result,
+        'last_text': summary.get('payload', {}).get('text'),
+    }
+    save_runtime_state(runtime)
+    return {
+        'ran': True,
+        'sent': sent,
+        'reason': 'notified' if sent else 'notify-disabled',
+        'summary': summary,
+        'result': result,
+    }
 
 
 def build_exchange_diagnostics(cfg: Config, exchange: Exchange) -> dict:
@@ -3101,6 +3202,8 @@ def main():
     parser.add_argument('--mode-status', action='store_true', help='显示当前模式状态')
     parser.add_argument('--daily-summary', action='store_true', help='生成日报摘要')
     parser.add_argument('--health-summary', action='store_true', help='立即生成一份健康汇总并发送通知')
+    parser.add_argument('--outcome-issue-summary', action='store_true', help='生成一份 outcome issue 摘要；配合 runtime.outcome_issue_summary.notify_enabled 可主动推送')
+    parser.add_argument('--force-notify', action='store_true', help='配合 --outcome-issue-summary，临时强制推送一次（默认仍以配置开关为准）')
     parser.add_argument('--approval-hygiene', action='store_true', help='执行审批卫生检查；开启 auto_cleanup 时会自动收口 stale 审批')
     parser.add_argument('--adaptive-rollout-orchestration', action='store_true', help='执行一轮 runtime adaptive rollout orchestration（workflow_ready -> executor/approval/review/recovery）')
     parser.add_argument('--cleanup-runtime-records', action='store_true', help='清理重复的治理/日报运行记录')
@@ -3186,6 +3289,10 @@ def main():
                 maybe_send_daily_health_summary(cfg, Database(cfg.db_path), notifier)
             except Exception as e:
                 logger.error(f'发送每日健康汇总失败: {e}')
+            try:
+                maybe_run_outcome_issue_summary(cfg, Database(cfg.db_path), notifier)
+            except Exception as e:
+                logger.error(f'执行 outcome issue 摘要失败: {e}')
             time.sleep(interval)
     
     elif args.train:
@@ -3314,6 +3421,22 @@ def main():
         result = maybe_send_daily_health_summary(cfg, db, notifier, force=True)
         print("\n🩺 健康汇总:\n")
         print(json.dumps(result, ensure_ascii=False, indent=2))
+
+    elif args.outcome_issue_summary:
+        cfg = Config()
+        db = Database(cfg.db_path)
+        notifier = NotificationManager(cfg, db, logger)
+        result = maybe_run_outcome_issue_summary(cfg, db, notifier, force=True, force_notify=args.force_notify)
+        print("\n🧾 Outcome issue 摘要:\n")
+        print((result.get('summary') or {}).get('payload', {}).get('text', ''))
+        print("\n📦 运行结果:\n")
+        print(json.dumps({
+            'ran': result.get('ran'),
+            'sent': result.get('sent'),
+            'reason': result.get('reason'),
+            'config': (result.get('summary') or {}).get('config'),
+            'result': result.get('result'),
+        }, ensure_ascii=False, indent=2))
 
     elif args.approval_hygiene:
         cfg = Config()

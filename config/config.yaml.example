@@ -173,6 +173,15 @@ runtime:
   health_summary:
     enabled: true
     hour: 20   # 每日几时发一份健康汇总（24 小时制）
+  outcome_issue_summary:
+    enabled: false         # 默认关闭；开启后 daemon 会按 interval_minutes 定时生成 outcome issue 摘要
+    notify_enabled: false  # 默认关闭；只有显式打开先会主动发通知
+    interval_minutes: 360  # 例如每 6 小时一份
+    recent_hours: 24       # 统计最近 N 小时
+    view: both             # both / hours / trades
+    limit: 50              # trades 视图取最近 N 笔
+    fetch_limit: null      # 可选：hours 视图内部抓取上限
+    symbols: [XRP/USDT, SOL/USDT]
   approval_hygiene:
     enabled: true
     auto_cleanup_enabled: false   # 默认先 audit-only；显式开启后守护周期会把 stale pending/ready/replayed 安全标记为 expired

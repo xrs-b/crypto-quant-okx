@@ -1,0 +1,9 @@
+# 使用前先把 PROJECT_DIR 改成你自己的仓库路径；也可以直接 export PROJECT_DIR 后复用
+PROJECT_DIR=/path/to/crypto-quant-okx
+VENV_PYTHON=$PROJECT_DIR/.venv/bin/python3
+
+# 每 6 小时生成一份 outcome issue 摘要（默认只本地打印，不主动发通知）
+0 */6 * * * cd $PROJECT_DIR && PROJECT_DIR=$PROJECT_DIR $VENV_PYTHON bot/run.py --outcome-issue-summary >> /tmp/okx-outcome-issue-summary.log 2>&1
+
+# 如需临时强制发一次通知（仍建议先把 config 里的 notify_enabled 显式打开）
+# 5 */6 * * * cd $PROJECT_DIR && PROJECT_DIR=$PROJECT_DIR $VENV_PYTHON bot/run.py --outcome-issue-summary --force-notify >> /tmp/okx-outcome-issue-summary-notify.log 2>&1

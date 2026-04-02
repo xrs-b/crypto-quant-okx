@@ -18,6 +18,53 @@ DEFAULT_HOURS = 24.0
 DEFAULT_LIMIT = 50
 
 
+def build_outcome_issue_summary_payload(
+    db_path: str,
+    *,
+    view: str = 'both',
+    hours: float = DEFAULT_HOURS,
+    limit: int = DEFAULT_LIMIT,
+    symbols: list[str] | None = None,
+    fetch_limit: int | None = None,
+) -> dict:
+    resolved_symbols = list(symbols or DEFAULT_SYMBOLS)
+    reports = {}
+    if view in {'both', 'hours'}:
+        reports['hours'] = _build_view_report(
+            db_path,
+            hours=hours,
+            limit=max(limit, 1),
+            symbols=resolved_symbols,
+            fetch_limit=fetch_limit,
+        )
+    if view in {'both', 'trades'}:
+        reports['trades'] = _build_view_report(
+            db_path,
+            hours=None,
+            limit=limit,
+            symbols=resolved_symbols,
+            fetch_limit=fetch_limit,
+        )
+
+    text_blocks = []
+    if 'hours' in reports:
+        text_blocks.append(format_outcome_issue_summary(reports['hours'], title=f"Outcome issue summary — recent {_format_number(hours)}h"))
+    if 'trades' in reports:
+        text_blocks.append(format_outcome_issue_summary(reports['trades'], title=f'Outcome issue summary — latest {limit} trades'))
+
+    return {
+        'schema_version': 'outcome_issue_summary_payload_v1',
+        'db_path': db_path,
+        'symbols': resolved_symbols,
+        'hours': hours,
+        'limit': limit,
+        'view': view,
+        'fetch_limit': fetch_limit,
+        'reports': reports,
+        'text': '\n\n'.join(text_blocks),
+    }
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description='Summarize recent outcome attribution issues for XRP/SOL without any UI.'
@@ -53,41 +100,20 @@ def main() -> int:
     args = parser.parse_args()
     symbols = args.symbols or list(DEFAULT_SYMBOLS)
 
-    reports = {}
-    if args.view in {'both', 'hours'}:
-        reports['hours'] = _build_view_report(
-            args.db_path,
-            hours=args.hours,
-            limit=max(args.limit, 1),
-            symbols=symbols,
-            fetch_limit=args.fetch_limit,
-        )
-    if args.view in {'both', 'trades'}:
-        reports['trades'] = _build_view_report(
-            args.db_path,
-            hours=None,
-            limit=args.limit,
-            symbols=symbols,
-            fetch_limit=args.fetch_limit,
-        )
+    payload = build_outcome_issue_summary_payload(
+        args.db_path,
+        view=args.view,
+        hours=args.hours,
+        limit=args.limit,
+        symbols=symbols,
+        fetch_limit=args.fetch_limit,
+    )
 
     if args.json:
-        payload = {
-            'symbols': symbols,
-            'hours': args.hours,
-            'limit': args.limit,
-            'view': args.view,
-            'reports': reports,
-        }
         print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True, default=str))
         return 0
 
-    blocks = []
-    if 'hours' in reports:
-        blocks.append(format_outcome_issue_summary(reports['hours'], title=f"Outcome issue summary — recent {_format_number(args.hours)}h"))
-    if 'trades' in reports:
-        blocks.append(format_outcome_issue_summary(reports['trades'], title=f'Outcome issue summary — latest {args.limit} trades'))
-    print('\n\n'.join(blocks))
+    print(payload['text'])
     return 0
 
 

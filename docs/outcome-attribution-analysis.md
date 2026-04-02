@@ -23,6 +23,12 @@ python3 scripts/analyze_outcome_attribution.py
 python3 scripts/outcome_issue_summary.py
 ```
 
+再往前推进一层，现在也支持“自动参数调优建议（只给建议，不自动改配置）”CLI，同样默认聚焦 `XRP/USDT` + `SOL/USDT`：
+
+```bash
+python3 scripts/parameter_tuning_advice.py
+```
+
 常用参数：
 
 ```bash
@@ -49,6 +55,12 @@ python3 scripts/outcome_issue_summary.py --view trades --limit 80
 python3 scripts/outcome_issue_summary.py \
   --symbol BTC/USDT \
   --symbol ETH/USDT
+
+# 自动参数调优建议：最近 72 小时，仅输出建议
+python3 scripts/parameter_tuning_advice.py --view hours --hours 72
+
+# 自动参数调优建议：最近 80 笔，并输出 JSON
+python3 scripts/parameter_tuning_advice.py --view trades --limit 80 --json
 ```
 
 ## 输出内容

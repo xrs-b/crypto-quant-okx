@@ -5,7 +5,7 @@ import json
 import time
 from math import isclose
 from typing import Dict, List, Optional, Any
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from core.config import Config, DEFAULT_LAYERING_CONFIG
 from core.exchange import Exchange
 from core.database import Database
@@ -1052,6 +1052,83 @@ class TradingExecutor:
             'hinted': bool(snapshot.get('exit_hints_enabled', False)),
         }
 
+    def _get_exit_arming_config(self, exit_profile: Dict[str, Any] = None) -> Dict[str, Any]:
+        live = dict((exit_profile or {}).get('live') or {})
+        min_hold_seconds = live.get('exit_min_hold_seconds')
+        if min_hold_seconds is None:
+            min_hold_seconds = self.trading_config.get('exit_min_hold_seconds', 0)
+        try:
+            min_hold_seconds = max(0, int(float(min_hold_seconds or 0)))
+        except (TypeError, ValueError):
+            min_hold_seconds = 0
+
+        profit_threshold = live.get('exit_arm_profit_threshold')
+        if profit_threshold is None:
+            profit_threshold = self.trading_config.get('exit_arm_profit_threshold')
+        try:
+            profit_threshold = float(profit_threshold) if profit_threshold is not None else None
+        except (TypeError, ValueError):
+            profit_threshold = None
+
+        return {
+            'min_hold_seconds': min_hold_seconds,
+            'profit_threshold': profit_threshold,
+        }
+
+    def _get_position_opened_at(self, position: Dict[str, Any]) -> Optional[datetime]:
+        raw_value = position.get('opened_at') or position.get('updated_at')
+        if not raw_value:
+            return None
+        try:
+            parsed = datetime.fromisoformat(str(raw_value).replace('Z', '+00:00'))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed
+
+    def _is_exit_armed(self, symbol: str, position: Dict[str, Any], pnl_percent: float,
+                       exit_profile: Dict[str, Any] = None) -> bool:
+        cache = self._trade_cache.setdefault(symbol, {})
+        if cache.get('exit_armed'):
+            return True
+
+        arming_config = self._get_exit_arming_config(exit_profile)
+        min_hold_seconds = arming_config['min_hold_seconds']
+        profit_threshold = arming_config['profit_threshold']
+
+        if min_hold_seconds <= 0 and profit_threshold is None:
+            cache['exit_armed'] = True
+            cache['exit_arming'] = {
+                'armed_by': 'disabled',
+                'min_hold_seconds': min_hold_seconds,
+                'profit_threshold': profit_threshold,
+            }
+            return True
+
+        opened_at = self._get_position_opened_at(position)
+        hold_seconds = None
+        if opened_at is not None:
+            hold_seconds = max(0.0, (datetime.now(timezone.utc) - opened_at.astimezone(timezone.utc)).total_seconds())
+
+        hold_armed = bool(min_hold_seconds > 0 and hold_seconds is not None and hold_seconds >= min_hold_seconds)
+        profit_armed = bool(profit_threshold is not None and pnl_percent >= profit_threshold)
+        exit_armed = hold_armed or profit_armed
+
+        cache['exit_armed'] = exit_armed
+        cache['exit_arming'] = {
+            'hold_seconds': round(hold_seconds, 3) if hold_seconds is not None else None,
+            'min_hold_seconds': min_hold_seconds,
+            'profit_threshold': profit_threshold,
+            'armed_by': 'hold' if hold_armed else ('profit' if profit_armed else None),
+        }
+
+        if exit_armed:
+            reason = '持仓时间达标' if hold_armed else '达到浮盈阈值'
+            trade_logger.info(f"{symbol}: 退出条件已 armed ({reason})")
+
+        return exit_armed
+
     def check_stop_loss(self, symbol: str, current_price: float) -> bool:
         """检查止损"""
         
@@ -1159,9 +1236,11 @@ class TradingExecutor:
         except (TypeError, ZeroDivisionError):
             pnl_percent = 0
         
+        cache = self._trade_cache.setdefault(symbol, {})
+        exit_armed = self._is_exit_armed(symbol, position, pnl_percent, exit_profile=exit_profile)
+
         # 检查是否已达到激活阈值（None 表示始终激活，作为安全回退）
         # 一旦激活（trailing_armed），就保持激活状态
-        cache = self._trade_cache.setdefault(symbol, {})
         already_armed = cache.get('trailing_armed', False)
         trailing_activated = already_armed or (trailing_activation is None or pnl_percent >= trailing_activation)
         
@@ -1171,8 +1250,8 @@ class TradingExecutor:
             cache['highest_price'] = anchor
             self.db.update_position(symbol, side, entry_price, position.get('quantity', 0), leverage, current_price, peak_price=anchor, trough_price=position.get('trough_price'), contract_size=position.get('contract_size', 1) or 1, coin_quantity=position.get('coin_quantity'))
             
-            # 盈利触发型追踪：只有激活后且价格回落才触发
-            if trailing_activated:
+            # 盈利触发型追踪：只有 exit armed 且 trailing 激活后才触发
+            if exit_armed and trailing_activated:
                 stop_price = anchor * (1 - trailing_stop)
                 if current_price <= stop_price and current_price > entry_price:
                     try:
@@ -1191,8 +1270,8 @@ class TradingExecutor:
             cache['lowest_price'] = anchor
             self.db.update_position(symbol, side, entry_price, position.get('quantity', 0), leverage, current_price, peak_price=position.get('peak_price'), trough_price=anchor, contract_size=position.get('contract_size', 1) or 1, coin_quantity=position.get('coin_quantity'))
             
-            # 盈利触发型追踪：只有激活后且价格回升才触发
-            if trailing_activated:
+            # 盈利触发型追踪：只有 exit armed 且 trailing 激活后才触发
+            if exit_armed and trailing_activated:
                 stop_price = anchor * (1 + trailing_stop)
                 if current_price >= stop_price and current_price < entry_price:
                     try:
@@ -1220,6 +1299,9 @@ class TradingExecutor:
             return False
         
         leveraged_pnl = pnl_percent * leverage
+
+        if not exit_armed:
+            return False
         
         # 检查部分止盈（第一止盈层）
         partial_tp = self._check_partial_take_profit(symbol, leveraged_pnl, position, current_price)
@@ -1536,9 +1618,12 @@ class TradingExecutor:
     def _seed_trailing_anchor(self, symbol: str, side: str, price: float):
         if symbol not in self._trade_cache:
             self._trade_cache[symbol] = {}
-        # 清除部分止盈标记（新仓位重新开始）
+        # 清除部分止盈/exit arming 标记（新仓位重新开始）
         self._trade_cache[symbol].pop('partial_tp_executed', None)
         self._trade_cache[symbol].pop('partial_tp2_executed', None)
+        self._trade_cache[symbol].pop('exit_armed', None)
+        self._trade_cache[symbol].pop('exit_arming', None)
+        self._trade_cache[symbol].pop('trailing_armed', None)
         if side == 'long':
             self._trade_cache[symbol]['highest_price'] = price
         else:

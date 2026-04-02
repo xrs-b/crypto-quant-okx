@@ -3466,6 +3466,41 @@ class TestTradingExecutor(unittest.TestCase):
         self.executor.trading_config['trailing_activation'] = 1.0
         self.assertTrue(self.executor.check_take_profit('BTC/USDT', 102))
 
+    def test_exit_arming_blocks_soft_exit_for_fresh_position(self):
+        self.executor.trading_config['take_profit'] = 0.02
+        self.executor.trading_config['trailing_stop'] = 0.05
+        self.executor.trading_config['trailing_activation'] = None
+        self.executor.trading_config['exit_min_hold_seconds'] = 300
+        self.executor.trading_config['exit_arm_profit_threshold'] = None
+
+        self.db.update_position(symbol='BTC/USDT', side='long', entry_price=100, quantity=1, leverage=1, current_price=100)
+
+        self.assertFalse(self.executor.check_take_profit('BTC/USDT', 102))
+        self.assertFalse(self.executor._trade_cache['BTC/USDT']['exit_armed'])
+        self.assertEqual(self.executor._trade_cache['BTC/USDT']['highest_price'], 102)
+
+    def test_exit_arming_keeps_hard_stop_available_before_armed(self):
+        self.executor.trading_config['stop_loss'] = 0.01
+        self.executor.trading_config['exit_min_hold_seconds'] = 300
+        self.executor.trading_config['exit_arm_profit_threshold'] = None
+
+        self.db.update_position(symbol='BTC/USDT', side='long', entry_price=100, quantity=1, leverage=1, current_price=100)
+
+        self.assertTrue(self.executor.check_stop_loss('BTC/USDT', 99))
+
+    def test_exit_arming_restores_soft_exit_after_profit_threshold(self):
+        self.executor.trading_config['take_profit'] = 0.02
+        self.executor.trading_config['trailing_stop'] = 0.05
+        self.executor.trading_config['trailing_activation'] = None
+        self.executor.trading_config['exit_min_hold_seconds'] = 300
+        self.executor.trading_config['exit_arm_profit_threshold'] = 0.015
+
+        self.db.update_position(symbol='BTC/USDT', side='long', entry_price=100, quantity=1, leverage=1, current_price=100)
+
+        self.assertTrue(self.executor.check_take_profit('BTC/USDT', 102))
+        self.assertTrue(self.executor._trade_cache['BTC/USDT']['exit_armed'])
+        self.assertEqual(self.executor._trade_cache['BTC/USDT']['exit_arming']['armed_by'], 'profit')
+
     def test_close_position_auto_reconciles_51169_when_exchange_has_no_position(self):
         db = Database('data/test_close_mismatch.db')
         try:

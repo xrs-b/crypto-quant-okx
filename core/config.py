@@ -336,6 +336,8 @@ class Config:
                 'leverage': 10,
                 'stop_loss': 0.02,
                 'take_profit': 0.04,
+                'exit_min_hold_seconds': 0,
+                'exit_arm_profit_threshold': None,
                 'partial_tp_enabled': False,
                 'partial_tp_threshold': 0.015,
                 'partial_tp_ratio': 0.5,

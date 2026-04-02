@@ -289,6 +289,10 @@ trading:
   position_size: 0.08
   stop_loss: 0.018
   take_profit: 0.028
+  # Phase A：fresh position 未 armed 前屏蔽普通止盈/追踪退出；0 表示关闭最小持仓时间
+  exit_min_hold_seconds: 0
+  # 达到该浮盈（未杠杆）后提前 armed；null 表示仅靠持仓时间/默认立即 armed
+  exit_arm_profit_threshold: null
   trailing_stop: 0.01
   # 盈利触发型追踪止损：盈利达到此阈值后激活追踪（0.01 = 1%）
   # 设置为 null 或删除则始终激活（旧行为）

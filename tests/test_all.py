@@ -14836,3 +14836,84 @@ class TestTradeOutcomeAttribution(unittest.TestCase):
         self.assertEqual(close_result['close_source'], 'exchange_fills')
         trade = self.db.get_trades(symbol='BTC/USDT', limit=1)[0]
         self.assertEqual(trade['exit_price'], 106.25)
+
+    def test_executor_close_path_marks_instant_stopout_and_pre_arm_exit(self):
+        class CloseCapableExchange(FakeExecutorExchange):
+            def close_order(self, symbol, side, quantity, posSide=None):
+                return {'symbol': symbol, 'side': side, 'quantity': quantity, 'posSide': posSide}
+
+            def fetch_closed_trade_summary(self, trade, fallback_price=None):
+                return None
+
+        self.executor.exchange = CloseCapableExchange()
+        self.executor.trading_config['exit_min_hold_seconds'] = 300
+        self.executor.trading_config['exit_arm_profit_threshold'] = None
+        self.db.update_position(symbol='BTC/USDT', side='long', entry_price=100, quantity=1, leverage=1, current_price=100, coin_quantity=1, contract_size=1)
+        self.db.record_trade(symbol='BTC/USDT', side='long', entry_price=100, quantity=1, leverage=1, coin_quantity=1, contract_size=1)
+
+        result = self.executor.close_position('BTC/USDT', reason='止损', close_price=99)
+
+        self.assertTrue(result)
+        trade = self.db.get_trades(symbol='BTC/USDT', limit=1)[0]
+        outcome = trade['outcome_attribution']
+        self.assertTrue(outcome['instant_exit'])
+        self.assertTrue(outcome['instant_stopout'])
+        self.assertTrue(outcome['pre_arm_exit'])
+        self.assertEqual(outcome['close_reason_code'], 'stop_loss')
+        self.assertFalse(outcome['exit_guard_state']['exit_armed'])
+
+    def test_outcome_attribution_persists_signal_age_and_entry_drift_context(self):
+        signal_time = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+        trade_id = self.db.record_trade(
+            symbol='BTC/USDT', side='long', entry_price=102, quantity=1, leverage=1,
+            signal_id=401, layer_no=1, root_signal_id=401,
+            plan_context={
+                'layer_no': 1,
+                'root_signal_id': 401,
+                'signal_time': signal_time,
+                'signal_price': 100,
+                'stale_signal_ttl_seconds': 120,
+                'entry_drift_tolerance_bps': 30,
+            }
+        )
+
+        changed = self.db.close_trade_with_outcome_enrichment(
+            trade_id=trade_id,
+            exit_price=103,
+            pnl=1,
+            pnl_percent=0.98,
+            notes='manual_take_profit',
+            close_source='local_market_close',
+        )
+
+        self.assertTrue(changed)
+        trade = self.db.get_trades(symbol='BTC/USDT', limit=1)[0]
+        outcome = trade['outcome_attribution']
+        self.assertGreater(outcome['signal_age_seconds_at_entry'], 500)
+        self.assertAlmostEqual(outcome['entry_drift_pct_from_signal'], 2.0, places=6)
+        self.assertEqual(outcome['stale_signal_ttl_seconds'], 120)
+        self.assertEqual(outcome['entry_drift_tolerance_bps'], 30)
+
+    def test_executor_close_path_marks_pre_arm_exit_without_stopout(self):
+        class CloseCapableExchange(FakeExecutorExchange):
+            def close_order(self, symbol, side, quantity, posSide=None):
+                return {'symbol': symbol, 'side': side, 'quantity': quantity, 'posSide': posSide}
+
+            def fetch_closed_trade_summary(self, trade, fallback_price=None):
+                return None
+
+        self.executor.exchange = CloseCapableExchange()
+        self.executor.trading_config['exit_min_hold_seconds'] = 300
+        self.executor.trading_config['exit_arm_profit_threshold'] = 0.05
+        self.db.update_position(symbol='BTC/USDT', side='long', entry_price=100, quantity=1, leverage=1, current_price=100, coin_quantity=1, contract_size=1)
+        self.db.record_trade(symbol='BTC/USDT', side='long', entry_price=100, quantity=1, leverage=1, coin_quantity=1, contract_size=1)
+
+        result = self.executor.close_position('BTC/USDT', reason='manual_take_profit', close_price=101)
+
+        self.assertTrue(result)
+        trade = self.db.get_trades(symbol='BTC/USDT', limit=1)[0]
+        outcome = trade['outcome_attribution']
+        self.assertTrue(outcome['pre_arm_exit'])
+        self.assertFalse(outcome['instant_stopout'])
+        self.assertEqual(outcome['close_reason_code'], 'take_profit')
+        self.assertFalse(outcome['exit_guard_state']['exit_armed'])

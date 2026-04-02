@@ -4,7 +4,7 @@
 import sqlite3
 import json
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Any
 from pathlib import Path
 import pandas as pd
@@ -106,6 +106,13 @@ class Database:
             'outcome_quality': outcome.get('outcome_quality'),
             'plan_layer_no': outcome.get('plan_layer_no') or plan_context.get('layer_no'),
             'root_signal_id': outcome.get('root_signal_id') or plan_context.get('root_signal_id') or data.get('root_signal_id'),
+            'instant_exit': outcome.get('instant_exit'),
+            'instant_stopout': outcome.get('instant_stopout'),
+            'pre_arm_exit': outcome.get('pre_arm_exit'),
+            'signal_age_seconds_at_entry': outcome.get('signal_age_seconds_at_entry'),
+            'entry_drift_pct_from_signal': outcome.get('entry_drift_pct_from_signal'),
+            'exit_guard_state': self._safe_json_dict(outcome.get('exit_guard_state')),
+            'close_reason_code': outcome.get('close_reason_code'),
         })
         return data
 
@@ -1033,9 +1040,44 @@ class Database:
                     tags.append(tag)
         return tags
 
+    def _parse_datetime(self, value: Any) -> Optional[datetime]:
+        if value in (None, ''):
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace('Z', '+00:00'))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.astimezone(timezone.utc)
+        except Exception:
+            return None
+
+    def _normalize_close_reason_code(self, reason: Any = None, *, reason_category: str = None) -> str:
+        text = str(reason or '').strip().lower()
+        if 'partial_tp2' in text:
+            return 'partial_take_profit_2'
+        if 'partial_tp' in text:
+            return 'partial_take_profit'
+        if 'trailing' in text:
+            return 'trailing_stop'
+        if 'take_profit' in text or '止盈' in str(reason or '') or reason_category == 'take_profit':
+            return 'take_profit'
+        if 'stop' in text or '止损' in str(reason or '') or reason_category == 'stop_loss':
+            return 'stop_loss'
+        if 'reconcile' in text or '收口' in str(reason or '') or '对账' in str(reason or '') or reason_category == 'reconcile_close':
+            return 'reconcile_close'
+        if 'stale' in text or '无对应仓位' in str(reason or '') or reason_category == 'stale_close':
+            return 'stale_close'
+        if 'manual' in text or '手动' in str(reason or '') or reason_category == 'manual_close':
+            return 'manual_close'
+        return reason_category or 'unknown'
+
     def _build_trade_outcome_attribution(self, current: Dict[str, Any], summary: Dict = None, *, reason: str = None,
                                          exit_price: Any = None, pnl: Any = None, pnl_percent: Any = None,
-                                         close_source: str = None, close_fill_count: Any = None) -> Dict[str, Any]:
+                                         close_source: str = None, close_fill_count: Any = None,
+                                         close_meta: Dict[str, Any] = None) -> Dict[str, Any]:
         current = dict(current or {})
         summary = dict(summary or {})
         plan_context = self._safe_json_dict(current.get('plan_context'))
@@ -1043,6 +1085,7 @@ class Database:
         regime_snapshot = self._safe_json_dict(plan_context.get('regime_snapshot'))
         policy_snapshot = self._safe_json_dict(plan_context.get('adaptive_policy_snapshot'))
         strategy_tags = self._extract_strategy_tags(plan_context, current)
+        close_meta = self._safe_json_dict(close_meta or summary.get('close_meta') or current.get('close_meta'))
         effective_close_source = close_source or summary.get('source') or current.get('close_source') or 'local_market_close'
         effective_fill_count = int(close_fill_count if close_fill_count is not None else len(summary.get('fills') or []))
         entry_price = self._safe_float(current.get('entry_price'))
@@ -1065,6 +1108,21 @@ class Database:
         except Exception:
             holding_seconds = None
         holding_minutes = round(holding_seconds / 60, 2) if holding_seconds is not None else None
+        signal_time = self._parse_datetime(plan_context.get('signal_time') or plan_context.get('bar_time'))
+        open_time = self._parse_datetime(current.get('open_time'))
+        signal_age_seconds_at_entry = None
+        if signal_time is not None and open_time is not None:
+            try:
+                signal_age_seconds_at_entry = max(0.0, round((open_time - signal_time).total_seconds(), 3))
+            except Exception:
+                signal_age_seconds_at_entry = None
+        signal_reference_price = self._safe_float(plan_context.get('signal_price') or plan_context.get('entry_reference_price') or plan_context.get('price') or plan_context.get('current_price'))
+        entry_drift_pct_from_signal = None
+        if signal_reference_price > 0 and entry_price > 0:
+            try:
+                entry_drift_pct_from_signal = round(((entry_price - signal_reference_price) / signal_reference_price) * 100, 6)
+            except Exception:
+                entry_drift_pct_from_signal = None
         reason_text = str(reason or '').strip()
         reason_lower = reason_text.lower()
         if 'stop' in reason_lower or '止损' in reason_text:
@@ -1079,8 +1137,13 @@ class Database:
             reason_category = 'stale_close'
         else:
             reason_category = 'signal_or_rule_close' if reason_text else 'unknown'
-        close_decision = 'win' if (effective_pnl or 0) > 0 else 'loss' if (effective_pnl or 0) < 0 else 'flat'
+        close_reason_code = self._normalize_close_reason_code(reason_text, reason_category=reason_category)
+        instant_exit_threshold_seconds = int(self._safe_float(close_meta.get('instant_exit_threshold_seconds'), 300) or 300)
+        instant_exit = bool(close_meta.get('instant_exit')) if close_meta.get('instant_exit') is not None else bool(holding_seconds is not None and holding_seconds <= instant_exit_threshold_seconds)
+        instant_stopout = bool(close_meta.get('instant_stopout')) if close_meta.get('instant_stopout') is not None else bool(instant_exit and reason_category == 'stop_loss')
+        pre_arm_exit = bool(close_meta.get('pre_arm_exit')) if close_meta.get('pre_arm_exit') is not None else bool((close_meta.get('exit_guard_state') or {}).get('exit_armed') is False)
         abs_return = abs(float(effective_pnl_percent or 0.0))
+        close_decision = 'win' if (effective_pnl or 0) > 0 else 'loss' if (effective_pnl or 0) < 0 else 'flat'
         pnl_bucket = 'flat' if close_decision == 'flat' else ('large' if abs_return >= 5 else 'medium' if abs_return >= 1 else 'small')
         outcome_quality = 'positive' if close_decision == 'win' else ('bounded_loss' if reason_category == 'stop_loss' else 'adverse' if close_decision == 'loss' else 'aligned')
         observe_only = normalize_observe_only_view(
@@ -1116,11 +1179,23 @@ class Database:
             'layer_ratio': plan_context.get('layer_ratio'),
             'planned_margin': plan_context.get('planned_margin'),
             'risk_budget': self._safe_json_dict((plan_context.get('entry_plan') or {}).get('risk_budget')),
+            'instant_exit': instant_exit,
+            'instant_stopout': instant_stopout,
+            'pre_arm_exit': pre_arm_exit,
+            'instant_exit_threshold_seconds': instant_exit_threshold_seconds,
+            'signal_age_seconds_at_entry': signal_age_seconds_at_entry,
+            'signal_reference_price': signal_reference_price if signal_reference_price > 0 else None,
+            'entry_drift_pct_from_signal': entry_drift_pct_from_signal,
+            'stale_signal_ttl_seconds': close_meta.get('stale_signal_ttl_seconds') or plan_context.get('stale_signal_ttl_seconds'),
+            'entry_drift_tolerance_bps': close_meta.get('entry_drift_tolerance_bps') or plan_context.get('entry_drift_tolerance_bps'),
+            'exit_guard_state': self._safe_json_dict(close_meta.get('exit_guard_state')),
+            'close_reason_code': close_reason_code,
+            'close_meta': close_meta,
         }
 
     def close_trade_with_outcome_enrichment(self, trade_id: int, exit_price: float, pnl: float,
                                             pnl_percent: float, notes: str = None, close_source: str = 'local_market_close',
-                                            close_time: str = None, close_fill_count: int = 0) -> bool:
+                                            close_time: str = None, close_fill_count: int = 0, close_meta: Dict[str, Any] = None) -> bool:
         conn = self._get_connection()
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM trades WHERE id = ?", (trade_id,))
@@ -1137,6 +1212,7 @@ class Database:
             pnl_percent=pnl_percent,
             close_source=close_source,
             close_fill_count=close_fill_count,
+            close_meta=close_meta,
         )
         cursor.execute("""
             UPDATE trades 
@@ -1152,7 +1228,7 @@ class Database:
 
     def close_trade(self, trade_id: int, exit_price: float, pnl: float, 
                     pnl_percent: float, notes: str = None, close_source: str = 'local_market_close',
-                    close_time: str = None, close_fill_count: int = 0):
+                    close_time: str = None, close_fill_count: int = 0, close_meta: Dict[str, Any] = None):
         """平仓"""
         self.close_trade_with_outcome_enrichment(
             trade_id=trade_id,
@@ -1163,9 +1239,10 @@ class Database:
             close_source=close_source,
             close_time=close_time,
             close_fill_count=close_fill_count,
+            close_meta=close_meta,
         )
 
-    def reconcile_trade_close(self, trade_id: int, summary: Dict, reason: str = None) -> bool:
+    def reconcile_trade_close(self, trade_id: int, summary: Dict, reason: str = None, close_meta: Dict[str, Any] = None) -> bool:
         conn = self._get_connection()
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM trades WHERE id = ?", (trade_id,))
@@ -1207,6 +1284,7 @@ class Database:
             reason=final_notes,
             close_source=source,
             close_fill_count=fill_count,
+            close_meta=close_meta,
         )
         cursor.execute("""
             UPDATE trades

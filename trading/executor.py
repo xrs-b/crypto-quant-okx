@@ -1003,6 +1003,7 @@ class TradingExecutor:
             return False
         
         side = position['side']  # 'long' or 'short'
+        exit_profile = self._resolve_live_exit_profile(symbol, side)
         # 支持部分平仓：使用指定数量或全部
         quantity = close_quantity if close_quantity is not None else position['quantity']
         coin_quantity = float(position.get('coin_quantity', 0) or 0)
@@ -1060,6 +1061,7 @@ class TradingExecutor:
                 # 杠杆后盈亏
                 leverage = position.get('leverage', 1)
                 leveraged_pnl_percent = pnl_percent * leverage
+                close_meta = self._build_close_meta(symbol, position, reason, close_price, exit_profile=exit_profile)
                 
                 # 更新交易记录（positions.id ≠ trades.id，需回查最新 open trade）
                 trade_id = trade.get('id') if trade else None
@@ -1068,7 +1070,7 @@ class TradingExecutor:
                     if is_partial:
                         close_note += f" | 部分平仓({close_ratio*100:.0f}%)"
                     if exchange_close:
-                        self.db.reconcile_trade_close(trade_id, exchange_close, reason=close_note)
+                        self.db.reconcile_trade_close(trade_id, exchange_close, reason=close_note, close_meta=close_meta)
                     else:
                         self.db.close_trade_with_outcome_enrichment(
                             trade_id=trade_id,
@@ -1076,7 +1078,8 @@ class TradingExecutor:
                             pnl=pnl,
                             pnl_percent=leveraged_pnl_percent,
                             notes=close_note,
-                            close_source='local_market_close'
+                            close_source='local_market_close',
+                            close_meta=close_meta,
                         )
                 else:
                     trade_logger.warning(f"{symbol}: 未找到可关闭的 open trade 记录，持仓会先从本地移除")
@@ -1114,6 +1117,8 @@ class TradingExecutor:
                     'trade_id': trade_id,
                     'close_source': exchange_close.get('source') if exchange_close else 'local_market_close',
                     'close_summary': dict(exchange_close or {}),
+                    'close_meta': close_meta,
+                    'close_reason_code': close_meta.get('close_reason_code'),
                     'is_partial': is_partial,
                 })
                 
@@ -1238,6 +1243,68 @@ class TradingExecutor:
             trade_logger.info(f"{symbol}: 退出条件已 armed ({reason})")
 
         return exit_armed
+
+    def _build_close_meta(self, symbol: str, position: Dict[str, Any], reason: str, close_price: float, *, exit_profile: Dict[str, Any] = None) -> Dict[str, Any]:
+        exit_profile = exit_profile or self._resolve_live_exit_profile(symbol, position.get('side'))
+        entry_price = float(position.get('entry_price') or 0)
+        side = str(position.get('side') or '').lower()
+        pnl_percent = 0.0
+        if entry_price > 0 and close_price:
+            if side == 'long':
+                pnl_percent = (float(close_price) - entry_price) / entry_price
+            elif side == 'short':
+                pnl_percent = (entry_price - float(close_price)) / entry_price
+        exit_armed = self._is_exit_armed(symbol, position, pnl_percent, exit_profile=exit_profile)
+        cache = dict(self._trade_cache.get(symbol) or {})
+        arming = dict(cache.get('exit_arming') or {})
+        arming_config = self._get_exit_arming_config(symbol, exit_profile)
+        holding_seconds = arming.get('hold_seconds')
+        instant_exit_threshold_seconds = 300
+        reason_text = str(reason or '')
+        reason_lower = reason_text.lower()
+        reason_is_stop = ('stop' in reason_lower) or ('止损' in reason_text)
+        close_reason_code = 'unknown'
+        if 'partial_tp2' in reason_lower:
+            close_reason_code = 'partial_take_profit_2'
+        elif 'partial_tp' in reason_lower:
+            close_reason_code = 'partial_take_profit'
+        elif 'trailing' in reason_lower:
+            close_reason_code = 'trailing_stop'
+        elif 'take_profit' in reason_lower or '止盈' in reason_text:
+            close_reason_code = 'take_profit'
+        elif reason_is_stop:
+            close_reason_code = 'stop_loss'
+        elif 'reconcile' in reason_lower or '收口' in reason_text or '对账' in reason_text:
+            close_reason_code = 'reconcile_close'
+        elif 'stale' in reason_lower or '无对应仓位' in reason_text:
+            close_reason_code = 'stale_close'
+        elif 'manual' in reason_lower or '手动' in reason_text:
+            close_reason_code = 'manual_close'
+        instant_exit = bool(holding_seconds is not None and holding_seconds <= instant_exit_threshold_seconds)
+        exit_guard_state = {
+            'exit_armed': bool(exit_armed),
+            'pre_arm_exit': bool(not exit_armed),
+            'armed_by': arming.get('armed_by'),
+            'hold_seconds': holding_seconds,
+            'min_hold_seconds': arming.get('min_hold_seconds', arming_config.get('min_hold_seconds')),
+            'profit_threshold': arming.get('profit_threshold', arming_config.get('profit_threshold')),
+            'trailing_armed': bool(cache.get('trailing_armed', False)),
+            'exit_profile_enforced': bool((exit_profile or {}).get('enforced', False)),
+            'exit_profile_hinted': bool((exit_profile or {}).get('hinted', False)),
+        }
+        plan_context = dict((self.db.get_latest_open_trade(symbol, side) or {}).get('plan_context') or {}) if self.db else {}
+        return {
+            'instant_exit': instant_exit,
+            'instant_stopout': bool(instant_exit and reason_is_stop),
+            'pre_arm_exit': bool(not exit_armed),
+            'instant_exit_threshold_seconds': instant_exit_threshold_seconds,
+            'signal_age_seconds_at_entry': plan_context.get('signal_age_seconds_at_entry'),
+            'entry_drift_pct_from_signal': plan_context.get('entry_drift_pct_from_signal'),
+            'stale_signal_ttl_seconds': plan_context.get('stale_signal_ttl_seconds'),
+            'entry_drift_tolerance_bps': plan_context.get('entry_drift_tolerance_bps'),
+            'exit_guard_state': exit_guard_state,
+            'close_reason_code': close_reason_code,
+        }
 
     def check_stop_loss(self, symbol: str, current_price: float) -> bool:
         """检查止损"""

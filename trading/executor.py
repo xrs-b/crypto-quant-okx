@@ -187,6 +187,7 @@ class TradingExecutor:
         self.trading_config = config.get('trading', {})
         self.layering_config = config.get_layering_config() if hasattr(config, 'get_layering_config') else dict(DEFAULT_LAYERING_CONFIG)
         self._trade_cache = {}  # 交易缓存
+        self._last_close_result = {}
         # MFE/MAE 建议提供者
         self._recommendation_provider = get_recommendation_provider(db, config)
 
@@ -209,6 +210,18 @@ class TradingExecutor:
                 return True
         return False
 
+    def _store_close_result(self, symbol: str, side: str, result: Dict[str, Any]) -> None:
+        key = (symbol, side)
+        payload = dict(result or {})
+        payload.setdefault('symbol', symbol)
+        payload.setdefault('side', side)
+        self._last_close_result[key] = payload
+
+    def get_last_close_result(self, symbol: str, side: str) -> Optional[Dict[str, Any]]:
+        key = (symbol, side)
+        result = self._last_close_result.get(key)
+        return dict(result) if isinstance(result, dict) else None
+
     def _close_local_position_as_stale(self, symbol: str, side: str, close_price: float, reason: str) -> bool:
         trade = self.db.get_latest_open_trade(symbol, side)
         trade_id = trade.get('id') if trade else None
@@ -217,6 +230,13 @@ class TradingExecutor:
         self.db.close_position(symbol)
         self.db.sync_layer_plan_state(symbol, side, reset_if_flat=True)
         self.db.cleanup_orphan_execution_state(stale_after_minutes=1)
+        self._store_close_result(symbol, side, {
+            'exit_price': close_price,
+            'pnl': None,
+            'reason': reason,
+            'trade_id': trade_id,
+            'close_source': 'stale_local_close',
+        })
         trade_logger.warning(f"{symbol}: 检测到交易所已无对应仓位，自动收口本地持仓/交易")
         return True
     
@@ -978,6 +998,16 @@ class TradingExecutor:
                     self._clear_trade_cache(symbol)
                 
                 trade_logger.close(symbol, close_price, pnl, reason)
+                self._store_close_result(symbol, side, {
+                    'exit_price': close_price,
+                    'pnl': exchange_close.get('pnl') if exchange_close and exchange_close.get('pnl') is not None else pnl,
+                    'pnl_percent': exchange_close.get('pnl_percent') if exchange_close and exchange_close.get('pnl_percent') is not None else leveraged_pnl_percent,
+                    'reason': reason,
+                    'trade_id': trade_id,
+                    'close_source': exchange_close.get('source') if exchange_close else 'local_market_close',
+                    'close_summary': dict(exchange_close or {}),
+                    'is_partial': is_partial,
+                })
                 
                 return True
                 

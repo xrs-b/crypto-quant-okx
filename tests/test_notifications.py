@@ -201,6 +201,27 @@ class TestNotifications(unittest.TestCase):
         self.assertEqual(payload['adaptive_policy_snapshot']['regime_name'], 'range_bound')
         self.assertEqual(payload['adaptive_policy_snapshot']['regime_confidence'], 0.76)
 
+    def test_trading_bot_close_notification_prefers_executor_close_result(self):
+        bot = TradingBot.__new__(TradingBot)
+
+        class CloseResultExecutor:
+            def get_last_close_result(self, symbol, side):
+                return {
+                    'symbol': symbol,
+                    'side': side,
+                    'exit_price': 79.88,
+                    'pnl': 3.21,
+                    'reason': '止盈',
+                    'close_source': 'exchange_fills',
+                }
+
+        bot.executor = CloseResultExecutor()
+        payload = bot._resolve_close_notification('SOL/USDT', 'long', 79.14, '止盈')
+
+        self.assertEqual(payload['close_price'], 79.88)
+        self.assertEqual(payload['pnl'], 3.21)
+        self.assertEqual(payload['reason'], '止盈')
+
     def test_discord_bot_fallback_channel(self):
         cfg = Config()
         cfg._config.setdefault('notification', {}).setdefault('discord', {})

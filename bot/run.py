@@ -1967,6 +1967,24 @@ class TradingBot:
 
         return payload
 
+    def _resolve_close_notification(self, symbol: str, side: str, fallback_price: float, reason: str) -> dict:
+        payload = {'symbol': symbol, 'side': side, 'close_price': fallback_price, 'reason': reason, 'pnl': None}
+        if not hasattr(self, 'executor') or not hasattr(self.executor, 'get_last_close_result'):
+            return payload
+        try:
+            result = self.executor.get_last_close_result(symbol, side) or {}
+        except Exception:
+            return payload
+        exit_price = result.get('exit_price')
+        if exit_price not in (None, ''):
+            payload['close_price'] = exit_price
+        if result.get('pnl') not in (None, ''):
+            payload['pnl'] = result.get('pnl')
+        close_reason = str(result.get('reason') or '').strip()
+        if close_reason:
+            payload['reason'] = close_reason
+        return payload
+
     def _candidate_diversification_history(self) -> list:
         state = load_runtime_state()
         history = state.get('candidate_selection_history') or []
@@ -2949,22 +2967,26 @@ class TradingBot:
                 
                 # 检查止损
                 if self.executor.check_stop_loss(symbol, current_price):
-                    closed = self.executor.close_position(symbol, '止损')
+                    close_reason = '止损'
+                    closed = self.executor.close_position(symbol, close_reason)
                     if closed:
                         summary['closed'] += 1
-                        self.notifier.notify_trade_close(symbol, position['side'], current_price, '止损')
+                        notice = self._resolve_close_notification(symbol, position['side'], current_price, close_reason)
+                        self.notifier.notify_trade_close(symbol, position['side'], notice['close_price'], notice['reason'], pnl=notice.get('pnl'))
                     else:
-                        self.notifier.notify_trade_close_failed(symbol, position['side'], '止损触发后平仓失败', {'symbol': symbol, 'reason': '止损'})
+                        self.notifier.notify_trade_close_failed(symbol, position['side'], '止损触发后平仓失败', {'symbol': symbol, 'reason': close_reason})
                     print(f"   🔴 止损: {symbol}")
                 
                 # 检查止盈
                 elif self.executor.check_take_profit(symbol, current_price):
-                    closed = self.executor.close_position(symbol, '止盈')
+                    close_reason = '止盈'
+                    closed = self.executor.close_position(symbol, close_reason)
                     if closed:
                         summary['closed'] += 1
-                        self.notifier.notify_trade_close(symbol, position['side'], current_price, '止盈')
+                        notice = self._resolve_close_notification(symbol, position['side'], current_price, close_reason)
+                        self.notifier.notify_trade_close(symbol, position['side'], notice['close_price'], notice['reason'], pnl=notice.get('pnl'))
                     else:
-                        self.notifier.notify_trade_close_failed(symbol, position['side'], '止盈触发后平仓失败', {'symbol': symbol, 'reason': '止盈'})
+                        self.notifier.notify_trade_close_failed(symbol, position['side'], '止盈触发后平仓失败', {'symbol': symbol, 'reason': close_reason})
                     print(f"   🟢 止盈: {symbol}")
                 
             except Exception as e:

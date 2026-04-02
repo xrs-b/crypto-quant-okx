@@ -14623,3 +14623,31 @@ class TestTradeOutcomeAttribution(unittest.TestCase):
         self.assertEqual(trade['close_decision'], 'win')
         self.assertEqual(trade['outcome_attribution']['close_source'], 'local_market_close')
         self.assertEqual(trade['outcome_attribution']['strategy_tags'], ['mean_revert'])
+
+    def test_executor_close_result_prefers_exchange_exit_price_for_notification(self):
+        class ExchangeCloseSummaryStub(FakeExecutorExchange):
+            def close_order(self, symbol, side, quantity, posSide=None):
+                return {'symbol': symbol, 'side': side, 'quantity': quantity, 'posSide': posSide}
+
+            def fetch_closed_trade_summary(self, trade, fallback_price=None):
+                return {
+                    'exit_price': 106.25,
+                    'pnl': 6.25,
+                    'pnl_percent': 12.5,
+                    'source': 'exchange_fills',
+                    'fills': [{'price': 106.25, 'quantity': 1}],
+                }
+
+        self.executor.exchange = ExchangeCloseSummaryStub()
+        self.db.update_position(symbol='BTC/USDT', side='long', entry_price=100, quantity=1, leverage=2, current_price=100, coin_quantity=1, contract_size=1)
+        self.db.record_trade(symbol='BTC/USDT', side='long', entry_price=100, quantity=1, leverage=2, coin_quantity=1, contract_size=1)
+
+        result = self.executor.close_position('BTC/USDT', reason='止盈', close_price=105)
+
+        self.assertTrue(result)
+        close_result = self.executor.get_last_close_result('BTC/USDT', 'long')
+        self.assertEqual(close_result['exit_price'], 106.25)
+        self.assertEqual(close_result['pnl'], 6.25)
+        self.assertEqual(close_result['close_source'], 'exchange_fills')
+        trade = self.db.get_trades(symbol='BTC/USDT', limit=1)[0]
+        self.assertEqual(trade['exit_price'], 106.25)

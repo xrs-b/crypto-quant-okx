@@ -3,7 +3,12 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from analytics.outcome_attribution_report import analyze_outcome_attribution, format_outcome_attribution_report
+from analytics.outcome_attribution_report import (
+    analyze_outcome_attribution,
+    build_field_coverage,
+    format_outcome_attribution_report,
+    format_outcome_issue_summary,
+)
 from core.database import Database
 
 
@@ -11,7 +16,7 @@ def _seed_trade(db_path: str, *, symbol: str, dominant_strategy: str, regime_tag
                 close_reason_code: str, instant_stopout: bool = False, pre_arm_exit: bool = False,
                 signal_age_seconds_at_entry: float = None, stale_signal_ttl_seconds: float = None,
                 entry_drift_pct_from_signal: float = None, entry_drift_tolerance_bps: float = None,
-                close_time: datetime = None):
+                exit_guard_state: dict = None, close_time: datetime = None):
     close_time = close_time or datetime.now(timezone.utc)
     open_time = close_time - timedelta(minutes=10)
     outcome = {
@@ -28,6 +33,7 @@ def _seed_trade(db_path: str, *, symbol: str, dominant_strategy: str, regime_tag
         'stale_signal_ttl_seconds': stale_signal_ttl_seconds,
         'entry_drift_pct_from_signal': entry_drift_pct_from_signal,
         'entry_drift_tolerance_bps': entry_drift_tolerance_bps,
+        'exit_guard_state': exit_guard_state,
         'holding_seconds': 600,
         'holding_minutes': 10,
     }
@@ -80,6 +86,7 @@ def test_analyze_outcome_attribution_groups_and_breaches(tmp_path: Path):
         stale_signal_ttl_seconds=300,
         entry_drift_pct_from_signal=0.9,
         entry_drift_tolerance_bps=50,
+        exit_guard_state={'exit_armed': False, 'pre_arm_exit': True},
         close_time=now - timedelta(hours=1),
     )
     _seed_trade(
@@ -94,6 +101,7 @@ def test_analyze_outcome_attribution_groups_and_breaches(tmp_path: Path):
         stale_signal_ttl_seconds=300,
         entry_drift_pct_from_signal=0.1,
         entry_drift_tolerance_bps=50,
+        exit_guard_state={'exit_armed': True},
         close_time=now - timedelta(hours=2),
     )
 
@@ -128,6 +136,64 @@ def test_analyze_outcome_attribution_groups_and_breaches(tmp_path: Path):
     assert 'Outcome attribution analysis report' in rendered
     assert 'XRP/USDT' in rendered
     assert 'SOL/USDT' in rendered
+
+
+def test_format_outcome_issue_summary_includes_field_coverage(tmp_path: Path):
+    db_path = tmp_path / 'analysis_issue_summary.db'
+    Database(str(db_path))
+    now = datetime.now(timezone.utc)
+    _seed_trade(
+        str(db_path),
+        symbol='XRP/USDT',
+        dominant_strategy='RSI',
+        regime_tag='range',
+        close_reason_code='stop_loss',
+        instant_stopout=True,
+        pre_arm_exit=True,
+        signal_age_seconds_at_entry=420,
+        stale_signal_ttl_seconds=300,
+        entry_drift_pct_from_signal=0.9,
+        entry_drift_tolerance_bps=50,
+        exit_guard_state={'exit_armed': False, 'pre_arm_exit': True},
+        close_time=now - timedelta(hours=1),
+    )
+    _seed_trade(
+        str(db_path),
+        symbol='SOL/USDT',
+        dominant_strategy='ML',
+        regime_tag='trend',
+        close_reason_code='take_profit',
+        signal_age_seconds_at_entry=120,
+        stale_signal_ttl_seconds=300,
+        entry_drift_pct_from_signal=0.1,
+        entry_drift_tolerance_bps=50,
+        exit_guard_state=None,
+        close_time=now - timedelta(hours=2),
+    )
+
+    report = analyze_outcome_attribution(
+        str(db_path),
+        limit=50,
+        hours=24,
+        symbols=['XRP/USDT', 'SOL/USDT'],
+        focus_symbols=['XRP/USDT', 'SOL/USDT'],
+    )
+
+    coverage = build_field_coverage(
+        report['structured_rows'],
+        ['signal_age_seconds_at_entry', 'entry_drift_pct_from_signal', 'exit_guard_state'],
+    )
+    assert coverage['signal_age_seconds_at_entry']['present_count'] == 2
+    assert coverage['entry_drift_pct_from_signal']['present_count'] == 2
+    assert coverage['exit_guard_state']['present_count'] == 1
+    assert coverage['exit_guard_state']['coverage_pct'] == 50.0
+
+    rendered = format_outcome_issue_summary(report, title='Outcome issue summary — recent 24h')
+    assert 'Outcome issue summary — recent 24h' in rendered
+    assert 'Field coverage:' in rendered
+    assert 'exit_guard_state=1/2 (50.0%)' in rendered
+    assert '- XRP/USDT: samples=1' in rendered
+    assert '- SOL/USDT: samples=1' in rendered
 
 
 def test_analyze_outcome_attribution_respects_symbol_and_hour_filters(tmp_path: Path):

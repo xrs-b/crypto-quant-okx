@@ -123,6 +123,11 @@ def _normalize_trade(row: Dict[str, Any]) -> Dict[str, Any]:
     stale_ttl = _safe_float(outcome.get('stale_signal_ttl_seconds'))
     tolerance_bps = _safe_float(outcome.get('entry_drift_tolerance_bps'))
     drift_tolerance_pct = round(tolerance_bps / 100.0, 6) if tolerance_bps is not None else None
+    exit_guard_state = trade.get('exit_guard_state')
+    if exit_guard_state in (None, ''):
+        exit_guard_state = outcome.get('exit_guard_state')
+    if not isinstance(exit_guard_state, dict):
+        exit_guard_state = None
     close_time = trade.get('close_time') or outcome.get('close_time')
     return {
         'trade_id': trade.get('id') or trade.get('trade_id'),
@@ -142,6 +147,7 @@ def _normalize_trade(row: Dict[str, Any]) -> Dict[str, Any]:
         'instant_exit': bool(trade.get('instant_exit')) if trade.get('instant_exit') is not None else bool(outcome.get('instant_exit')),
         'signal_age_seconds_at_entry': signal_age,
         'entry_drift_pct_from_signal': entry_drift,
+        'exit_guard_state': exit_guard_state,
         'stale_signal_ttl_seconds': stale_ttl,
         'entry_drift_tolerance_pct': drift_tolerance_pct,
         'drift_tolerance_bps': tolerance_bps,
@@ -353,6 +359,91 @@ def _format_group_lines(title: str, groups: Sequence[Dict[str, Any]], *, limit: 
         lines.append(f"      {_format_distribution('signal_age_seconds_at_entry', item['signal_age_seconds_at_entry'], 's')}")
         lines.append(f"      {_format_distribution('entry_drift_pct_from_signal', item['entry_drift_pct_from_signal'], '%')}")
     return lines
+
+
+def _coverage_value_present(value: Any) -> bool:
+    if value in (None, ''):
+        return False
+    if isinstance(value, (dict, list, tuple, set)):
+        return len(value) > 0
+    return True
+
+
+def build_field_coverage(rows: Sequence[Dict[str, Any]], fields: Sequence[str]) -> Dict[str, Dict[str, Any]]:
+    total = len(rows)
+    coverage: Dict[str, Dict[str, Any]] = {}
+    for field in fields:
+        present_count = sum(1 for row in rows if _coverage_value_present(row.get(field)))
+        coverage[field] = {
+            'present_count': present_count,
+            'missing_count': max(total - present_count, 0),
+            'coverage_pct': _share(present_count, total),
+        }
+    return coverage
+
+
+def _format_field_coverage(coverage: Dict[str, Dict[str, Any]], fields: Sequence[str]) -> str:
+    parts = []
+    for field in fields:
+        stats = coverage.get(field) or {}
+        parts.append(
+            f"{field}={stats.get('present_count', 0)}/{stats.get('present_count', 0) + stats.get('missing_count', 0)} "
+            f"({stats.get('coverage_pct', 0.0)}%)"
+        )
+    return ' / '.join(parts) if parts else 'none'
+
+
+def format_outcome_issue_summary(
+    report: Dict[str, Any],
+    *,
+    title: Optional[str] = None,
+    coverage_fields: Optional[Sequence[str]] = None,
+) -> str:
+    summary = report.get('summary') or {}
+    structured_rows = report.get('structured_rows') or []
+    fields = list(coverage_fields or ['signal_age_seconds_at_entry', 'entry_drift_pct_from_signal', 'exit_guard_state'])
+    global_coverage = build_field_coverage(structured_rows, fields)
+    scope_bits = []
+    if summary.get('requested_hours') is not None:
+        requested_hours = float(summary['requested_hours'])
+        requested_hours_text = str(int(requested_hours)) if requested_hours.is_integer() else str(requested_hours)
+        scope_bits.append(f"recent {requested_hours_text}h")
+    elif summary.get('requested_limit'):
+        scope_bits.append(f"latest {summary['requested_limit']} trades")
+    if summary.get('symbol_filter'):
+        scope_bits.append('symbols=' + ', '.join(summary['symbol_filter']))
+    lines = [title or 'Outcome issue summary']
+    if scope_bits:
+        lines.append('Scope: ' + ' / '.join(scope_bits))
+    lines.append(
+        f"Samples: closed={summary.get('closed_rows_in_scope', 0)} / structured={summary.get('structured_rows_in_scope', 0)}"
+    )
+    lines.append(
+        f"Issues: instant_stopout={summary.get('instant_stopout_count', 0)} ({summary.get('instant_stopout_share', 0.0)}%) / "
+        f"pre_arm_exit={summary.get('pre_arm_exit_count', 0)} ({summary.get('pre_arm_exit_share', 0.0)}%) / "
+        f"stale_signal_breach={summary.get('stale_signal_breach_count', 0)} ({summary.get('stale_signal_breach_share', 0.0)}%) / "
+        f"drift_breach={summary.get('drift_breach_count', 0)} ({summary.get('drift_breach_share', 0.0)}%)"
+    )
+    lines.append('close_reason_code: ' + _format_reason_counts(summary.get('close_reason_code_counts') or {}, limit=12))
+    lines.append('Field coverage: ' + _format_field_coverage(global_coverage, fields))
+
+    by_symbol = report.get('by_symbol') or []
+    if by_symbol:
+        lines.append('')
+        lines.append('By symbol')
+        for item in by_symbol:
+            symbol_rows = [row for row in structured_rows if row.get('symbol') == item.get('group')]
+            coverage = build_field_coverage(symbol_rows, fields)
+            lines.append(
+                f"- {item['group']}: samples={item['trade_count']} / "
+                f"instant_stopout={item['instant_stopout_count']} / "
+                f"pre_arm_exit={item['pre_arm_exit_count']} / "
+                f"stale_signal_breach={item['stale_signal_breach_count']} / "
+                f"drift_breach={item['drift_breach_count']}"
+            )
+            lines.append('  close_reason_code: ' + _format_reason_counts(item.get('close_reason_code_counts') or {}, limit=8))
+            lines.append('  field_coverage: ' + _format_field_coverage(coverage, fields))
+    return '\n'.join(lines)
 
 
 def format_outcome_attribution_report(report: Dict[str, Any]) -> str:

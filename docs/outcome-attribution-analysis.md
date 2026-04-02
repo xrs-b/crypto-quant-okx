@@ -14,6 +14,15 @@
 python3 scripts/analyze_outcome_attribution.py
 ```
 
+新增一个更聚焦“自动问题摘要”的非 UI 脚本，默认看 `XRP/USDT` + `SOL/USDT`，并同时输出：
+
+- 最近 24 小时视角
+- 最近 50 笔视角
+
+```bash
+python3 scripts/outcome_issue_summary.py
+```
+
 常用参数：
 
 ```bash
@@ -29,6 +38,17 @@ python3 scripts/analyze_outcome_attribution.py \
   --symbol SOL/USDT \
   --hours 72 \
   --json
+
+# 自动问题摘要：仅输出最近 72 小时视角
+python3 scripts/outcome_issue_summary.py --view hours --hours 72
+
+# 自动问题摘要：只输出最近 80 笔视角
+python3 scripts/outcome_issue_summary.py --view trades --limit 80
+
+# 自动问题摘要：改成看 BTC / ETH
+python3 scripts/outcome_issue_summary.py \
+  --symbol BTC/USDT \
+  --symbol ETH/USDT
 ```
 
 ## 输出内容
@@ -42,6 +62,10 @@ python3 scripts/analyze_outcome_attribution.py \
 - `close_reason_code` 分布
 - 按 `symbol / dominant_strategy / regime` 的聚合摘要
 - 对焦 symbol（默认 `XRP/USDT`、`SOL/USDT`）的额外摘要与最近 flag 样本
+- 自动问题摘要脚本额外输出字段覆盖率：
+  - `signal_age_seconds_at_entry`
+  - `entry_drift_pct_from_signal`
+  - `exit_guard_state`
 
 ## 说明
 

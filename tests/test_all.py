@@ -15,7 +15,7 @@ import unittest
 from unittest.mock import patch
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from core.config import Config
 from core.database import Database
@@ -75,6 +75,28 @@ class FakeExecutorExchange:
         if len(self.order_amounts) == 1:
             raise Exception('okx 51202 Market order amount exceeds the maximum amount.')
         return {'id': 'fake-open'}
+
+
+class DriftBlockExchangeStub:
+    def __init__(self, latest_price=50250):
+        self.latest_price = latest_price
+        self.order_amounts = []
+
+    def fetch_balance(self):
+        return {'free': {'USDT': 1000}}
+
+    def is_futures_symbol(self, symbol):
+        return True
+
+    def normalize_contract_amount(self, symbol, desired_notional, price):
+        return 10.0
+
+    def fetch_ticker(self, symbol):
+        return {'last': self.latest_price}
+
+    def create_order(self, symbol, side, amount, posSide=None):
+        self.order_amounts.append(amount)
+        return {'id': 'should-not-submit'}
 
 
 class CloseMismatchExchangeStub:
@@ -5003,6 +5025,8 @@ class TestOpenCandidateRanking(unittest.TestCase):
 
     def test_build_execution_plan_context_embeds_final_execution_permit(self):
         signal = self._make_signal(symbol='ETH/USDT', strength=75)
+        signal.timestamp = '2026-04-02T01:02:03+00:00'
+        signal.market_context = {'bar_time': '2026-04-02T01:00:00+00:00', 'signal_bar_marker': 'ETH/USDT:2026-04-02T01:00:00+00:00'}
         row = self.bot._build_candidate_contract(
             symbol='ETH/USDT',
             current_price=3200,
@@ -5029,6 +5053,10 @@ class TestOpenCandidateRanking(unittest.TestCase):
         self.assertTrue(guard.get('final_execution_allowed'))
         self.assertTrue(guard.get('guard_passed'))
         self.assertEqual(guard.get('final_execution_permit_reason_code'), 'PERMIT_FINAL_EXECUTION_GRANTED')
+        self.assertEqual(plan_context.get('signal_time'), '2026-04-02T01:00:00+00:00')
+        self.assertEqual(plan_context.get('bar_time'), '2026-04-02T01:00:00+00:00')
+        self.assertEqual(plan_context.get('signal_bar_marker'), 'ETH/USDT:2026-04-02T01:00:00+00:00')
+        self.assertEqual(plan_context.get('signal_price'), 50000)
 
     def test_build_final_execution_permit_contract_emits_runtime_diagnose_bundle_for_defer(self):
         self.bot.config._config['runtime']['open_position']['max_candidates_per_cycle'] = 2
@@ -7885,6 +7913,8 @@ class TestLayeringConfig(unittest.TestCase):
         self.assertEqual(layering['layer_count'], 3)
         self.assertEqual(layering['layer_ratios'], [0.06, 0.06, 0.04])
         self.assertEqual(layering['layer_max_total_ratio'], 0.16)
+        self.assertEqual(layering['stale_signal_ttl_seconds'], 900)
+        self.assertEqual(layering['entry_drift_tolerance_bps'], 30)
 
     def test_invalid_layering_config_raises(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -7928,6 +7958,44 @@ class TestLayeringBehavior(unittest.TestCase):
         ok, reason, _ = self.executor._check_layering_runtime_guards('BTC/USDT', 'long', signal_id=2, plan_context={'signal_bar_marker': 'bar-1'})
         self.assertFalse(ok)
         self.assertIn('同一 bar', reason)
+
+    def test_stale_signal_blocked_before_open(self):
+        signal_time = (datetime.now(timezone.utc) - timedelta(minutes=16)).isoformat()
+        ok, reason, details = self.executor._check_layering_runtime_guards(
+            'BTC/USDT', 'long', signal_id=3,
+            plan_context={'signal_time': signal_time, 'signal_price': 50000, 'current_price': 50010}
+        )
+        self.assertFalse(ok)
+        self.assertIn('过期', reason)
+        self.assertEqual(details['observability']['deny_reason'], 'stale_signal')
+        self.assertGreater(details['signal_age_seconds'], details['stale_signal_ttl_seconds'])
+
+    def test_execution_time_entry_drift_blocks_unfavorable_move(self):
+        cfg = Config()
+        cfg._config.setdefault('trading', {}).setdefault('layering', {})
+        cfg._config['trading']['layering'].update({
+            'stale_signal_ttl_seconds': 900,
+            'entry_drift_tolerance_bps': 30,
+        })
+        db = Database('data/test_layering_drift_guard.db')
+        exchange = DriftBlockExchangeStub(latest_price=50250)
+        executor = TradingExecutor(cfg, exchange, db)
+        try:
+            trade_id = executor.open_position(
+                'BTC/USDT', 'long', 50000, signal_id=4,
+                plan_context={
+                    'signal_time': datetime.now(timezone.utc).isoformat(),
+                    'signal_price': 50000,
+                    'signal_bar_marker': 'BTC/USDT:bar-1',
+                },
+                root_signal_id=4,
+            )
+            self.assertIsNone(trade_id)
+            self.assertEqual(exchange.order_amounts, [])
+            self.assertIsNone(db.get_open_intent_by_signal_id(4))
+        finally:
+            if os.path.exists('data/test_layering_drift_guard.db'):
+                os.remove('data/test_layering_drift_guard.db')
 
     def test_adaptive_live_guardrails_can_tighten_runtime_layering_checks(self):
         self.cfg._config['adaptive_regime'] = {

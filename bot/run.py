@@ -2566,6 +2566,34 @@ class TradingBot:
         contract['runtime_diagnose_bundle']['next_step_summary'] = contract['runtime_diagnose_bundle']['operator_action_hint'].get('summary')
         return contract
 
+    def _build_signal_runtime_context(self, signal, *, current_price: float = None) -> dict:
+        market_context = getattr(signal, 'market_context', {}) or {}
+        signal_time = (
+            market_context.get('signal_time')
+            or market_context.get('bar_time')
+            or getattr(signal, 'timestamp', None)
+        )
+        signal_price = market_context.get('signal_price')
+        if signal_price in (None, ''):
+            signal_price = getattr(signal, 'price', None)
+        if signal_price in (None, ''):
+            signal_price = current_price
+        bar_time = market_context.get('bar_time') or signal_time
+        signal_bar_marker = (
+            market_context.get('signal_bar_marker')
+            or market_context.get('bar_marker')
+            or market_context.get('candle_key')
+            or (f"{getattr(signal, 'symbol', '')}:{bar_time}" if bar_time else None)
+            or signal_time
+        )
+        context = {
+            'signal_time': signal_time,
+            'signal_price': signal_price,
+            'bar_time': bar_time,
+            'signal_bar_marker': signal_bar_marker,
+        }
+        return {k: v for k, v in context.items() if v not in (None, '')}
+
     def _build_execution_plan_context(self, row: dict) -> dict:
         """把风控阶段算出的 adaptive/live context 原样带进 executor。"""
         row = dict(row or {})
@@ -2593,9 +2621,11 @@ class TradingBot:
 
         strategy_selection = dict(((getattr(signal, 'market_context', {}) or {}).get('strategy_selection')) or {})
         final_strategy_contract = dict(((getattr(signal, 'market_context', {}) or {}).get('final_strategy_contract')) or {})
+        signal_runtime_context = self._build_signal_runtime_context(signal, current_price=row.get('current_price'))
         final_execution_permit = self._build_final_execution_permit_contract(row)
         plan_context = dict(layer_plan)
         plan_context.update({
+            **signal_runtime_context,
             'current_price': row.get('current_price'),
             'signal_id': row.get('signal_id'),
             'root_signal_id': row.get('signal_id'),
@@ -2798,7 +2828,12 @@ class TradingBot:
                 risk_reason = None
                 risk_details = {}
                 if passed and signal.signal_type in ['buy', 'sell']:
-                    can_open, risk_reason, risk_details = self.risk_mgr.can_open_position(symbol, side='long' if signal.signal_type == 'buy' else 'short', signal_id=signal_id, plan_context={'regime_snapshot': getattr(signal, 'regime_snapshot', {}) or getattr(signal, 'regime_info', {}) or {}, 'adaptive_policy_snapshot': getattr(signal, 'adaptive_policy_snapshot', {}) or {}})
+                    risk_plan_context = {
+                        'regime_snapshot': getattr(signal, 'regime_snapshot', {}) or getattr(signal, 'regime_info', {}) or {},
+                        'adaptive_policy_snapshot': getattr(signal, 'adaptive_policy_snapshot', {}) or {},
+                        **self._build_signal_runtime_context(signal, current_price=current_price),
+                    }
+                    can_open, risk_reason, risk_details = self.risk_mgr.can_open_position(symbol, side='long' if signal.signal_type == 'buy' else 'short', signal_id=signal_id, plan_context=risk_plan_context)
                     risk_obs = dict((risk_details or {}).get('observability') or {})
                     if risk_obs:
                         merged_filter_details = dict(signal.filter_details or {})

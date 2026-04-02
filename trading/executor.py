@@ -431,6 +431,86 @@ class TradingExecutor:
                     return str(value)
         return str(signal_id) if signal_id is not None else None
 
+    @staticmethod
+    def _parse_plan_timestamp(value: Any) -> Optional[datetime]:
+        if value in (None, ''):
+            return None
+        try:
+            if isinstance(value, datetime):
+                dt = value
+            elif isinstance(value, (int, float)):
+                ts = float(value)
+                dt = datetime.fromtimestamp(ts / 1000.0 if abs(ts) > 10**11 else ts, tz=timezone.utc)
+            else:
+                text = str(value).strip()
+                if not text:
+                    return None
+                if text.isdigit():
+                    ts = float(text)
+                    dt = datetime.fromtimestamp(ts / 1000.0 if abs(ts) > 10**11 else ts, tz=timezone.utc)
+                else:
+                    dt = datetime.fromisoformat(text.replace('Z', '+00:00'))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _extract_signal_reference_price(plan_context: Dict[str, Any] = None) -> float:
+        if not isinstance(plan_context, dict):
+            return 0.0
+        for key in ('signal_price', 'entry_reference_price', 'price', 'current_price'):
+            value = plan_context.get(key)
+            try:
+                price = float(value or 0.0)
+            except Exception:
+                price = 0.0
+            if price > 0:
+                return price
+        return 0.0
+
+    def _check_signal_freshness(self, symbol: str, side: str, signal_id: int = None, plan_context: Dict[str, Any] = None, *, deny_reason: str = 'stale_signal') -> tuple:
+        layering = dict(self._get_layering_config(symbol) or {})
+        layering.update(self._get_live_execution_profile(symbol, plan_context)['live'] or {})
+        ttl_seconds = int(layering.get('stale_signal_ttl_seconds') or 0)
+        if ttl_seconds <= 0:
+            return True, None, {}
+        signal_time = self._parse_plan_timestamp((plan_context or {}).get('signal_time') or (plan_context or {}).get('bar_time'))
+        if signal_time is None:
+            return True, None, {}
+        age_seconds = (datetime.now(timezone.utc) - signal_time).total_seconds()
+        details = {
+            'signal_time': signal_time.isoformat(),
+            'signal_age_seconds': round(age_seconds, 3),
+            'stale_signal_ttl_seconds': ttl_seconds,
+        }
+        if age_seconds > ttl_seconds:
+            context = build_observability_context(symbol=symbol, side=side, signal_id=signal_id, root_signal_id=(plan_context or {}).get('root_signal_id') or signal_id, layer_no=(plan_context or {}).get('layer_no'), deny_reason=deny_reason, extra=details)
+            return False, 'signal 已过期，跳过开仓', merge_observability_details({'stage': deny_reason, **details}, context)
+        return True, None, details
+
+    def _check_entry_drift_guard(self, symbol: str, side: str, current_price: float, signal_id: int = None, plan_context: Dict[str, Any] = None, *, deny_reason: str = 'entry_drift') -> tuple:
+        layering = dict(self._get_layering_config(symbol) or {})
+        layering.update(self._get_live_execution_profile(symbol, plan_context)['live'] or {})
+        tolerance_bps = float(layering.get('entry_drift_tolerance_bps') or 0.0)
+        signal_price = self._extract_signal_reference_price(plan_context)
+        if tolerance_bps <= 0 or signal_price <= 0 or current_price <= 0:
+            return True, None, {}
+        drift_ratio = (float(current_price) - float(signal_price)) / float(signal_price)
+        unfavorable = drift_ratio > 0 if side == 'long' else drift_ratio < 0
+        details = {
+            'signal_price': round(float(signal_price), 10),
+            'execution_price': round(float(current_price), 10),
+            'entry_drift_bps': round(drift_ratio * 10000, 3),
+            'entry_drift_tolerance_bps': round(tolerance_bps, 3),
+            'entry_drift_unfavorable': bool(unfavorable),
+        }
+        if unfavorable and abs(drift_ratio) * 10000 > tolerance_bps:
+            context = build_observability_context(symbol=symbol, side=side, signal_id=signal_id, root_signal_id=(plan_context or {}).get('root_signal_id') or signal_id, layer_no=(plan_context or {}).get('layer_no'), deny_reason=deny_reason, extra=details)
+            return False, '入场价格漂移超限，跳过开仓', merge_observability_details({'stage': deny_reason, **details}, context)
+        return True, None, details
+
     def _check_layering_runtime_guards(self, symbol: str, side: str, signal_id: int = None, plan_context: Dict[str, Any] = None) -> tuple:
         execution_profile = self._get_live_execution_profile(symbol, plan_context)
         layering = execution_profile['live']
@@ -465,6 +545,14 @@ class TradingExecutor:
             existing_intent = self.db.get_open_intent_by_signal_id(signal_id)
             if existing_intent:
                 return False, 'signal_id 已存在进行中的开仓 intent', _guard_details('signal_idempotency', build_observability_context(symbol=symbol, side=side, signal_id=signal_id, root_signal_id=existing_intent.get('root_signal_id') or state.get('root_signal_id') or signal_id, layer_no=existing_intent.get('layer_no') or ((max(filled_layers) + 1) if filled_layers else 1), deny_reason='signal_idempotency'), {'intent_id': existing_intent.get('id')})
+
+        fresh_ok, fresh_reason, fresh_details = self._check_signal_freshness(symbol, side, signal_id=signal_id, plan_context=plan_context, deny_reason='stale_signal')
+        if not fresh_ok:
+            return False, fresh_reason, _guard_details('stale_signal', fresh_details.get('observability') or {}, {k: v for k, v in fresh_details.items() if k != 'observability'})
+
+        drift_ok, drift_reason, drift_details = self._check_entry_drift_guard(symbol, side, float((plan_context or {}).get('current_price') or 0.0), signal_id=signal_id, plan_context=plan_context, deny_reason='entry_drift')
+        if not drift_ok:
+            return False, drift_reason, _guard_details('entry_drift', drift_details.get('observability') or {}, {k: v for k, v in drift_details.items() if k != 'observability'})
 
         if layering.get('profit_only_add') and filled_layers:
             latest_trade = self.db.get_latest_open_trade(symbol, side)
@@ -772,6 +860,26 @@ class TradingExecutor:
                 self.db.release_direction_lock(lock_symbol, lock_side, owner=lock_owner)
             return None
         
+        execution_reference_price = current_price
+        if hasattr(self.exchange, 'fetch_ticker'):
+            try:
+                latest_ticker = self.exchange.fetch_ticker(symbol) or {}
+                execution_reference_price = float(latest_ticker.get('last') or current_price)
+            except Exception:
+                execution_reference_price = current_price
+        drift_ok, drift_reason, drift_details = self._check_entry_drift_guard(
+            symbol, side, execution_reference_price, signal_id=signal_id, plan_context=plan_context, deny_reason='entry_drift_execution'
+        )
+        if not drift_ok:
+            trade_logger.warning(f"{symbol}: {drift_reason} | details={drift_details} | obs={observability_log_text((drift_details or {}).get('observability'))}")
+            if intent_id:
+                self.db.update_open_intent(intent_id, status='failed', notes=drift_reason)
+                self.db.delete_open_intent(intent_id)
+                intent_id = None
+            self._finalize_layer(symbol, side, plan_context, success=False)
+            self.db.release_direction_lock(lock_symbol, lock_side, owner=lock_owner)
+            return None
+
         # 重试机制
         max_retries = 3
         retry_delay = 2

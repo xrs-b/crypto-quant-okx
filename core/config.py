@@ -25,6 +25,8 @@ DEFAULT_LAYERING_CONFIG = {
     'signal_idempotency_ttl_seconds': 3600,
     'max_layers_per_signal': 3,
     'allow_same_bar_multiple_adds': False,
+    'stale_signal_ttl_seconds': 900,
+    'entry_drift_tolerance_bps': 30,
 }
 
 DEFAULT_ADAPTIVE_REGIME_CONFIG = {
@@ -219,6 +221,12 @@ class Config:
             raise ValueError('trading.layering.max_layers_per_signal 必须 > 0')
         if max_layers_per_signal > layer_count:
             raise ValueError('trading.layering.max_layers_per_signal 不能大于 layer_count')
+        stale_signal_ttl_seconds = int(layering.get('stale_signal_ttl_seconds', DEFAULT_LAYERING_CONFIG['stale_signal_ttl_seconds']) or 0)
+        if stale_signal_ttl_seconds < 0:
+            raise ValueError('trading.layering.stale_signal_ttl_seconds 不能 < 0')
+        entry_drift_tolerance_bps = float(layering.get('entry_drift_tolerance_bps', DEFAULT_LAYERING_CONFIG['entry_drift_tolerance_bps']) or 0)
+        if entry_drift_tolerance_bps < 0:
+            raise ValueError('trading.layering.entry_drift_tolerance_bps 不能 < 0')
         scope = str(layering.get('direction_lock_scope', DEFAULT_LAYERING_CONFIG['direction_lock_scope']) or '').strip()
         if scope not in {'symbol_side', 'symbol'}:
             raise ValueError('trading.layering.direction_lock_scope 仅支持 symbol_side / symbol')
@@ -228,6 +236,8 @@ class Config:
         layering['min_add_interval_seconds'] = min_add_interval
         layering['signal_idempotency_ttl_seconds'] = ttl_seconds
         layering['max_layers_per_signal'] = max_layers_per_signal
+        layering['stale_signal_ttl_seconds'] = stale_signal_ttl_seconds
+        layering['entry_drift_tolerance_bps'] = entry_drift_tolerance_bps
         layering['direction_lock_scope'] = scope
 
     def get_layering_config(self, symbol: str = None) -> Dict[str, Any]:
@@ -240,6 +250,8 @@ class Config:
         layering['min_add_interval_seconds'] = int(layering.get('min_add_interval_seconds') or 0)
         layering['signal_idempotency_ttl_seconds'] = int(layering.get('signal_idempotency_ttl_seconds') or 0)
         layering['max_layers_per_signal'] = int(layering.get('max_layers_per_signal') or layering['layer_count'])
+        layering['stale_signal_ttl_seconds'] = int(layering.get('stale_signal_ttl_seconds') or 0)
+        layering['entry_drift_tolerance_bps'] = float(layering.get('entry_drift_tolerance_bps') or 0.0)
         layering['direction_lock_scope'] = str(layering.get('direction_lock_scope') or 'symbol_side')
         for key in ('profit_only_add', 'disallow_skip_layers', 'direction_lock_enabled', 'direction_lock_release_on_flat', 'signal_idempotency_enabled', 'allow_same_bar_multiple_adds'):
             layering[key] = bool(layering.get(key, DEFAULT_LAYERING_CONFIG[key]))

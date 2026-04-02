@@ -49,6 +49,29 @@ class Signal:
 class SignalDetector:
     """信号检测器 - 增强版"""
 
+    @staticmethod
+    def _normalize_bar_time(raw_value: Any) -> Optional[str]:
+        if raw_value in (None, ''):
+            return None
+        try:
+            if isinstance(raw_value, pd.Timestamp):
+                dt = raw_value.to_pydatetime()
+            elif isinstance(raw_value, (int, float, np.integer, np.floating)):
+                ts = float(raw_value)
+                dt = datetime.fromtimestamp(ts / 1000.0 if abs(ts) > 10**11 else ts)
+            else:
+                text = str(raw_value).strip()
+                if not text:
+                    return None
+                if text.isdigit():
+                    ts = float(text)
+                    dt = datetime.fromtimestamp(ts / 1000.0 if abs(ts) > 10**11 else ts)
+                else:
+                    dt = datetime.fromisoformat(text.replace('Z', '+00:00'))
+            return dt.isoformat()
+        except Exception:
+            return None
+
     def __init__(self, config: Dict):
         self.config = config
         self.strategies_config = config.get('strategies', {})
@@ -77,6 +100,10 @@ class SignalDetector:
             indicators=indicators
         )
         signal.market_context = self._analyze_market_context(df, current_price, symbol)
+        bar_time = self._normalize_bar_time(df.iloc[-1, 0] if len(df.index) else None)
+        if bar_time:
+            signal.market_context['bar_time'] = bar_time
+            signal.market_context['signal_bar_marker'] = f"{signal.symbol}:{bar_time}"
 
         # Regime / adaptive policy snapshots (M0 Step 2 observe-only)
         regime_result = detect_regime(df, current_price)

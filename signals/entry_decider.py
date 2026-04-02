@@ -152,6 +152,12 @@ class EntryDecider:
         'sideways_ml_only_watch_max_score': 60,
         'mtf_breakout_candidate_bonus_max': 12,
         'mtf_breakout_candidate_penalty_max': 12,
+        'mtf_breakout_live_mode': 'observe_only',
+        'mtf_breakout_allow_aligned_bonus': True,
+        'mtf_breakout_allow_counter_penalty': True,
+        'mtf_breakout_anchor_conflict_action': 'watch',
+        'mtf_breakout_allow_positive_promote': False,
+        'mtf_breakout_allow_negative_downgrade': True,
     }
 
     CONSERVATIVE_THRESHOLD_RULES = {
@@ -224,6 +230,15 @@ class EntryDecider:
             return effective_thresholds[key]
         return self.thresholds.get(key, default)
 
+    def _base_thresholds_for_symbol(self, symbol: Optional[str]) -> Dict[str, Any]:
+        thresholds = dict(self.thresholds)
+        if not symbol:
+            return thresholds
+        symbol_entry_decider = (self.get_symbol_overrides(symbol) or {}).get('entry_decider') or {}
+        if isinstance(symbol_entry_decider, dict):
+            thresholds.update(symbol_entry_decider)
+        return thresholds
+
     def decide(self, signal, current_positions: Dict = None,
                tracking_data: Dict = None, ml_prediction: tuple = None) -> EntryDecisionResult:
         """
@@ -248,7 +263,8 @@ class EntryDecider:
         breakdown.observe_only_summary = observe_only_payload.get('observe_only_summary', '')
         breakdown.observe_only_tags = list(observe_only_payload.get('observe_only_tags') or [])
 
-        effective_thresholds, adaptive_meta = self._build_effective_thresholds(result.adaptive_policy_snapshot)
+        base_thresholds = self._base_thresholds_for_symbol(getattr(signal, 'symbol', None))
+        effective_thresholds, adaptive_meta = self._build_effective_thresholds(result.adaptive_policy_snapshot, base_thresholds)
         breakdown.adaptive_policy_mode = adaptive_meta['mode']
         breakdown.adaptive_policy_state = adaptive_meta['state']
         breakdown.adaptive_policy_is_effective = adaptive_meta['is_effective']
@@ -304,9 +320,7 @@ class EntryDecider:
         result.breakdown = breakdown
 
         total_score = self._calculate_total_score(breakdown)
-        result.score = total_score
-
-        result.decision, result.watch_reasons = self._make_decision(
+        baseline_decision, baseline_watch_reasons = self._make_decision(
             breakdown, total_score, signal, effective_thresholds, adaptive_meta
         )
 
@@ -314,11 +328,15 @@ class EntryDecider:
             signal,
             breakdown,
             baseline_score=total_score,
-            baseline_decision=result.decision,
+            baseline_decision=baseline_decision,
+            baseline_watch_reasons=baseline_watch_reasons,
             effective_thresholds=effective_thresholds,
             adaptive_meta=adaptive_meta,
         )
         self._apply_mtf_breakout_decision_context(breakdown, mtf_decision_context)
+        result.score = int(mtf_decision_context.get('live_score', total_score) or total_score)
+        result.decision = str(mtf_decision_context.get('live_decision') or baseline_decision)
+        result.watch_reasons = list(mtf_decision_context.get('live_watch_reasons') or baseline_watch_reasons)
 
         result.reason_summary = self._generate_summary(result.decision, breakdown, signal)
         return result
@@ -399,8 +417,8 @@ class EntryDecider:
             'triggered': copy.deepcopy(breakdown.adaptive_triggered_rules or []),
         }
 
-    def _build_effective_thresholds(self, policy_snapshot: Dict[str, Any]) -> tuple:
-        effective_thresholds = dict(self.thresholds)
+    def _build_effective_thresholds(self, policy_snapshot: Dict[str, Any], base_thresholds: Optional[Dict[str, Any]] = None) -> tuple:
+        effective_thresholds = dict(base_thresholds or self.thresholds)
         policy_snapshot = policy_snapshot or {}
         effective_overrides = dict(policy_snapshot.get('effective_overrides') or {})
         decision_overrides = dict(policy_snapshot.get('decision_overrides') or {})
@@ -695,13 +713,16 @@ class EntryDecider:
             reason = f"ML置信度不足({prob:.0%})，仅供参考"
         return score, reason
 
-    def _calculate_mtf_breakout_candidate_adjustment(self, signal, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def _calculate_mtf_breakout_candidate_adjustment(self, signal, payload: Dict[str, Any], effective_thresholds: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         payload = payload or {}
         signal_type = str(getattr(signal, 'signal_type', 'hold') or 'hold').strip() or 'hold'
+        configured_mode = str(self._cfg('mtf_breakout_live_mode', 'observe_only', effective_thresholds) or 'observe_only')
         observe_only = bool(payload.get('observe_only', True))
-        mode = 'observe_only' if observe_only else 'decision_live'
-        bonus_cap = max(0, int(self._cfg('mtf_breakout_candidate_bonus_max', 12) or 0))
-        penalty_cap = max(0, int(self._cfg('mtf_breakout_candidate_penalty_max', 12) or 0))
+        mode = 'observe_only' if observe_only else configured_mode
+        if mode not in {'observe_only', 'decision_only', 'limited_execution'}:
+            mode = 'observe_only'
+        bonus_cap = max(0, int(self._cfg('mtf_breakout_candidate_bonus_max', 12, effective_thresholds) or 0))
+        penalty_cap = max(0, int(self._cfg('mtf_breakout_candidate_penalty_max', 12, effective_thresholds) or 0))
         direction = str(payload.get('direction') or 'hold').strip() or 'hold'
         score = int(payload.get('score', 0) or 0)
         enabled = bool(payload.get('enabled', False))
@@ -709,6 +730,9 @@ class EntryDecider:
         anchor_available = bool(payload.get('anchor_available', False))
         anchor_aligned = bool(payload.get('anchor_aligned', False))
         has_breakout = bool(payload.get('has_breakout', False))
+        allow_aligned_bonus = bool(self._cfg('mtf_breakout_allow_aligned_bonus', True, effective_thresholds))
+        allow_counter_penalty = bool(self._cfg('mtf_breakout_allow_counter_penalty', True, effective_thresholds))
+        anchor_conflict_action = str(self._cfg('mtf_breakout_anchor_conflict_action', 'watch', effective_thresholds) or 'watch').lower()
 
         adjustment = 0
         bias = 'neutral'
@@ -720,39 +744,52 @@ class EntryDecider:
         elif signal_type not in {'buy', 'sell'}:
             bias = 'neutral'
             action = 'ignore_non_directional_signal'
+        elif anchor_available and has_breakout and direction == signal_type and not anchor_aligned:
+            bias = 'anchor_conflict'
+            if anchor_conflict_action in {'watch', 'block'}:
+                adjustment = -min(penalty_cap, max(4, int(round(score / 12.0))))
+                action = f'anchor_conflict_{anchor_conflict_action}'
+            else:
+                action = 'anchor_conflict_observe'
         elif not has_breakout:
             bias = 'neutral'
             action = 'no_breakout'
         elif direction == signal_type:
             bias = 'aligned'
-            if eligible:
-                adjustment = min(bonus_cap, max(4, int(round(score / 10.0))))
-                action = 'candidate_boost'
+            if allow_aligned_bonus:
+                if eligible:
+                    adjustment = min(bonus_cap, max(4, int(round(score / 10.0))))
+                    action = 'candidate_boost'
+                else:
+                    adjustment = min(max(0, bonus_cap // 2), max(2, int(round(score / 25.0))))
+                    action = 'candidate_watch_boost'
             else:
-                adjustment = min(max(0, bonus_cap // 2), max(2, int(round(score / 25.0))))
-                action = 'candidate_watch_boost'
+                action = 'aligned_bonus_disabled'
         elif direction in {'buy', 'sell'}:
             bias = 'counter'
-            adjustment = -min(penalty_cap, max(4, int(round(score / 10.0))))
-            action = 'candidate_penalty'
-        elif anchor_available and not anchor_aligned:
-            bias = 'anchor_conflict'
-            adjustment = -min(max(0, penalty_cap // 2), 4)
-            action = 'anchor_conflict_penalty'
+            if allow_counter_penalty:
+                adjustment = -min(penalty_cap, max(4, int(round(score / 10.0))))
+                action = 'candidate_penalty'
+            else:
+                action = 'counter_penalty_disabled'
 
-        effective = bool(not observe_only and adjustment != 0)
+        effective = bool(mode != 'observe_only' and (adjustment != 0 or action.startswith('anchor_conflict_')))
         return {
             'mtf_breakout_mode': mode,
             'mtf_breakout_effective': effective,
             'mtf_breakout_bias': bias,
             'mtf_breakout_action': action,
             'candidate_adjustment': int(adjustment),
+            'allow_positive_promote': bool(self._cfg('mtf_breakout_allow_positive_promote', False, effective_thresholds)),
+            'allow_negative_downgrade': bool(self._cfg('mtf_breakout_allow_negative_downgrade', True, effective_thresholds)),
+            'anchor_conflict_action': anchor_conflict_action,
         }
 
-    def _build_mtf_breakout_decision_context(self, signal, breakdown: DecisionBreakdown, *, baseline_score: int, baseline_decision: str, effective_thresholds: Optional[Dict[str, Any]] = None, adaptive_meta: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def _build_mtf_breakout_decision_context(self, signal, breakdown: DecisionBreakdown, *, baseline_score: int, baseline_decision: str, baseline_watch_reasons: Optional[List[str]] = None, effective_thresholds: Optional[Dict[str, Any]] = None, adaptive_meta: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         payload = self.build_mtf_breakout_observability(signal)
-        candidate_meta = self._calculate_mtf_breakout_candidate_adjustment(signal, payload)
+        candidate_meta = self._calculate_mtf_breakout_candidate_adjustment(signal, payload, effective_thresholds)
         baseline_score = int(max(0, min(100, baseline_score or 0)))
+        baseline_watch_reasons = list(baseline_watch_reasons or [])
         candidate_adjustment = int(candidate_meta.get('candidate_adjustment', 0) or 0)
         candidate_score = int(max(0, min(100, baseline_score + candidate_adjustment)))
         candidate_breakdown = copy.deepcopy(breakdown)
@@ -763,16 +800,43 @@ class EntryDecider:
             effective_thresholds,
             adaptive_meta,
         )
+
+        live_score = baseline_score
+        live_decision = str(baseline_decision or 'unknown')
+        live_watch_reasons = list(baseline_watch_reasons)
+        mode = str(candidate_meta.get('mtf_breakout_mode') or 'observe_only')
+
+        if mode in {'decision_only', 'limited_execution'}:
+            live_score = candidate_score
+            live_decision = self._clamp_mtf_live_decision(baseline_decision, candidate_decision, candidate_meta)
+            if live_decision == candidate_decision:
+                live_watch_reasons = list(candidate_watch_reasons or [])
+            anchor_conflict_action = str(candidate_meta.get('anchor_conflict_action') or 'off')
+            if candidate_meta.get('mtf_breakout_bias') == 'anchor_conflict':
+                if anchor_conflict_action == 'block':
+                    live_decision = 'block'
+                elif anchor_conflict_action == 'watch' and self._decision_rank(live_decision) > self._decision_rank('watch'):
+                    live_decision = 'watch'
+                anchor_reason = 'MTF breakout anchor 冲突'
+                if anchor_reason not in live_watch_reasons:
+                    live_watch_reasons.append(anchor_reason)
+            if live_decision != candidate_decision and candidate_adjustment > 0 and not candidate_meta.get('allow_positive_promote', False):
+                guard_reason = 'MTF breakout 正向 promote 默认禁用'
+                if guard_reason not in live_watch_reasons:
+                    live_watch_reasons.append(guard_reason)
+
         return {
             'baseline_score': baseline_score,
             'baseline_decision': str(baseline_decision or 'unknown'),
+            'baseline_watch_reasons': baseline_watch_reasons,
             'candidate_adjustment': candidate_adjustment,
             'candidate_score_after_mtf': candidate_score,
             'candidate_decision_after_mtf': str(candidate_decision or 'unknown'),
             'candidate_watch_reasons_after_mtf': list(candidate_watch_reasons or []),
-            'live_score': baseline_score,
-            'live_decision': str(baseline_decision or 'unknown'),
-            'mtf_breakout_mode': str(candidate_meta.get('mtf_breakout_mode') or ('observe_only' if payload.get('observe_only', True) else 'decision_live')),
+            'live_score': live_score,
+            'live_decision': str(live_decision or baseline_decision or 'unknown'),
+            'live_watch_reasons': list(live_watch_reasons or []),
+            'mtf_breakout_mode': mode,
             'mtf_breakout_effective': bool(candidate_meta.get('mtf_breakout_effective', False)),
             'mtf_breakout_bias': str(candidate_meta.get('mtf_breakout_bias') or 'neutral'),
             'mtf_breakout_action': str(candidate_meta.get('mtf_breakout_action') or 'none'),
@@ -794,6 +858,19 @@ class EntryDecider:
         breakdown.mtf_breakout_bias = str(context.get('mtf_breakout_bias') or 'neutral')
         breakdown.mtf_breakout_action = str(context.get('mtf_breakout_action') or 'none')
         breakdown.mtf_breakout_decision_context = context
+
+    @staticmethod
+    def _decision_rank(decision: str) -> int:
+        return {'block': 0, 'watch': 1, 'allow': 2}.get(str(decision or 'watch'), 1)
+
+    def _clamp_mtf_live_decision(self, baseline_decision: str, candidate_decision: str, candidate_meta: Dict[str, Any]) -> str:
+        baseline_rank = self._decision_rank(baseline_decision)
+        candidate_rank = self._decision_rank(candidate_decision)
+        if candidate_rank < baseline_rank and candidate_meta.get('allow_negative_downgrade', True):
+            return candidate_decision
+        if candidate_rank > baseline_rank and candidate_meta.get('allow_positive_promote', False):
+            return candidate_decision
+        return baseline_decision
 
     @staticmethod
     def build_mtf_breakout_observability(signal, entry_decision=None) -> Dict[str, Any]:

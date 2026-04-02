@@ -25,6 +25,31 @@ def _make_ohlcv(closes, *, freq='1h', volume_base=1000, last_volume=None):
 
 
 class TestMtfBreakout(unittest.TestCase):
+    def _make_entry_signal(self, *, symbol='BTC/USDT', strength=72, trend='bullish', reasons=None, strategies=None, direction_score=None, mtf_breakout=None):
+        market_context = {
+            'trend': trend,
+            'volatility': 0.012,
+            'atr_ratio': 0.012,
+            'volatility_too_low': False,
+            'volatility_too_high': False,
+        }
+        if mtf_breakout is not None:
+            market_context['mtf_breakout'] = mtf_breakout
+        return Signal(
+            symbol=symbol,
+            signal_type='buy',
+            price=50000,
+            strength=strength,
+            strategies_triggered=strategies or ['MACD', 'Volume'],
+            reasons=reasons or [
+                {'strategy': 'MACD', 'action': 'buy', 'strength': 30, 'confidence': 0.8},
+                {'strategy': 'Volume', 'action': 'buy', 'strength': 20, 'confidence': 0.7},
+            ],
+            direction_score=direction_score or {'buy': 38.0, 'sell': 0.0, 'net': 38.0},
+            market_context=market_context,
+            regime_info={'regime': 'trend', 'confidence': 0.7},
+        )
+
     def setUp(self):
         self.config = {
             'strategies': {
@@ -173,6 +198,149 @@ class TestMtfBreakout(unittest.TestCase):
         self.assertEqual(observability['mtf_breakout_mode'], 'observe_only')
         self.assertFalse(observability['mtf_breakout_effective'])
         self.assertEqual(observability['mtf_breakout_action'], 'candidate_boost')
+
+    def test_decision_only_counter_breakout_can_downgrade_live_decision(self):
+        signal = self._make_entry_signal(
+            mtf_breakout={
+                'enabled': True,
+                'score': 88,
+                'direction': 'sell',
+                'has_breakout': True,
+                'eligible': True,
+                'reason': '1h 向下突破；与做多方向冲突',
+                'observe_only': False,
+            }
+        )
+
+        result = EntryDecider({'entry_decider': {'mtf_breakout_live_mode': 'decision_only'}}).decide(signal)
+
+        self.assertEqual(result.breakdown.baseline_score, 74)
+        self.assertEqual(result.breakdown.candidate_score_after_mtf, 65)
+        self.assertEqual(result.breakdown.candidate_adjustment, -9)
+        self.assertEqual(result.breakdown.candidate_decision_after_mtf, 'watch')
+        self.assertEqual(result.score, 65)
+        self.assertEqual(result.decision, 'watch')
+        self.assertEqual(result.breakdown.mtf_breakout_mode, 'decision_only')
+        self.assertTrue(result.breakdown.mtf_breakout_effective)
+        self.assertEqual(result.breakdown.mtf_breakout_bias, 'counter')
+        self.assertEqual(result.breakdown.mtf_breakout_action, 'candidate_penalty')
+
+    def test_decision_only_positive_promote_is_disabled_by_default(self):
+        signal = self._make_entry_signal(
+            strength=75,
+            trend='sideways',
+            strategies=['RSI', 'Bollinger'],
+            reasons=[
+                {'strategy': 'RSI', 'action': 'buy', 'value': 38, 'strength': 20, 'confidence': 0.7},
+                {'strategy': 'Bollinger', 'action': 'buy', 'strength': 18, 'confidence': 0.7},
+            ],
+            direction_score={'buy': 24.0, 'sell': 0.0, 'net': 24.0},
+            mtf_breakout={
+                'enabled': True,
+                'score': 88,
+                'direction': 'buy',
+                'has_breakout': True,
+                'eligible': True,
+                'reason': '1h 向上突破；4h anchor bullish 对齐',
+                'observe_only': False,
+                'anchor': {'available': True, 'trend': 'bullish'},
+                'trigger': {'available': True},
+            }
+        )
+
+        result = EntryDecider({'entry_decider': {'mtf_breakout_live_mode': 'decision_only'}}).decide(signal)
+
+        self.assertEqual(result.breakdown.baseline_score, 68)
+        self.assertGreater(result.breakdown.candidate_score_after_mtf, result.breakdown.baseline_score)
+        self.assertEqual(result.breakdown.candidate_decision_after_mtf, 'allow')
+        self.assertEqual(result.score, result.breakdown.candidate_score_after_mtf)
+        self.assertEqual(result.decision, 'watch')
+        self.assertIn('MTF breakout 正向 promote 默认禁用', result.watch_reasons)
+        self.assertEqual(result.breakdown.mtf_breakout_bias, 'aligned')
+        self.assertEqual(result.breakdown.mtf_breakout_action, 'candidate_boost')
+
+    def test_anchor_conflict_can_force_block_when_enabled(self):
+        signal = self._make_entry_signal(
+            mtf_breakout={
+                'enabled': True,
+                'score': 84,
+                'direction': 'buy',
+                'has_breakout': True,
+                'eligible': False,
+                'reason': '1h 向上突破，但 4h anchor bearish 冲突',
+                'observe_only': False,
+                'trigger': {'available': True},
+                'anchor': {'available': True, 'trend': 'bearish'},
+            }
+        )
+        decider = EntryDecider({
+            'entry_decider': {
+                'mtf_breakout_live_mode': 'decision_only',
+                'mtf_breakout_anchor_conflict_action': 'block',
+            }
+        })
+
+        result = decider.decide(signal)
+
+        self.assertEqual(result.decision, 'block')
+        self.assertEqual(result.breakdown.mtf_breakout_bias, 'anchor_conflict')
+        self.assertEqual(result.breakdown.mtf_breakout_action, 'anchor_conflict_block')
+        self.assertIn('MTF breakout anchor 冲突', result.watch_reasons)
+
+    def test_symbol_override_can_disable_counter_penalty_while_global_mode_remains_live(self):
+        signal_btc = self._make_entry_signal(
+            symbol='BTC/USDT',
+            mtf_breakout={
+                'enabled': True,
+                'score': 88,
+                'direction': 'sell',
+                'has_breakout': True,
+                'eligible': True,
+                'reason': '1h 向下突破；与做多方向冲突',
+                'observe_only': False,
+            }
+        )
+        signal_eth = self._make_entry_signal(
+            symbol='ETH/USDT',
+            mtf_breakout={
+                'enabled': True,
+                'score': 88,
+                'direction': 'sell',
+                'has_breakout': True,
+                'eligible': True,
+                'reason': '1h 向下突破；与做多方向冲突',
+                'observe_only': False,
+            }
+        )
+        decider = EntryDecider({
+            'entry_decider': {
+                'mtf_breakout_live_mode': 'decision_only',
+                'mtf_breakout_allow_counter_penalty': True,
+            },
+            'symbol_overrides': {
+                'BTC/USDT': {
+                    'entry_decider': {
+                        'mtf_breakout_allow_counter_penalty': False,
+                        'mtf_breakout_live_mode': 'limited_execution',
+                    }
+                }
+            }
+        })
+
+        btc_result = decider.decide(signal_btc)
+        eth_result = decider.decide(signal_eth)
+
+        self.assertEqual(btc_result.decision, 'allow')
+        self.assertEqual(btc_result.score, btc_result.breakdown.baseline_score)
+        self.assertEqual(btc_result.breakdown.candidate_adjustment, 0)
+        self.assertEqual(btc_result.breakdown.mtf_breakout_action, 'counter_penalty_disabled')
+        self.assertEqual(btc_result.breakdown.mtf_breakout_mode, 'limited_execution')
+
+        self.assertEqual(eth_result.decision, 'watch')
+        self.assertEqual(eth_result.score, eth_result.breakdown.candidate_score_after_mtf)
+        self.assertLess(eth_result.breakdown.candidate_adjustment, 0)
+        self.assertEqual(eth_result.breakdown.mtf_breakout_action, 'candidate_penalty')
+        self.assertEqual(eth_result.breakdown.mtf_breakout_mode, 'decision_only')
 
 
 if __name__ == '__main__':

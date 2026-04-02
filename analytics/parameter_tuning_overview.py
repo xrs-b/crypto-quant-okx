@@ -6,6 +6,7 @@ from analytics.parameter_tuning_advice import (
     build_parameter_tuning_advice_payload,
     format_parameter_tuning_advice,
 )
+from analytics.mtf_breakout_report import analyze_mtf_breakout_report, format_mtf_breakout_report
 from analytics.parameter_tuning_patch import (
     build_parameter_tuning_patch_payload,
     format_parameter_tuning_patch_text,
@@ -54,6 +55,13 @@ def build_parameter_tuning_overview_payload(
         symbols=resolved_symbols,
         fetch_limit=fetch_limit,
     )
+    mtf_breakout_summary = analyze_mtf_breakout_report(
+        db_path,
+        limit=limit,
+        hours=hours if view in {'both', 'hours'} else None,
+        symbols=resolved_symbols,
+        fetch_limit=fetch_limit,
+    )
     return {
         'schema_version': 'parameter_tuning_overview_v1',
         'mode': 'read_only_overview',
@@ -67,19 +75,22 @@ def build_parameter_tuning_overview_payload(
         'issue_summary': issue_summary,
         'parameter_advice': advice,
         'patch_preview': patch_preview,
+        'mtf_breakout_summary': mtf_breakout_summary,
         'text': format_parameter_tuning_overview_text(
             issue_summary=issue_summary,
             advice=advice,
             patch_preview=patch_preview,
+            mtf_breakout_summary=mtf_breakout_summary,
         ),
     }
 
 
-def format_parameter_tuning_overview_text(*, issue_summary: Dict[str, Any], advice: Dict[str, Any], patch_preview: Dict[str, Any]) -> str:
+def format_parameter_tuning_overview_text(*, issue_summary: Dict[str, Any], advice: Dict[str, Any], patch_preview: Dict[str, Any], mtf_breakout_summary: Dict[str, Any]) -> str:
     return '\n\n'.join(
         [
             'A. 问题摘要 / Issue summary\n' + (issue_summary.get('text') or '(no issue summary)'),
             'B. 参数建议 / Parameter advice\n' + format_parameter_tuning_advice(advice),
             'C. Patch 预览 / Patch preview\n' + format_parameter_tuning_patch_text(patch_preview),
+            'D. MTF Breakout 观察摘要 / Observe-only summary\n' + format_mtf_breakout_report(mtf_breakout_summary),
         ]
     )

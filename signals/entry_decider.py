@@ -69,6 +69,15 @@ class DecisionBreakdown:
     adaptive_decision_tags: List[str] = field(default_factory=list)
     adaptive_decision_audit: Dict[str, Any] = field(default_factory=dict)
     mtf_breakout_observe_only: bool = True
+    baseline_score: int = 0
+    candidate_adjustment: int = 0
+    candidate_score_after_mtf: int = 0
+    candidate_decision_after_mtf: str = "unknown"
+    mtf_breakout_mode: str = "observe_only"
+    mtf_breakout_effective: bool = False
+    mtf_breakout_bias: str = "neutral"
+    mtf_breakout_action: str = "none"
+    mtf_breakout_decision_context: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -141,6 +150,8 @@ class EntryDecider:
         'falling_knife_block_max_score': 72,
         'sideways_mean_reversion_watch_max_score': 72,
         'sideways_ml_only_watch_max_score': 60,
+        'mtf_breakout_candidate_bonus_max': 12,
+        'mtf_breakout_candidate_penalty_max': 12,
     }
 
     CONSERVATIVE_THRESHOLD_RULES = {
@@ -298,6 +309,16 @@ class EntryDecider:
         result.decision, result.watch_reasons = self._make_decision(
             breakdown, total_score, signal, effective_thresholds, adaptive_meta
         )
+
+        mtf_decision_context = self._build_mtf_breakout_decision_context(
+            signal,
+            breakdown,
+            baseline_score=total_score,
+            baseline_decision=result.decision,
+            effective_thresholds=effective_thresholds,
+            adaptive_meta=adaptive_meta,
+        )
+        self._apply_mtf_breakout_decision_context(breakdown, mtf_decision_context)
 
         result.reason_summary = self._generate_summary(result.decision, breakdown, signal)
         return result
@@ -674,6 +695,106 @@ class EntryDecider:
             reason = f"ML置信度不足({prob:.0%})，仅供参考"
         return score, reason
 
+    def _calculate_mtf_breakout_candidate_adjustment(self, signal, payload: Dict[str, Any]) -> Dict[str, Any]:
+        payload = payload or {}
+        signal_type = str(getattr(signal, 'signal_type', 'hold') or 'hold').strip() or 'hold'
+        observe_only = bool(payload.get('observe_only', True))
+        mode = 'observe_only' if observe_only else 'decision_live'
+        bonus_cap = max(0, int(self._cfg('mtf_breakout_candidate_bonus_max', 12) or 0))
+        penalty_cap = max(0, int(self._cfg('mtf_breakout_candidate_penalty_max', 12) or 0))
+        direction = str(payload.get('direction') or 'hold').strip() or 'hold'
+        score = int(payload.get('score', 0) or 0)
+        enabled = bool(payload.get('enabled', False))
+        eligible = bool(payload.get('eligible', False))
+        anchor_available = bool(payload.get('anchor_available', False))
+        anchor_aligned = bool(payload.get('anchor_aligned', False))
+        has_breakout = bool(payload.get('has_breakout', False))
+
+        adjustment = 0
+        bias = 'neutral'
+        action = 'none'
+
+        if not enabled:
+            bias = 'disabled'
+            action = 'disabled'
+        elif signal_type not in {'buy', 'sell'}:
+            bias = 'neutral'
+            action = 'ignore_non_directional_signal'
+        elif not has_breakout:
+            bias = 'neutral'
+            action = 'no_breakout'
+        elif direction == signal_type:
+            bias = 'aligned'
+            if eligible:
+                adjustment = min(bonus_cap, max(4, int(round(score / 10.0))))
+                action = 'candidate_boost'
+            else:
+                adjustment = min(max(0, bonus_cap // 2), max(2, int(round(score / 25.0))))
+                action = 'candidate_watch_boost'
+        elif direction in {'buy', 'sell'}:
+            bias = 'counter'
+            adjustment = -min(penalty_cap, max(4, int(round(score / 10.0))))
+            action = 'candidate_penalty'
+        elif anchor_available and not anchor_aligned:
+            bias = 'anchor_conflict'
+            adjustment = -min(max(0, penalty_cap // 2), 4)
+            action = 'anchor_conflict_penalty'
+
+        effective = bool(not observe_only and adjustment != 0)
+        return {
+            'mtf_breakout_mode': mode,
+            'mtf_breakout_effective': effective,
+            'mtf_breakout_bias': bias,
+            'mtf_breakout_action': action,
+            'candidate_adjustment': int(adjustment),
+        }
+
+    def _build_mtf_breakout_decision_context(self, signal, breakdown: DecisionBreakdown, *, baseline_score: int, baseline_decision: str, effective_thresholds: Optional[Dict[str, Any]] = None, adaptive_meta: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        payload = self.build_mtf_breakout_observability(signal)
+        candidate_meta = self._calculate_mtf_breakout_candidate_adjustment(signal, payload)
+        baseline_score = int(max(0, min(100, baseline_score or 0)))
+        candidate_adjustment = int(candidate_meta.get('candidate_adjustment', 0) or 0)
+        candidate_score = int(max(0, min(100, baseline_score + candidate_adjustment)))
+        candidate_breakdown = copy.deepcopy(breakdown)
+        candidate_decision, candidate_watch_reasons = self._make_decision(
+            candidate_breakdown,
+            candidate_score,
+            signal,
+            effective_thresholds,
+            adaptive_meta,
+        )
+        return {
+            'baseline_score': baseline_score,
+            'baseline_decision': str(baseline_decision or 'unknown'),
+            'candidate_adjustment': candidate_adjustment,
+            'candidate_score_after_mtf': candidate_score,
+            'candidate_decision_after_mtf': str(candidate_decision or 'unknown'),
+            'candidate_watch_reasons_after_mtf': list(candidate_watch_reasons or []),
+            'live_score': baseline_score,
+            'live_decision': str(baseline_decision or 'unknown'),
+            'mtf_breakout_mode': str(candidate_meta.get('mtf_breakout_mode') or ('observe_only' if payload.get('observe_only', True) else 'decision_live')),
+            'mtf_breakout_effective': bool(candidate_meta.get('mtf_breakout_effective', False)),
+            'mtf_breakout_bias': str(candidate_meta.get('mtf_breakout_bias') or 'neutral'),
+            'mtf_breakout_action': str(candidate_meta.get('mtf_breakout_action') or 'none'),
+            'observe_only': bool(payload.get('observe_only', True)),
+            'eligible': bool(payload.get('eligible', False)),
+            'direction': str(payload.get('direction') or 'hold'),
+            'state': str(payload.get('state') or 'unknown'),
+            'score_bucket': str(payload.get('score_bucket') or '0'),
+        }
+
+    def _apply_mtf_breakout_decision_context(self, breakdown: DecisionBreakdown, context: Dict[str, Any]):
+        context = dict(context or {})
+        breakdown.baseline_score = int(context.get('baseline_score', 0) or 0)
+        breakdown.candidate_adjustment = int(context.get('candidate_adjustment', 0) or 0)
+        breakdown.candidate_score_after_mtf = int(context.get('candidate_score_after_mtf', breakdown.baseline_score) or 0)
+        breakdown.candidate_decision_after_mtf = str(context.get('candidate_decision_after_mtf') or 'unknown')
+        breakdown.mtf_breakout_mode = str(context.get('mtf_breakout_mode') or 'observe_only')
+        breakdown.mtf_breakout_effective = bool(context.get('mtf_breakout_effective', False))
+        breakdown.mtf_breakout_bias = str(context.get('mtf_breakout_bias') or 'neutral')
+        breakdown.mtf_breakout_action = str(context.get('mtf_breakout_action') or 'none')
+        breakdown.mtf_breakout_decision_context = context
+
     @staticmethod
     def build_mtf_breakout_observability(signal, entry_decision=None) -> Dict[str, Any]:
         market_context = getattr(signal, 'market_context', {}) or {}
@@ -688,6 +809,15 @@ class EntryDecider:
         observe_only = bool(payload.get('observe_only', breakdown.get('mtf_breakout_observe_only', market_context.get('mtf_breakout_observe_only', True))))
         has_breakout = bool(payload.get('has_breakout', direction in {'buy', 'sell'}))
         eligible = bool(payload.get('eligible', False))
+        decision_context = dict(payload.get('decision_context') or breakdown.get('mtf_breakout_decision_context') or {})
+        baseline_score = int(decision_context.get('baseline_score', breakdown.get('baseline_score', (decision_payload.get('score') if isinstance(decision_payload, dict) else 0) or 0)) or 0)
+        candidate_adjustment = int(decision_context.get('candidate_adjustment', breakdown.get('candidate_adjustment', 0)) or 0)
+        candidate_score_after_mtf = int(decision_context.get('candidate_score_after_mtf', breakdown.get('candidate_score_after_mtf', baseline_score + candidate_adjustment)) or 0)
+        candidate_decision_after_mtf = str(decision_context.get('candidate_decision_after_mtf', breakdown.get('candidate_decision_after_mtf', (decision_payload.get('decision') if isinstance(decision_payload, dict) else 'unknown') or 'unknown')) or 'unknown')
+        mtf_breakout_mode = str(decision_context.get('mtf_breakout_mode', breakdown.get('mtf_breakout_mode', 'observe_only')) or 'observe_only')
+        mtf_breakout_effective = bool(decision_context.get('mtf_breakout_effective', breakdown.get('mtf_breakout_effective', False)))
+        mtf_breakout_bias = str(decision_context.get('mtf_breakout_bias', breakdown.get('mtf_breakout_bias', 'neutral')) or 'neutral')
+        mtf_breakout_action = str(decision_context.get('mtf_breakout_action', breakdown.get('mtf_breakout_action', 'none')) or 'none')
         trigger = dict(payload.get('trigger') or {})
         anchor = dict(payload.get('anchor') or {})
         confirm = dict(payload.get('confirm') or {})
@@ -724,6 +854,25 @@ class EntryDecider:
         else:
             score_bucket = '0'
 
+        decision_context.update({
+            'baseline_score': baseline_score,
+            'candidate_adjustment': candidate_adjustment,
+            'candidate_score_after_mtf': candidate_score_after_mtf,
+            'candidate_decision_after_mtf': candidate_decision_after_mtf,
+            'mtf_breakout_mode': mtf_breakout_mode,
+            'mtf_breakout_effective': mtf_breakout_effective,
+            'mtf_breakout_bias': mtf_breakout_bias,
+            'mtf_breakout_action': mtf_breakout_action,
+            'baseline_decision': str(decision_context.get('baseline_decision') or ((decision_payload.get('decision') if isinstance(decision_payload, dict) else None) or 'unknown')),
+            'live_decision': str(decision_context.get('live_decision') or ((decision_payload.get('decision') if isinstance(decision_payload, dict) else None) or 'unknown')),
+            'live_score': int(decision_context.get('live_score', baseline_score) or 0),
+            'observe_only': observe_only,
+            'eligible': eligible,
+            'direction': direction,
+            'state': state,
+            'score_bucket': score_bucket,
+        })
+
         return {
             'schema_version': 'mtf_breakout_observability_v1',
             'enabled': enabled,
@@ -737,6 +886,15 @@ class EntryDecider:
             'has_breakout': has_breakout,
             'eligible': eligible,
             'reason': reason,
+            'baseline_score': baseline_score,
+            'candidate_adjustment': candidate_adjustment,
+            'candidate_score_after_mtf': candidate_score_after_mtf,
+            'candidate_decision_after_mtf': candidate_decision_after_mtf,
+            'mtf_breakout_mode': mtf_breakout_mode,
+            'mtf_breakout_effective': mtf_breakout_effective,
+            'mtf_breakout_bias': mtf_breakout_bias,
+            'mtf_breakout_action': mtf_breakout_action,
+            'decision_context': decision_context,
             'timeframes': dict(payload.get('timeframes') or {}),
             'trigger_timeframe': trigger.get('timeframe') or (payload.get('timeframes') or {}).get('trigger') or '1h',
             'anchor_timeframe': anchor.get('timeframe') or (payload.get('timeframes') or {}).get('anchor') or '4h',

@@ -141,6 +141,9 @@ class TestMtfBreakout(unittest.TestCase):
                     **baseline_signal.market_context,
                     'mtf_breakout': {
                         'score': 88,
+                        'direction': 'buy',
+                        'has_breakout': True,
+                        'eligible': True,
                         'reason': '1h 向上突破前20根高点；4h anchor bullish 对齐；observe-only',
                         'observe_only': True,
                     },
@@ -154,6 +157,22 @@ class TestMtfBreakout(unittest.TestCase):
         self.assertEqual(observe.score, baseline.score)
         self.assertEqual(observe.breakdown.mtf_breakout_score, 88)
         self.assertTrue(observe.breakdown.mtf_breakout_observe_only)
+        self.assertEqual(observe.breakdown.baseline_score, baseline.score)
+        self.assertGreater(observe.breakdown.candidate_adjustment, 0)
+        self.assertEqual(observe.breakdown.candidate_score_after_mtf, baseline.score + observe.breakdown.candidate_adjustment)
+        self.assertFalse(observe.breakdown.mtf_breakout_effective)
+        self.assertEqual(observe.breakdown.mtf_breakout_mode, 'observe_only')
+        self.assertEqual(observe.breakdown.mtf_breakout_bias, 'aligned')
+        self.assertIn(observe.breakdown.candidate_decision_after_mtf, {'allow', 'watch', 'block'})
+
+        observability = EntryDecider({}).build_mtf_breakout_observability(observe_signal, observe)
+        self.assertEqual(observability['baseline_score'], baseline.score)
+        self.assertEqual(observability['candidate_adjustment'], observe.breakdown.candidate_adjustment)
+        self.assertEqual(observability['candidate_score_after_mtf'], observe.breakdown.candidate_score_after_mtf)
+        self.assertEqual(observability['candidate_decision_after_mtf'], observe.breakdown.candidate_decision_after_mtf)
+        self.assertEqual(observability['mtf_breakout_mode'], 'observe_only')
+        self.assertFalse(observability['mtf_breakout_effective'])
+        self.assertEqual(observability['mtf_breakout_action'], 'candidate_boost')
 
 
 if __name__ == '__main__':

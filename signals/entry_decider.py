@@ -674,13 +674,86 @@ class EntryDecider:
             reason = f"ML置信度不足({prob:.0%})，仅供参考"
         return score, reason
 
-    def _eval_mtf_breakout(self, signal) -> tuple:
+    @staticmethod
+    def build_mtf_breakout_observability(signal, entry_decision=None) -> Dict[str, Any]:
         market_context = getattr(signal, 'market_context', {}) or {}
         payload = dict(market_context.get('mtf_breakout') or {})
-        score = int(payload.get('score', market_context.get('mtf_breakout_score', 0)) or 0)
-        reason = str(payload.get('reason') or market_context.get('mtf_breakout_reason') or 'MTF breakout 无额外证据')
-        observe_only = bool(payload.get('observe_only', market_context.get('mtf_breakout_observe_only', True)))
-        return score, reason, observe_only
+        decision_payload = entry_decision.to_dict() if hasattr(entry_decision, 'to_dict') else (entry_decision or {})
+        breakdown = dict((decision_payload.get('breakdown') if isinstance(decision_payload, dict) else {}) or {})
+
+        enabled = bool(payload.get('enabled', bool(payload)))
+        direction = str(payload.get('direction') or market_context.get('mtf_breakout_direction') or 'hold').strip() or 'hold'
+        score = int(payload.get('score', breakdown.get('mtf_breakout_score', market_context.get('mtf_breakout_score', 0))) or 0)
+        reason = str(payload.get('reason') or breakdown.get('mtf_breakout_reason') or market_context.get('mtf_breakout_reason') or 'MTF breakout 无额外证据')
+        observe_only = bool(payload.get('observe_only', breakdown.get('mtf_breakout_observe_only', market_context.get('mtf_breakout_observe_only', True))))
+        has_breakout = bool(payload.get('has_breakout', direction in {'buy', 'sell'}))
+        eligible = bool(payload.get('eligible', False))
+        trigger = dict(payload.get('trigger') or {})
+        anchor = dict(payload.get('anchor') or {})
+        confirm = dict(payload.get('confirm') or {})
+        anchor_trend = str(anchor.get('trend') or 'unknown').strip() or 'unknown'
+        anchor_available = bool(anchor.get('available'))
+        anchor_aligned = bool(
+            has_breakout and anchor_available and (
+                (direction == 'buy' and anchor_trend == 'bullish')
+                or (direction == 'sell' and anchor_trend == 'bearish')
+            )
+        )
+        confirm_momentum = str(confirm.get('momentum') or 'neutral').strip() or 'neutral'
+        if not enabled:
+            state = 'disabled'
+        elif not trigger.get('available', bool(payload)):
+            state = 'data_insufficient'
+        elif not has_breakout:
+            state = 'no_breakout'
+        elif eligible:
+            state = 'eligible_breakout'
+        elif anchor_available and not anchor_aligned:
+            state = 'breakout_counter_anchor'
+        else:
+            state = 'breakout_watch'
+
+        if score >= 80:
+            score_bucket = '80-100'
+        elif score >= 60:
+            score_bucket = '60-79'
+        elif score >= 40:
+            score_bucket = '40-59'
+        elif score > 0:
+            score_bucket = '1-39'
+        else:
+            score_bucket = '0'
+
+        return {
+            'schema_version': 'mtf_breakout_observability_v1',
+            'enabled': enabled,
+            'observe_only': observe_only,
+            'decision': str((decision_payload.get('decision') if isinstance(decision_payload, dict) else None) or 'unknown'),
+            'score': score,
+            'score_bucket': score_bucket,
+            'direction': direction,
+            'state': state,
+            'has_evidence': bool(score > 0 or has_breakout or anchor_available or payload),
+            'has_breakout': has_breakout,
+            'eligible': eligible,
+            'reason': reason,
+            'timeframes': dict(payload.get('timeframes') or {}),
+            'trigger_timeframe': trigger.get('timeframe') or (payload.get('timeframes') or {}).get('trigger') or '1h',
+            'anchor_timeframe': anchor.get('timeframe') or (payload.get('timeframes') or {}).get('anchor') or '4h',
+            'anchor_available': anchor_available,
+            'anchor_trend': anchor_trend,
+            'anchor_aligned': anchor_aligned,
+            'confirm_timeframe': confirm.get('timeframe') or (payload.get('timeframes') or {}).get('confirm'),
+            'confirm_available': bool(confirm.get('available')),
+            'confirm_momentum': confirm_momentum,
+            'trigger': trigger,
+            'anchor': anchor,
+            'confirm': confirm,
+        }
+
+    def _eval_mtf_breakout(self, signal) -> tuple:
+        payload = self.build_mtf_breakout_observability(signal)
+        return payload['score'], payload['reason'], payload['observe_only']
 
     def _calculate_total_score(self, breakdown: DecisionBreakdown) -> int:
         weights = {

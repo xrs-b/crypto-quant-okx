@@ -2706,6 +2706,8 @@ class TradingBot:
 
         layer_plan = dict((risk_details.get('exposure_limit') or {}).get('layer_plan') or (risk_details.get('layer_eligibility') or {}).get('layer_plan') or {})
         observability = dict(risk_details.get('observability') or {})
+        signal_filter_details = dict(getattr(signal, 'filter_details', {}) or {})
+        signal_observability = dict(signal_filter_details.get('observability') or {})
         adaptive_risk_snapshot = dict(risk_details.get('adaptive_risk_snapshot') or observability.get('adaptive_risk_snapshot') or {})
         entry_plan = dict((risk_details.get('exposure_limit') or {}).get('entry_plan') or layer_plan.get('entry_plan') or {})
 
@@ -2771,8 +2773,11 @@ class TradingBot:
             plan_context['entry_plan'] = entry_plan
             plan_context.setdefault('planned_margin', entry_plan.get('allowed_margin'))
             plan_context.setdefault('layer_ratio', entry_plan.get('effective_entry_margin_ratio') or plan_context.get('layer_ratio'))
-        if observability:
-            plan_context['observability'] = observability
+        merged_observability = {**signal_observability, **observability}
+        if 'mtf_breakout' not in merged_observability:
+            merged_observability['mtf_breakout'] = self.entry_decider.build_mtf_breakout_observability(signal)
+        if merged_observability:
+            plan_context['observability'] = merged_observability
         return plan_context
     
     def run(self):
@@ -2883,6 +2888,11 @@ class TradingBot:
                 )
                 signal.filter_details = signal.filter_details or {}
                 signal.filter_details['entry_decision'] = entry_decision.to_dict()
+                mtf_breakout_observability = self.entry_decider.build_mtf_breakout_observability(signal, entry_decision)
+                signal.filter_details['observability'] = {
+                    **dict(signal.filter_details.get('observability') or {}),
+                    'mtf_breakout': mtf_breakout_observability,
+                }
                 print(f"   🎯 开单决策: {entry_decision.decision.upper()} | 分数: {entry_decision.score}")
                 
                 # 验证信号

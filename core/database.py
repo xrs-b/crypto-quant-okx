@@ -84,6 +84,7 @@ class Database:
             policy_snapshot=policy_snapshot,
             fallback_summary=(outcome.get('observe_only') or {}).get('summary') or (observability.get('observe_only') or {}).get('summary'),
         )
+        mtf_breakout = self._safe_json_dict(outcome.get('mtf_breakout') or observability.get('mtf_breakout'))
         final_execution_permit = self._normalize_final_execution_permit(plan_context.get('final_execution_permit'))
         data['final_execution_permit'] = final_execution_permit
         data['final_execution_reason_code'] = final_execution_permit.get('reason_code')
@@ -97,6 +98,7 @@ class Database:
             'dominant_strategy': outcome.get('dominant_strategy') or (strategy_tags[0] if strategy_tags else 'unknown'),
             'strategy_count': outcome.get('strategy_count') or len(strategy_tags),
             'observe_only': observe_only,
+            'mtf_breakout': mtf_breakout,
             'close_reason': outcome.get('close_reason'),
             'close_decision': outcome.get('close_decision'),
             'close_reason_category': outcome.get('close_reason_category'),
@@ -1232,6 +1234,7 @@ class Database:
             'dominant_strategy': strategy_tags[0] if strategy_tags else 'unknown',
             'strategy_count': len(strategy_tags),
             'observe_only': observe_only,
+            'mtf_breakout': self._safe_json_dict(observability.get('mtf_breakout')),
             'holding_seconds': holding_seconds,
             'holding_minutes': holding_minutes,
             'pnl_bucket': pnl_bucket,

@@ -1032,14 +1032,15 @@ class TradingExecutor:
     def _resolve_live_exit_profile(self, symbol: str, side: str = None) -> Dict[str, Any]:
         plan_context = self._get_open_trade_plan_context(symbol, side)
         observability = dict(plan_context.get('observability') or {})
-        snapshot = dict(observability.get('adaptive_execution_snapshot') or {})
+        stored_snapshot = dict(observability.get('adaptive_execution_snapshot') or {})
+        snapshot = build_execution_effective_snapshot(
+            self.config,
+            symbol,
+            regime_snapshot=plan_context.get('regime_snapshot'),
+            policy_snapshot=plan_context.get('adaptive_policy_snapshot'),
+        )
         if not snapshot:
-            snapshot = build_execution_effective_snapshot(
-                self.config,
-                symbol,
-                regime_snapshot=plan_context.get('regime_snapshot'),
-                policy_snapshot=plan_context.get('adaptive_policy_snapshot'),
-            )
+            snapshot = stored_snapshot
         baseline = dict(snapshot.get('baseline') or {})
         live = dict(snapshot.get('live') or snapshot.get('enforced_profile') or baseline)
         return {
@@ -1052,11 +1053,12 @@ class TradingExecutor:
             'hinted': bool(snapshot.get('exit_hints_enabled', False)),
         }
 
-    def _get_exit_arming_config(self, exit_profile: Dict[str, Any] = None) -> Dict[str, Any]:
+    def _get_exit_arming_config(self, symbol: str, exit_profile: Dict[str, Any] = None) -> Dict[str, Any]:
         live = dict((exit_profile or {}).get('live') or {})
+        trading_cfg = self.config.get_symbol_section(symbol, 'trading') if hasattr(self.config, 'get_symbol_section') else dict(self.trading_config)
         min_hold_seconds = live.get('exit_min_hold_seconds')
         if min_hold_seconds is None:
-            min_hold_seconds = self.trading_config.get('exit_min_hold_seconds', 0)
+            min_hold_seconds = trading_cfg.get('exit_min_hold_seconds', self.trading_config.get('exit_min_hold_seconds', 0))
         try:
             min_hold_seconds = max(0, int(float(min_hold_seconds or 0)))
         except (TypeError, ValueError):
@@ -1064,7 +1066,7 @@ class TradingExecutor:
 
         profit_threshold = live.get('exit_arm_profit_threshold')
         if profit_threshold is None:
-            profit_threshold = self.trading_config.get('exit_arm_profit_threshold')
+            profit_threshold = trading_cfg.get('exit_arm_profit_threshold', self.trading_config.get('exit_arm_profit_threshold'))
         try:
             profit_threshold = float(profit_threshold) if profit_threshold is not None else None
         except (TypeError, ValueError):
@@ -1093,7 +1095,7 @@ class TradingExecutor:
         if cache.get('exit_armed'):
             return True
 
-        arming_config = self._get_exit_arming_config(exit_profile)
+        arming_config = self._get_exit_arming_config(symbol, exit_profile)
         min_hold_seconds = arming_config['min_hold_seconds']
         profit_threshold = arming_config['profit_threshold']
 

@@ -351,6 +351,23 @@ class TestExecutionEffectiveSnapshotStep1(unittest.TestCase):
         import json
         json.dumps(snapshot, ensure_ascii=False)
 
+
+    def test_execution_snapshot_uses_symbol_specific_exit_arming_baseline(self):
+        cfg = Config()
+        cfg._config['trading']['exit_min_hold_seconds'] = 300
+        cfg._config['trading']['exit_arm_profit_threshold'] = 0.01
+        cfg._config.setdefault('symbol_overrides', {})['XRP/USDT'] = {
+            'trading': {
+                'exit_min_hold_seconds': 1200,
+                'exit_arm_profit_threshold': 0.03,
+            }
+        }
+        snapshot = build_execution_effective_snapshot(cfg, 'XRP/USDT')
+        self.assertEqual(snapshot['baseline']['exit_min_hold_seconds'], 1200)
+        self.assertEqual(snapshot['baseline']['exit_arm_profit_threshold'], 0.03)
+        self.assertEqual(snapshot['live']['exit_min_hold_seconds'], 1200)
+        self.assertEqual(snapshot['live']['exit_arm_profit_threshold'], 0.03)
+
     def test_execution_snapshot_step2_enforces_only_guardrail_fields_by_default(self):
         cfg = Config()
         cfg._config['adaptive_regime'] = {

@@ -23,6 +23,8 @@ EXECUTION_PROFILE_FIELDS = [
     "take_profit",
     "trailing_stop",
     "trailing_activation",
+    "exit_min_hold_seconds",
+    "exit_arm_profit_threshold",
 ]
 
 LAYERING_GUARDRAIL_FIELDS = [
@@ -38,6 +40,8 @@ EXIT_PROFILE_FIELDS = [
     "take_profit",
     "trailing_stop",
     "trailing_activation",
+    "exit_min_hold_seconds",
+    "exit_arm_profit_threshold",
 ]
 
 
@@ -477,6 +481,8 @@ def build_execution_baseline_snapshot(config_helper: Any, symbol: Optional[str])
         'take_profit': float(trading_cfg.get('take_profit') or 0.04),
         'trailing_stop': float(trading_cfg.get('trailing_stop') or 0.01),
         'trailing_activation': trading_cfg.get('trailing_activation') if trading_cfg.get('trailing_activation') is not None else 0.01,
+        'exit_min_hold_seconds': int(float(trading_cfg.get('exit_min_hold_seconds') or 0)),
+        'exit_arm_profit_threshold': float(trading_cfg.get('exit_arm_profit_threshold')) if trading_cfg.get('exit_arm_profit_threshold') is not None else None,
     }
 
 
@@ -532,6 +538,38 @@ def merge_execution_overrides_conservatively(baseline_snapshot: Dict[str, Any], 
                 applied_overrides[key] = {'baseline': baseline, 'effective': effective[key], 'requested': requested, 'source': f'execution_overrides.{key}'}
             elif conservative_only and requested_float > baseline_float + 1e-12:
                 ignored_overrides.append({'key': key, 'requested': requested, 'baseline': baseline, 'reason': 'non_conservative_override', 'code': 'IGNORED_NON_CONSERVATIVE_OVERRIDE'})
+            continue
+        if key == 'exit_min_hold_seconds':
+            if not isinstance(requested, (int, float)):
+                ignored_overrides.append({'key': key, 'requested': requested, 'reason': 'override_not_numeric', 'code': 'IGNORED_INVALID_OVERRIDE'})
+                continue
+            requested_int = max(0, int(requested))
+            baseline_int = max(0, int(baseline or 0))
+            final_value = max(baseline_int, requested_int)
+            if final_value > baseline_int:
+                effective[key] = final_value
+                applied_overrides[key] = {'baseline': baseline_int, 'effective': final_value, 'requested': requested_int, 'source': f'execution_overrides.{key}'}
+            elif conservative_only and requested_int < baseline_int:
+                ignored_overrides.append({'key': key, 'requested': requested_int, 'baseline': baseline_int, 'reason': 'non_conservative_override', 'code': 'IGNORED_NON_CONSERVATIVE_OVERRIDE'})
+            continue
+        if key == 'exit_arm_profit_threshold':
+            if requested is None:
+                if conservative_only and baseline is not None:
+                    ignored_overrides.append({'key': key, 'requested': requested, 'baseline': baseline, 'reason': 'non_conservative_override', 'code': 'IGNORED_NON_CONSERVATIVE_OVERRIDE'})
+                continue
+            if not isinstance(requested, (int, float)):
+                ignored_overrides.append({'key': key, 'requested': requested, 'reason': 'override_not_numeric', 'code': 'IGNORED_INVALID_OVERRIDE'})
+                continue
+            requested_float = float(requested)
+            baseline_float = float(baseline) if baseline is not None else None
+            if baseline_float is None:
+                effective[key] = requested_float
+                applied_overrides[key] = {'baseline': baseline, 'effective': requested_float, 'requested': requested_float, 'source': f'execution_overrides.{key}'}
+            elif requested_float > baseline_float + 1e-12:
+                effective[key] = requested_float
+                applied_overrides[key] = {'baseline': baseline, 'effective': requested_float, 'requested': requested_float, 'source': f'execution_overrides.{key}'}
+            elif conservative_only and requested_float + 1e-12 < baseline_float:
+                ignored_overrides.append({'key': key, 'requested': requested_float, 'baseline': baseline, 'reason': 'non_conservative_override', 'code': 'IGNORED_NON_CONSERVATIVE_OVERRIDE'})
             continue
         if key == 'max_layers_per_signal':
             if not isinstance(requested, (int, float)):
@@ -855,6 +893,8 @@ def build_execution_effective_snapshot(config_helper: Any, symbol: Optional[str]
         'take_profit': 'WOULD_EARLY_TAKE_PROFIT',
         'trailing_stop': 'WOULD_TIGHTEN_TRAILING_STOP',
         'trailing_activation': 'WOULD_EARLY_ACTIVATE_TRAILING',
+        'exit_min_hold_seconds': 'WOULD_DELAY_EXIT_ARMING_BY_HOLD',
+        'exit_arm_profit_threshold': 'WOULD_DELAY_EXIT_ARMING_BY_PROFIT',
     }
     for field in EXECUTION_PROFILE_FIELDS:
         applied = field in applied_keys

@@ -3501,6 +3501,48 @@ class TestTradingExecutor(unittest.TestCase):
         self.assertTrue(self.executor._trade_cache['BTC/USDT']['exit_armed'])
         self.assertEqual(self.executor._trade_cache['BTC/USDT']['exit_arming']['armed_by'], 'profit')
 
+
+    def test_symbol_specific_exit_arming_rebuilds_live_snapshot_for_open_trade(self):
+        self.config._config['trading']['take_profit'] = 0.02
+        self.config._config['trading']['trailing_stop'] = 0.05
+        self.config._config['trading']['trailing_activation'] = None
+        self.config._config['trading']['exit_min_hold_seconds'] = 0
+        self.config._config['trading']['exit_arm_profit_threshold'] = None
+        self.config._config.setdefault('symbol_overrides', {})['XRP/USDT'] = {
+            'trading': {
+                'take_profit': 0.02,
+                'trailing_stop': 0.05,
+                'trailing_activation': None,
+                'exit_min_hold_seconds': 1200,
+                'exit_arm_profit_threshold': 0.03,
+            }
+        }
+        self.executor.trading_config.update(self.config.get('trading', {}))
+
+        stale_snapshot = {
+            'baseline': {'exit_min_hold_seconds': 0, 'exit_arm_profit_threshold': None},
+            'live': {'exit_min_hold_seconds': 0, 'exit_arm_profit_threshold': None},
+            'effective_state': 'disabled',
+            'exit_enforcement_enabled': False,
+            'exit_hints_enabled': False,
+        }
+        self.db.update_position(symbol='XRP/USDT', side='long', entry_price=100, quantity=1, leverage=1, current_price=100)
+        self.db.record_trade(
+            symbol='XRP/USDT',
+            side='long',
+            entry_price=100,
+            quantity=1,
+            leverage=1,
+            plan_context={'observability': {'adaptive_execution_snapshot': stale_snapshot}},
+        )
+
+        exit_profile = self.executor._resolve_live_exit_profile('XRP/USDT', 'long')
+        self.assertEqual(exit_profile['live']['exit_min_hold_seconds'], 1200)
+        self.assertEqual(exit_profile['live']['exit_arm_profit_threshold'], 0.03)
+        self.assertFalse(self.executor.check_take_profit('XRP/USDT', 102))
+        self.assertEqual(self.executor._trade_cache['XRP/USDT']['exit_arming']['min_hold_seconds'], 1200)
+        self.assertEqual(self.executor._trade_cache['XRP/USDT']['exit_arming']['profit_threshold'], 0.03)
+
     def test_close_position_auto_reconciles_51169_when_exchange_has_no_position(self):
         db = Database('data/test_close_mismatch.db')
         try:

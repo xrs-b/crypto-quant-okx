@@ -726,8 +726,10 @@ def build_exchange_diagnostics(cfg: Config, exchange: Exchange) -> dict:
                     row['market_symbol'] = market.get('symbol')
                     row['market_id'] = market.get('id')
                     row['market_inst_id'] = (market.get('info') or {}).get('instId')
-                ticker = exchange.fetch_ticker(symbol)
-                row['last_price'] = ticker.get('last')
+                price_snapshot = exchange.fetch_price_snapshot(symbol, prefer='last') if hasattr(exchange, 'fetch_price_snapshot') else {'reference_price': (exchange.fetch_ticker(symbol) or {}).get('last')}
+                row['last_price'] = price_snapshot.get('reference_price')
+                row['price_source'] = price_snapshot.get('price_source') or 'okx_swap_ticker'
+                row['mark_price'] = price_snapshot.get('mark_price')
                 if row['last_price']:
                     row['sample_amount'] = exchange.normalize_contract_amount(symbol, desired_notional, row['last_price'])
                 preview = {'tdMode': 'isolated'}
@@ -772,9 +774,11 @@ def build_exchange_smoke_plan(cfg: Config, exchange: Exchange, symbol: str = Non
         if not plan['is_futures_symbol']:
             plan['error'] = '目标币种不是可用合约'
             return plan
-        ticker = exchange.fetch_ticker(selected_symbol)
-        last_price = float(ticker.get('last') or 0)
+        price_snapshot = exchange.fetch_price_snapshot(selected_symbol, prefer='last') if hasattr(exchange, 'fetch_price_snapshot') else {'reference_price': float((exchange.fetch_ticker(selected_symbol) or {}).get('last') or 0)}
+        last_price = float(price_snapshot.get('reference_price') or 0)
         plan['last_price'] = last_price
+        plan['mark_price'] = price_snapshot.get('mark_price')
+        plan['price_source'] = price_snapshot.get('price_source') or 'okx_swap_ticker'
         smoke_notional = max(5.0, available * 0.01)
         plan['smoke_notional'] = round(smoke_notional, 4)
         plan['sample_amount'] = exchange.normalize_contract_amount(selected_symbol, smoke_notional, last_price)
@@ -818,8 +822,7 @@ def backfill_closed_trades_from_exchange(exchange: Exchange, db: Database, limit
             fallback_price = trade.get('exit_price') or None
             if not fallback_price:
                 try:
-                    ticker = exchange.fetch_ticker(trade['symbol'])
-                    fallback_price = ticker.get('last')
+                    fallback_price = exchange.fetch_reference_price(trade['symbol'], prefer='last') if hasattr(exchange, 'fetch_reference_price') else (exchange.fetch_ticker(trade['symbol']) or {}).get('last')
                 except Exception:
                     fallback_price = None
             summary = exchange.fetch_closed_trade_summary(trade, fallback_price=fallback_price)
@@ -2831,9 +2834,8 @@ class TradingBot:
                 df = pd.DataFrame(ohlcv)
                 df = self._add_indicators(df)
                 
-                # 获取当前价格
-                ticker = self.exchange.fetch_ticker(symbol)
-                current_price = ticker['last']
+                # 获取当前合约价格（统一以 OKX SWAP ticker 为准）
+                current_price = self.exchange.fetch_reference_price(symbol, prefer='last') if hasattr(self.exchange, 'fetch_reference_price') else self.exchange.fetch_ticker(symbol)['last']
                 
                 # 获取ML预测
                 ml_pred = None
@@ -3043,6 +3045,7 @@ class TradingBot:
                 self.recorder.mark_executed(signal_id, trade_id)
                 latest_trade = self.db.get_latest_open_trade(symbol, side)
                 contracts = latest_trade.get('quantity') if latest_trade else 0
+                open_notice_price = float((latest_trade or {}).get('entry_price') or current_price or 0)
                 quantity_details = {}
                 try:
                     contract_size = self.exchange.get_contract_size(symbol)
@@ -3051,11 +3054,11 @@ class TradingBot:
                         'contracts': contracts,
                         'contract_size': contract_size,
                         'coin_quantity': coin_quantity,
-                        'notional_usdt': self.exchange.estimate_notional_usdt(symbol, contracts, current_price),
+                        'notional_usdt': self.exchange.estimate_notional_usdt(symbol, contracts, open_notice_price),
                     }
                 except Exception:
                     quantity_details = {}
-                self.notifier.notify_trade_open(symbol, side, current_price, contracts, trade_id, signal, quantity_details=quantity_details)
+                self.notifier.notify_trade_open(symbol, side, open_notice_price, contracts, trade_id, signal, quantity_details=quantity_details)
                 print(f"   ✅ 开{'多' if side == 'long' else '空'}成功! Trade ID: {trade_id}")
             else:
                 self.notifier.notify_trade_open_failed(
@@ -3092,8 +3095,7 @@ class TradingBot:
             symbol = position['symbol']
             
             try:
-                ticker = self.exchange.fetch_ticker(symbol)
-                current_price = ticker['last']
+                current_price = self.exchange.fetch_reference_price(symbol, prefer='mark') if hasattr(self.exchange, 'fetch_reference_price') else self.exchange.fetch_ticker(symbol)['last']
                 
                 # 更新持仓价格
                 self.db.update_position(

@@ -134,9 +134,8 @@ def main():
             df = pd.DataFrame(ohlcv)
             df = add_indicators(df)
             
-            # 获取当前价格
-            ticker = ex.fetch_ticker(symbol)
-            current_price = ticker['last']
+            # 获取当前合约价格
+            current_price = ex.fetch_reference_price(symbol, prefer='last') if hasattr(ex, 'fetch_reference_price') else ex.fetch_ticker(symbol)['last']
             
             # 获取ML预测
             ml_pred = get_ml_prediction(symbol)
@@ -220,8 +219,7 @@ def main():
         symbol = position['symbol']
         
         try:
-            ticker = ex.fetch_ticker(symbol)
-            current_price = ticker['last']
+            current_price = ex.fetch_reference_price(symbol, prefer='mark') if hasattr(ex, 'fetch_reference_price') else ex.fetch_ticker(symbol)['last']
             
             # 更新持仓价格
             db.update_position(

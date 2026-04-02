@@ -187,7 +187,13 @@ class Exchange:
         side = self.normalize_side(pos.get('side') or pos.get('info', {}).get('posSide') or 'long')
         contract_size = self.get_contract_size(symbol) if symbol else 1.0
         entry_price = self._safe_float(pos.get('entryPrice') or pos.get('entry_price') or pos.get('info', {}).get('avgPx') or pos.get('average') or 0)
-        current_price = self._safe_float(pos.get('markPrice') or pos.get('last') or pos.get('info', {}).get('markPx') or pos.get('info', {}).get('last') or entry_price)
+        current_price = self._safe_float(
+            pos.get('markPrice')
+            or pos.get('info', {}).get('markPx')
+            or pos.get('last')
+            or pos.get('info', {}).get('last')
+            or entry_price
+        )
         leverage = self._safe_int(pos.get('leverage') or pos.get('info', {}).get('lever') or self.leverage, self.leverage)
         coin_quantity = self.contracts_to_coin_quantity(symbol, contracts)
         realized_pnl = self._safe_float(pos.get('realizedPnl') or pos.get('info', {}).get('realizedPnl') or pos.get('info', {}).get('uplLastPx') or 0)
@@ -386,9 +392,76 @@ class Exchange:
             return symbol
         return market.get('symbol') or market.get('id') or symbol
 
+    def _extract_last_price_from_ticker(self, ticker: Dict) -> float:
+        info = (ticker or {}).get('info', {}) or {}
+        return self._safe_float(
+            (ticker or {}).get('last')
+            or (ticker or {}).get('close')
+            or info.get('last')
+            or info.get('lastPr')
+            or info.get('lastPx')
+            or 0
+        )
+
+    def _extract_mark_price_from_ticker(self, ticker: Dict) -> float:
+        info = (ticker or {}).get('info', {}) or {}
+        return self._safe_float(
+            (ticker or {}).get('markPrice')
+            or info.get('markPx')
+            or info.get('markPrice')
+            or 0
+        )
+
+    def select_price_from_ticker(self, ticker: Dict, prefer: str = 'last') -> float:
+        prefer = str(prefer or 'last').strip().lower()
+        last_price = self._extract_last_price_from_ticker(ticker)
+        mark_price = self._extract_mark_price_from_ticker(ticker)
+        if prefer == 'mark':
+            return mark_price or last_price or 0.0
+        return last_price or mark_price or 0.0
+
+    def _enrich_swap_ticker(self, symbol: str, ticker: Dict) -> Dict:
+        market = self.get_market(symbol)
+        payload = dict(ticker or {})
+        info = dict(payload.get('info') or {})
+        payload['info'] = info
+        payload['requested_symbol'] = self.normalize_symbol(symbol)
+        payload['market_symbol'] = payload.get('market_symbol') or (market.get('symbol') if market else None)
+        payload['market_id'] = payload.get('market_id') or (market.get('id') if market else None)
+        payload['market_inst_id'] = payload.get('market_inst_id') or ((market.get('info') or {}).get('instId') if market else None)
+        payload['price_source'] = 'okx_swap_ticker'
+        payload['last_price'] = self._extract_last_price_from_ticker(payload)
+        payload['mark_price'] = self._extract_mark_price_from_ticker(payload)
+        payload['reference_price'] = payload['last_price'] or payload['mark_price'] or 0.0
+        if payload.get('last') in (None, '') and payload.get('last_price'):
+            payload['last'] = payload['last_price']
+        if payload.get('markPrice') in (None, '') and payload.get('mark_price'):
+            payload['markPrice'] = payload['mark_price']
+        return payload
+
     def fetch_ticker(self, symbol: str) -> Dict:
         market_symbol = self._get_market_fetch_symbol(symbol)
-        return self.exchange.fetch_ticker(market_symbol)
+        ticker = self.exchange.fetch_ticker(market_symbol)
+        return self._enrich_swap_ticker(symbol, ticker)
+
+    def fetch_reference_price(self, symbol: str, prefer: str = 'last') -> float:
+        ticker = self.fetch_ticker(symbol)
+        return self.select_price_from_ticker(ticker, prefer=prefer)
+
+    def fetch_price_snapshot(self, symbol: str, prefer: str = 'last') -> Dict:
+        ticker = self.fetch_ticker(symbol)
+        return {
+            'symbol': self.normalize_symbol(symbol),
+            'market_symbol': ticker.get('market_symbol') or ticker.get('symbol'),
+            'market_id': ticker.get('market_id'),
+            'market_inst_id': ticker.get('market_inst_id'),
+            'price_source': ticker.get('price_source') or 'okx_swap_ticker',
+            'last_price': self._extract_last_price_from_ticker(ticker),
+            'mark_price': self._extract_mark_price_from_ticker(ticker),
+            'reference_price': self.select_price_from_ticker(ticker, prefer=prefer),
+            'prefer': prefer,
+            'ticker': ticker,
+        }
 
     def fetch_ohlcv(self, symbol: str, timeframe: str = '1h', since: int = None, limit: int = 100) -> List:
         market_symbol = self._get_market_fetch_symbol(symbol)

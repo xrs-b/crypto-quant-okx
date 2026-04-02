@@ -1774,6 +1774,58 @@ class TestExchange(unittest.TestCase):
         }])
         self.assertEqual(rows, [[1, 2, 3, 4, 5, 6]])
 
+    def test_fetch_reference_price_uses_swap_last_with_mark_fallback_for_btc(self):
+        class FetchTickerStub:
+            def __init__(self):
+                self.calls = []
+
+            def fetch_ticker(self, symbol):
+                self.calls.append(symbol)
+                return {'symbol': symbol, 'last': None, 'info': {'markPx': '50123.4'}}
+
+        ex = Exchange.__new__(Exchange)
+        ex.config = {'exchange': {'name': 'okx', 'mode': 'testnet'}}
+        ex.exchange = FetchTickerStub()
+        ex.get_market = lambda symbol: {'symbol': 'BTC/USDT:USDT', 'id': 'BTC-USDT-SWAP', 'swap': True, 'linear': True, 'info': {'instId': 'BTC-USDT-SWAP'}}
+
+        snapshot = ex.fetch_price_snapshot('BTC/USDT', prefer='last')
+        self.assertEqual(ex.exchange.calls, ['BTC/USDT:USDT'])
+        self.assertEqual(snapshot['reference_price'], 50123.4)
+        self.assertEqual(snapshot['mark_price'], 50123.4)
+        self.assertEqual(snapshot['market_id'], 'BTC-USDT-SWAP')
+        self.assertEqual(snapshot['price_source'], 'okx_swap_ticker')
+
+    def test_normalize_position_prefers_mark_price_over_last_for_sol_xrp(self):
+        ex = Exchange.__new__(Exchange)
+        ex.config = {'exchange': {'name': 'okx', 'mode': 'testnet'}, 'trading': {'leverage': 3}}
+        ex.leverage = 3
+        ex.get_contract_size = lambda symbol: {'SOL/USDT': 0.1, 'XRP/USDT': 100.0}[symbol]
+        ex.contracts_to_coin_quantity = lambda symbol, contracts: contracts * ex.get_contract_size(symbol)
+
+        sol = ex.normalize_position({
+            'symbol': 'SOL/USDT:USDT',
+            'contracts': 5,
+            'side': 'long',
+            'entryPrice': 180,
+            'last': 175,
+            'info': {'markPx': '181.5', 'lever': '5'},
+        })
+        xrp = ex.normalize_position({
+            'symbol': 'XRP-USDT-SWAP',
+            'contracts': 2,
+            'side': 'short',
+            'entryPrice': 0.62,
+            'last': 0.59,
+            'info': {'markPx': '0.61', 'lever': '4'},
+        })
+
+        self.assertEqual(sol['symbol'], 'SOL/USDT')
+        self.assertEqual(sol['current_price'], 181.5)
+        self.assertEqual(sol['coin_quantity'], 0.5)
+        self.assertEqual(xrp['symbol'], 'XRP/USDT')
+        self.assertEqual(xrp['current_price'], 0.61)
+        self.assertEqual(xrp['coin_quantity'], 200.0)
+
 
 class TestReconcilePositions(unittest.TestCase):
     def test_reconcile_exchange_positions(self):
@@ -3349,6 +3401,30 @@ class TestTradingExecutor(unittest.TestCase):
         self.assertIsNotNone(trade_id)
         self.assertEqual(self.executor.exchange.order_amounts[0], 10.0)
         self.assertEqual(self.executor.exchange.order_amounts[1], 5.0)
+
+    def test_open_position_records_swap_execution_reference_price(self):
+        class SwapExecutionPriceStub(FakeExecutorExchange):
+            def fetch_reference_price(self, symbol, prefer='last'):
+                self.last_fetch_reference = {'symbol': symbol, 'prefer': prefer}
+                return 50123.4
+
+            def get_contract_size(self, symbol):
+                return 0.01
+
+            def contracts_to_coin_quantity(self, symbol, contracts):
+                return contracts * self.get_contract_size(symbol)
+
+        self.executor.exchange = SwapExecutionPriceStub()
+        trade_id = self.executor.open_position('BTC/USDT', 'long', 50000, signal_id=101)
+        self.assertIsNotNone(trade_id)
+        latest_trade = self.db.get_latest_open_trade('BTC/USDT', 'long')
+        self.assertAlmostEqual(latest_trade['entry_price'], 50123.4)
+        self.assertEqual(latest_trade['plan_context']['execution_reference_price'], 50123.4)
+        positions = self.db.get_positions()
+        self.assertEqual(len(positions), 1)
+        self.assertAlmostEqual(positions[0]['entry_price'], 50123.4)
+        self.assertAlmostEqual(positions[0]['current_price'], 50123.4)
+        self.assertEqual(self.executor.exchange.last_fetch_reference, {'symbol': 'BTC/USDT', 'prefer': 'last'})
 
     def test_symbol_cooldown_survives_executor_restart_via_db(self):
         self.db.record_trade(symbol='BTC/USDT', side='long', entry_price=50000, quantity=0.1, leverage=10)

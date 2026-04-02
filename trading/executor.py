@@ -861,7 +861,12 @@ class TradingExecutor:
             return None
         
         execution_reference_price = current_price
-        if hasattr(self.exchange, 'fetch_ticker'):
+        if hasattr(self.exchange, 'fetch_reference_price'):
+            try:
+                execution_reference_price = float(self.exchange.fetch_reference_price(symbol, prefer='last') or current_price)
+            except Exception:
+                execution_reference_price = current_price
+        elif hasattr(self.exchange, 'fetch_ticker'):
             try:
                 latest_ticker = self.exchange.fetch_ticker(symbol) or {}
                 execution_reference_price = float(latest_ticker.get('last') or current_price)
@@ -901,7 +906,7 @@ class TradingExecutor:
                 trade_id = self.db.record_trade(
                     symbol=symbol,
                     side=side,
-                    entry_price=current_price,
+                    entry_price=execution_reference_price,
                     quantity=amount,
                     contract_size=contract_size,
                     coin_quantity=coin_quantity,
@@ -910,24 +915,24 @@ class TradingExecutor:
                     notes=f"开仓尝试 #{attempt + 1}",
                     layer_no=plan_context.get('layer_no'),
                     root_signal_id=root_signal_id or plan_context.get('root_signal_id') or signal_id,
-                    plan_context=plan_context
+                    plan_context={**dict(plan_context or {}), 'execution_reference_price': execution_reference_price}
                 )
                 
                 # 更新持仓
                 self.db.update_position(
                     symbol=symbol,
                     side=side,
-                    entry_price=current_price,
+                    entry_price=execution_reference_price,
                     quantity=amount,
                     contract_size=contract_size,
                     coin_quantity=coin_quantity,
                     leverage=effective_leverage,
-                    current_price=current_price
+                    current_price=execution_reference_price
                 )
                 
                 # 更新冷却时间
                 self._update_cooldown(symbol)
-                self._seed_trailing_anchor(symbol, side, current_price)
+                self._seed_trailing_anchor(symbol, side, execution_reference_price)
                 
                 if intent_id:
                     self.db.update_open_intent(intent_id, status='filled', trade_id=trade_id, notes='filled')
@@ -936,7 +941,7 @@ class TradingExecutor:
                 self._finalize_layer(symbol, side, plan_context, success=True)
                 self.db.release_direction_lock(lock_symbol, lock_side, owner=lock_owner)
                 trade_logger.trade(
-                    symbol, side, current_price, amount, trade_id
+                    symbol, side, execution_reference_price, amount, trade_id
                 )
                 trade_logger.info(f"{symbol}: 开仓执行完成 | obs={observability_log_text(plan_context.get('observability'))}")
                 
@@ -1013,8 +1018,11 @@ class TradingExecutor:
         # 获取当前价格
         if close_price is None:
             try:
-                ticker = self.exchange.fetch_ticker(symbol)
-                close_price = ticker['last']
+                if hasattr(self.exchange, 'fetch_reference_price'):
+                    close_price = self.exchange.fetch_reference_price(symbol, prefer='last')
+                else:
+                    ticker = self.exchange.fetch_ticker(symbol)
+                    close_price = ticker['last']
             except Exception as e:
                 trade_logger.error(f"获取价格失败: {e}")
                 return False
@@ -1718,8 +1726,7 @@ class TradingExecutor:
                     coin_quantity = float(normalized.get('coin_quantity') or quantity * contract_size)
                     leverage = int(float(normalized.get('leverage') or position.get('leverage') or 1))
                 else:
-                    ticker = self.exchange.fetch_ticker(symbol)
-                    current_price = ticker['last']
+                    current_price = self.exchange.fetch_reference_price(symbol, prefer='mark') if hasattr(self.exchange, 'fetch_reference_price') else self.exchange.fetch_ticker(symbol)['last']
                     entry_price = position['entry_price']
                     quantity = position['quantity']
                     contract_size = position.get('contract_size', 1)

@@ -57,6 +57,28 @@ def summarize_trade_buckets(
     return rows
 
 
+
+
+def _resample_named_ohlcv(frame: pd.DataFrame, rule: str = '4h') -> pd.DataFrame:
+    if frame is None or frame.empty or 'datetime' not in frame.columns:
+        return pd.DataFrame(columns=getattr(frame, 'columns', []))
+    working = frame.copy()
+    working['datetime'] = pd.to_datetime(working['datetime'])
+    working = working.set_index('datetime')
+    agg = working.resample(rule).agg({
+        'open': 'first',
+        'high': 'max',
+        'low': 'min',
+        'close': 'last',
+        'volume': 'sum',
+    }).dropna()
+    if agg.empty:
+        return agg.reset_index()
+    agg = agg.reset_index()
+    if 'timestamp' in frame.columns:
+        agg['timestamp'] = agg['datetime'].astype('int64') // 10**9
+    return agg
+
 def _normalize_strategy_tags(value) -> List[str]:
     if value is None:
         return []
@@ -2825,7 +2847,11 @@ class StrategyBacktester:
             current_row = window.iloc[-1]
             current_price = float(current_row['close'])
             timestamp = str(current_row['datetime'])
-            signal = self.detector.analyze(symbol, detector_df, current_price, None)
+            mtf_frames = {'1h': detector_df}
+            anchor_window = _resample_named_ohlcv(window, '4h')
+            if not anchor_window.empty:
+                mtf_frames['4h'] = self._to_detector_frame(self._add_indicators(anchor_window.copy()))
+            signal = self.detector.analyze(symbol, detector_df, current_price, None, mtf_frames=mtf_frames)
 
             current_positions = {}
             if position:
@@ -3145,7 +3171,41 @@ class SignalQualityAnalyzer:
                     'BB_lower': window['BB_lower'].values,
                 })
                 current_price = float(window.iloc[-1]['close'])
-                signal = self.detector.analyze(symbol, detector_df, current_price, None)
+                mtf_frames = {'1h': detector_df}
+                anchor_window = _resample_named_ohlcv(window, '4h')
+                if not anchor_window.empty:
+                    anchor_with_indicators = anchor_window.copy()
+                    close_anchor = anchor_with_indicators['close']
+                    delta_anchor = close_anchor.diff()
+                    gain_anchor = delta_anchor.where(delta_anchor > 0, 0.0)
+                    loss_anchor = -delta_anchor.where(delta_anchor < 0, 0.0)
+                    avg_gain_anchor = gain_anchor.rolling(14).mean()
+                    avg_loss_anchor = loss_anchor.rolling(14).mean()
+                    rs_anchor = avg_gain_anchor / (avg_loss_anchor + 1e-10)
+                    anchor_with_indicators['RSI'] = 100 - (100 / (1 + rs_anchor))
+                    ema12_anchor = close_anchor.ewm(span=12).mean()
+                    ema26_anchor = close_anchor.ewm(span=26).mean()
+                    anchor_with_indicators['MACD'] = ema12_anchor - ema26_anchor
+                    anchor_with_indicators['MACD_signal'] = anchor_with_indicators['MACD'].ewm(span=9).mean()
+                    anchor_with_indicators['BB_mid'] = close_anchor.rolling(20).mean()
+                    std_anchor = close_anchor.rolling(20).std()
+                    anchor_with_indicators['BB_upper'] = anchor_with_indicators['BB_mid'] + 2 * std_anchor
+                    anchor_with_indicators['BB_lower'] = anchor_with_indicators['BB_mid'] - 2 * std_anchor
+                    mtf_frames['4h'] = pd.DataFrame({
+                        0: anchor_with_indicators['timestamp'].values if 'timestamp' in anchor_with_indicators.columns else range(len(anchor_with_indicators)),
+                        1: anchor_with_indicators['open'].values,
+                        2: anchor_with_indicators['high'].values,
+                        3: anchor_with_indicators['low'].values,
+                        4: anchor_with_indicators['close'].values,
+                        5: anchor_with_indicators['volume'].values,
+                        'RSI': anchor_with_indicators['RSI'].values,
+                        'MACD': anchor_with_indicators['MACD'].values,
+                        'MACD_signal': anchor_with_indicators['MACD_signal'].values,
+                        'BB_mid': anchor_with_indicators['BB_mid'].values,
+                        'BB_upper': anchor_with_indicators['BB_upper'].values,
+                        'BB_lower': anchor_with_indicators['BB_lower'].values,
+                    })
+                signal = self.detector.analyze(symbol, detector_df, current_price, None, mtf_frames=mtf_frames)
                 if signal.signal_type not in ['buy', 'sell']:
                     continue
                 mock_signal = {

@@ -133,6 +133,13 @@ def main():
             ohlcv = ex.fetch_ohlcv(symbol, '1h', limit=50)
             df = pd.DataFrame(ohlcv)
             df = add_indicators(df)
+            mtf_frames = {'1h': df}
+            try:
+                ohlcv_4h = ex.fetch_ohlcv(symbol, '4h', limit=120)
+                if ohlcv_4h:
+                    mtf_frames['4h'] = add_indicators(pd.DataFrame(ohlcv_4h))
+            except Exception as mtf_exc:
+                print(f"⚠️ {symbol} 4h anchor 数据获取失败: {mtf_exc}")
             
             # 获取当前合约价格
             current_price = ex.fetch_reference_price(symbol, prefer='last') if hasattr(ex, 'fetch_reference_price') else ex.fetch_ticker(symbol)['last']
@@ -141,7 +148,7 @@ def main():
             ml_pred = get_ml_prediction(symbol)
             
             # 分析信号
-            signal = detector.analyze(symbol, df, current_price, ml_pred)
+            signal = detector.analyze(symbol, df, current_price, ml_pred, mtf_frames=mtf_frames)
             
             print(f"价格: {current_price:.2f}")
             print(f"信号: {signal.signal_type.upper()} 强度: {signal.strength}%")

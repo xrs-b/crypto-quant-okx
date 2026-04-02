@@ -2833,6 +2833,13 @@ class TradingBot:
                 ohlcv = self.exchange.fetch_ohlcv(symbol, '1h', limit=100)
                 df = pd.DataFrame(ohlcv)
                 df = self._add_indicators(df)
+                mtf_frames = {'1h': df}
+                try:
+                    ohlcv_4h = self.exchange.fetch_ohlcv(symbol, '4h', limit=120)
+                    if ohlcv_4h:
+                        mtf_frames['4h'] = self._add_indicators(pd.DataFrame(ohlcv_4h))
+                except Exception as mtf_exc:
+                    print(f"   ⚠️ 4h anchor 数据获取失败: {mtf_exc}")
                 
                 # 获取当前合约价格（统一以 OKX SWAP ticker 为准）
                 current_price = self.exchange.fetch_reference_price(symbol, prefer='last') if hasattr(self.exchange, 'fetch_reference_price') else self.exchange.fetch_ticker(symbol)['last']
@@ -2843,7 +2850,7 @@ class TradingBot:
                     ml_pred = self.ml.predict(symbol, ohlcv)
                 
                 # 分析信号
-                signal = self.detector.analyze(symbol, df, current_price, ml_pred)
+                signal = self.detector.analyze(symbol, df, current_price, ml_pred, mtf_frames=mtf_frames)
                 strategy_selection = self._build_strategy_selection_contract(symbol, signal)
                 signal = self.detector.apply_strategy_selection(signal, strategy_selection, symbol=symbol)
                 signal.filter_details = signal.filter_details or {}

@@ -39,6 +39,7 @@ class DecisionBreakdown:
     trend_alignment_score: int = 0            # 趋势顺势度
     execution_risk_score: int = 0             # 执行风险度
     ml_confidence_score: int = 0              # ML 置信度 (如无ML则为50)
+    mtf_breakout_score: int = 0              # MTF breakout 证据分（observe-only，不参与总分）
 
     # 各维度原因
     signal_strength_reason: str = ""
@@ -47,6 +48,7 @@ class DecisionBreakdown:
     trend_alignment_reason: str = ""
     execution_risk_reason: str = ""
     ml_confidence_reason: str = ""
+    mtf_breakout_reason: str = ""
 
     # 观测辅助信息（兼容旧 API，新增字段只会出现在 breakdown 中）
     signal_conflict_score: int = 0            # 多空冲突程度，越高代表越冲突
@@ -66,6 +68,7 @@ class DecisionBreakdown:
     adaptive_decision_notes: List[str] = field(default_factory=list)
     adaptive_decision_tags: List[str] = field(default_factory=list)
     adaptive_decision_audit: Dict[str, Any] = field(default_factory=dict)
+    mtf_breakout_observe_only: bool = True
 
 
 @dataclass
@@ -278,6 +281,11 @@ class EntryDecider:
         ml_score, ml_reason = self._eval_ml_confidence(ml_prediction, signal)
         breakdown.ml_confidence_score = ml_score
         breakdown.ml_confidence_reason = ml_reason
+
+        mtf_score, mtf_reason, mtf_observe_only = self._eval_mtf_breakout(signal)
+        breakdown.mtf_breakout_score = mtf_score
+        breakdown.mtf_breakout_reason = mtf_reason
+        breakdown.mtf_breakout_observe_only = mtf_observe_only
 
         breakdown.signal_conflict_score = getattr(signal, '_entry_signal_conflict_score', 0)
         breakdown.mean_reversion_bias = getattr(signal, '_entry_mean_reversion_bias', False)
@@ -666,6 +674,14 @@ class EntryDecider:
             reason = f"ML置信度不足({prob:.0%})，仅供参考"
         return score, reason
 
+    def _eval_mtf_breakout(self, signal) -> tuple:
+        market_context = getattr(signal, 'market_context', {}) or {}
+        payload = dict(market_context.get('mtf_breakout') or {})
+        score = int(payload.get('score', market_context.get('mtf_breakout_score', 0)) or 0)
+        reason = str(payload.get('reason') or market_context.get('mtf_breakout_reason') or 'MTF breakout 无额外证据')
+        observe_only = bool(payload.get('observe_only', market_context.get('mtf_breakout_observe_only', True)))
+        return score, reason, observe_only
+
     def _calculate_total_score(self, breakdown: DecisionBreakdown) -> int:
         weights = {
             'signal_strength': 0.25,
@@ -694,6 +710,7 @@ class EntryDecider:
             'trend_alignment_score': breakdown.trend_alignment_score,
             'execution_risk_score': breakdown.execution_risk_score,
             'ml_confidence_score': breakdown.ml_confidence_score,
+            'mtf_breakout_score': breakdown.mtf_breakout_score,
             'signal_conflict_score': breakdown.signal_conflict_score,
             'mean_reversion_bias': breakdown.mean_reversion_bias,
         }

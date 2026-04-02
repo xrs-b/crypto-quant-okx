@@ -29,6 +29,21 @@ DEFAULT_LAYERING_CONFIG = {
     'entry_drift_tolerance_bps': 30,
 }
 
+DEFAULT_MTF_BREAKOUT_CONFIG = {
+    'enabled': True,
+    'observe_only': True,
+    'trigger_timeframe': '1h',
+    'anchor_timeframe': '4h',
+    'confirm_timeframe': None,
+    'breakout_lookback_bars': 20,
+    'min_breakout_pct': 0.002,
+    'min_volume_ratio': 1.1,
+    'anchor_trend_threshold': 0.003,
+    'require_anchor_trend_alignment': True,
+    'min_score': 60,
+}
+
+
 DEFAULT_ADAPTIVE_REGIME_CONFIG = {
     'enabled': False,
     'mode': 'observe_only',
@@ -110,6 +125,7 @@ class Config:
 
         self._config = self._resolve_env_placeholders(self._config)
         self._normalize_legacy_layering_config()
+        self._normalize_mtf_breakout_config()
         self._normalize_adaptive_regime_config()
         self._validate()
 
@@ -172,6 +188,14 @@ class Config:
                 normalized['layer_count'] = len(normalized['layer_ratios'])
         trading['layering'] = normalized
 
+    def _normalize_mtf_breakout_config(self):
+        mtf_breakout = self._config.get('mtf_breakout') or {}
+        if mtf_breakout is None:
+            mtf_breakout = {}
+        if not isinstance(mtf_breakout, dict):
+            raise ValueError('mtf_breakout 必须是对象')
+        self._config['mtf_breakout'] = self._deep_merge(DEFAULT_MTF_BREAKOUT_CONFIG, mtf_breakout)
+
     def _normalize_adaptive_regime_config(self):
         adaptive_regime = self._config.get('adaptive_regime') or {}
         if adaptive_regime is None:
@@ -183,6 +207,7 @@ class Config:
 
     def _validate(self):
         self._validate_layering_config()
+        self._validate_mtf_breakout_config()
         self._validate_adaptive_regime_config()
 
     def _validate_layering_config(self):
@@ -256,6 +281,19 @@ class Config:
         for key in ('profit_only_add', 'disallow_skip_layers', 'direction_lock_enabled', 'direction_lock_release_on_flat', 'signal_idempotency_enabled', 'allow_same_bar_multiple_adds'):
             layering[key] = bool(layering.get(key, DEFAULT_LAYERING_CONFIG[key]))
         return layering
+
+    def _validate_mtf_breakout_config(self):
+        mtf_breakout = self.get('mtf_breakout', {}) or {}
+        if not isinstance(mtf_breakout, dict):
+            raise ValueError('mtf_breakout 必须是对象')
+        if str(mtf_breakout.get('trigger_timeframe', '1h') or '').strip() != '1h':
+            raise ValueError('mtf_breakout.trigger_timeframe 当前仅支持 1h')
+        anchor = str(mtf_breakout.get('anchor_timeframe', '4h') or '').strip()
+        if anchor not in {'4h', ''}:
+            raise ValueError('mtf_breakout.anchor_timeframe 当前仅支持 4h')
+        confirm = mtf_breakout.get('confirm_timeframe')
+        if confirm not in (None, '', '15m'):
+            raise ValueError('mtf_breakout.confirm_timeframe 当前仅支持 15m 或关闭')
 
     def _validate_adaptive_regime_config(self):
         adaptive_regime = self.get('adaptive_regime', {}) or {}

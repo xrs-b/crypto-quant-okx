@@ -116,6 +116,19 @@ market_filters:
   max_volatility: 0.05
   min_volatility: 0.0045
 
+mtf_breakout:
+  enabled: true
+  observe_only: true     # MVP-1 / MVP-2 先只出证据，不改真实执行
+  trigger_timeframe: 1h
+  anchor_timeframe: 4h
+  confirm_timeframe: null   # 可选：15m；默认关闭，先保守
+  breakout_lookback_bars: 20
+  min_breakout_pct: 0.002
+  min_volume_ratio: 1.1
+  anchor_trend_threshold: 0.003
+  require_anchor_trend_alignment: true
+  min_score: 60
+
 ml:
   enabled: true
   features:
@@ -267,6 +280,8 @@ symbol_overrides:
         min_strategy_count: 2
     market_filters:
       block_counter_trend: true
+    mtf_breakout:
+      min_score: 62
   XRP/USDT:
     strategies:
       composite:

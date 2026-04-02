@@ -89,7 +89,7 @@ class SignalDetector:
         return self._config_helper.get(key, {}) or {}
 
     def analyze(self, symbol: str, df: pd.DataFrame,
-                current_price: float, ml_prediction: tuple = None) -> Signal:
+                current_price: float, ml_prediction: tuple = None, mtf_frames: Optional[Dict[str, pd.DataFrame]] = None) -> Signal:
         """分析信号：改为“方向评分 + 门槛判断”"""
         indicators = self._get_current_indicators(df)
         signal = Signal(
@@ -99,7 +99,8 @@ class SignalDetector:
             strength=0,
             indicators=indicators
         )
-        signal.market_context = self._analyze_market_context(df, current_price, symbol)
+        mtf_frames = self._normalize_mtf_frames(df, mtf_frames, symbol)
+        signal.market_context = self._analyze_market_context(df, current_price, symbol, mtf_frames=mtf_frames)
         bar_time = self._normalize_bar_time(df.iloc[-1, 0] if len(df.index) else None)
         if bar_time:
             signal.market_context['bar_time'] = bar_time
@@ -239,7 +240,22 @@ class SignalDetector:
         last_close = float(close.iloc[-1] or 1)
         return float(atr / last_close) if last_close else 0.0
 
-    def _analyze_market_context(self, df: pd.DataFrame, current_price: float, symbol: str = None) -> Dict:
+    def _normalize_mtf_frames(self, base_df: pd.DataFrame, mtf_frames: Optional[Dict[str, pd.DataFrame]], symbol: str = None) -> Dict[str, pd.DataFrame]:
+        cfg = self._cfg_section('mtf_breakout', symbol)
+        trigger_tf = str(cfg.get('trigger_timeframe', '1h') or '1h')
+        anchor_tf = str(cfg.get('anchor_timeframe', '4h') or '4h')
+        confirm_tf = cfg.get('confirm_timeframe')
+        frames = dict(mtf_frames or {})
+        frames.setdefault(trigger_tf, base_df)
+        if trigger_tf == '1h':
+            frames.setdefault('1h', base_df)
+        if anchor_tf and anchor_tf in frames and frames.get(anchor_tf) is None:
+            frames.pop(anchor_tf, None)
+        if confirm_tf and confirm_tf in frames and frames.get(confirm_tf) is None:
+            frames.pop(confirm_tf, None)
+        return frames
+
+    def _analyze_market_context(self, df: pd.DataFrame, current_price: float, symbol: str = None, mtf_frames: Optional[Dict[str, pd.DataFrame]] = None) -> Dict:
         close = df[4]
         ma20 = float(close.rolling(20).mean().iloc[-1]) if len(df) >= 20 else current_price
         ma60 = float(close.rolling(60).mean().iloc[-1]) if len(df) >= 60 else ma20
@@ -260,7 +276,7 @@ class SignalDetector:
         too_low = volatility < min_volatility
         too_high = volatility > max_volatility or atr_ratio > max_volatility
 
-        return {
+        context = {
             'trend': trend,
             'trend_gap': round(trend_gap, 5),
             'volatility': round(volatility, 5),
@@ -269,6 +285,13 @@ class SignalDetector:
             'volatility_too_high': too_high,
             'market_ok': not too_low and not too_high,
         }
+        mtf_breakout = self._analyze_mtf_breakout(current_price, mtf_frames or {'1h': df}, symbol)
+        context['mtf_breakout'] = mtf_breakout
+        context['mtf_breakout_score'] = int(mtf_breakout.get('score', 0) or 0)
+        context['mtf_breakout_reason'] = str(mtf_breakout.get('reason') or '')
+        context['mtf_breakout_direction'] = str(mtf_breakout.get('direction') or 'hold')
+        context['mtf_breakout_observe_only'] = bool(mtf_breakout.get('observe_only', True))
+        return context
 
     def _apply_regime_weighting(self, reason: Dict, context: Dict) -> Dict:
         reason = dict(reason)
@@ -315,6 +338,178 @@ class SignalDetector:
             adjusted *= 0.78
 
         return min(100, max(0, int(round(adjusted))))
+
+    def _infer_mtf_anchor_trend(self, anchor_df: Optional[pd.DataFrame], threshold: float) -> Dict[str, Any]:
+        if anchor_df is None or len(anchor_df) <= 0:
+            return {
+                'available': False,
+                'trend': 'unknown',
+                'trend_gap': 0.0,
+                'close': None,
+                'ma20': None,
+                'ma60': None,
+            }
+        close = anchor_df[4].astype(float)
+        last_close = float(close.iloc[-1])
+        ma20 = float(close.rolling(20).mean().iloc[-1]) if len(close) >= 20 else last_close
+        ma60 = float(close.rolling(60).mean().iloc[-1]) if len(close) >= 60 else ma20
+        trend_gap = ((ma20 - ma60) / ma60) if ma60 else 0.0
+        trend = 'sideways'
+        if trend_gap > threshold or (last_close > ma20 * (1 + threshold * 0.5)):
+            trend = 'bullish'
+        elif trend_gap < -threshold or (last_close < ma20 * (1 - threshold * 0.5)):
+            trend = 'bearish'
+        return {
+            'available': True,
+            'trend': trend,
+            'trend_gap': round(float(trend_gap), 5),
+            'close': round(last_close, 6),
+            'ma20': round(float(ma20), 6),
+            'ma60': round(float(ma60), 6),
+        }
+
+    def _analyze_mtf_breakout(self, current_price: float, mtf_frames: Dict[str, pd.DataFrame], symbol: str = None) -> Dict[str, Any]:
+        cfg = self._cfg_section('mtf_breakout', symbol)
+        enabled = bool(cfg.get('enabled', True))
+        observe_only = bool(cfg.get('observe_only', True))
+        trigger_tf = str(cfg.get('trigger_timeframe', '1h') or '1h')
+        anchor_tf = str(cfg.get('anchor_timeframe', '4h') or '4h')
+        confirm_tf = cfg.get('confirm_timeframe')
+        lookback = max(5, int(cfg.get('breakout_lookback_bars', 20) or 20))
+        min_breakout_pct = max(0.0, float(cfg.get('min_breakout_pct', 0.002) or 0.0))
+        min_volume_ratio = max(0.0, float(cfg.get('min_volume_ratio', 1.1) or 0.0))
+        anchor_threshold = max(0.0, float(cfg.get('anchor_trend_threshold', 0.003) or 0.0))
+        require_anchor_alignment = bool(cfg.get('require_anchor_trend_alignment', True))
+        min_score = max(0, int(cfg.get('min_score', 60) or 0))
+
+        trigger_df = (mtf_frames or {}).get(trigger_tf)
+        anchor_df = (mtf_frames or {}).get(anchor_tf)
+        confirm_df = (mtf_frames or {}).get(confirm_tf) if confirm_tf else None
+
+        payload: Dict[str, Any] = {
+            'enabled': enabled,
+            'observe_only': observe_only,
+            'timeframes': {'trigger': trigger_tf, 'anchor': anchor_tf, 'confirm': confirm_tf},
+            'direction': 'hold',
+            'score': 0,
+            'reason': 'MTF breakout 未启用',
+            'has_breakout': False,
+            'eligible': False,
+            'min_score': min_score,
+            'trigger': {'timeframe': trigger_tf, 'available': False},
+            'anchor': {'timeframe': anchor_tf, 'available': False},
+            'confirm': {'timeframe': confirm_tf, 'available': bool(confirm_tf)},
+        }
+        if not enabled:
+            return payload
+        if trigger_df is None or len(trigger_df) < lookback + 1:
+            payload['reason'] = f'MTF breakout 数据不足(trigger={trigger_tf})'
+            return payload
+
+        trigger_close = float(trigger_df[4].iloc[-1] or current_price or 0.0)
+        trigger_high = trigger_df[2].astype(float)
+        trigger_low = trigger_df[3].astype(float)
+        trigger_volume = trigger_df[5].astype(float) if 5 in trigger_df.columns else pd.Series(dtype=float)
+        prior_high = float(trigger_high.iloc[-(lookback + 1):-1].max())
+        prior_low = float(trigger_low.iloc[-(lookback + 1):-1].min())
+        breakout_up = bool(prior_high and trigger_close >= prior_high * (1 + min_breakout_pct))
+        breakout_down = bool(prior_low and trigger_close <= prior_low * (1 - min_breakout_pct))
+        volume_ratio = 1.0
+        if len(trigger_volume) >= lookback:
+            volume_ma = float(trigger_volume.iloc[-(lookback + 1):-1].mean() or 0.0)
+            if volume_ma > 0:
+                volume_ratio = float(trigger_volume.iloc[-1] / volume_ma)
+        breakout_side = 'hold'
+        if breakout_up and not breakout_down:
+            breakout_side = 'buy'
+        elif breakout_down and not breakout_up:
+            breakout_side = 'sell'
+
+        anchor = self._infer_mtf_anchor_trend(anchor_df, anchor_threshold)
+        payload['anchor'] = {'timeframe': anchor_tf, **anchor}
+
+        confirm = {'timeframe': confirm_tf, 'available': bool(confirm_tf and confirm_df is not None and len(confirm_df) >= 20), 'momentum': 'neutral'}
+        if confirm['available']:
+            close = confirm_df[4].astype(float)
+            ma5 = float(close.rolling(5).mean().iloc[-1]) if len(close) >= 5 else float(close.iloc[-1])
+            ma20 = float(close.rolling(20).mean().iloc[-1]) if len(close) >= 20 else ma5
+            if ma5 > ma20:
+                confirm['momentum'] = 'bullish'
+            elif ma5 < ma20:
+                confirm['momentum'] = 'bearish'
+            confirm['close'] = round(float(close.iloc[-1]), 6)
+            confirm['ma5'] = round(ma5, 6)
+            confirm['ma20'] = round(ma20, 6)
+        payload['confirm'] = confirm
+
+        score = 0
+        reason_parts = []
+        anchor_aligned = False
+        if breakout_side == 'buy':
+            score += 55
+            reason_parts.append(f'1h 向上突破前{lookback}根高点')
+            anchor_aligned = anchor.get('trend') == 'bullish'
+        elif breakout_side == 'sell':
+            score += 55
+            reason_parts.append(f'1h 向下跌破前{lookback}根低点')
+            anchor_aligned = anchor.get('trend') == 'bearish'
+        else:
+            reason_parts.append('1h 未形成有效 breakout')
+
+        if volume_ratio >= min_volume_ratio:
+            score += 15
+            reason_parts.append(f'量能放大({volume_ratio:.2f}x)')
+        elif volume_ratio >= 1.0:
+            score += 8
+            reason_parts.append(f'量能中性({volume_ratio:.2f}x)')
+        else:
+            reason_parts.append(f'量能不足({volume_ratio:.2f}x)')
+
+        if anchor.get('available'):
+            if anchor_aligned:
+                score += 20
+                reason_parts.append(f"4h anchor {anchor.get('trend')} 对齐")
+            elif breakout_side in {'buy', 'sell'} and anchor.get('trend') == 'sideways':
+                score += 5
+                reason_parts.append('4h anchor 横盘，先记观察')
+            elif breakout_side in {'buy', 'sell'}:
+                score = max(0, score - 10)
+                reason_parts.append(f"4h anchor {anchor.get('trend')} 未对齐")
+        else:
+            reason_parts.append('4h anchor 数据不足')
+
+        if confirm.get('available') and breakout_side in {'buy', 'sell'}:
+            expected_momentum = 'bullish' if breakout_side == 'buy' else 'bearish'
+            if confirm.get('momentum') == expected_momentum:
+                score += 10
+                reason_parts.append(f'{confirm_tf} momentum 确认')
+            elif confirm.get('momentum') != 'neutral':
+                score = max(0, score - 5)
+                reason_parts.append(f'{confirm_tf} momentum 反向')
+
+        eligible = breakout_side in {'buy', 'sell'} and score >= min_score
+        if require_anchor_alignment and breakout_side in {'buy', 'sell'} and anchor.get('available') and not anchor_aligned:
+            eligible = False
+
+        payload['direction'] = breakout_side
+        payload['score'] = int(max(0, min(100, round(score))))
+        payload['has_breakout'] = breakout_side in {'buy', 'sell'}
+        payload['eligible'] = bool(eligible)
+        payload['reason'] = '；'.join(reason_parts)
+        payload['trigger'] = {
+            'timeframe': trigger_tf,
+            'available': True,
+            'lookback_bars': lookback,
+            'close': round(trigger_close, 6),
+            'prior_high': round(prior_high, 6),
+            'prior_low': round(prior_low, 6),
+            'breakout_up': breakout_up,
+            'breakout_down': breakout_down,
+            'volume_ratio': round(float(volume_ratio), 4),
+            'min_breakout_pct': min_breakout_pct,
+            'min_volume_ratio': min_volume_ratio,
+        }
+        return payload
 
     def _recompute_signal_state(self, signal: Signal, symbol: str = None) -> Signal:
         buy_score = 0.0

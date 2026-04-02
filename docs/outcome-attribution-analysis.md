@@ -29,6 +29,12 @@ python3 scripts/outcome_issue_summary.py
 python3 scripts/parameter_tuning_advice.py
 ```
 
+以及“配置 patch 草案生成器”（依然只输出建议文本 / YAML patch，不自动 apply）：
+
+```bash
+python3 scripts/parameter_tuning_patch.py
+```
+
 常用参数：
 
 ```bash
@@ -61,6 +67,12 @@ python3 scripts/parameter_tuning_advice.py --view hours --hours 72
 
 # 自动参数调优建议：最近 80 笔，并输出 JSON
 python3 scripts/parameter_tuning_advice.py --view trades --limit 80 --json
+
+# 配置 patch 草案：只看 XRP，并输出人类可读建议
+python3 scripts/parameter_tuning_patch.py --view hours --hours 72 --symbol XRP/USDT
+
+# 配置 patch 草案：输出 YAML patch 草案
+python3 scripts/parameter_tuning_patch.py --view trades --limit 80 --format yaml
 ```
 
 ## 输出内容

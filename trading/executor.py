@@ -902,37 +902,62 @@ class TradingExecutor:
                     posSide=side
                 )
                 
+                open_fill_summary = None
+                if hasattr(self.exchange, 'fetch_open_trade_summary'):
+                    try:
+                        open_fill_summary = self.exchange.fetch_open_trade_summary(
+                            symbol,
+                            order=order,
+                            fallback_price=execution_reference_price,
+                            fallback_quantity=amount,
+                        )
+                    except Exception as fill_error:
+                        trade_logger.warning(f"{symbol}: 获取开仓真实成交均价失败，回退 execution reference price - {fill_error}")
+
+                actual_entry_price = float((open_fill_summary or {}).get('entry_price') or execution_reference_price)
+                actual_quantity = float((open_fill_summary or {}).get('quantity') or amount)
+                actual_contract_size = float((open_fill_summary or {}).get('contract_size') or contract_size or 1.0)
+                actual_coin_quantity = float((open_fill_summary or {}).get('coin_quantity') or (actual_quantity * actual_contract_size))
+                actual_entry_source = (open_fill_summary or {}).get('source') or 'execution_reference_fallback'
+                actual_fill_count = int((open_fill_summary or {}).get('fill_count') or 0)
+
                 # 记录交易
                 trade_id = self.db.record_trade(
                     symbol=symbol,
                     side=side,
-                    entry_price=execution_reference_price,
-                    quantity=amount,
-                    contract_size=contract_size,
-                    coin_quantity=coin_quantity,
+                    entry_price=actual_entry_price,
+                    quantity=actual_quantity,
+                    contract_size=actual_contract_size,
+                    coin_quantity=actual_coin_quantity,
                     leverage=effective_leverage,
                     signal_id=signal_id,
                     notes=f"开仓尝试 #{attempt + 1}",
                     layer_no=plan_context.get('layer_no'),
                     root_signal_id=root_signal_id or plan_context.get('root_signal_id') or signal_id,
-                    plan_context={**dict(plan_context or {}), 'execution_reference_price': execution_reference_price}
+                    plan_context={
+                        **dict(plan_context or {}),
+                        'execution_reference_price': execution_reference_price,
+                        'actual_entry_price': actual_entry_price,
+                        'actual_entry_price_source': actual_entry_source,
+                        'actual_entry_fill_count': actual_fill_count,
+                    }
                 )
                 
                 # 更新持仓
                 self.db.update_position(
                     symbol=symbol,
                     side=side,
-                    entry_price=execution_reference_price,
-                    quantity=amount,
-                    contract_size=contract_size,
-                    coin_quantity=coin_quantity,
+                    entry_price=actual_entry_price,
+                    quantity=actual_quantity,
+                    contract_size=actual_contract_size,
+                    coin_quantity=actual_coin_quantity,
                     leverage=effective_leverage,
-                    current_price=execution_reference_price
+                    current_price=actual_entry_price
                 )
                 
                 # 更新冷却时间
                 self._update_cooldown(symbol)
-                self._seed_trailing_anchor(symbol, side, execution_reference_price)
+                self._seed_trailing_anchor(symbol, side, actual_entry_price)
                 
                 if intent_id:
                     self.db.update_open_intent(intent_id, status='filled', trade_id=trade_id, notes='filled')

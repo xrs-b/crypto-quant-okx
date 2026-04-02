@@ -329,6 +329,97 @@ class Exchange:
             'fills': rows,
         }
 
+    def _normalize_open_order_fill(self, fill: Dict, symbol: str = None) -> Optional[Dict]:
+        if not isinstance(fill, dict):
+            return None
+        info = fill.get('info', {}) or {}
+        normalized_symbol = self.normalize_symbol(fill.get('symbol') or info.get('instId') or symbol or '')
+        contracts = self._safe_float(fill.get('amount') or fill.get('filled') or info.get('fillSz') or info.get('accFillSz') or info.get('sz') or 0)
+        price = self._safe_float(fill.get('price') or fill.get('average') or info.get('fillPx') or info.get('avgPx') or info.get('px') or 0)
+        if not normalized_symbol or contracts <= 0 or price <= 0:
+            return None
+        contract_size = self.get_contract_size(normalized_symbol) if normalized_symbol else 1.0
+        timestamp = fill.get('timestamp') or self._parse_time_ms(info.get('fillTime') or info.get('uTime') or info.get('cTime') or info.get('ts'))
+        return {
+            'symbol': normalized_symbol,
+            'price': price,
+            'quantity': contracts,
+            'contracts': contracts,
+            'contract_size': contract_size,
+            'coin_quantity': self.contracts_to_coin_quantity(normalized_symbol, contracts) if normalized_symbol else contracts,
+            'timestamp': timestamp,
+            'order_id': fill.get('order') or fill.get('id') or info.get('ordId'),
+            'raw': fill,
+        }
+
+    def build_open_summary(self, fills: List[Dict], symbol: str = None, fallback_price: float = None, fallback_quantity: float = None, source: str = 'exchange_open_fills') -> Optional[Dict]:
+        rows = [self._normalize_open_order_fill(fill, symbol=symbol) for fill in (fills or [])]
+        rows = [row for row in rows if row and self._safe_float(row.get('quantity')) > 0 and self._safe_float(row.get('price')) > 0]
+        fallback_qty = self._safe_float(fallback_quantity)
+        if not rows and (fallback_price is None or fallback_qty <= 0):
+            return None
+        total_qty = sum(self._safe_float(row.get('quantity')) for row in rows)
+        total_coin_qty = sum(self._safe_float(row.get('coin_quantity')) for row in rows)
+        weighted_entry = None
+        if total_qty > 0:
+            weighted_entry = sum(self._safe_float(row.get('price')) * self._safe_float(row.get('quantity')) for row in rows) / total_qty
+        entry_price = weighted_entry if weighted_entry is not None else self._safe_float(fallback_price)
+        contract_size = self._safe_float(rows[0].get('contract_size'), 1.0) if rows else (self.get_contract_size(symbol) if symbol else 1.0)
+        quantity = total_qty if total_qty > 0 else fallback_qty
+        coin_quantity = total_coin_qty if total_coin_qty > 0 else (quantity * contract_size if quantity > 0 else 0.0)
+        timestamps = [self._parse_time_ms(row.get('timestamp')) for row in rows if self._parse_time_ms(row.get('timestamp'))]
+        fill_time = datetime.fromtimestamp(max(timestamps) / 1000).isoformat() if timestamps else None
+        return {
+            'entry_price': entry_price if entry_price > 0 else None,
+            'quantity': quantity if quantity > 0 else None,
+            'coin_quantity': coin_quantity if coin_quantity > 0 else None,
+            'contract_size': contract_size,
+            'fill_count': len(rows),
+            'fill_time': fill_time,
+            'fills': rows,
+            'source': source,
+        }
+
+    def fetch_open_trade_summary(self, symbol: str, order: Dict = None, fallback_price: float = None, fallback_quantity: float = None) -> Optional[Dict]:
+        normalized_symbol = self.normalize_symbol(symbol)
+        fallback_qty = self._safe_float(fallback_quantity)
+        order = dict(order or {})
+        info = order.get('info', {}) or {}
+        order_id = order.get('id') or order.get('order') or info.get('ordId')
+
+        direct_summary = self.build_open_summary([order], symbol=normalized_symbol, fallback_price=fallback_price, fallback_quantity=fallback_qty, source='order_response_avg')
+        if direct_summary and direct_summary.get('entry_price'):
+            return direct_summary
+
+        fetch_candidates = []
+        if hasattr(self.exchange, 'fetch_order') and order_id:
+            try:
+                fetch_symbol = self.get_order_symbol(normalized_symbol)
+            except Exception:
+                fetch_symbol = normalized_symbol
+            for candidate in [fetch_symbol, normalized_symbol, None]:
+                if candidate in fetch_candidates:
+                    continue
+                fetch_candidates.append(candidate)
+                try:
+                    fetched = self.exchange.fetch_order(order_id, candidate) if candidate is not None else self.exchange.fetch_order(order_id)
+                except Exception:
+                    continue
+                fetched_summary = self.build_open_summary([fetched], symbol=normalized_symbol, fallback_price=fallback_price, fallback_quantity=fallback_qty, source='fetch_order_avg')
+                if fetched_summary and fetched_summary.get('entry_price'):
+                    return fetched_summary
+
+        trade_rows = self._fetch_my_trades_candidates(symbol=normalized_symbol, limit=200)
+        if order_id:
+            trade_rows = [row for row in (trade_rows or []) if str((row.get('order') or row.get('orderId') or (row.get('info', {}) or {}).get('ordId') or '')) == str(order_id)]
+        trade_summary = self.build_open_summary(trade_rows, symbol=normalized_symbol, fallback_price=fallback_price, fallback_quantity=fallback_qty, source='exchange_open_fills')
+        if trade_summary and trade_summary.get('entry_price'):
+            return trade_summary
+
+        if fallback_price is not None and fallback_qty > 0:
+            return self.build_open_summary([], symbol=normalized_symbol, fallback_price=fallback_price, fallback_quantity=fallback_qty, source='execution_reference_fallback')
+        return None
+
     def fetch_closed_trade_summary(self, open_trade: Dict, fallback_price: float = None, lookback_hours: int = 168) -> Optional[Dict]:
         if not open_trade or not open_trade.get('symbol'):
             return None

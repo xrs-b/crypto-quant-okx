@@ -923,8 +923,8 @@ class EntryDecider:
             return EntryDecision.WATCH.value, watch_reasons
 
         if signal_type in ['buy', 'sell'] and trend == 'sideways' and mean_reversion_only:
-            watch_reasons.append("横盘中的抄底/摸顶信号，确认度不足")
             if total_score <= self._cfg('sideways_mean_reversion_watch_max_score', 72, effective_thresholds):
+                watch_reasons.append("横盘中的抄底/摸顶信号，确认度不足")
                 return EntryDecision.WATCH.value, watch_reasons
 
         if signal_type in ['buy', 'sell'] and trend == 'sideways' and ml_only_with_bollinger and total_score <= self._cfg('sideways_ml_only_watch_max_score', 60, effective_thresholds):
